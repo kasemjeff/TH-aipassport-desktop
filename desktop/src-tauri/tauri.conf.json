@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "aipass desktop",
+  "version": "0.2.0",
+  "identifier": "com.aipass.desktop",
+  "build": {
+    "frontendDist": "../ui",
+    "devUrl": "http://127.0.0.1:8790",
+    "beforeDevCommand": "node main.mjs --detach --root ..",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    },
+    "trayIcon": {
+      "id": "aipass-tray",
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": false,
+      "tooltip": "aipass desktop"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
+    "externalBin": ["../sidecar/node"],
+    "resources": {
+      "../../aipass-bridge/**/*": "aipass-bridge/",
+      "../main.mjs": "main.mjs",
+      "../ui/**/*": "ui/"
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "offlineInstaller" }
+    },    "publisher": "aipass",
+    "copyright": "",
+    "category": "DeveloperTool",
+    "shortDescription": "AiPASS bridge, chat and file agent in a window",
+    "longDescription": "A desktop front end for the aipass bridge: chat with the AiPASS models from a window, and let the file agent edit a project you point it at — with sessions, per-file approval, plan mode, helpers and compaction."
+  }
+}

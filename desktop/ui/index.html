@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>aipass desktop</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<header id="bar">
+  <div class="brand">aipass <span class="dim">desktop</span></div>
+
+  <label class="field">
+    <span>project</span>
+    <select id="project"></select>
+  </label>
+  <button id="add-project" class="mini" title="open another folder">+ folder</button>
+
+  <label class="field">
+    <span>model</span>
+    <select id="model"></select>
+  </label>
+
+  <div class="field">
+    <span>mode</span>
+    <select id="mode">
+      <option value="ask">ask — confirm every write</option>
+      <option value="auto">auto — writes go through</option>
+      <option value="yolo">yolo — writes and shell</option>
+    </select>
+  </div>
+
+  <div class="status" id="status"></div>
+  <button id="settings-btn" class="mini" title="settings">gear</button>
+</header>
+
+<main>
+  <aside id="side">
+    <section>
+      <h3>sessions <button class="mini" id="new-session" title="new session">+</button></h3>
+      <ul id="sessions" class="list"></ul>
+    </section>
+    <section id="plugin-panels">
+      <h3>plugins</h3>
+    </section>
+    <section>
+      <h3>playbooks</h3>
+      <ul id="skills" class="list"></ul>
+    </section>
+    <section>
+      <h3>files</h3>
+      <ul id="files" class="list dim">loading…</ul>
+    </section>
+  </aside>
+
+  <section id="chat">
+    <div id="meta"></div>
+    <div id="log"></div>
+
+    <div id="pending" class="hidden">
+      <div class="pending-head">
+        <strong id="pending-count">0 changes</strong>
+        <span class="dim">tick the ones to write</span>
+        <span class="grow"></span>
+        <button id="apply" class="primary">apply</button>
+        <button id="discard">discard</button>
+      </div>
+      <ul id="pending-list"></ul>
+    </div>
+
+    <div id="attachments" class="hidden">
+      <span class="dim">attached</span>
+      <ul id="attachment-list"></ul>
+    </div>
+
+    <form id="composer">
+      <textarea id="task" rows="3" placeholder="Ask it to do something. Enter sends, Shift+Enter is a newline, Esc cancels a run. Drop an image or a file here to attach it."></textarea>
+      <div class="composer-row">
+        <input type="file" id="file-picker" multiple hidden />
+        <button type="button" id="attach-btn" class="mini" title="attach an image or a file">attach</button>
+        <span class="dim" id="hint"></span>
+        <span class="grow"></span>
+        <button type="submit" id="send" class="primary">send</button>
+      </div>
+    </form>
+  </section>
+</main>
+
+<div id="modal" class="hidden">
+  <div class="sheet">
+    <h3 id="modal-title"></h3>
+    <div id="modal-body"></div>
+    <div class="modal-actions" id="modal-actions"></div>
+  </div>
+</div>
+
+<script type="module" src="/md.js"></script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

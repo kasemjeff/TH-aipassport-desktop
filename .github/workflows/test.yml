@@ -1,0 +1,47 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is in the matrix deliberately: the path bugs fixed in #3/#4
+        # only showed up there.
+        os: [ubuntu-latest, windows-latest]
+        node: [20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # The bridge and its tests have no dependencies, so there is nothing to
+      # install — the suite spawns the real server and a fake extension.
+      - name: Run tests
+        run: npm test
+
+      - name: Check every entry point parses
+        shell: bash
+        run: |
+          for f in aipass-bridge/bridge/server.mjs aipass-bridge/agent.mjs \
+                   aipass-bridge/chat.mjs aipass-bridge/list.mjs \
+                   aipass-bridge/extension/*.js; do
+            node --check "$f"
+          done
+
+  shellcheck:
+    name: deploy scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax-check the deployment scripts
+        run: for f in aipass-bridge/deploy/*.sh; do bash -n "$f"; done

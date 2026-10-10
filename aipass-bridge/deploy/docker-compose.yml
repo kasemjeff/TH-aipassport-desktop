@@ -1,0 +1,29 @@
+services:
+  aipass-bridge:
+    build: .
+    image: aipass-bridge:latest
+    container_name: aipass-bridge
+    restart: unless-stopped
+    ports:
+      # All three are bound to 127.0.0.1 — none is exposed to the network by
+      # default. both noVNC and the bridge lack authentication,
+      # so reach them over an SSH tunnel rather than opening a public port.
+      # If you MUST expose noVNC, change it to "6080:6080" AND set a strong
+      # noVNC_PASSWORD in .env first.
+      - "127.0.0.1:6080:6080"   # noVNC web desktop
+      - "127.0.0.1:8787:8787"   # OpenAI-compatible bridge (no auth)
+    volumes:
+      - ./chrome-data:/app/chrome-data      # the logged-in browser profile (gitignored)
+      - ../extension:/app/extension:ro      # the unmodified core extension
+      - ../bridge:/app/bridge:ro            # the unmodified core bridge
+      - ./start-browser.sh:/app/start-browser.sh:ro
+      - ./start-vnc.sh:/app/start-vnc.sh:ro
+      - ./supervisord.conf:/etc/supervisor/conf.d/supervisord.conf:ro
+      - ./.env:/app/.env:ro
+    environment:
+      - DISPLAY=:99
+      - AIPASS_PORT=8787
+      - AIPASS_HOST=0.0.0.0
+      - AIPASS_MODEL=gemini-3.1-flash-lite
+      - noVNC_PASSWORD=${noVNC_PASSWORD:-}
+    shm_size: '2gb'

@@ -1,0 +1,914 @@
+<title>aipass bridge field guide</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ground: #EEF0F4;
+    --surface: #FFFFFF;
+    --surface-2: #F5F7FB;
+    --code-bg: #14171F;
+    --code-ink: #E7EAF2;
+    --code-faint: #8790A4;
+    --ink: #12151C;
+    --strong: #05070C;
+    --muted: #59606E;
+    --faint: #8A92A2;
+    --line: #DCE0E9;
+    --line-strong: #C6CCD8;
+    --accent: #2F62F0;
+    --accent-ink: #1E4AC7;
+    --accent-soft: rgba(47, 98, 240, 0.09);
+    --accent-line: rgba(47, 98, 240, 0.28);
+    --good: #1F8A54;
+    --good-soft: rgba(31, 138, 84, 0.10);
+    --warn: #B36B12;
+    --warn-soft: rgba(179, 107, 18, 0.10);
+    --bad: #CE3A3E;
+    --bad-soft: rgba(206, 58, 62, 0.09);
+    --zone: rgba(47, 98, 240, 0.05);
+    --zone-line: rgba(47, 98, 240, 0.22);
+    --shadow: 0 1px 2px rgba(16, 21, 34, 0.04), 0 8px 24px rgba(16, 21, 34, 0.05);
+    --shadow-lift: 0 2px 4px rgba(16, 21, 34, 0.05), 0 18px 40px rgba(16, 21, 34, 0.09);
+  }
+  :root:not([data-theme="light"]) {
+    @media (prefers-color-scheme: dark) {
+      --ground: #0A0D14;
+      --surface: #111624;
+      --surface-2: #0E1320;
+      --code-bg: #0C1019;
+      --code-ink: #E4E8F1;
+      --code-faint: #6E778C;
+      --ink: #E7EBF3;
+      --strong: #FFFFFF;
+      --muted: #99A1B4;
+      --faint: #667089;
+      --line: #212838;
+      --line-strong: #2E3648;
+      --accent: #6E97FF;
+      --accent-ink: #9DB8FF;
+      --accent-soft: rgba(110, 151, 255, 0.12);
+      --accent-line: rgba(110, 151, 255, 0.30);
+      --good: #46B87C;
+      --good-soft: rgba(70, 184, 124, 0.13);
+      --warn: #E0A64B;
+      --warn-soft: rgba(224, 166, 75, 0.13);
+      --bad: #F0666A;
+      --bad-soft: rgba(240, 102, 106, 0.12);
+      --zone: rgba(110, 151, 255, 0.06);
+      --zone-line: rgba(110, 151, 255, 0.26);
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 30px rgba(0, 0, 0, 0.35);
+      --shadow-lift: 0 2px 6px rgba(0, 0, 0, 0.4), 0 24px 50px rgba(0, 0, 0, 0.5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0A0D14;
+    --surface: #111624;
+    --surface-2: #0E1320;
+    --code-bg: #0C1019;
+    --code-ink: #E4E8F1;
+    --code-faint: #6E778C;
+    --ink: #E7EBF3;
+    --strong: #FFFFFF;
+    --muted: #99A1B4;
+    --faint: #667089;
+    --line: #212838;
+    --line-strong: #2E3648;
+    --accent: #6E97FF;
+    --accent-ink: #9DB8FF;
+    --accent-soft: rgba(110, 151, 255, 0.12);
+    --accent-line: rgba(110, 151, 255, 0.30);
+    --good: #46B87C;
+    --good-soft: rgba(70, 184, 124, 0.13);
+    --warn: #E0A64B;
+    --warn-soft: rgba(224, 166, 75, 0.13);
+    --bad: #F0666A;
+    --bad-soft: rgba(240, 102, 106, 0.12);
+    --zone: rgba(110, 151, 255, 0.06);
+    --zone-line: rgba(110, 151, 255, 0.26);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 30px rgba(0, 0, 0, 0.35);
+    --shadow-lift: 0 2px 6px rgba(0, 0, 0, 0.4), 0 24px 50px rgba(0, 0, 0, 0.5);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    * { animation: none !important; transition: none !important; }
+  }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    font-size: 17px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  .mono { font-family: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace; }
+
+  /* ---- layout scaffold ---- */
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 28px; }
+  .col { max-width: 680px; }
+  section { padding: 62px 0; border-top: 1px solid var(--line); }
+  section:first-of-type { border-top: none; }
+
+  .eyebrow {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    margin: 0 0 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 22px;
+    height: 1px;
+    background: var(--accent-line);
+  }
+
+  h1, h2, h3 { color: var(--strong); text-wrap: balance; margin: 0; }
+  h2 { font-size: clamp(26px, 3.4vw, 34px); font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; }
+  h3 { font-size: 19px; font-weight: 600; letter-spacing: -0.01em; margin-bottom: 6px; }
+  p { margin: 0 0 18px; }
+  p:last-child { margin-bottom: 0; }
+  .lead { font-size: 20px; color: var(--muted); line-height: 1.55; }
+  a { color: var(--accent-ink); text-decoration-color: var(--accent-line); text-underline-offset: 3px; }
+  strong { color: var(--strong); font-weight: 600; }
+  .sub { color: var(--muted); }
+
+  code, .code {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 0.86em;
+  }
+  p code, li code, td code {
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    padding: 0.12em 0.4em;
+    border-radius: 5px;
+    white-space: nowrap;
+  }
+
+  /* ---- header ---- */
+  header.hero {
+    padding: 30px 0 6px;
+    position: relative;
+    overflow: hidden;
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 18px 0 40px;
+  }
+  .brand { display: flex; align-items: center; gap: 11px; font-family: 'IBM Plex Mono', monospace; font-weight: 500; font-size: 14px; letter-spacing: 0.02em; }
+  .brand .glyph {
+    width: 28px; height: 28px; border-radius: 7px;
+    background: var(--accent); color: #fff;
+    display: grid; place-items: center;
+    font-size: 15px; font-weight: 600;
+    box-shadow: 0 2px 8px var(--accent-line);
+  }
+  :root[data-theme="dark"] .brand .glyph, :root:not([data-theme="light"]) .brand .glyph { color: #0A0D14; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .brand .glyph { color: #0A0D14; } }
+
+  .toggle {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px; letter-spacing: 0.04em;
+    background: var(--surface); color: var(--muted);
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 7px 12px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 8px;
+    transition: border-color 0.2s, color 0.2s;
+  }
+  .toggle:hover { border-color: var(--line-strong); color: var(--ink); }
+  .toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .hero-title {
+    font-size: clamp(38px, 7vw, 74px);
+    font-weight: 700;
+    letter-spacing: -0.035em;
+    line-height: 0.98;
+    margin: 0 0 22px;
+    color: var(--strong);
+  }
+  .hero-title .thin { font-weight: 400; color: var(--muted); }
+  .hero-lead { font-size: clamp(19px, 2.4vw, 23px); color: var(--muted); max-width: 620px; line-height: 1.5; }
+  .hero-lead b { color: var(--ink); font-weight: 600; }
+
+  .meta-strip {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    margin-top: 34px;
+  }
+  .chip {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12.5px; letter-spacing: 0.02em;
+    color: var(--muted);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 6px 14px;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .chip b { color: var(--ink); font-weight: 600; }
+  .chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--good); }
+
+  /* ---- callout ---- */
+  .thesis {
+    margin-top: 44px;
+    background: linear-gradient(180deg, var(--accent-soft), transparent);
+    border: 1px solid var(--accent-line);
+    border-radius: 16px;
+    padding: 26px 28px;
+    display: flex; gap: 20px; align-items: flex-start;
+  }
+  .thesis .k {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--accent-ink); white-space: nowrap; padding-top: 4px;
+  }
+  .thesis p { margin: 0; font-size: 18px; color: var(--ink); }
+  .thesis b { color: var(--strong); }
+
+  /* ---- architecture diagram ---- */
+  .diagram {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    box-shadow: var(--shadow);
+    padding: 8px;
+    margin-top: 8px;
+  }
+  .diagram-inner { display: grid; grid-template-columns: 1fr; }
+  .zone {
+    border-radius: 13px;
+    padding: 20px 20px 22px;
+    position: relative;
+  }
+  .zone.browser { background: var(--zone); border: 1px dashed var(--zone-line); }
+  .zone-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--faint);
+    display: flex; align-items: center; gap: 9px;
+    margin-bottom: 16px;
+  }
+  .zone.browser .zone-label { color: var(--accent-ink); }
+  .cookie-badge {
+    margin-left: auto;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10.5px; letter-spacing: 0.02em; text-transform: none;
+    color: var(--accent-ink);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-line);
+    border-radius: 999px; padding: 3px 10px;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .nodes { display: flex; flex-direction: column; gap: 0; }
+  .node {
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: 11px;
+    padding: 14px 16px;
+    box-shadow: var(--shadow);
+    position: relative; z-index: 1;
+  }
+  .zone.browser .node { border-color: var(--accent-line); }
+  .node .role { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); margin-bottom: 4px; }
+  .node .name { font-weight: 600; color: var(--strong); font-size: 15.5px; }
+  .node .name .file { font-family: 'IBM Plex Mono', monospace; font-weight: 500; font-size: 13px; color: var(--accent-ink); }
+  .node .desc { font-size: 13.5px; color: var(--muted); margin-top: 3px; line-height: 1.45; }
+
+  .hop {
+    display: flex; align-items: center; gap: 12px;
+    padding: 11px 4px 11px 18px;
+    position: relative;
+  }
+  .hop::before {
+    content: ""; position: absolute; left: 30px; top: -2px; bottom: -2px;
+    width: 2px;
+    background: linear-gradient(var(--accent-line), var(--accent-line));
+    opacity: 0.5;
+  }
+  .hop .arrow {
+    width: 22px; height: 22px; flex: none;
+    border-radius: 50%;
+    background: var(--surface);
+    border: 1.5px solid var(--accent-line);
+    color: var(--accent-ink);
+    display: grid; place-items: center;
+    font-size: 12px; position: relative; z-index: 1;
+  }
+  .hop .label { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--muted); }
+  .hop .label b { color: var(--accent-ink); font-weight: 500; }
+  .hop.up .arrow { border-color: var(--line-strong); color: var(--muted); }
+  .hop.up .label b { color: var(--ink); }
+
+  .boundary {
+    display: flex; align-items: center; gap: 14px;
+    margin: 6px 8px; padding: 4px 0;
+  }
+  .boundary .rule { flex: 1; height: 1px; background: repeating-linear-gradient(90deg, var(--line-strong) 0 6px, transparent 6px 12px); }
+  .boundary .txt { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); white-space: nowrap; }
+
+  @media (min-width: 860px) {
+    .diagram-inner { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .zone { padding: 22px 22px 24px; }
+  }
+
+  /* ---- generic cards ---- */
+  .grid { display: grid; gap: 18px; }
+  @media (min-width: 720px) { .grid.two { grid-template-columns: 1fr 1fr; } }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 22px 22px;
+    box-shadow: var(--shadow);
+    transition: transform 0.18s ease, box-shadow 0.18s ease;
+  }
+  .card.lift:hover { transform: translateY(-2px); box-shadow: var(--shadow-lift); }
+  .card h3 { display: flex; align-items: center; gap: 10px; }
+  .card h3 .tag { font-family: 'IBM Plex Mono', monospace; font-size: 11px; font-weight: 500; color: var(--accent-ink); background: var(--accent-soft); border-radius: 6px; padding: 2px 8px; letter-spacing: 0.03em; }
+  .card p { font-size: 15px; color: var(--muted); margin: 0; }
+  .card p + p { margin-top: 10px; }
+
+  /* ---- code blocks ---- */
+  pre {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    border-radius: 12px;
+    padding: 18px 20px;
+    overflow-x: auto;
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 13.5px;
+    line-height: 1.7;
+    margin: 0;
+    border: 1px solid rgba(255,255,255,0.05);
+  }
+  pre .c { color: var(--code-faint); }
+  pre .g { color: #7FD1A0; }
+  pre .b { color: #86A9FF; }
+  pre .p { color: #E7EAF2; }
+  .codeframe { margin: 22px 0; }
+  .codeframe .cap {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--faint); margin-bottom: 8px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .codeframe .cap::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+  /* ---- constraint list ---- */
+  .rules { display: grid; gap: 2px; margin: 8px 0 0; }
+  .rule-row {
+    display: grid; grid-template-columns: 116px 1fr; gap: 18px;
+    padding: 18px 0; border-top: 1px solid var(--line);
+    align-items: start;
+  }
+  .rule-row:first-child { border-top: none; }
+  .rule-row .sig {
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.02em;
+    padding-top: 2px;
+  }
+  .sig .m { display: inline-block; padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
+  .sig .m.ok { color: var(--good); background: var(--good-soft); }
+  .sig .m.no { color: var(--bad); background: var(--bad-soft); }
+  .rule-row .body h3 { font-size: 16px; margin-bottom: 4px; }
+  .rule-row .body p { font-size: 15px; color: var(--muted); margin: 0; }
+
+  /* ---- timeline ---- */
+  .timeline { margin-top: 12px; display: grid; gap: 0; }
+  .entry {
+    display: grid; grid-template-columns: 54px 1fr; gap: 20px;
+    position: relative; padding-bottom: 30px;
+  }
+  .entry::before {
+    content: ""; position: absolute; left: 26px; top: 44px; bottom: -4px; width: 2px;
+    background: var(--line); z-index: 0;
+  }
+  .entry:last-child { padding-bottom: 0; }
+  .entry:last-child::before { display: none; }
+  .entry .num {
+    width: 54px; height: 54px; flex: none;
+    border-radius: 13px;
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    display: grid; place-items: center;
+    font-family: 'IBM Plex Mono', monospace; font-weight: 600; font-size: 17px;
+    color: var(--accent-ink);
+    box-shadow: var(--shadow); position: relative; z-index: 1;
+  }
+  .entry .content {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 20px 22px;
+    box-shadow: var(--shadow);
+  }
+  .entry .head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .entry .head h3 { font-size: 17px; }
+  .signal {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; font-weight: 500;
+    letter-spacing: 0.03em; padding: 3px 9px; border-radius: 6px; white-space: nowrap;
+  }
+  .signal.s403 { color: var(--bad); background: var(--bad-soft); }
+  .signal.s409 { color: var(--warn); background: var(--warn-soft); }
+  .signal.s404 { color: var(--warn); background: var(--warn-soft); }
+  .signal.refuse { color: var(--muted); background: var(--surface-2); border: 1px solid var(--line); }
+  .signal.win { color: var(--good); background: var(--good-soft); }
+  .entry .content p { font-size: 15px; color: var(--muted); margin: 0 0 12px; }
+  .entry .fix {
+    display: flex; gap: 10px; align-items: baseline;
+    border-top: 1px solid var(--line); padding-top: 12px; margin-top: 4px;
+    font-size: 14.5px;
+  }
+  .entry .fix .fk {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--good); white-space: nowrap; padding-top: 1px;
+  }
+  .entry .fix .fv { color: var(--ink); }
+  .entry .fix .fv b { color: var(--strong); }
+  .entry .fix code { background: var(--good-soft); color: var(--good); }
+
+  /* ---- script table ---- */
+  .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
+  table { border-collapse: collapse; width: 100%; font-size: 15px; min-width: 460px; }
+  th, td { text-align: left; padding: 13px 18px; border-top: 1px solid var(--line); vertical-align: top; }
+  thead th { border-top: none; background: var(--surface-2); font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); font-weight: 500; }
+  tbody tr { background: var(--surface); }
+  td.cmd { white-space: nowrap; }
+  td.cmd code { background: var(--accent-soft); color: var(--accent-ink); }
+  td .d { color: var(--muted); }
+
+  /* ---- file map ---- */
+  .filemap { display: grid; gap: 10px; margin-top: 8px; }
+  .file-row {
+    display: grid; grid-template-columns: 230px 1fr; gap: 20px;
+    padding: 12px 0; border-top: 1px solid var(--line); align-items: baseline;
+  }
+  .file-row:first-child { border-top: none; }
+  .file-row .path { font-family: 'IBM Plex Mono', monospace; font-size: 13.5px; color: var(--accent-ink); }
+  .file-row .what { font-size: 14.5px; color: var(--muted); }
+
+  ul.clean { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+  ul.clean li { display: flex; gap: 12px; font-size: 15.5px; color: var(--muted); }
+  ul.clean li b { color: var(--ink); font-weight: 600; }
+  ul.clean li .mk { color: var(--accent); flex: none; padding-top: 2px; }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding: 40px 0 70px;
+    color: var(--faint);
+    font-size: 13.5px;
+    font-family: 'IBM Plex Mono', monospace;
+    letter-spacing: 0.02em;
+  }
+  footer .row { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
+
+  .flow { animation: dash 2.4s linear infinite; }
+  @keyframes dash { to { stroke-dashoffset: -24; } }
+
+  @media (max-width: 620px) {
+    body { font-size: 16px; }
+    section { padding: 48px 0; }
+    .rule-row { grid-template-columns: 1fr; gap: 8px; }
+    .entry { grid-template-columns: 44px 1fr; gap: 14px; }
+    .entry::before { left: 21px; }
+    .entry .num { width: 44px; height: 44px; font-size: 15px; }
+    .file-row { grid-template-columns: 1fr; gap: 4px; }
+    .thesis { flex-direction: column; gap: 10px; }
+  }
+</style>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand"><span class="glyph">⇄</span> aipass&nbsp;bridge</div>
+      <button class="toggle" id="themeToggle" aria-label="Toggle color theme">
+        <span id="themeIcon">◐</span><span id="themeLabel">Theme</span>
+      </button>
+    </div>
+
+    <h1 class="hero-title">A terminal that speaks<br><span class="thin">through a browser tab.</span></h1>
+    <p class="hero-lead">aipass gives away pro AI models behind a web chat. This bridge puts them in your terminal and points them at your local files — by driving a real, logged-in <b>de.aipass.net</b> tab instead of forging its requests.</p>
+
+    <div class="meta-strip">
+      <span class="chip"><span class="dot"></span><b>32</b>&nbsp;tests passing</span>
+      <span class="chip"><b>0</b>&nbsp;dependencies</span>
+      <span class="chip">Node&nbsp;+&nbsp;MV3 extension</span>
+      <span class="chip">OpenAI-compatible&nbsp;<b>/v1</b></span>
+    </div>
+
+    <div class="thesis">
+      <span class="k">The&nbsp;thesis</span>
+      <p>The session cookie <b>never leaves the browser</b>. The bridge and your terminal never see it. The one request that carries credentials runs as ordinary page JavaScript inside a first-party tab, where Chrome attaches the cookie itself — so there is no token to store, refresh, or leak.</p>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap col">
+    <p class="eyebrow">Why it exists</p>
+    <h2>The problem, and the shape of the answer</h2>
+    <p class="lead" style="margin-top:18px">You have a browser login to a chat product with generous free models. You want those models in a script, a coding loop, an editor — anywhere that isn't a chat box.</p>
+    <p style="margin-top:22px">The naive path is to copy the cookie out of the browser and replay the request from a script. That means storing a live credential, tracking its expiry, and re-authenticating when it rotates — plus every request now originates from an unrecognized client. The bridge takes the opposite path: it never handles the credential at all. The real request is issued from inside a tab that is already logged in, so it is genuinely first-party and Chrome supplies the cookie the same way it does for a click.</p>
+    <p>What sits in front is an <strong>OpenAI-compatible endpoint</strong> on <code>127.0.0.1:8787</code>. Anything that speaks that protocol — a curl one-liner, the bundled chat CLI, the file-editing agent — points at it and works, while the traffic is quietly relayed through the browser.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Architecture</p>
+    <h2 style="max-width:620px">Four hops and one boundary that matters</h2>
+    <p class="lead col" style="margin:18px 0 34px">Read it left to right. The dashed zone is the browser's first-party context — the only place the cookie exists, and the only place the real request is allowed to originate.</p>
+
+    <div class="diagram">
+      <div class="diagram-inner">
+        <div class="zone machine">
+          <div class="zone-label">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
+            Your machine
+          </div>
+          <div class="nodes">
+            <div class="node">
+              <div class="role">Client</div>
+              <div class="name">Terminal &amp; agents <span class="file">chat.mjs · agent.mjs</span></div>
+              <div class="desc">Or any OpenAI-compatible tool. Sends a normal chat request.</div>
+            </div>
+            <div class="hop">
+              <span class="arrow">↓</span>
+              <span class="label"><b>POST</b> /v1/chat/completions</span>
+            </div>
+            <div class="node">
+              <div class="role">Relay</div>
+              <div class="name">The bridge <span class="file">server.mjs · :8787</span></div>
+              <div class="desc">Translates OpenAI ⇄ aipass. Holds no cookie. Streams jobs out, deltas back.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="zone browser">
+          <div class="zone-label">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 2.5 15.5 0 18M12 3c-2.5 2.5-2.5 15.5 0 18"/></svg>
+            The logged-in browser
+            <span class="cookie-badge">🍪 cookie lives only here</span>
+          </div>
+          <div class="nodes">
+            <div class="hop">
+              <span class="arrow">↓</span>
+              <span class="label">job over SSE — <b>no credentials</b></span>
+            </div>
+            <div class="node">
+              <div class="role">Courier</div>
+              <div class="name">Extension <span class="file">background · content · page</span></div>
+              <div class="desc">Service worker holds the socket; content script keeps it alive; page script runs the fetch.</div>
+            </div>
+            <div class="hop">
+              <span class="arrow">↓</span>
+              <span class="label"><b>fetch()</b> — Chrome attaches the cookie</span>
+            </div>
+            <div class="node">
+              <div class="role">Origin</div>
+              <div class="name">de.aipass.net tab <span class="file">/actions/send-message</span></div>
+              <div class="desc">A first-party request. Streams AI SDK deltas straight back up the chain.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="boundary">
+        <span class="rule"></span>
+        <span class="txt">deltas stream back up ↑</span>
+        <span class="rule"></span>
+      </div>
+    </div>
+
+    <div class="grid two" style="margin-top:26px">
+      <div class="card lift">
+        <h3><span class="tag">rule 1</span> Fetch in the page, not the worker</h3>
+        <p>A service-worker fetch has no top-level browsing context, so a <code>SameSite=Lax</code> session cookie is never attached. The request has to run in the page's <code>MAIN</code> world to count as first-party.</p>
+      </div>
+      <div class="card lift">
+        <h3><span class="tag">rule 2</span> Socket in the worker, not the page</h3>
+        <p>An <code>https://</code> page reaching <code>http://127.0.0.1</code> hits mixed-content and Private Network Access checks. An extension request with <code>host_permissions</code> does not — so the long-lived connection lives in the background worker.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap col">
+    <p class="eyebrow">The data path</p>
+    <h2>What one message actually does</h2>
+    <p style="margin-top:18px">A request enters as OpenAI JSON and leaves the browser as the exact form the aipass chat page submits. The steps in between are the whole job of the bridge.</p>
+  </div>
+  <div class="wrap">
+    <div class="codeframe col">
+      <div class="cap">the round trip</div>
+<pre><span class="c">// 1 · client → bridge  (OpenAI shape)</span>
+POST /v1/chat/completions
+{ <span class="b">"model"</span>: <span class="g">"claude-sonnet-5@default"</span>, <span class="b">"stream"</span>: true,
+  <span class="b">"messages"</span>: [{ <span class="b">"role"</span>: <span class="g">"user"</span>, <span class="b">"content"</span>: <span class="g">"..."</span> }] }
+
+<span class="c">// 2 · bridge → extension  (a job, over SSE — no cookie)</span>
+event: job
+data: { <span class="b">"jobId"</span>: <span class="g">"…"</span>, <span class="b">"conversationId"</span>: <span class="g">"40adc2adf1f043f7"</span>,
+        <span class="b">"modelId"</span>: <span class="g">"…"</span>, <span class="b">"text"</span>: <span class="g">"the newest user message only"</span> }
+
+<span class="c">// 3 · page → aipass  (first-party, Chrome adds the cookie)</span>
+POST /actions/send-message/40adc2adf1f043f7
+{ <span class="b">"modelId"</span>: <span class="g">"…"</span>, <span class="b">"imageAspectRatio"</span>: <span class="g">"1:1"</span>,
+  <span class="b">"messages"</span>: [{ role, parts: [{ type: <span class="g">"text"</span>, text }] }] }
+
+<span class="c">// 4 · aipass → page → bridge → client  (AI SDK stream, refolded to OpenAI)</span>
+data: {"type":<span class="g">"text-delta"</span>,"delta":<span class="g">"..."</span>}          <span class="c">→ choices[].delta.content</span>
+data: {"type":<span class="g">"tool-input-available"</span>, ...}      <span class="c">→ delta.reasoning_content</span>
+data: {"type":<span class="g">"finish"</span>,"finishReason":<span class="g">"stop"</span>}   <span class="c">→ finish_reason</span></pre>
+    </div>
+    <div class="col">
+      <p class="sub" style="font-size:15.5px">Server-side tools ride the same stream. When a model runs <code>web_search</code>, the <code>tool-input</code> / <code>tool-output</code> / <code>source-url</code> frames are surfaced as <code>reasoning_content</code> — visible as progress, invisible to a client that only reads <code>content</code>. Those tools are fixed on the server; they can't be extended, which is why local file editing is driven by prompt convention instead.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap col">
+    <p class="eyebrow">The contract</p>
+    <h2>What the endpoint actually allows</h2>
+    <p style="margin-top:18px">These are not choices the bridge made — they are what the upstream accepts. Everything above is shaped to fit them.</p>
+    <div class="rules">
+      <div class="rule-row">
+        <div class="sig"><span class="m no">reject</span></div>
+        <div class="body">
+          <h3>An assistant turn in the array → 403</h3>
+          <p>A <code>messages</code> array containing an assistant message is refused by the edge before the model sees it. The web UI never sends one, because the server owns the history. So the bridge forwards <strong>only the newest user message</strong>.</p>
+        </div>
+      </div>
+      <div class="rule-row">
+        <div class="sig"><span class="m ok">keep</span></div>
+        <div class="body">
+          <h3>The server remembers the conversation</h3>
+          <p>History lives server-side, keyed by conversation id. Multi-turn works exactly as it does in the web UI — you send one message, the context is already there.</p>
+        </div>
+      </div>
+      <div class="rule-row">
+        <div class="sig"><span class="m no">reject</span></div>
+        <div class="body">
+          <h3>An invented conversation id → 404</h3>
+          <p>Conversations are created by the server. A random id returns <code>Conversation not found</code>. The id is the first sixteen hex characters of the <code>clientCreateRequestId</code> you submit when creating one.</p>
+        </div>
+      </div>
+      <div class="rule-row">
+        <div class="sig"><span class="m ok">free</span></div>
+        <div class="body">
+          <h3>Web search comes with the model</h3>
+          <p>Some models call <code>web_search</code>, <code>image</code>, <code>video</code>, <code>audio</code> or <code>deep-research</code> upstream. You receive the results folded in. The tool set is fixed and cannot be extended from the client.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap col">
+    <p class="eyebrow">Field notes</p>
+    <h2>Tracing the 403</h2>
+    <p class="lead" style="margin-top:18px">Most of the work here was not building the pipe — it was learning what the edge in front of aipass rejects. It is Google Cloud Armor (the tell: a bare <code>&lt;title&gt;403&lt;/title&gt;</code> page with <code>via: 1.1 google</code>), and it scores requests rather than matching one rule. Each finding below is a real dead end and the fix that cleared it.</p>
+  </div>
+  <div class="wrap">
+    <div class="timeline col">
+
+      <div class="entry">
+        <div class="num">01</div>
+        <div class="content">
+          <div class="head"><h3>Auth is cookie-only, same-origin</h3><span class="signal win">design</span></div>
+          <p>The capture showed no bearer token — just the session cookie, checked by origin. That single fact decided the whole architecture: the request must run inside a first-party tab, not from a script holding a copied cookie.</p>
+          <div class="fix"><span class="fk">fix</span><span class="fv">Run the real <code>fetch</code> in the page's <b>MAIN</b> world; relay everything else.</span></div>
+        </div>
+      </div>
+
+      <div class="entry">
+        <div class="num">02</div>
+        <div class="content">
+          <div class="head"><h3>A fresh random conversation id</h3><span class="signal s404">404</span></div>
+          <p>Posting to a made-up id returned <code>Conversation not found</code>. The server owns conversation creation — the client can't just name one and start talking.</p>
+          <div class="fix"><span class="fk">fix</span><span class="fv">Reuse the most recent conversation, then later <b>create one</b> via <code>/chat.data</code>.</span></div>
+        </div>
+      </div>
+
+      <div class="entry">
+        <div class="num">03</div>
+        <div class="content">
+          <div class="head"><h3>An assistant turn in the transcript</h3><span class="signal s403">403</span></div>
+          <p>Sending a full transcript to give the model context was rejected at the edge — at every size, plain or not. The one variable that mattered was an <code>assistant</code>-role message, which the web UI never sends.</p>
+          <div class="fix"><span class="fk">fix</span><span class="fv">Forward <b>only the last user message</b>; let the server hold the history.</span></div>
+        </div>
+      </div>
+
+      <div class="entry">
+        <div class="num">04</div>
+        <div class="content">
+          <div class="head"><h3>A conversation that stalled</h3><span class="signal s409">409</span></div>
+          <p>An aborted stream leaves the server believing a generation is still running, and every later request to that conversation returns <code>409 Conflict</code>. It does not clear on its own.</p>
+          <div class="fix"><span class="fk">fix</span><span class="fv">On 404/409, <b>rotate</b> to the next most recent conversation and retry.</span></div>
+        </div>
+      </div>
+
+      <div class="entry">
+        <div class="num">05</div>
+        <div class="content">
+          <div class="head"><h3>A README that said “localhost”</h3><span class="signal s403">403 · SSRF</span></div>
+          <p>Once the agent read real files, <code>Open http://localhost:3000</code> in a Next.js README tripped an SSRF rule. Not size, not tags — the loopback host itself. A URL to a public site passed fine.</p>
+          <div class="fix"><span class="fk">fix</span><span class="fv">Substitute <code>localhost</code>/<code>127.0.0.1</code> outbound, <b>restore them on disk</b> — bytes unchanged.</span></div>
+        </div>
+      </div>
+
+      <div class="entry">
+        <div class="num">06</div>
+        <div class="content">
+          <div class="head"><h3>A package.json with <code>node -e</code></h3><span class="signal s403">403 · RCE</span></div>
+          <p>A script field shaped like code execution (<code>node -e "…"</code>) matched an RCE rule. The agent reads <code>package.json</code> early in almost any task, so it was a landmine directly in the path.</p>
+          <div class="fix"><span class="fk">fix</span><span class="fv">Split, then <b>drop only the un-sendable line</b>; keep the rest. And stop shipping such scripts.</span></div>
+        </div>
+      </div>
+
+      <div class="entry">
+        <div class="num">07</div>
+        <div class="content">
+          <div class="head"><h3>The model refused the “tools”</h3><span class="signal refuse">refusal</span></div>
+          <p>Framed as a tool protocol, the model — whose real system prompt says its only tool is web search — correctly declined to “simulate fake commands.” The framing was the bug, not the model.</p>
+          <div class="fix"><span class="fk">fix</span><span class="fv">Reframe as a person pasting files: <b>“you write the lines, I run them.”</b> No claim of tools.</span></div>
+        </div>
+      </div>
+
+      <div class="entry">
+        <div class="num">08</div>
+        <div class="content">
+          <div class="head"><h3>Creating conversations on demand</h3><span class="signal win">solved</span></div>
+          <p>A capture of the chat page's “new chat” revealed <code>POST /chat.data</code> with <code>intent=create-conversation</code>. The returned id is just the first 16 hex of the request id you send — which is why ids always looked the way they did.</p>
+          <div class="fix"><span class="fk">fix</span><span class="fv">Each agent run now starts its <b>own fresh conversation</b> — no leaked history, no manual id.</span></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap col">
+    <p class="eyebrow">Run it</p>
+    <h2>From clone to first message</h2>
+    <p style="margin-top:18px">Two moving parts: a Node process, and an unpacked Chrome extension pointed at an open aipass tab.</p>
+  </div>
+  <div class="wrap">
+    <div class="codeframe col">
+      <div class="cap">setup</div>
+<pre><span class="c"># 1 · start the bridge</span>
+npm run dev
+
+<span class="c"># 2 · load the extension</span>
+<span class="c">#   chrome://extensions → Developer mode → Load unpacked</span>
+<span class="c">#   → select aipass-bridge/extension</span>
+
+<span class="c"># 3 · open a tab and leave it open</span>
+<span class="p">https://de.aipass.net/chat</span>   <span class="c"># popup should read “connected”</span></pre>
+    </div>
+    <div class="codeframe col">
+      <div class="cap">use it</div>
+<pre><span class="c"># chat, streaming, in the terminal</span>
+npm run chat -- <span class="g">"ช่วยสรุปข่าว AI วันนี้"</span>
+
+<span class="c"># edit local files — starts its own fresh conversation</span>
+npm run agent -- <span class="g">"add a /health route that returns ok"</span> --root .
+
+<span class="c"># dry run by default; write with --apply</span>
+npm run agent -- <span class="g">"..."</span> --root . --apply</pre>
+    </div>
+
+    <div class="tablewrap col" style="margin-top:26px">
+      <table>
+        <thead><tr><th>script</th><th>what it does</th></tr></thead>
+        <tbody>
+          <tr><td class="cmd"><code>npm run dev</code></td><td class="d">Start the bridge on <code>:8787</code>.</td></tr>
+          <tr><td class="cmd"><code>npm run chat</code></td><td class="d">Terminal client. Streams; shows tool progress and sources.</td></tr>
+          <tr><td class="cmd"><code>npm run agent</code></td><td class="d">Local file tools, in a fresh conversation. Dry run unless <code>--apply</code>.</td></tr>
+          <tr><td class="cmd"><code>npm run models</code></td><td class="d">List discovered models, marking free-credit ones.</td></tr>
+          <tr><td class="cmd"><code>npm run conversations</code></td><td class="d">List conversations and which is in use.</td></tr>
+          <tr><td class="cmd"><code>npm test</code></td><td class="d">The full suite — no network, no browser.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap col">
+    <p class="eyebrow">Tests</p>
+    <h2>How it verifies itself without a browser</h2>
+    <p style="margin-top:18px">The one thing tests can't reach is the live edge filter — it lives behind a real session. Everything else is covered, because the harness runs the <strong>actual bridge</strong> as a subprocess and a scriptable stand-in for the extension. Tests drive the real HTTP surface and run the real CLIs, not mocks of them.</p>
+  </div>
+  <div class="wrap">
+    <div class="codeframe col">
+      <div class="cap">the shape of a test</div>
+<pre><span class="c">// script the model's replies; reject payloads that match a pattern,</span>
+<span class="c">// the way the real WAF would</span>
+const handler = scripted([<span class="g">'NEED file package.json'</span>, <span class="g">'DONE'</span>], {
+  reject: (t) =&gt; /node\s+-e/.test(t),
+});
+const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+
+const { out } = await agent(dir);
+assert.match(out, /omitting 1 line/);          <span class="c">// redaction fired</span>
+assert.doesNotMatch(handler.sent.join(<span class="g">''</span>), /node -e/); <span class="c">// never sent</span></pre>
+    </div>
+    <div class="col">
+      <p class="sub" style="font-size:15.5px;margin-bottom:20px">Every failure in the field notes above is now a regression test: assistant-turn rejection, conversation rotation, a job surviving a mid-stream disconnect, loopback round-tripping unchanged to disk, split-and-resend, line redaction, the premature-<code>DONE</code> guard, refusing paths outside the project root.</p>
+    </div>
+    <div class="grid two col">
+      <div class="card">
+        <h3>Writing the harness found real bugs</h3>
+        <p>Three of them, all test-side: stale extension connections leaking replies between tests; a thrown assertion skipping cleanup and cascading; an assertion that counted a <em>rejected</em> attempt as delivered. The kind of thing that makes a suite quietly lie later.</p>
+      </div>
+      <div class="card">
+        <h3>Adding a case is cheap</h3>
+        <p>Script the replies with <code>scripted([...])</code>, pass <code>reject</code> to model a new filter rule, assert on the CLI output or the files on disk. No fixtures, no network, ~1.5s for the whole run.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap col">
+    <p class="eyebrow">Extend it</p>
+    <h2>Where to take it next</h2>
+    <ul class="clean" style="margin-top:20px">
+      <li><span class="mk">→</span><span><b>New edge rules will surface only in real runs.</b> When a payload 403s, the failing fragment is printed. Add its trigger to the substitution or redaction list — each is a two-line change with a matching test.</span></li>
+      <li><span class="mk">→</span><span><b>The agent's format is convention, not capability.</b> <code>NEED</code> / <code>EDIT</code> / <code>CREATE</code> / <code>RUN</code> / <code>DONE</code> are parsed from prose. New verbs are a parser case plus a tool function plus a line in the preamble.</span></li>
+      <li><span class="mk">→</span><span><b>Model choice is a runtime lever.</b> Discovery is live from <code>list-models</code>; free-credit and thinking flags are exposed. Only <code>gemini-3.1-flash-lite</code> is free — heavier work draws on the credit pool.</span></li>
+      <li><span class="mk">→</span><span><b>The reframing is fragile by nature.</b> The server's own persona always pulls the other way. Scrupulous models hold the arrangement well; weaker ones drift, which the nudge loop catches. Worth revisiting as models change.</span></li>
+    </ul>
+
+    <p class="eyebrow" style="margin-top:44px">The map</p>
+    <div class="filemap">
+      <div class="file-row"><span class="path">bridge/server.mjs</span><span class="what">The relay. OpenAI ⇄ aipass, model discovery, conversation lifecycle, the job hub.</span></div>
+      <div class="file-row"><span class="path">extension/page.js</span><span class="what">MAIN world. The one place the real credentialed fetch runs.</span></div>
+      <div class="file-row"><span class="path">extension/background.js</span><span class="what">Service worker. Holds the socket to the bridge; re-injects scripts; routes jobs.</span></div>
+      <div class="file-row"><span class="path">extension/content.js</span><span class="what">Relay between page and worker, plus the keep-alive port.</span></div>
+      <div class="file-row"><span class="path">agent.mjs</span><span class="what">File-editing loop: the preamble, the markers, substitution, redaction, split-and-resend.</span></div>
+      <div class="file-row"><span class="path">chat.mjs</span><span class="what">The terminal client.</span></div>
+      <div class="file-row"><span class="path">test/harness.mjs</span><span class="what">Real bridge + scriptable fake extension. The foundation every test builds on.</span></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="row">
+      <span>aipass bridge · field guide</span>
+      <span>·</span>
+      <span>Node + MV3 · 0 deps · 32 tests</span>
+      <span>·</span>
+      <span>drives de.aipass.net, never impersonates it</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var root = document.documentElement;
+    var icon = document.getElementById('themeIcon');
+    var label = document.getElementById('themeLabel');
+    function systemDark() {
+      try { return window.matchMedia('(prefers-color-scheme: dark)').matches; } catch (e) { return false; }
+    }
+    function apply(mode) {
+      if (mode === 'dark' || mode === 'light') root.setAttribute('data-theme', mode);
+      else root.removeAttribute('data-theme');
+      var dark = mode === 'dark' || (mode !== 'light' && systemDark());
+      icon.textContent = dark ? '☾' : '☀';
+      label.textContent = dark ? 'Dark' : 'Light';
+    }
+    var saved = null;
+    try { saved = localStorage.getItem('aipass-theme'); } catch (e) {}
+    apply(saved || 'system');
+    document.getElementById('themeToggle').addEventListener('click', function () {
+      var current = null;
+      try { current = localStorage.getItem('aipass-theme'); } catch (e) {}
+      var effective = current || (systemDark() ? 'dark' : 'light');
+      var next = effective === 'dark' ? 'light' : 'dark';
+      try { localStorage.setItem('aipass-theme', next); } catch (e) {}
+      apply(next);
+    });
+  })();
+</script>

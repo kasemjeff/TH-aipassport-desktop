@@ -1,0 +1,29 @@
+[package]
+name = "aipass-desktop"
+version = "0.2.0"
+description = "AiPASS in a window — bridge, agent and chat, one command."
+edition = "2021"
+rust-version = "1.77"
+
+# The Rust side is deliberately thin: it owns the window, the tray and the
+# Node sidecar that runs the bridge and the harness. All the agent logic stays
+# in the .mjs files the CLI already uses, so the window and the terminal can
+# never drift apart.
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# Default enables Tauri's generated code; `custom-protocol` is what a release
+# build needs on Windows to serve its own assets.
+default = []
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+strip = true          # the binary is ~3 MB smaller without symbols
+lto = true
+codegen-units = 1
