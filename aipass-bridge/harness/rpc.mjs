@@ -22,7 +22,11 @@ import { SkillLibrary } from './skills.mjs';
 import { Settings } from './settings.mjs';
 import { PluginManager } from './plugins.mjs';
 
-const UI_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'desktop', 'ui');
+// The window's static files. In the repo they live in desktop/ui; the shipped
+// layout puts ui/ beside aipass-bridge instead — first that exists wins.
+const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const UI_DIRS = [path.join(APP_ROOT, 'desktop', 'ui'), path.join(APP_ROOT, 'ui')];
+const UI_DIR = UI_DIRS.find((dir) => fs.existsSync(dir)) ?? UI_DIRS[0];
 
 /** Attachment kinds the bridge can carry, with the part shape each needs. */
 import { MAX_ATTACHMENT_BYTES, mimeOf } from '../bridge/attachment-types.mjs';

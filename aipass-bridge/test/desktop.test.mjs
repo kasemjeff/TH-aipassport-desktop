@@ -383,6 +383,21 @@ test('the window only reaches for elements that exist', async (t) => {  // A typ
   assert.deepEqual(missing, [], `app.js references ids the html does not have: ${missing.join(', ')}`);
 });
 
+test('the backend serves the window files in every layout', async (t) => {
+  // UI_DIR is a candidate chain (desktop/ui in the repo, ui/ beside
+  // aipass-bridge in the shipped layout) — whichever layout the backend runs
+  // from, the window must get the real files and nothing else.
+  const env = await startRpc({ files: {}, replies: [] });
+  t.after(() => env.stop());
+
+  const home = await fetch(`http://127.0.0.1:${env.rpc.port}/`);
+  assert.equal(home.status, 200);
+  assert.match(await home.text(), /<title>aipass desktop<\/title>/);
+
+  const missing = await fetch(`http://127.0.0.1:${env.rpc.port}/no-such-file.js`);
+  assert.equal(missing.status, 404);
+});
+
 test('reading helpers: file listing, file text, and the playbook library', async (t) => {
   const env = await startRpc({
     files: {
