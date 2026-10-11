@@ -24,15 +24,20 @@ fn backend_port() -> Result<u16, String> {
 /// Where the app finds the files it runs.
 ///
 /// Four layouts, tried in order:
-///   1. the packaged resource dir            — an installed build
-///   2. next to the binary                   — some installers relocate these
-///   3. the repo, walking up                 — `tauri dev` from target/debug
-///   4. the Tauri dir, two up                — `tauri dev` resource resolution
+///   1. the packaged resource dir            — an installed build (on Windows
+///                                             this is the exe's own dir)
+///   2. the Tauri dir, two up                — the repo, as `tauri dev` needs
+///   3. next to the binary                   — some installers relocate these
+///   4. walking up from the binary           — a last resort
 fn find_root(app: &tauri::App, exe_dir: &std::path::Path) -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Ok(res) = app.path().resolve(MARKER, tauri::path::BaseDirectory::Resource) {
-        if let Some(root) = res.parent().and_then(|p| p.parent()) {
+        // res is <resource dir>/aipass-bridge/bridge/server.mjs, so the
+        // resource dir itself is three parents up — the candidate whose
+        // join(MARKER) is what the loop below checks. Two parents stopped one
+        // short, inside aipass-bridge/, and never matched any layout.
+        if let Some(root) = res.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
             candidates.push(root.to_path_buf());
         }
     }
