@@ -257,6 +257,50 @@ test('the event stream pushes frames to a subscriber', async (t) => {
   reader.cancel();
 });
 
+/* ------------------------------------------------------------- bridge URL */
+
+/** createRpc with every store hermetic, and no bridgeURL argument at all. */
+async function startEnvRpc() {
+  return createRpc({
+    port: await freePort(),
+    root: tempDir({ 'a.txt': 'x' }),
+    store: tempDir(),
+    settings: new Settings(tempDir(), 'settings.json'),
+    pluginsDir: tempDir(),
+    rulesFile: path.join(tempDir(), 'rules.json'),
+  });
+}
+
+test('AIPASS_BRIDGE reaches the bridge client the harness actually chats with', async (t) => {
+  // No bridgeURL is passed: the environment is the only way the client could
+  // learn an address, and it must be the same client the run traffic uses.
+  const bridgePort = await freePort();
+  const saved = process.env.AIPASS_BRIDGE;
+  process.env.AIPASS_BRIDGE = `127.0.0.1:${bridgePort}`;
+  let rpc;
+  try {
+    rpc = await startEnvRpc();
+    assert.equal(rpc.harness.bridge.base, `http://127.0.0.1:${bridgePort}`);
+  } finally {
+    rpc?.server.close();
+    if (saved === undefined) delete process.env.AIPASS_BRIDGE;
+    else process.env.AIPASS_BRIDGE = saved;
+  }
+});
+
+test('with no AIPASS_BRIDGE the bridge client keeps the loopback default', async (t) => {
+  const saved = process.env.AIPASS_BRIDGE;
+  delete process.env.AIPASS_BRIDGE;
+  let rpc;
+  try {
+    rpc = await startEnvRpc();
+    assert.equal(rpc.harness.bridge.base, 'http://127.0.0.1:8787');
+  } finally {
+    rpc?.server.close();
+    if (saved !== undefined) process.env.AIPASS_BRIDGE = saved;
+  }
+});
+
 /* ------------------------------------------------- settings, projects, uploads */
 
 test('settings are read, changed and persisted', async (t) => {

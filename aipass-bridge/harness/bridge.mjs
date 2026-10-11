@@ -9,6 +9,33 @@ import { outbound, inbound, RISKY_LINE } from './waf.mjs';
 
 export const MIN_SPLIT = 300;
 
+/** The bridge every client talks to unless something says otherwise. */
+export const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:8787';
+
+/**
+ * Where the bridge is: AIPASS_BRIDGE when the environment names it, the
+ * loopback default otherwise. Accepted forms are a full URL
+ * (http://127.0.0.1:8788), a host:port pair (localhost:8788) or a bare port
+ * (8788). Anything else is a typo — and a typo must stop the start, not
+ * quietly point chat traffic at a port nothing is listening on.
+ */
+export function resolveBridgeURL(env = process.env) {
+  const raw = String(env.AIPASS_BRIDGE ?? '').trim();
+  if (!raw) return DEFAULT_BRIDGE_URL;
+  const reject = () => {
+    throw new Error(`AIPASS_BRIDGE must be an http(s) URL, host:port or a port — got ${JSON.stringify(raw)}`);
+  };
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+    let parsed;
+    try { parsed = new URL(raw); } catch { reject(); }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') reject();
+    return raw.replace(/\/+$/, '');
+  }
+  if (/^\d+$/.test(raw)) return `http://127.0.0.1:${raw}`;
+  if (/^[a-z0-9._-]+:\d+$/i.test(raw)) return `http://${raw}`;
+  reject();
+}
+
 /** Split text in half on a line boundary when it has one. */
 export function splitInHalf(text) {
   const lines = text.split('\n');
@@ -37,7 +64,7 @@ export function redact(text) {
 }
 
 export class BridgeClient {
-  constructor(base = 'http://127.0.0.1:8787', { model = null } = {}) {
+  constructor(base = DEFAULT_BRIDGE_URL, { model = null } = {}) {
     this.base = String(base).replace(/\/+$/, '');
     this.model = model;
   }

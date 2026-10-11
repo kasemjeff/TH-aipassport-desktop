@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { Emitter } from './events.mjs';
 import { Overlay } from './overlay.mjs';
 import { SkillLibrary } from './skills.mjs';
-import { BridgeClient } from './bridge.mjs';
+import { BridgeClient, DEFAULT_BRIDGE_URL } from './bridge.mjs';
 import { createTools } from './tools.mjs';
 import { PermissionEngine } from './permissions.mjs';
 import { SessionStore } from './session.mjs';
@@ -63,7 +63,7 @@ export class Harness {
     };
     this.bridge = opts.bridge instanceof BridgeClient
       ? opts.bridge
-      : new BridgeClient(opts.bridgeURL ?? 'http://127.0.0.1:8787', { model: opts.model ?? this.options.model ?? null });
+      : new BridgeClient(opts.bridgeURL ?? DEFAULT_BRIDGE_URL, { model: opts.model ?? this.options.model ?? null });
     this.skills = opts.skills ?? SkillLibrary.default({ root: this.root, repoDir: REPO_SKILLS });
     this.store = opts.store === 'off' ? null : (opts.store ?? new SessionStore(path.join(home(), 'sessions')));
     this.overlay = new Overlay(this.root);

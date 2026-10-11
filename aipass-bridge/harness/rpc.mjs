@@ -30,11 +30,21 @@ const UI_DIR = UI_DIRS.find((dir) => fs.existsSync(dir)) ?? UI_DIRS[0];
 
 /** Attachment kinds the bridge can carry, with the part shape each needs. */
 import { MAX_ATTACHMENT_BYTES, mimeOf } from '../bridge/attachment-types.mjs';
+// Where the bridge lives: AIPASS_BRIDGE from the environment, or the loopback
+// default — the one resolver, so the desktop's probe and the client the
+// harness chats with can never disagree.
+import { resolveBridgeURL } from './bridge.mjs';
+
+// Re-exported for desktop/main.mjs, whose ensureBridge probe must resolve the
+// bridge exactly the way the harness's own client does.
+export { resolveBridgeURL };
 
 export function createRpc({
   port = 8790,
   root = process.cwd(),
-  bridgeURL = 'http://127.0.0.1:8787',
+  // Read at the rpc/harness boundary: an explicit bridgeURL (tests, the
+  // desktop) wins; otherwise the environment decides.
+  bridgeURL = resolveBridgeURL(),
   model = null,
   store = null,
   compaction = null,

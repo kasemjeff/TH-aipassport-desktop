@@ -21,8 +21,10 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = fs.existsSync(path.join(HERE, 'aipass-bridge', 'bridge', 'server.mjs')) ? HERE : path.resolve(HERE, '..');
 // A static relative import can only ever see one of the two layouts, so resolve
 // the backend from REPO — `node main.mjs` then works from both.
-const { createRpc } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'rpc.mjs')));
-const BRIDGE_URL = process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787';
+const { createRpc, resolveBridgeURL } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'rpc.mjs')));
+// One resolver for the probe and the harness client alike: AIPASS_BRIDGE
+// (http(s)://host:port, host:port or a bare port) or the loopback default.
+const BRIDGE_URL = resolveBridgeURL();
 const PORT = Number(process.env.AIPASS_DESKTOP_PORT ?? 8790);
 
 const arg = (name, fallback = null) => {
@@ -95,7 +97,7 @@ if (DETACH) {
   bridge?.unref();
   // let the loop drain; an exit() here trips a libuv assertion on Windows
 } else {
-  const rpc = createRpc({ port: PORT, root: ROOT });
+  const rpc = createRpc({ port: PORT, root: ROOT, bridgeURL: BRIDGE_URL });
 
   const bridge = await ensureBridge();
   process.stdout.write(`aipass desktop\n`);
