@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { startBridge, FakeExtension, scripted, run, tempDir, waitFor, CHAT } from './harness.mjs';
+import { startBridge, FakeExtension, scripted, run, tempDir, waitFor, CHAT, DEFAULT_VIDEO_OPTIONS } from './harness.mjs';
 
 let bridge;
 before(async () => { bridge = await startBridge(); });
@@ -249,7 +249,25 @@ test('a video link labelled with a filename is still downloaded', async (t) => {
 });
 
 test('--resolution and the video switches reach the job', async (t) => {
-  const ext = await new FakeExtension(bridge.base).connect();
+  // The fake serves the exact switches this test asserts. Otherwise the
+  // outcome would hinge on whether the bridge's video-options cache has been
+  // warmed yet: the default fake rows (480p, 4-6s) make the bridge — rightly —
+  // drop --resolution 720p and --duration 8 before dispatch, while a cold
+  // cache falls back to a table that allows them. Hermetic beats lucky.
+  const ext = await new FakeExtension(bridge.base, {
+    videoOptions: {
+      ...DEFAULT_VIDEO_OPTIONS,
+      'list-video-resolutions': [
+        { id: 'r1', provider: 'seedance', label: '480p', value: '480p', is_default: true, is_active: true },
+        { id: 'r2', provider: 'seedance', label: '720p', value: '720p', is_active: true },
+      ],
+      'list-video-durations': [
+        { id: 'd1', provider: 'seedance', label: '4s', value: 4, is_default: true, is_active: true },
+        { id: 'd2', provider: 'seedance', label: '6s', value: 6, is_active: true },
+        { id: 'd3', provider: 'seedance', label: '8s', value: 8, is_active: true },
+      ],
+    },
+  }).connect();
   t.after(() => ext.disconnect());
   await waitFor(async () => (await (await fetch(`${bridge.base}/v1/models?refresh=1`)).json()).data.length > 1);
 
