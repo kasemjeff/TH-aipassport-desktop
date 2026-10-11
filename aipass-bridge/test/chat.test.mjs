@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { startBridge, FakeExtension, scripted, run, tempDir, waitFor, CHAT } from './harness.mjs';
 
@@ -10,6 +11,19 @@ before(async () => { bridge = await startBridge(); });
 after(() => bridge.stop());
 
 const chat = (args) => run(CHAT, [...args, '--bridge', bridge.base]);
+
+// A 1x1 transparent PNG on disk — the repo ships no image fixture (the tests
+// used to point at an untracked public/image.png that a fresh clone never
+// has, making the CLI exit with "image file not found"). The CLI checks the
+// extension and the fake extension echoes whatever parts arrive, so the tests
+// make their own smallest-legal-payload file instead.
+const PNG_1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+const pngPath = () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-chat-'));
+  const file = path.join(dir, 'pixel.png');
+  fs.writeFileSync(file, Buffer.from(PNG_1X1, 'base64'));
+  return file;
+};
 
 test('one-shot prints the answer', async (t) => {
   const handler = scripted(['สวัสดีครับ ยินดีช่วยเหลือ']);
@@ -72,7 +86,7 @@ test('sends image part when --image is provided', async (t) => {
   }).connect();
   t.after(() => ext.disconnect());
 
-  const imgPath = path.resolve(import.meta.dirname, '../../public/image.png');
+  const imgPath = pngPath();
   const { out, code } = await chat(['describe this image', '--image', imgPath]);
   assert.equal(code, 0);
   assert.match(out, /I see an image/);
@@ -94,7 +108,7 @@ test('auto-detects and attaches inline image file path in chat prompt', async (t
   }).connect();
   t.after(() => ext.disconnect());
 
-  const imgPath = path.resolve(import.meta.dirname, '../../public/image.png');
+  const imgPath = pngPath();
   const { out, code } = await chat([`describe ${imgPath}`]);
   assert.equal(code, 0);
   assert.match(out, /Analyzed inline image/);
