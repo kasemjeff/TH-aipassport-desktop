@@ -9,6 +9,7 @@
 // for the web UI, so there is nothing to reconstruct on this side.
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { DOCUMENT_TYPES, MAX_ATTACHMENT_BYTES, isAllowedAttachment } from './attachment-types.mjs';
 
 const PORT = Number(process.env.AIPASS_PORT ?? 8787);
 const HOST = process.env.AIPASS_HOST ?? '127.0.0.1';
@@ -523,7 +524,10 @@ function findValue(node, key) {
 // mints a conversation that never appears in the account's history and expires
 // on its own — which is what an agent run wants: nothing to clean up, nothing
 // to rotate past, and no earlier conversation to inherit.
-async function createConversation({ modelId = defaultModel, message = 'Hello', assistant, temporary = false } = {}) {
+// `adopt` is false for conversations a caller only borrows — a helper run, a
+// WEB scratch space — so the bridge's current-conversation pointer is not
+// moved and no save/restore dance is needed around the borrower.
+async function createConversation({ modelId = defaultModel, message = 'Hello', assistant, temporary = false, adopt = true } = {}) {
   const requestId = randomUUID();
   const raw = await new Promise((resolve, reject) => {
     const job = new Job({
@@ -539,11 +543,13 @@ async function createConversation({ modelId = defaultModel, message = 'Hello', a
   // answers with the conversation object, whose id lives under `id`.
   const id = findValue(decoded, 'conversationId') ?? findValue(decoded, 'id');
   if (!id) throw new Error(`could not read a conversation id from the response: ${raw.slice(0, 200)}`);
-  conversationCache = id;
-  conversationIsTemporary = Boolean(temporary);
-  conversationIndex = 0;
-  conversationList = [];
-  log(`created ${temporary ? 'temporary ' : ''}conversation ${id}`);
+  if (adopt) {
+    conversationCache = id;
+    conversationIsTemporary = Boolean(temporary);
+    conversationIndex = 0;
+    conversationList = [];
+  }
+  log(`created ${temporary ? 'temporary ' : ''}conversation ${id}${adopt ? '' : ' (borrowed)'}`);
   return id;
 }
 
@@ -565,7 +571,7 @@ async function resolveConversation() {
 
 // A 404 means the conversation was deleted; a 409 means the server still
 // believes a generation is running there. Neither recovers on its own.
-function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, video, imageStyleId, outputTone, outputFormat, onDelta, onDone, onError }) {
+function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, video, imageStyleId, outputTone, outputFormat, conversation: fixedConversation = null, temporary: fixedTemporary = null, onDelta, onDone, onError }) {
   // A video model does not go through /actions/send-message at all — it is a
   // job submitted to /actions/video-generation and then polled. Same Job
   // machinery, different kind, so retries and aborts behave the same way.
@@ -577,14 +583,24 @@ function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, vi
   const attempt = async () => {
     attempts++;
     let conversationId;
-    try { conversationId = await resolveConversation(); }
-    catch (err) { return onError(err.message); }
+    let jobTemporary;
+    if (fixedConversation) {
+      // A named conversation belongs to its caller: no cache resolution, and
+      // no rotation onto the next conversation when it rejects — the caller
+      // decides what a dead conversation means for it.
+      conversationId = fixedConversation;
+      jobTemporary = fixedTemporary === true;
+    } else {
+      try { conversationId = await resolveConversation(); }
+      catch (err) { return onError(err.message); }
+      jobTemporary = conversationIsTemporary;
+    }
 
     current = new Job({
       kind: isVideo ? 'video' : 'chat',
       modelId, text, parts, conversationId, aspectRatio: ratio, thinkingLevel,
       imageStyleId, outputTone, outputFormat,
-      temporary: conversationIsTemporary,
+      temporary: jobTemporary,
       // No aspect-ratio fallback here: videoOptionsFor already read the request
       // and dropped a ratio this provider is not served. Re-adding the raw value
       // would put back exactly what validation just removed.
@@ -594,7 +610,7 @@ function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, vi
       onDone,
       onError: (message) => {
         const rejected = /conversation not found|returned 404|returned 409/i.test(message);
-        if (rejected && attempts <= 3 && delivered === 0 && !PINNED_CONVERSATION) {
+        if (rejected && attempts <= 3 && delivered === 0 && !PINNED_CONVERSATION && !fixedConversation) {
           log(`conversation ${conversationId} rejected, trying the next one`);
           conversationIndex++;
           conversationCache = null;
@@ -611,67 +627,13 @@ function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, vi
   return { abort: () => current?.abort() };
 }
 
-// True for loopback, link-local and RFC1918 addresses. The URL parser has
-// already normalised integer, hex and octal spellings of an IPv4 address to
-// dotted-quad by the time this sees the hostname, so those need no case of
-// their own. A bare domain name is not classified here — that would need DNS
-// resolution — so this blocks the literal-IP SSRF attempts, which is what a
-// URL in a chat message looks like.
-const privateV4 = (a, b) =>
-  a === 0 || a === 127 || a === 10                     // this-host, loopback, private
-  || (a === 169 && b === 254)                          // link-local incl. cloud metadata
-  || (a === 192 && b === 168)
-  || (a === 172 && b >= 16 && b <= 31);                // 172.16.0.0/12
+// The private-network classifier lives in its own module so the harness's
+// FETCH tool guards with exactly the same rules as the attachment path here.
+import { isPrivateHost } from './private-hosts.mjs';
 
-function isPrivateHost(host) {
-  let h = String(host).toLowerCase();
-  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
-  if (h === 'localhost' || h.endsWith('.localhost')) return true;
-  if (h === '::' || h === '::1') return true;                 // unspecified / loopback
-  if (/^fe[89ab][0-9a-f]:/.test(h)) return true;               // fe80::/10 link-local
-  if (/^f[cd][0-9a-f]{2}:/.test(h)) return true;               // fc00::/7 unique-local
-  // An IPv4-mapped address. The URL parser rewrites ::ffff:127.0.0.1 into the
-  // hex form ::ffff:7f00:1, so both spellings have to be unwrapped to the IPv4
-  // address they carry — which a plain dotted-quad match never sees.
-  const mapped = h.startsWith('::ffff:') ? h.slice(7) : '';
-  if (mapped.includes('.')) return isPrivateHost(mapped);
-  const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(mapped);
-  if (hex) {
-    const bits = (hex[1].padStart(4, '0') + hex[2].padStart(4, '0'));
-    return privateV4(parseInt(bits.slice(0, 2), 16), parseInt(bits.slice(2, 4), 16));
-  }
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
-  if (!m) return false;
-  return privateV4(Number(m[1]), Number(m[2]));
-}
-
-// What may be attached to a message. Images go to vision models; the document
-// types are what the web UI's own file picker offers. Anything else is refused
-// here rather than uploaded and rejected upstream, where the error is vaguer.
-const DOCUMENT_TYPES = new Set([
-  'application/pdf',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.ms-excel',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.ms-powerpoint',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  'text/plain',
-  'text/markdown',
-  'text/csv',
-  'application/json',
-  // Video: the upstream may or may not look inside one, but refusing it here
-  // hides the whole attachment path behind a vaguer upstream error. It is
-  // trimmed to the 20 MB cap like everything else, so nothing unbounded rides
-  // along.
-  'video/mp4',
-  'video/quicktime',
-  'video/webm',
-]);
-const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
-
-const isAllowedAttachment = (type, kind) =>
-  kind === 'image' ? type.startsWith('image/') : type.startsWith('image/') || DOCUMENT_TYPES.has(type);
+// What may be attached to a message — the table is shared with the desktop's
+// staged uploads and the agent's ATTACH tool, in bridge/attachment-types.mjs,
+// so the three cannot drift.
 
 // Fetch a remote attachment and convert it to a Base64 data URI, with the SSRF
 // guard. `kind` narrows what content-type is acceptable: an image_url part will
@@ -994,6 +956,14 @@ async function chatCompletions(req, res) {
   const { text, parts } = await extractUserParts(payload.messages);
   if (!text && (!parts || parts.length === 0)) return oaiError(res, 400, 'no user message');
 
+  // A client that manages its own conversations — the harness's helpers, a
+  // pool — names one per request here. Without it every chat goes to the
+  // bridge's current conversation, exactly as before.
+  const conversation = typeof payload.conversation === 'string' && payload.conversation.trim()
+    ? payload.conversation.trim()
+    : null;
+  const conversationTemporary = conversation ? payload.temporary === true : null;
+
   const id = `chatcmpl-${randomUUID().replace(/-/g, '').slice(0, 24)}`;
   const created = Math.floor(Date.now() / 1000);
   const imageCount = (parts ?? []).filter(p => p.type === 'image').length;
@@ -1028,6 +998,7 @@ async function chatCompletions(req, res) {
     const job = startChat({
       modelId: model, text, parts, aspectRatio: ratio, thinkingLevel, video,
       imageStyleId, outputTone, outputFormat,
+      conversation, temporary: conversationTemporary,
       onDelta: (part) => {
         if (part.kind === 'status') {
           if (TOOL_VISIBILITY === 'off') return;
@@ -1062,6 +1033,7 @@ async function chatCompletions(req, res) {
     const job = startChat({
       modelId: model, text, parts, aspectRatio: ratio, thinkingLevel, video,
       imageStyleId, outputTone, outputFormat,
+      conversation, temporary: conversationTemporary,
       onDelta: (p) => {
         if (p.kind === 'status') { if (TOOL_VISIBILITY !== 'off') reasoning += `${p.text}\n`; return; }
         if (MEDIA_KINDS.has(p.kind)) { out += mediaMarkdown(p.kind, p.text, p.filename); return; }
@@ -1207,11 +1179,13 @@ const server = http.createServer(async (req, res) => {
 
     if (path === '/conversations/new' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req) || '{}');
+      const adopt = body.adopt !== false;
+      const temporary = body.temporary === true;
       const id = await createConversation({
         modelId: body.model, message: body.message, assistant: body.assistant,
-        temporary: body.temporary === true,
+        temporary, adopt,
       });
-      return json(res, 200, { id, temporary: conversationIsTemporary });
+      return json(res, 200, { id, temporary });
     }
     if (path === '/conversations') {
       await loadConversations().catch(() => {});

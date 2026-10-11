@@ -213,12 +213,15 @@ const DEFAULT_CONVERSATIONS = [
 // Stands in for the extension. `onChat` receives the job plus an emitter and
 // decides what the upstream would have streamed back.
 export class FakeExtension {
-  constructor(base, { onChat, models = DEFAULT_MODELS, conversations = DEFAULT_CONVERSATIONS, quota = quotaFixture(), assistants = [], videoOptions = DEFAULT_VIDEO_OPTIONS } = {}) {
+  constructor(base, { onChat, models = DEFAULT_MODELS, conversations = DEFAULT_CONVERSATIONS, quota = quotaFixture(), assistants = [], videoOptions = DEFAULT_VIDEO_OPTIONS, uniqueTemporaryIds = false } = {}) {
     this.base = base;
     this.quota = quota;
     this.onChat = onChat ?? (async (_job, e) => { await e.text('ok'); await e.done(); });
     this.models = models;
     this.conversations = conversations;
+    // Pool tests need each created conversation to have its own id; the fixed
+    // one is the default because older tests assert it verbatim.
+    this.uniqueTemporaryIds = uniqueTemporaryIds;
     this.chats = [];       // every chat job received
     this.created = [];     // every create-conversation job received
     this.videos = [];      // every video-generation job received
@@ -286,7 +289,7 @@ export class FakeExtension {
     if (job.kind === 'create') {
       this.created.push(job);
       const raw = job.temporary
-        ? temporaryChatFixture()
+        ? temporaryChatFixture(this.uniqueTemporaryIds ? `tmp${String(this.created.length).padStart(4, '0')}` : undefined)
         : createFixture(job.requestId, job.message);
       return void this.post('/ext/loader', { jobId: job.jobId, raw });
     }

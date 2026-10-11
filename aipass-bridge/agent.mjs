@@ -59,6 +59,40 @@ const ASSISTANT = flag('assistant', process.env.AIPASS_ASSISTANT_ID || null);
 // above the repo (scratch/aipass2/skills) so a re-clone never wipes it;
 // override with AIPASS_SKILLS_DIR or --skills.
 const SKILLS_DIR = flag('skills', null) ?? process.env.AIPASS_SKILLS_DIR;
+// Teach the model the SEARCH -i form in the preamble. Off by default so the
+// first message stays byte-identical to the protocol it was tuned against.
+const SEARCH_I = has('search-i');
+// Teach the model the ATTACH marker, for files `read` refuses (images, PDFs).
+const ATTACH = has('attach');
+// Run WEB lookups in a throwaway scratch conversation, so the search Q&A never
+// occupies the working conversation's context.
+const WEB_SCRATCH = has('web-scratch');
+// Helpers in one reply run beside each other, each on its own conversation
+// (P2-B). Off by default: the upstream must be live-verified to accept
+// concurrent generations on separate conversations before this earns trust.
+const PARALLEL_HELPERS = has('parallel-helpers');
+// Teach the model the SUBAGENT marker and let the loop answer it. Without it
+// a SUBAGENT marker comes back as an `err:` result.
+const SUBAGENT = has('subagent');
+// Repeatable --rule "pattern=decision[:kinds]" — the caller's explicit
+// instruction for this run. Persisted rules live in ~/.aipass/rules.json
+// (harness/rules.mjs); flag rules outrank them because they are more recent
+// intent.
+const RULES = [];
+for (let i = 0; i < argv.length; i++) {
+  if (argv[i] !== '--rule') continue;
+  const raw = String(argv[i + 1] ?? '').trim();
+  const m = /^([^=]+)=(allow|deny)(?::([a-z,]+))?$/i.exec(raw);
+  if (!m) {
+    console.error(`bad --rule: "${raw}" — expected "pattern=allow|deny[:kinds]", e.g. --rule "src/**=allow:write"`);
+    process.exit(1);
+  }
+  RULES.push({
+    pattern: m[1].trim(),
+    decision: m[2].toLowerCase(),
+    ...(m[3] ? { kinds: m[3].split(',').map((k) => k.trim()).filter(Boolean) } : {}),
+  });
+}
 
 const HELP = has('help') || argv.includes('-h');
 
@@ -84,6 +118,12 @@ if (!task || HELP) {
   --bridge URL    bridge base URL                    (default: http://127.0.0.1:8787)
   --session ID    continue a saved session (default: a new one)
   --plan          ask for a PLAN/TODO before working (desktop harness feature)
+  --search-i      tell the model about SEARCH -i (case-insensitive search)
+  --attach        tell the model about ATTACH (hand it an image or document)
+  --web-scratch   run WEB lookups in a throwaway conversation
+  --parallel-helpers  run several SUBAGENTs of one reply beside each other
+  --subagent      tell the model about SUBAGENT and let it hand off work
+  --rule R        add a permission rule "pattern=decision" (repeatable, e.g. "src/**=allow")
   --no-session    do not save a session log
 
 The model receives a tool protocol on turn 1 and drives file edits directly.
@@ -246,6 +286,7 @@ const harness = new Harness({
   root: ROOT,
   bridgeURL: BRIDGE,
   model: MODEL,
+  rules: RULES,
   skills: SKILLS_DIR ? new SkillLibrary([SKILLS_DIR], { maxResult: MAX_RESULT }) : undefined,
   options: {
     maxSteps: MAX_STEPS,
@@ -253,6 +294,11 @@ const harness = new Harness({
     mode: 'auto',
     slim: SLIM || Boolean(ASSISTANT),
     plan: has('plan'),
+    searchI: SEARCH_I,
+    attach: ATTACH,
+    webScratch: WEB_SCRATCH,
+    parallelHelpers: PARALLEL_HELPERS,
+    subagent: SUBAGENT,
     conversation: CONVERSATION,
     reuse: REUSE,
     permanent: PERMANENT,

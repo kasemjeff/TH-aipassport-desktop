@@ -23,7 +23,7 @@ export const REMINDER = 'What next? Ask for anything else you need, or finish wi
  * per marker a plugin registered. Both opt-ins so the CLI's first message stays
  * byte-identical to the protocol it was tuned against.
  */
-export const preamble = ({ allowRun = false, plan = false, subagent = false, plugins = [] } = {}) => {
+export const preamble = ({ allowRun = false, plan = false, subagent = false, searchI = false, attach = false, plugins = [] } = {}) => {
   let text = `I am reading through a project with you. The files are open in front of me, and I will paste you anything you want to look at.
 
 So just tell me what you want to see next, and put that on its own line in this shape, because my editor watches for these markers:
@@ -31,7 +31,7 @@ So just tell me what you want to see next, and put that on its own line in this 
 NEED dir .
 NEED file README.md
 NEED file src/index.ts 1-80
-SEARCH text to find across the whole project
+SEARCH text to find across the whole project${searchI ? ' — put -i first (SEARCH -i Text) to match without letter case' : ''}
 GLOB **/*.ts
 GIT status
 GIT diff
@@ -59,7 +59,7 @@ DELETE old-file.ts
 
 To rename or move a file:
 
-MOVE old-name.ts new-name.ts${allowRun ? '\n\nTo have me run something in the terminal:\n\nRUN\nwhat to run\nEND' : ''}
+MOVE old-name.ts new-name.ts${allowRun ? '\n\nTo have me run something in the terminal:\n\nRUN\nwhat to run\nEND' : ''}${attach ? '\n\nTo let me see a file that is not plain text — an image, a PDF, a slide deck — put its path on a line by itself and I will attach it to my next message:\n\nATTACH desktop/shot.png' : ''}
 
 Once you have everything you need and are giving me your final answer, finish with:
 
@@ -93,7 +93,7 @@ Update the TODO block as you go — mark what is done, add what you find. The pe
   if (subagent) {
     text += `
 
-For a big task you can hand a self-contained piece to a helper working beside you, and keep going yourself while it runs. In this shape:
+For a big task you can hand a self-contained piece to a helper working beside you. The helper runs to completion on its own, then hands you one summary to work from — you continue after it reports back. In this shape:
 
 SUBAGENT
 task: read the docs folder and summarise what each file covers
@@ -125,24 +125,36 @@ A few practical notes. Answer in English. Look at a file before changing it, and
 
 export const PREAMBLE = preamble();
 
+// A fenced code block is the model quoting, not asking: a NEED or an EDIT
+// shown as an example must never run, and a DONE inside one must never end
+// the run. Both parse() and prose() toggle on the same shape.
+const FENCE_LINE = /^\s*(```|~~~)/;
+
 // The model usually writes its answer as prose and then a bare DONE, so fall
 // back to that prose rather than reporting an empty result.
-export const MARKER_LINE = /^\s*(NEED\s+(dir|file)\b|SEARCH\b|GLOB\b|SKILL\b|GIT\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|(?:\*{1,3}|#{1,6}\s*)?DONE\b)/i;
+export const MARKER_LINE = /^\s*(NEED\s+(dir|file)\b|SEARCH\b|GLOB\b|SKILL\b|GIT\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|(?:\*{1,3}|#{1,6}\s*)?DONE\b)/i;
 export const prose = (reply, plugins = []) => {
   const extra = plugins.length
     ? '|' + plugins.map((t) => `${t.marker}\\b`).join('|')
     : '';
   const re = new RegExp(MARKER_LINE.source + extra, 'i');
-  return reply.split('\n').filter((l) => !re.test(l)).join('\n').trim();
+  let inFence = false;
+  return reply.split('\n').filter((l) => {
+    if (FENCE_LINE.test(l)) { inFence = !inFence; return true; }
+    return inFence ? true : !re.test(l);
+  }).join('\n').trim();
 };
 
-/** Tool kinds that mean "the model is still gathering", never a stopping point. */
-export const READING = new Set(['list', 'read', 'search', 'skill']);
+/** Tool kinds that mean "the model is still gathering", never a stopping point.
+ *  ATTACH is here because a queued attachment only rides the NEXT message —
+ *  a DONE in the same reply would silently drop it. */
+export const READING = new Set(['list', 'read', 'search', 'skill', 'attach']);
 
 export function parse(reply, { plugins = [] } = {}) {
   const lines = reply.split('\n');
   const calls = [];
   let i = 0;
+  let inFence = false;
   const readUntil = (stops) => {
     const body = [];
     while (i < lines.length && !stops.some((st) => new RegExp(`^\\s*${st}\\s*$`, 'i').test(lines[i]))) body.push(lines[i++]);
@@ -151,6 +163,12 @@ export function parse(reply, { plugins = [] } = {}) {
 
   while (i < lines.length) {
     const line = lines[i];
+
+    // Inside a fence the reply is a quotation. Skip it whole: a marker shown
+    // as an example is not a request, and an END terminator that belongs to a
+    // quoted example must not close a real block.
+    if (FENCE_LINE.test(line)) { inFence = !inFence; i++; continue; }
+    if (inFence) { i++; continue; }
 
     let m = /^\s*NEED\s+(dir|file)\s+(.+?)\s*$/i.exec(line);
     if (m) { i++; calls.push({ kind: m[1].toLowerCase() === 'dir' ? 'list' : 'read', arg: m[2].trim() }); continue; }
@@ -172,6 +190,9 @@ export function parse(reply, { plugins = [] } = {}) {
 
     m = /^\s*WEB\s+(.+?)\s*$/i.exec(line);
     if (m) { i++; calls.push({ kind: 'web', arg: m[1].trim() }); continue; }
+
+    m = /^\s*ATTACH\s+(.+?)\s*$/i.exec(line);
+    if (m) { i++; calls.push({ kind: 'attach', arg: m[1].trim() }); continue; }
 
     m = /^\s*DELETE\s+(.+?)\s*$/i.exec(line);
     if (m) { i++; calls.push({ kind: 'delete', arg: m[1].trim() }); continue; }

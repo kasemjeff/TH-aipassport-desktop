@@ -42,8 +42,14 @@ export class BridgeClient {
     this.model = model;
   }
 
-  /** One turn. Streams deltas through the callbacks, resolves with the text. */
-  async chat({ message, parts = null, model = null, onText = () => {}, onReasoning = () => {}, signal = null } = {}) {
+  /**
+   * One turn. Streams deltas through the callbacks, resolves with the text.
+   * `conversation` targets a specific conversation instead of the bridge's
+   * current one — how a helper run or a WEB scratch space keeps its traffic
+   * out of the working conversation. `temporary` rides along so a temporary
+   * conversation is told so on every turn, as the upstream requires.
+   */
+  async chat({ message, parts = null, model = null, conversation = null, temporary = null, onText = () => {}, onReasoning = () => {}, signal = null } = {}) {
     const content = Array.isArray(parts) && parts.length
       ? [{ type: 'text', text: message }, ...parts]
       : message;
@@ -52,6 +58,7 @@ export class BridgeClient {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         ...(model ?? this.model ? { model: model ?? this.model } : {}),
+        ...(conversation ? { conversation, ...(temporary === null ? {} : { temporary: temporary === true }) } : {}),
         stream: true,
         messages: [{ role: 'user', content }],
       }),
@@ -84,7 +91,11 @@ export class BridgeClient {
     return { text: out, reasoning };
   }
 
-  async createConversation({ model = null, assistant = null, temporary = true, message } = {}) {
+  /**
+   * Mint a conversation. `adopt: false` leaves the bridge's current-conversation
+   * pointer alone — the caller holds the id and passes it per chat.
+   */
+  async createConversation({ model = null, assistant = null, temporary = true, message, adopt = true } = {}) {
     const r = await fetch(`${this.base}/conversations/new`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -92,6 +103,7 @@ export class BridgeClient {
         ...(model ? { model } : {}),
         ...(assistant ? { assistant } : {}),
         temporary,
+        adopt,
         message: message ?? 'Starting a new working session.',
       }),
     });

@@ -37,6 +37,7 @@ async function startRpc({ files = {}, replies, rpcOptions = {}, ...rest } = {}) 
     // Isolated settings, always: a test must never write the user's real
     // ~/.aipass/settings.json, and a polluted one must never steer a test.
     settings: new Settings(tempDir(), 'settings.json'),
+    rulesFile: path.join(tempDir(), 'rules.json'),
     ...rest,
     ...rpcOptions,
   });

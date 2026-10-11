@@ -14,7 +14,7 @@
 //   - PLAN / TODO / SUBAGENT markers exist on top of the original set
 import { outbound } from './waf.mjs';
 import {
-  REMINDER, prose, parse, parseTodo, mergeTodo,
+  REMINDER, prose, parse, parseTodo, mergeTodo, READING,
   preamble as buildPreamble,
 } from './protocol.mjs';
 import { resilientSay, decode } from './bridge.mjs';
@@ -47,7 +47,8 @@ export async function runTask(taskText, ctx = {}) {
   const {
     bridge, tools, overlay, session = null, permissions = null, events = null,
     subagent = null, approvePlan = null, options = {}, first = true,
-    runPluginTool = null,
+    runPluginTool = null, compactor = null, rotate = null,
+    conversation = null, conversationTemporary = null,
   } = ctx;  const maxSteps = Number(options.maxSteps ?? 10);
   const model = options.model ?? null;
   const useSlim = Boolean(options.slim);
@@ -63,12 +64,19 @@ export async function runTask(taskText, ctx = {}) {
 
   const creditsBefore = await bridge.quota().catch(() => null);
 
+  // Per-run metrics (P2-D): the session already records every tool call and
+  // the run records credits; these counters are what turns that into rates.
+  const toolStats = new Map(); // kind → { n, fail }
+  let firewallNotes = 0;
+  const stepMs = [];
+
   const say = async (text, withParts = null) => {
     session?.append('user', { text, bytes: Buffer.byteLength(text) });
     const res = await bridge.chat({
       message: text,
       parts: withParts ?? null,
       model,
+      ...(conversation ? { conversation, temporary: conversationTemporary } : {}),
       signal: options.signal ?? null,
       onText: (t) => events?.emit('assistant_delta', { text: t }),
       onReasoning: (t) => events?.emit('reasoning_delta', { text: t }),
@@ -76,7 +84,10 @@ export async function runTask(taskText, ctx = {}) {
     session?.append('assistant', { text: res.text, reasoning: res.reasoning });
     return res.text;
   };
-  const saySafe = (text, parts = null) => resilientSay(say, text, (_level, t) => events?.emit('firewall_note', { text: t }), parts);
+  const saySafe = (text, parts = null) => resilientSay(say, text, (_level, t) => {
+    firewallNotes++;
+    events?.emit('firewall_note', { text: t });
+  }, parts);
 
   let listing = '';
   try { listing = outbound(tools.list('.')); } catch { /* ignore */ }
@@ -88,6 +99,8 @@ export async function runTask(taskText, ctx = {}) {
     allowRun: Boolean(options.allowRun),
     plan: Boolean(options.plan),
     subagent: Boolean(options.subagent),
+    searchI: Boolean(options.searchI),
+    attach: Boolean(options.attach),
     plugins: pluginTools,
   });
 
@@ -106,14 +119,27 @@ export async function runTask(taskText, ctx = {}) {
   let summary = null;
   let stopReason = 'steps';
 
+  // Attachments ride the first message only: the server keeps the history, so
+  // re-sending the same image on every step would re-upload it and occupy the
+  // context again for nothing. ATTACH queues (the tool's own) drain into the
+  // next message, whatever turn that is.
+  const firstParts = first ? (options.parts ?? null) : null;
+  let sends = 0;
+  const partsForSend = () => {
+    const queued = Array.isArray(tools.pendingParts) ? tools.pendingParts.splice(0) : [];
+    const base = sends === 0 && Array.isArray(firstParts) ? firstParts : [];
+    return base.length || queued.length ? [...base, ...queued] : null;
+  };
+
   for (let step = 1; step <= maxSteps; step++) {
     const stepStart = Date.now();
     let reply;
-    try { reply = await saySafe(next, first ? (options.parts ?? null) : null); }
+    try { reply = await saySafe(next, partsForSend()); sends++; }
     catch (err) { events?.emit('error', { message: err.message }); stopReason = 'error'; break; }
     reply = decode(reply);
 
     const elapsed = ((Date.now() - stepStart) / 1000).toFixed(1);
+    stepMs.push(Math.round((Date.now() - stepStart)));
     events?.emit('step', { step, maxSteps, elapsed });
 
     const proseText = prose(reply, pluginTools);
@@ -144,23 +170,46 @@ export async function runTask(taskText, ctx = {}) {
     }
     nudges = 0;
 
+    // Helpers fan out when the run opts in (P2-B): each carries its own
+    // conversation, so several can work beside each other. Results are
+    // reassembled in marker order either way.
+    const execCtx = { tools, permissions, events, subagent, todoState, session, approvePlan, options, runPluginTool };
+    const helperResults = options.parallelHelpers && work.some((c) => c.kind === 'subagent')
+      ? await Promise.all(work.map((c) => c.kind === 'subagent'
+          ? execute(c, execCtx).catch((err) => `err: ${err.message}`)
+          : null))
+      : null;
+
     const results = [];
     for (let i = 0; i < work.length; i++) {
       const call = work[i];
       toolsRun++;
       let result;
       let blocked = false;
-      try {
-        result = await execute(call, { tools, permissions, events, subagent, todoState, session, approvePlan, options, runPluginTool });
-      } catch (err) {
-        result = `error: ${err.message}`;
-        blocked = true;
+      if (helperResults && call.kind === 'subagent') {
+        result = helperResults[i];
+      } else {
+        try {
+          result = await execute(call, execCtx);
+        } catch (err) {
+          result = `err: ${err.message}`;
+          blocked = true;
+        }
       }
-      const [head, ...rest] = String(result).split('\n');
-      const refused = blocked || /^(no such|error|the text|that text)/.test(result) || / is (a|an) .*, not text\.$/.test(head);
+      const text = String(result);
+      const [head, ...rest] = text.split('\n');
+      // Tools answer with an `err: …` prefix when they failed (the tool
+      // contract, rule 2). The loop reads that one word instead of guessing
+      // failure phrases — every new failure message used to miss the old
+      // regexes silently.
+      const refused = blocked || /^err:/i.test(text.trimStart());
+      const stat = toolStats.get(call.kind) ?? { n: 0, fail: 0 };
+      stat.n += 1;
+      if (refused) stat.fail += 1;
+      toolStats.set(call.kind, stat);
       const isLast = i === work.length - 1 && !done;
       events?.emit('tool', { kind: call.kind, arg: call.arg, ok: !refused, head: head.slice(0, 70), lines: refused ? rest : [], isLast });
-      session?.append('tool', { kind: call.kind, arg: call.arg, out: String(result).slice(0, 20_000), ok: !refused });
+      session?.append('tool', { kind: call.kind, arg: call.arg, out: text.slice(0, 20_000), ok: !refused });
       results.push(`Result of ${call.kind} ${call.arg}:\n${outbound(result)}`);
     }
 
@@ -178,7 +227,7 @@ export async function runTask(taskText, ctx = {}) {
       events?.emit('diff_update', { changes });
     }
 
-    const stillLooking = work.some((c) => c.kind === 'list' || c.kind === 'read' || c.kind === 'search' || c.kind === 'skill');
+    const stillLooking = work.some((c) => READING.has(c.kind));
     if (done && !stillLooking) {
       summary = (done.arg || proseText || 'done').replace(/^[-—–:]\s*/, '').trim() || 'done';
       const extra = proseText && done.arg && proseText.trim() !== done.arg.trim() ? '\n' + proseText.trim() : '';
@@ -188,6 +237,25 @@ export async function runTask(taskText, ctx = {}) {
     }
     if (done) events?.emit('ignore_done', {});
     next = `${results.join('\n\n')}\n\n${REMINDER}`;
+
+    // The budget is re-checked here, against the message that is about to go
+    // out: tool results reach the server's conversation through it, so a long
+    // task crosses the line mid-run, not only between runs. If the summarise
+    // or the rotation itself fails, the results still go out — losing the
+    // step's work to a compaction error would be worse than an over-budget
+    // conversation.
+    if (compactor && session && compactor.needsCompaction(session, { pendingBytes: Buffer.byteLength(next) })) {
+      try {
+        events?.emit('note', { text: 'context is filling up — summarising this conversation and rotating to a fresh one' });
+        const note = await compactor.summarize(session, { task: taskText, model });
+        session.append('compaction', { summary: note, firstKeptEntryId: session.entries.at(-1)?.id ?? null });
+        await rotate?.(note);
+        events?.emit('compacted', { summary: note });
+        next = `${compactor.seed({ summary: note, task: taskText, listing: '', preambleText: pre, results: results.join('\n\n') })}\n\n${REMINDER}`;
+      } catch (err) {
+        events?.emit('error', { message: `compaction failed, sending the results without it: ${err.message}` });
+      }
+    }
     if (step === maxSteps) events?.emit('step_limit', {});
   }
 
@@ -195,6 +263,20 @@ export async function runTask(taskText, ctx = {}) {
   const spent = creditsBefore && creditsAfter ? creditsBefore.available - creditsAfter.available : null;
   const changes = overlay.changes();
   for (const c of changes) session?.append('diff', { file: c.file, added: c.added, removed: c.removed, deleted: c.deleted, decision: 'pending' });
+
+  // One line per run that `npm run stats` aggregates — refusals, nudges and
+  // firewall notes are how protocol drift shows up before it is guessed at.
+  const runStats = {
+    stopReason,
+    steps: toolsRun,
+    tools: Object.fromEntries(toolStats),
+    nudges,
+    firewallNotes,
+    stepMs,
+    spent,
+  };
+  session?.append('run_stats', runStats);
+  events?.emit('run_stats', runStats);
 
   events?.emit('finished', {
     summary, steps: toolsRun, stopReason, spent,
@@ -222,10 +304,10 @@ async function execute(call, ctx) {
   }
 
   if (call.kind === 'subagent') {
-    if (!subagent) return 'no helper is available in this run';
+    if (!subagent) return 'err: no helper is available in this run';
     const body = String(call.body ?? '');
     const task = (body.match(/^\s*task:\s*(.+)$/im)?.[1] ?? body).split('\n')[0].trim();
-    if (!task) return 'give the helper a task, on a `task:` line inside SUBAGENT';
+    if (!task) return 'err: give the helper a task, on a `task:` line inside SUBAGENT';
     events?.emit('subagent_start', { task });
     const out = await subagent(task);
     events?.emit('subagent_end', { task, out });
@@ -237,12 +319,12 @@ async function execute(call, ctx) {
   // the plugin's own responsibility: the result is a string, or an error
   // string, and nothing here interprets it.
   if (call.kind === 'plugin') {
-    if (!runPluginTool) return `no plugin tool named ${call.name} is installed`;
+    if (!runPluginTool) return `err: no plugin tool named ${call.name} is installed`;
     events?.emit('plugin_call', { marker: call.name, arg: call.arg });
     try {
       return String(await runPluginTool(call.name, { arg: call.arg, body: call.body ?? '' }) ?? '');
     } catch (err) {
-      return `error: ${err.message}`;
+      return `err: ${err.message}`;
     }
   }
 
@@ -252,7 +334,7 @@ async function execute(call, ctx) {
   if (call.kind === 'run' && !options.allowRun) return await tools.run('', call.body);
   if (permissions && risk !== 'read' && permissions.evaluate({ kind: call.kind, arg: call.arg }).decision !== 'allow') {
     const decision = await permissions.request({ kind: call.kind, arg: call.arg, preview: previewOf(call) });
-    if (decision === 'deny') return `the person watching declined ${call.kind} ${call.arg}`.slice(0, 300);
+    if (decision === 'deny') return `err: the person watching declined ${call.kind} ${call.arg}`.slice(0, 300);
     if (decision === 'always') { permissions.grant(call.kind, call.arg); }
   }
 

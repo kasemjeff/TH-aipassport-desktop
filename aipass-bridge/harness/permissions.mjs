@@ -38,15 +38,19 @@ export class PermissionEngine {
    * @param {boolean}  opts.allowRun  shell is permitted at all
    * @param {Array}    opts.rules   [{pattern, decision, kinds?}]
    * @param {Function} opts.askFn   ({id, kind, arg, preview, risk}) => 'allow'|'deny'|'always'
+   * @param {Function} [opts.onGrant] (kind, arg) => void — write-through when an
+   *                                "always" answer is recorded, so it survives
+   *                                a restart (harness/rules.mjs)
    * @param {object}   opts.events  Emitter; `permission_request` goes out on it
    */
-  constructor({ mode = 'ask', allowRun = false, rules = [], askFn = null, events = null, timeoutMs = 120_000 } = {}) {
+  constructor({ mode = 'ask', allowRun = false, rules = [], askFn = null, events = null, timeoutMs = 120_000, onGrant = null } = {}) {
     this.mode = mode;
     this.allowRun = allowRun;
     this.rules = rules;
     this.askFn = askFn;
     this.events = events;
     this.timeoutMs = timeoutMs;
+    this.onGrant = onGrant;
     this.grants = new Map();  // `${kind}:${arg}` → 'allow'
     this.pending = new Map(); // id → {resolve, kind, arg}
   }
@@ -96,7 +100,10 @@ export class PermissionEngine {
 
     // Nobody answered in time: refuse rather than hold the run open forever.
     const timer = this.timeoutMs > 0
-      ? setTimeout(() => { if (this.pending.delete(id)) resolveOnce('deny'); }, this.timeoutMs)
+      ? setTimeout(() => {
+          const entry = this.pending.get(id);
+          if (entry && this.pending.delete(id)) entry.resolve('deny');
+        }, this.timeoutMs)
       : null;
     const decision = await decided;
     if (timer) clearTimeout(timer);
@@ -104,7 +111,10 @@ export class PermissionEngine {
   }
 
   /** Record an "always" grant so the same question is not asked again. */
-  grant(kind, arg = '') { this.grants.set(`${kind}:${arg}`, 'allow'); }
+  grant(kind, arg = '') {
+    this.grants.set(`${kind}:${arg}`, 'allow');
+    this.onGrant?.(kind, arg);
+  }
 
   /** Called by the UI when the human answers a pending question. */
   answer(id, decision) {

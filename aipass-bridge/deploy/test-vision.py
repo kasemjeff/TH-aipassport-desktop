@@ -10,10 +10,27 @@ import sys
 import json
 import base64
 import argparse
+import urllib.parse
 import urllib.request
 
 DEFAULT_BRIDGE = "http://127.0.0.1:8787"
 DEFAULT_MODEL = "gemini-3.7-flash"
+
+# The bridge binds the loopback interface only, so this smoke test has exactly
+# one legitimate target. Check before use rather than pass an arbitrary host
+# along — a mistyped --bridge must fail here, not fetch somewhere else.
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+def check_bridge_url(bridge_url):
+    parsed = urllib.parse.urlparse(bridge_url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in ("http", "https") or host not in LOOPBACK_HOSTS:
+        raise SystemExit(
+            f"refusing bridge URL {bridge_url!r} — this script talks to the local "
+            "bridge only (default http://127.0.0.1:8787); the bridge never listens "
+            "on a public interface"
+        )
+    return bridge_url.rstrip("/")
 
 # Red canvas 100x100 PNG
 SAMPLE_RED_PNG_B64 = (
@@ -22,6 +39,7 @@ SAMPLE_RED_PNG_B64 = (
 )
 
 def test_vision(bridge_url=DEFAULT_BRIDGE, model=DEFAULT_MODEL, image_source=None, prompt=None, stream=False):
+    bridge_url = check_bridge_url(bridge_url)
     print("=" * 60)
     print("         🖼️  aipass-bridge Multimodal Vision Test         ")
     print("=" * 60)

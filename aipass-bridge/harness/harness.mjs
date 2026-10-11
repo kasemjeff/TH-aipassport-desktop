@@ -19,6 +19,7 @@ import { SessionStore } from './session.mjs';
 import { Compactor } from './compact.mjs';
 import { runTask, applyOverlay } from './loop.mjs';
 import { preamble as buildPreamble } from './protocol.mjs';
+import { RulesStore } from './rules.mjs';
 
 const REPO_SKILLS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills');
 
@@ -27,6 +28,8 @@ const home = () => path.join(os.homedir(), '.aipass');
 export class Harness {
   /** Resolves the plan-approval gate; null when nobody is waiting on it. */
   #planResolve = null;
+  /** The WEB scratch conversation id, created lazily and reused. */
+  #scratch = null;
 
   /**
    * @param {object} opts
@@ -52,6 +55,10 @@ export class Harness {
       reuse: false,
       permanent: false,
       assistant: null,
+      searchI: false,
+      attach: false,
+      webScratch: false,
+      parallelHelpers: false,
       ...(opts.options ?? {}),
     };
     this.bridge = opts.bridge instanceof BridgeClient
@@ -69,13 +76,28 @@ export class Harness {
       allowRun: this.options.allowRun,
       events: this.events,
       log: (_level, text) => this.events.emit('note', { text }),
+      // WEB on a scratch conversation (P2-B), when the run opts in.
+      webConversation: this.options.webScratch ? () => this.#scratchConversation() : null,
     });
+    // Permission rules: the caller's own first, then the project's persisted
+    // ones (harness/rules.mjs) — first match wins, so explicit beats stored.
+    // "Always" answers write through to the same file, so they survive a
+    // restart; previously they died with the process.
+    this.rulesStore = opts.rulesStore ?? (opts.rulesFile ? new RulesStore(opts.rulesFile) : new RulesStore());
+    const persisted = this.rulesStore.forRoot(this.root);
     this.permissions = new PermissionEngine({
       mode: this.options.mode,
       allowRun: this.options.allowRun,
-      rules: opts.rules ?? [],
+      rules: [...(opts.rules ?? []), ...persisted.rules],
       events: this.events,
+      // How long an unanswered permission question waits before it resolves
+      // to deny. The CLI's default suits a terminal someone is watching; the
+      // desktop passes 0 — the human may be three minutes into reading a
+      // diff, and a silent deny is worse than a wait.
+      timeoutMs: opts.permissionTimeoutMs ?? 120_000,
+      onGrant: (kind, arg) => this.rulesStore.addGrant(this.root, kind, arg),
     });
+    for (const g of persisted.grants) this.permissions.grants.set(`${g.kind}:${g.arg}`, 'allow');
     this.compactor = new Compactor({ bridge: this.bridge, events: this.events, ...(opts.compaction ?? {}) });
     this.session = null;
     this.conversation = null;
@@ -142,6 +164,17 @@ export class Harness {
     return summary;
   }
 
+  /** One throwaway conversation all WEB lookups share (P2-B), lazily made. */
+  async #scratchConversation() {
+    if (this.#scratch) return this.#scratch;
+    const made = await this.bridge
+      .createConversation({ temporary: true, message: 'Web search scratch space.', adopt: false })
+      .catch(() => null);
+    this.#scratch = made?.id ?? null;
+    if (this.#scratch) this.events.emit('conversation', { id: this.#scratch, temporary: true, scratch: true });
+    return this.#scratch;
+  }
+
   /* ------------------------------------------------------------------ run */
 
   async run(task, { first = null, runPluginTool = null } = {}) {
@@ -187,6 +220,8 @@ export class Harness {
         approvePlan: this.options.requirePlanApproval
           ? () => new Promise((resolve) => { this.events.emit('plan_request', {}); this.#planResolve = resolve; })
           : null,
+        compactor: this.compactor,
+        rotate: (summary) => this.#rotate(summary, task),
         options: {
           ...this.options,
           signal: this.abort.signal,
@@ -240,11 +275,16 @@ export class Harness {
    */
   #makeHelper() {
     return async (task) => {
-      const parentConversation = this.conversation;
       const child = new Overlay(this.root);
       const childSession = this.store.create({ root: this.root, model: this.bridge.model, title: `helper: ${task.slice(0, 60)}` });
       const childPermissions = new PermissionEngine({ mode: 'yolo', allowRun: false });
-      await this.bridge.createConversation({ temporary: true, message: task });
+      // The helper borrows its own conversation (P2-B) instead of moving the
+      // bridge's current one and restoring it afterwards — the old dance left
+      // the parent pointing at the child's conversation if anything died
+      // mid-helper. adopt:false never touches the pointer, so there is no
+      // restore to get wrong.
+      const made = await this.bridge.createConversation({ temporary: true, message: task, adopt: false }).catch(() => null);
+      const helperConversation = made?.id ?? null;
       this.events.emit('helper_start', { task, session: childSession.id });
 
       let result;
@@ -254,19 +294,20 @@ export class Harness {
           tools: createTools({
             root: this.root, overlay: child, skills: this.skills, bridge: this.bridge,
             model: this.bridge.model, allowRun: false, events: this.events,
+            conversation: helperConversation, temporary: true,
           }),
           overlay: child,
           session: childSession,
           permissions: childPermissions,
           events: this.events,
+          conversation: helperConversation,
+          conversationTemporary: helperConversation ? true : null,
           options: { ...this.options, maxSteps: Math.min(this.options.maxSteps, 8), subagent: false, signal: this.abort.signal },
           first: true,
         });
       } catch (err) {
         result = { summary: `helper failed: ${err.message}` };
       }
-
-      if (parentConversation) await this.bridge.config({ conversation: parentConversation });
 
       const prepared = [];
       for (const [abs, value] of child.map) {

@@ -25,18 +25,7 @@ import { PluginManager } from './plugins.mjs';
 const UI_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'desktop', 'ui');
 
 /** Attachment kinds the bridge can carry, with the part shape each needs. */
-const MAX_ATTACHMENT = 20 * 1024 * 1024;
-
-const mimeOf = (name) => {
-  const ext = path.extname(name).toLowerCase();
-  return ({
-    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
-    '.webp': 'image/webp', '.bmp': 'image/bmp', '.svg': 'image/svg+xml',
-    '.pdf': 'application/pdf', '.txt': 'text/plain', '.md': 'text/markdown',
-    '.csv': 'text/csv', '.json': 'application/json',
-    '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm',
-  })[ext] ?? 'application/octet-stream';
-};
+import { MAX_ATTACHMENT_BYTES, mimeOf } from '../bridge/attachment-types.mjs';
 
 export function createRpc({
   port = 8790,
@@ -47,6 +36,7 @@ export function createRpc({
   compaction = null,
   settings = null,
   pluginsDir = null,
+  rulesFile = null,
 } = {}) {
   const listeners = new Set();
   const emit = (type, payload) => {
@@ -76,6 +66,10 @@ export function createRpc({
       model: bridgeModel,
       store: new SessionStore(storeDir),
       compaction: compaction ?? appSettings.get('compaction'),
+      // The window's human may be reading a diff when the question lands;
+      // the run waits for their answer instead of denying after two minutes.
+      permissionTimeoutMs: 0,
+      rulesFile,
       options: {
         mode: appSettings.get('mode'),
         allowRun: appSettings.get('allowRun'),
@@ -83,6 +77,10 @@ export function createRpc({
         plan: appSettings.get('plan'),
         requirePlanApproval: appSettings.get('requirePlanApproval'),
         subagent: appSettings.get('subagent'),
+        searchI: appSettings.get('searchI'),
+        attach: appSettings.get('attach'),
+        webScratch: appSettings.get('webScratch'),
+        parallelHelpers: appSettings.get('parallelHelpers'),
       },
       skills: skillLibraryFor(abs),
     });
@@ -137,7 +135,7 @@ export function createRpc({
     const base64 = String(dataUrl ?? '').split(',').at(-1) ?? '';
     const bytes = Buffer.from(base64, 'base64');
     if (!bytes.length) throw new Error('empty attachment');
-    if (bytes.length > MAX_ATTACHMENT) throw new Error(`attachment too large: ${Math.round(bytes.length / 1024 / 1024)} MB (cap ${MAX_ATTACHMENT / 1024 / 1024} MB)`);
+    if (bytes.length > MAX_ATTACHMENT_BYTES) throw new Error(`attachment too large: ${Math.round(bytes.length / 1024 / 1024)} MB (cap ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB)`);
     const dir = appSettings.uploadDir();
     const file = path.join(dir, `${id}-${path.basename(name)}`);
     fs.writeFileSync(file, bytes);
@@ -263,6 +261,10 @@ export function createRpc({
         subagent: params.subagent ?? current.options.subagent,
         requirePlanApproval: Boolean(params.requirePlanApproval),
         maxSteps: params.maxSteps ?? current.options.maxSteps,
+        searchI: params.searchI ?? current.options.searchI,
+        attach: params.attach ?? current.options.attach,
+        webScratch: params.webScratch ?? current.options.webScratch,
+        parallelHelpers: params.parallelHelpers ?? current.options.parallelHelpers,
         parts: partsFor(params.attachments ?? []),
         pluginTools: plugins.toolTable(),
       });

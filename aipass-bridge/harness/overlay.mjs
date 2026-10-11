@@ -13,7 +13,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { unifiedDiff } from '../difflib.mjs';
 
-export const SKIP = new Set(['node_modules', '.git', '.next', 'dist', 'build', '.cache']);
+export const SKIP = new Set([
+  'node_modules', '.git', '.next', 'dist', 'build', '.cache',
+  // The usual suspects the walks kept drowning in: build outputs and
+  // dependency/vendor trees that are data to this project, not source.
+  'target', 'vendor', 'coverage', '__pycache__', '.venv', 'venv',
+]);
 export const DELETED = '\x00DELETE\x00';
 
 // Paths that go to the model come back from it, in a NEED file or an EDIT. On
