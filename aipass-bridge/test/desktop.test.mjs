@@ -301,6 +301,29 @@ test('with no AIPASS_BRIDGE the bridge client keeps the loopback default', async
   }
 });
 
+/* ----------------------------------------------------------- request hygiene */
+
+test('a malformed JSON body is answered as bad JSON, not as a missing method', async (t) => {
+  const env = await startRpc({ files: {}, replies: [] });
+  t.after(() => env.stop());
+
+  const res = await fetch(`http://127.0.0.1:${env.rpc.port}/rpc`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"method":',
+  });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.ok, false);
+  assert.match(body.error, /bad JSON body/);
+  assert.doesNotMatch(body.error, /no such method/, 'the parse failure must not masquerade as an unknown method');
+
+  // An empty body is still "no method given", not a parse error.
+  const empty = await fetch(`http://127.0.0.1:${env.rpc.port}/rpc`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '',
+  });
+  assert.equal(empty.status, 404);
+  assert.match((await empty.json()).error, /no such method/);
+});
+
 /* ------------------------------------------------- settings, projects, uploads */
 
 test('settings are read, changed and persisted', async (t) => {

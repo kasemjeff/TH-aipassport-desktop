@@ -375,7 +375,13 @@ export function createRpc({
       req.on('data', (c) => { body += c; if (body.length > 32_000_000) req.destroy(); });
       req.on('end', async () => {
         let msg = {};
-        try { msg = JSON.parse(body || '{}'); } catch { /* handled below */ }
+        try {
+          msg = JSON.parse(body || '{}');
+        } catch (err) {
+          // A body that does not parse is the caller's bug — say so, instead of
+          // letting `msg = {}` fall through to "no such method: undefined".
+          return json(res, 400, { ok: false, error: `bad JSON body: ${err.message}` });
+        }
 
         const fn = methods[msg.method];
         if (!fn) {
