@@ -28,6 +28,23 @@ const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const UI_DIRS = [path.join(APP_ROOT, 'desktop', 'ui'), path.join(APP_ROOT, 'ui')];
 const UI_DIR = UI_DIRS.find((dir) => fs.existsSync(dir)) ?? UI_DIRS[0];
 
+/**
+ * The file under `uiDir` a request path maps to, or null when it would leave
+ * ui/. The containment check has to be path.relative, not a string prefix:
+ * `target.startsWith(uiDir)` also matches a sibling directory whose name
+ * merely begins with ui's — a `ui-x` beside `ui` survives it the moment a
+ * request carries a `..` that survives URL normalisation. path.relative is
+ * the real boundary, and on Windows it compares the prefix case-insensitively,
+ * which is what that filesystem deserves.
+ */
+export function staticFileFor(uiDir, pathname) {
+  const file = pathname === '/' ? 'index.html' : String(pathname).replace(/^\/+/, '');
+  const target = path.join(uiDir, path.normalize(file));
+  const rel = path.relative(uiDir, target);
+  if (!rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return null;
+  return target;
+}
+
 /** Attachment kinds the bridge can carry, with the part shape each needs. */
 import { MAX_ATTACHMENT_BYTES, mimeOf } from '../bridge/attachment-types.mjs';
 // Where the bridge lives: AIPASS_BRIDGE from the environment, or the loopback
@@ -406,9 +423,8 @@ export function createRpc({
     }
 
     // The UI itself: a handful of static files, no build step.
-    const file = url.pathname === '/' ? 'index.html' : url.pathname.replace(/^\/+/, '');
-    const target = path.join(UI_DIR, path.normalize(file));
-    if (!target.startsWith(UI_DIR) || !fs.existsSync(target) || !fs.statSync(target).isFile()) {
+    const target = staticFileFor(UI_DIR, url.pathname);
+    if (!target || !fs.existsSync(target) || !fs.statSync(target).isFile()) {
       return json(res, 404, { ok: false, error: 'not found' });
     }
     const type = target.endsWith('.html') ? 'text/html; charset=utf-8'

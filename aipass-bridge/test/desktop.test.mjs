@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startBridge, FakeExtension, scripted, tempDir, freePort } from './harness.mjs';
-import { createRpc } from '../harness/rpc.mjs';
+import { createRpc, staticFileFor } from '../harness/rpc.mjs';
 import { Settings } from '../harness/settings.mjs';
 import { SessionStore } from '../harness/session.mjs';
 
@@ -322,6 +322,46 @@ test('a malformed JSON body is answered as bad JSON, not as a missing method', a
   });
   assert.equal(empty.status, 404);
   assert.match((await empty.json()).error, /no such method/);
+});
+
+/* ------------------------------------------------------------- static files */
+
+test('the static file guard serves ui/ and nothing beside it', async (t) => {
+  // ui/ with a sibling whose name merely begins with ui's: a string-prefix
+  // check served the sibling once a request path carried a `..`, because
+  // '…\\ui-x\\f' starts with '…\\ui'. The guard has to be a path boundary.
+  const parent = tempDir();
+  const ui = path.join(parent, 'ui');
+  fs.mkdirSync(ui);
+  fs.writeFileSync(path.join(ui, 'index.html'), '<title>aipass desktop</title>');
+  fs.writeFileSync(path.join(ui, 'app.js'), '// ui code');
+  const sibling = path.join(parent, 'ui-x');
+  fs.mkdirSync(sibling);
+  fs.writeFileSync(path.join(sibling, 'secret.txt'), 'not for the window');
+
+  assert.equal(staticFileFor(ui, '/'), path.join(ui, 'index.html'));
+  assert.equal(staticFileFor(ui, '/app.js'), path.join(ui, 'app.js'));
+  assert.equal(fs.existsSync(sibling), true, 'the sibling really is outside ui');
+  assert.equal(staticFileFor(ui, '/../ui-x/secret.txt'), null, 'a `..` into the sibling must not resolve');
+  assert.equal(staticFileFor(ui, '/..'), null, 'the parent of ui is not served either');
+  assert.equal(staticFileFor(ui, '/./app.js'), path.join(ui, 'app.js'), 'a harmless dot segment still resolves');
+
+  // path.relative compares case-insensitively on Windows, so the guard does
+  // not answer `..` merely because the drive letter or case spelling differs.
+  if (process.platform === 'win32') {
+    assert.equal(staticFileFor(ui.toUpperCase(), '/INDEX.HTML'), path.join(ui.toUpperCase(), 'INDEX.HTML'),
+      'a case-spelled path stays inside ui; the handler isFile check does the rest');
+  }
+
+  // Over HTTP the URL parser collapses literal dot segments, so the sibling
+  // case is provable at the helper; the wire check pins the behaviour that
+  // remains observable there: real files serve, encoded traversal does not.
+  const env = await startRpc({ files: {}, replies: [] });
+  t.after(() => env.stop());
+  const home = await fetch(`http://127.0.0.1:${env.rpc.port}/`);
+  assert.equal(home.status, 200);
+  const sneaky = await fetch(`http://127.0.0.1:${env.rpc.port}/%2e%2e/ui-x/secret.txt`);
+  assert.equal(sneaky.status, 404);
 });
 
 /* ------------------------------------------------- settings, projects, uploads */
