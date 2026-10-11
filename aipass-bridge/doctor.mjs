@@ -151,4 +151,9 @@ if (failed) console.log(red(`${failed} check${failed > 1 ? 's' : ''} failed.`) +
 else if (warned) console.log(yellow(`all clear, ${warned} warning${warned > 1 ? 's' : ''}.\n`));
 else console.log(green('all good.\n'));
 
-process.exit(failed ? 1 : 0);
+// Exit by drain, not process.exit(): on Windows, process.exit() immediately
+// after network I/O races Node's teardown and trips libuv's assert in
+// win/async.c:94 (0xC0000409) — the process aborts after printing a perfect
+// bill of health. Setting exitCode and letting the loop run out produces the
+// same code cleanly (nodejs/node#56645).
+process.exitCode = failed ? 1 : 0;

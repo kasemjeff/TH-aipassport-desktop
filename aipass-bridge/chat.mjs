@@ -2092,7 +2092,14 @@ async function maybeStartNew(seed) {
 }
 
 if (question) {
+  // One-shot: ask, print, leave. Attach failures set the exit code and skip
+  // the round trip; success falls out of the module and the event loop drains
+  // on its own. There is deliberately no process.exit() here — on Windows,
+  // process.exit() immediately after network I/O races Node's teardown and
+  // trips libuv's assert in win/async.c:94 (0xC0000409), while letting the
+  // loop run empty exits cleanly with the same code (nodejs/node#56645).
   let initialImages = getAttachedImagesForLine(question);
+  let bail = false;
   if (imageArg) {
     const resolved = resolveImagePath(imageArg);
     if (resolved) {
@@ -2100,12 +2107,12 @@ if (question) {
       if (reg && !initialImages.some((x) => x.id === reg.id)) initialImages.push(reg);
     } else {
       console.error(red(`✗ image file not found: ${imageArg}`));
-      process.exit(1);
+      bail = true;
     }
   }
 
   let initialDocs = getAttachedDocumentsForLine(question);
-  if (FILES.length > 0) {
+  if (!bail) {
     for (const f of FILES) {
       const resolved = resolveDocumentPath(f);
       if (resolved) {
@@ -2113,17 +2120,22 @@ if (question) {
         if (reg && !initialDocs.some((x) => x.id === reg.id)) initialDocs.push(reg);
       } else {
         console.error(red(`✗ document file not found or unsupported: ${f}`));
-        process.exit(1);
+        bail = true;
+        break;
       }
     }
   }
 
-  await maybeStartNew(question);
-  await ask(question, initialImages, initialDocs);
-  process.exit(0);
+  if (bail) process.exitCode = 1;
+  else {
+    await maybeStartNew(question);
+    await ask(question, initialImages, initialDocs);
+  }
 }
 
-if (FILES.length > 0) {
+// Everything below is the interactive session — one-shot mode must not touch
+// any of it, so each entry point is guarded rather than skipped by exiting.
+if (!question && FILES.length > 0) {
   for (const f of FILES) {
     const resolved = resolveDocumentPath(f);
     if (resolved) {
@@ -2195,15 +2207,15 @@ const HELP = [
   dim('  Drag-and-drop image files to automatically attach as [image1].'),
 ].map((l) => dim(l)).join('\n');
 
-banner();
+if (!question) banner();
 
-const rl = /** @type {any} */ (readline.createInterface({ input: stdin, output: stdout }));
-rl.on('SIGINT', () => {
+const rl = /** @type {any} */ (question ? null : readline.createInterface({ input: stdin, output: stdout }));
+if (rl) rl.on('SIGINT', () => {
   if (rl.line.length > 0) setLine('');
   handleExit('Ctrl+C');
 });
 
-if (TTY) {
+if (TTY && !question) {
   // Enable bracketed paste mode in terminal so pasted text (Ctrl+V) doesn't auto-submit on newline
   stdout.write('\x1b[?2004h');
   const restorePasteMode = () => stdout.write('\x1b[?2004l');
@@ -2453,7 +2465,7 @@ function drawMenu({ keepSel = false } = {}) {
   menuOpen = true;
 }
 
-if (TTY) {
+if (TTY && !question) {
   // Wrap internal readline keypress listener so we can intercept Ctrl+D on empty prompt
   const [rlKeypressListener] = stdin.rawListeners('keypress');
   if (rlKeypressListener) stdin.removeListener('keypress', /** @type {(...args: any[]) => void} */ (rlKeypressListener));
@@ -2634,9 +2646,9 @@ function pickList(items, { current, label, width }) {
 // question() promise as an unsettled top-level await.
 const CLOSED = Symbol('closed');
 /** @type {Promise<typeof CLOSED>} */
-const closed = new Promise((resolve) => rl.once('close', () => resolve(CLOSED)));
+const closed = new Promise((resolve) => rl?.once('close', () => resolve(CLOSED)));
 
-for (;;) {
+while (!question) {
   if (TTY) {
     out('');
     // Mode indicator — shown above the input box every loop
@@ -3454,4 +3466,4 @@ for (;;) {
   pendingDocuments.clear();
   nextDocId = 1;
 }
-rl.close();
+rl?.close();
