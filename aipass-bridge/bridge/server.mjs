@@ -1091,10 +1091,18 @@ function extEvents(req, res) {
     clearInterval(ping);
     extClients.delete(client);
     log(`extension disconnected (${extClients.size} left)`);
-    // Do NOT fail in-flight jobs. The upstream fetch lives in the page and
+    // Do NOT fail in-flight chat jobs. The upstream fetch lives in the page and
     // survives the worker being evicted, which is exactly what happens during
     // a long web_search when no deltas flow to reset the worker's idle timer.
-    for (const job of jobs.values()) if (job.client === client) job.client = null;
+    // A loader job is different: it is only this bridge refreshing a cache, so
+    // its only possible answer left with the page — fail it now instead of
+    // stalling every refresh=1 caller behind the single-flight for its full
+    // timeout (the next attachment re-warms the caches anyway).
+    for (const job of jobs.values()) {
+      if (job.client !== client) continue;
+      job.client = null;
+      if (job.kind === 'loader') job.fail('extension disconnected');
+    }
   });
 }
 
