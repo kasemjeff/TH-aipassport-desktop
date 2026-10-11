@@ -13,11 +13,15 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { createRpc } from '../aipass-bridge/harness/rpc.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const REPO = path.resolve(HERE, '..');
+// In the repo this file is desktop/main.mjs and aipass-bridge is a sibling of
+// the repo root; the packaged layout ships it beside aipass-bridge/ instead.
+const REPO = fs.existsSync(path.join(HERE, 'aipass-bridge', 'bridge', 'server.mjs')) ? HERE : path.resolve(HERE, '..');
+// A static relative import can only ever see one of the two layouts, so resolve
+// the backend from REPO — `node main.mjs` then works from both.
+const { createRpc } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'rpc.mjs')));
 const BRIDGE_URL = process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787';
 const PORT = Number(process.env.AIPASS_DESKTOP_PORT ?? 8790);
 
