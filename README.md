@@ -62,6 +62,15 @@ npm run verify    # the standing "is everything still working" check
   exercise the chat path, point the extension at the sandbox bridge
   (`AIPASS_BRIDGE=http://127.0.0.1:<port>`) and log in to a de.aipass.net tab.
 
+`AIPASS_BRIDGE` steers the whole chat path — the desktop backend and the CLIs
+read it to find the bridge. Accepted forms: a full URL
+(`http://127.0.0.1:8788`), `host:port` (`localhost:8788`), or a bare port
+(`8788`); unset or blank means the loopback default `http://127.0.0.1:8787`.
+Anything else throws at startup rather than quietly aiming chat at a port
+nothing is listening on. Note the desktop only ever adopts a bridge at that
+address — the one it spawns itself lands on `AIPASS_PORT` (8787) — so a custom
+`AIPASS_BRIDGE` is only useful when a bridge already listens there.
+
 Node ≥ 20 works everywhere; development happens on Node 24
 (`scripts/test.mjs` exists because the three supported versions disagree on
 glob and directory handling for `node --test`).
