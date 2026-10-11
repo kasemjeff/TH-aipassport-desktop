@@ -269,6 +269,11 @@ test('--resolution and the video switches reach the job', async (t) => {
     },
   }).connect();
   t.after(() => ext.disconnect());
+  // Pin the bridge's video-options cache to what THIS fake serves. The cache
+  // is global to the bridge and any earlier test's extension (default 480p
+  // rows) may have warmed it already — under load, routinely has — and the
+  // bridge would then rightly drop the asserted switches before dispatch.
+  await fetch(`${bridge.base}/video-options?refresh=1`);
   await waitFor(async () => (await (await fetch(`${bridge.base}/v1/models?refresh=1`)).json()).data.length > 1);
 
   await chat(['a street', '--model', 'seedance-2.0-mini', '--resolution', '720p',
