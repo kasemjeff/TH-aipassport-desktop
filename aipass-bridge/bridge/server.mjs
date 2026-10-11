@@ -1178,14 +1178,25 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (path === '/conversations/new' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req) || '{}');
+      let body;
+      try { body = JSON.parse(await readBody(req) || '{}'); }
+      catch (err) { return json(res, 400, { ok: false, error: `bad JSON body: ${err.message}` }); }
       const adopt = body.adopt !== false;
       const temporary = body.temporary === true;
-      const id = await createConversation({
-        modelId: body.model, message: body.message, assistant: body.assistant,
-        temporary, adopt,
-      });
-      return json(res, 200, { id, temporary });
+      try {
+        const id = await createConversation({
+          modelId: body.model, message: body.message, assistant: body.assistant,
+          temporary, adopt,
+        });
+        return json(res, 200, { id, temporary });
+      } catch (err) {
+        // A create fails here when no extension is attached to carry it (and
+        // when the upstream answer cannot be read). Both are conditions the
+        // caller can see and act on — answer them as one clean JSON line
+        // instead of an unhandled-rejection dump through the generic handler.
+        log(`conversation create failed: ${err.message}`);
+        return json(res, 503, { ok: false, error: err.message });
+      }
     }
     if (path === '/conversations') {
       await loadConversations().catch(() => {});

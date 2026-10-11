@@ -32,6 +32,44 @@ test('refuses a request with no extension attached', async () => {
   assert.match(body.error.message, /no extension connected/);
 });
 
+/** How many extension tabs the bridge currently sees. */
+const extCount = () => fetch(`${bridge.base}/status`).then((r) => r.json()).then((s) => s.extensions);
+
+test('a conversation create with no extension is a clean 5xx, not an unhandled dump', async () => {
+  // Like the test above, this runs before any extension connects; the wait
+  // keeps that true even if the file's test order changes.
+  await waitFor(async () => (await extCount()) === 0, { timeout: 3000 }).catch(() => {});
+  assert.equal(await extCount(), 0);
+
+  const logBefore = bridge.logText();
+  const res = await fetch(`${bridge.base}/conversations/new`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ temporary: true, message: 'x' }),
+  });
+  assert.equal(res.status, 503);
+  const body = await res.json();
+  assert.equal(body.ok, false);
+  assert.match(body.error, /no extension connected/);
+
+  // The point of the fix: one clean log line and a JSON answer, instead of the
+  // rejection landing in the server's generic unhandled handler.
+  const newLog = bridge.logText().slice(logBefore.length);
+  assert.match(newLog, /conversation create failed/);
+  assert.doesNotMatch(newLog, /unhandled/);
+});
+
+test('a malformed body on /conversations/new is refused as bad JSON', async () => {
+  const logBefore = bridge.logText();
+  const res = await fetch(`${bridge.base}/conversations/new`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"temporary":',
+  });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.ok, false);
+  assert.match(body.error, /bad JSON body/);
+  assert.doesNotMatch(bridge.logText().slice(logBefore.length), /unhandled/);
+});
+
 test('streams text, tool status and a finish reason', async () => {
   const ext = await new FakeExtension(bridge.base, {
     onChat: async (_job, e) => {
