@@ -385,7 +385,15 @@ test('the window only reaches for elements that exist', async (t) => {  // A typ
 
 test('reading helpers: file listing, file text, and the playbook library', async (t) => {
   const env = await startRpc({
-    files: { 'a.txt': 'hello world', 'sub/b.txt': 'nested' },
+    files: {
+      'a.txt': 'hello world',
+      'sub/b.txt': 'nested',
+      // The playbook library is machine-local user data (one level above the
+      // repo, or ~/.aipass/skills) that never ships inside the repo, so a
+      // fresh clone has none. Seed the project library to keep this test
+      // hermetic instead of depending on whatever the machine happens to have.
+      '.aipass/skills/playbook.md': 'step one\nstep two\n',
+    },
     replies: ['DONE nothing'],
   });
   t.after(() => env.stop());
@@ -396,7 +404,7 @@ test('reading helpers: file listing, file text, and the playbook library', async
   assert.equal(read.text, 'hello world');
 
   const skills = await env.call('skills.list');
-  assert.ok(skills.length > 0, 'the shipped library is listed');
+  assert.ok(skills.length > 0, 'the playbook library is listed');
   const first = await env.call('skills.load', { name: skills[0].name });
   assert.ok(first.text.length > 0);
 
