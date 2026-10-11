@@ -32,8 +32,39 @@ adopted instead of started again.
 
 ```powershell
 npm run tauri:build      # the packaged installer (needs Rust + MSVC — see below)
-npm test                 # 14 desktop tests + the CLI suite
+npm test                 # the full suite (parallel, under a minute)
+npm run verify           # the suite + a sandboxed live smoke — see below
 ```
+
+## Development & verification
+
+```powershell
+npm test          # the full test suite — parallel, reliable; extra args pass
+                  # through: npm test -- --test-name-pattern="compaction"
+npm run verify    # the standing "is everything still working" check
+```
+
+`npm run verify` runs up to three stages and exits nonzero if any fails:
+
+- **tests** — the full suite, exactly `npm test`.
+- **smoke** — starts the real bridge and the real backend from this source
+  tree on free ports (8792+) with a throwaway `HOME`/`USERPROFILE`, then
+  checks `/health`, `/status`, `/v1/models`, the backend RPC handshake and
+  the served window HTML + an asset, and shuts everything down again. It
+  never touches a live aipass stack: ports 8787 and 8790 are refused, and
+  inherited `AIPASS_*` environment is stripped. Nothing is written outside a
+  temp dir. `--bridge-port N` / `--backend-port N` pin the sandbox ports
+  (used as given, so a pinned-but-occupied port fails loudly).
+- **chat** — only with `--chat`: one tiny real chat through the sandbox
+  bridge, but only when a Chrome extension is connected to *it*. Normally
+  none is — your extension talks to the live bridge on 8787 — so verify
+  prints **PENDING-LOGIN** and skips the stage; that is not a failure. To
+  exercise the chat path, point the extension at the sandbox bridge
+  (`AIPASS_BRIDGE=http://127.0.0.1:<port>`) and log in to a de.aipass.net tab.
+
+Node ≥ 20 works everywhere; development happens on Node 24
+(`scripts/test.mjs` exists because the three supported versions disagree on
+glob and directory handling for `node --test`).
 
 ## What you get
 
