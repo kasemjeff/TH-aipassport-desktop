@@ -28,9 +28,9 @@
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
     "externalBin": ["../sidecar/node"],
     "resources": {
-      "../../aipass-bridge/**/*": "aipass-bridge/",
+      "../../aipass-bridge": "aipass-bridge/",
       "../main.mjs": "main.mjs",
-      "../ui/**/*": "ui/"
+      "../ui": "ui/"
     },
     "windows": {
       "webviewInstallMode": { "type": "offlineInstaller" }
