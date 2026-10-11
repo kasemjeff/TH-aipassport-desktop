@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="th">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -7,84 +7,143 @@
 <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-<header id="bar">
-  <div class="brand">aipass <span class="dim">desktop</span></div>
-
-  <label class="field">
-    <span>project</span>
-    <select id="project"></select>
-  </label>
-  <button id="add-project" class="mini" title="open another folder">+ folder</button>
-
-  <label class="field">
-    <span>model</span>
-    <select id="model"></select>
-  </label>
-
-  <div class="field">
-    <span>mode</span>
-    <select id="mode">
-      <option value="ask">ask — confirm every write</option>
-      <option value="auto">auto — writes go through</option>
-      <option value="yolo">yolo — writes and shell</option>
-    </select>
+<header id="titlebar">
+  <div class="brand"><span class="logo">✦</span>AiPASS<span class="th">TH</span></div>
+  <button id="side-toggle" class="icon-btn" title="ซ่อน/แสดงเมนู (Ctrl+B)">☰</button>
+  <div class="drag-region" data-tauri-drag-region></div>
+  <div id="win-controls" class="hidden">
+    <button id="win-min" class="win-btn" title="ย่อหน้าต่าง">─</button>
+    <button id="win-max" class="win-btn" title="ขยายเต็มจอ / คืนขนาด">❐</button>
+    <button id="win-close" class="win-btn close" title="ปิด">✕</button>
   </div>
-
-  <div class="status" id="status"></div>
-  <button id="settings-btn" class="mini" title="settings">gear</button>
 </header>
 
-<main>
+<div id="content">
   <aside id="side">
-    <section>
-      <h3>sessions <button class="mini" id="new-session" title="new session">+</button></h3>
-      <ul id="sessions" class="list"></ul>
-    </section>
-    <section id="plugin-panels">
-      <h3>plugins</h3>
-    </section>
-    <section>
-      <h3>playbooks</h3>
-      <ul id="skills" class="list"></ul>
-    </section>
-    <section>
-      <h3>files</h3>
-      <ul id="files" class="list dim">loading…</ul>
-    </section>
+    <div class="side-body">
+      <div class="new-row">
+        <button id="new-session" class="primary big" title="เริ่มแผนงานใหม่ (Ctrl+N)">✎ สร้างแผนใหม่</button>
+        <button id="add-project" class="dashed" title="เปิดโฟลเดอร์โปรเจกต์อื่น">＋</button>
+      </div>
+
+      <label class="project-field">
+        <span>โปรเจกต์</span>
+        <select id="project"></select>
+      </label>
+
+      <nav class="nav">
+        <button id="settings-btn" class="nav-item" title="settings (Ctrl+,)">⚙ ตั้งค่า</button>
+      </nav>
+
+      <details class="side-sec" open>
+        <summary>รายการแผน</summary>
+        <ul id="sessions" class="list"></ul>
+      </details>
+
+      <details class="side-sec">
+        <summary>ไฟล์ในโปรเจกต์</summary>
+        <ul id="files" class="list dim">กำลังโหลด…</ul>
+      </details>
+
+      <details class="side-sec">
+        <summary>Playbooks</summary>
+        <ul id="skills" class="list"></ul>
+      </details>
+
+      <section id="plugin-panels" class="side-sec hidden"></section>
+    </div>
+
+    <div class="side-foot">
+      <button id="profile" class="profile" title="ตั้งค่าโปรไฟล์">
+        <span id="profile-avatar" class="avatar">A</span>
+        <span class="who">
+          <span id="profile-name">aipass desktop</span>
+          <span id="profile-sub" class="dim">ตั้งชื่อได้ใน settings</span>
+        </span>
+      </button>
+    </div>
   </aside>
+  <div id="side-resize" title="ลากปรับความกว้างของเมนู"></div>
 
-  <section id="chat">
-    <div id="meta"></div>
-    <div id="log"></div>
+  <main>
+    <section id="chat">
+      <div id="greeting">
+        <h1 id="greeting-title">สวัสดีครับ 👋</h1>
+        <p class="sub">วันนี้อยากให้ AI ช่วยเรื่องไหนดีครับ</p>
 
-    <div id="pending" class="hidden">
-      <div class="pending-head">
-        <strong id="pending-count">0 changes</strong>
-        <span class="dim">tick the ones to write</span>
-        <span class="grow"></span>
-        <button id="apply" class="primary">apply</button>
-        <button id="discard">discard</button>
+        <div class="cards">
+          <div class="card">
+            <h3>สถานะการเชื่อมต่อ</h3>
+            <div class="row"><span id="card-bridge">กำลังตรวจสอบ…</span></div>
+            <div class="row"><span id="card-ext">กำลังตรวจสอบ…</span></div>
+            <div class="row"><span id="card-credits" class="dim"></span></div>
+          </div>
+          <div class="card">
+            <h3>โปรเจกต์ปัจจุบัน</h3>
+            <div class="project-name" id="card-project-name">—</div>
+            <div class="row dim"><span>โมเดล: <span id="card-model">auto</span></span></div>
+            <div class="row dim"><span>แผนในรายการ: <span id="card-sessions">0</span></span></div>
+            <button id="card-open-folder" class="soft">เปิดโฟลเดอร์อื่น…</button>
+          </div>
+        </div>
+
+        <div class="chip-row">
+          <button class="chip" data-prompt="ช่วยวางแผนงานนี้ให้หน่อย: ">🗺️ วางแผนงาน</button>
+          <button class="chip" data-prompt="ช่วยเขียนเอกสาร/README สำหรับ: ">📝 เขียนเอกสาร</button>
+          <button class="chip" data-prompt="มีบั๊กที่อยากให้ช่วยหาสาเหตุ: ">🐞 แก้บั๊ก</button>
+          <button class="chip" data-prompt="สำรวจโครงสร้างโปรเจกต์นี้แล้วสรุปให้หน่อย">📂 สำรวจโปรเจกต์</button>
+          <button class="chip">💬 ถาม-ตอบทั่วไป</button>
+        </div>
       </div>
-      <ul id="pending-list"></ul>
-    </div>
 
-    <div id="attachments" class="hidden">
-      <span class="dim">attached</span>
-      <ul id="attachment-list"></ul>
-    </div>
+      <div id="log"></div>
 
-    <form id="composer">
-      <textarea id="task" rows="3" placeholder="Ask it to do something. Enter sends, Shift+Enter is a newline, Esc cancels a run. Drop an image or a file here to attach it."></textarea>
-      <div class="composer-row">
-        <input type="file" id="file-picker" multiple hidden />
-        <button type="button" id="attach-btn" class="mini" title="attach an image or a file">attach</button>
-        <span class="dim" id="hint"></span>
-        <span class="grow"></span>
-        <button type="submit" id="send" class="primary">send</button>
+      <div id="composer-wrap">
+        <div id="pending" class="hidden">
+          <div class="pending-head">
+            <strong id="pending-count">0 changes</strong>
+            <span class="dim">ติ๊กเฉพาะไฟล์ที่จะเขียนจริง</span>
+            <span class="grow"></span>
+            <button id="apply" class="primary">เขียนเลย</button>
+            <button id="discard">ยกเลิก</button>
+          </div>
+          <ul id="pending-list"></ul>
+        </div>
+
+        <div id="attachments" class="hidden">
+          <span class="dim">แนบแล้ว</span>
+          <ul id="attachment-list"></ul>
+        </div>
+
+        <form id="composer">
+          <textarea id="task" rows="1" placeholder="ถามได้เลย — พิมพ์งานที่อยากให้ AI ทำ (Enter ส่ง, Shift+Enter ขึ้นบรรทัด)"></textarea>
+          <div class="composer-row">
+            <input type="file" id="file-picker" multiple hidden />
+            <button type="button" id="attach-btn" class="round-btn" title="แนบรูปหรือไฟล์">＋</button>
+            <label class="pill" id="mode-pill" title="ask — ยืนยันก่อนเขียนทุกไฟล์ · auto — เขียนผ่านเลย · yolo — เขียนและ shell ผ่านหมด">✦
+              <select id="mode">
+                <option value="ask">ask · ยืนยันก่อนเขียน</option>
+                <option value="auto">auto · เขียนอัตโนมัติ</option>
+                <option value="yolo">yolo · เขียน+shell</option>
+              </select>
+            </label>
+            <select id="model" class="pill" title="โมเดล"></select>
+            <span class="dim" id="hint"></span>
+            <span class="grow"></span>
+            <button type="submit" id="send" class="send-btn" title="ส่ง (Enter)">➤</button>
+          </div>
+        </form>
+        <p id="disclaimer" class="dim">AI อาจผิดพลาดได้ — โปรดตรวจสอบผลลัพธ์สำคัญก่อนใช้งานจริง</p>
       </div>
-    </form>
-  </section>
-</main>
+    </section>
+  </main>
+</div>
+
+<footer id="statusbar">
+  <span id="meta"></span>
+  <span class="grow"></span>
+  <div id="status"></div>
+</footer>
 
 <div id="modal" class="hidden">
   <div class="sheet">

@@ -1,3 +1,7 @@
+// Hide the console window in release builds — this only works as a crate-level
+// (inner) attribute; on `fn main` it is silently ignored.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::path::PathBuf;
 use std::process::Command;
 use tauri::Manager;
@@ -81,7 +85,6 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
-#[cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tauri::Builder::default()
         .setup(|app| {
@@ -127,6 +130,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tauri::WebviewUrl::External(url.parse().unwrap()),
             )
             .title("aipass desktop")
+            // The UI draws its own title bar (drag region + window controls);
+            // the OS chrome would duplicate it.
+            .decorations(false)
             .inner_size(1280.0, 860.0)
             .min_inner_size(900.0, 600.0)
             .build()?;

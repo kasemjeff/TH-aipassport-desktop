@@ -47,7 +47,7 @@ const state = {
 
 function addTask(text) {
   const msg = el('div', 'msg task');
-  msg.append(el('div', 'who', 'you'));
+  msg.append(el('div', 'who', 'คุณ'));
   const body = el('div', 'body');
   body.append(el('span', null, text));
   msg.append(body);
@@ -113,7 +113,7 @@ function renderTodo(items) {
   if (!panel) {
     panel = el('div', 'panel');
     panel.id = 'todo-panel';
-    panel.append(el('h4', null, 'plan & todo'));
+    panel.append(el('h4', null, 'แผน & สิ่งที่ต้องทำ'));
     const ul = el('ul');
     panel.append(ul);
     $('pending').before(panel);
@@ -169,10 +169,10 @@ async function showDiff(file) {
     }
     body.append(el('p', 'dim', `${file}  +${change.added} −${change.removed}${change.isNew ? '  (new file)' : ''}`), pre);
   }
-  $('modal-title').textContent = 'changes';
+  $('modal-title').textContent = 'การแก้ไขที่รออนุมัติ';
   const actions = $('modal-actions');
   actions.textContent = '';
-  const close = el('button', 'primary', 'close');
+  const close = el('button', 'primary', 'ปิด');
   close.onclick = hideModal;
   actions.append(close);
   $('modal').classList.remove('hidden');
@@ -183,39 +183,39 @@ function hideModal() { $('modal').classList.add('hidden'); }
 /* ------------------------------------------------------------ permissions */
 
 function askPermission({ id, kind, arg, risk }) {
-  $('modal-title').textContent = `${risk === 'shell' ? 'run this command' : 'change this file'}?`;
+  $('modal-title').textContent = `${risk === 'shell' ? 'รันคำสั่งนี้ไหม' : 'ให้แก้ไฟล์นี้ไหม'}?`;
   const body = $('modal-body');
   body.textContent = '';
   body.append(el('p', null, arg || kind));
   if (risk === 'shell') {
     const pre = el('pre', null, arg || '');
     body.textContent = '';
-    body.append(el('p', 'dim', 'shell command the model wants to run'), pre);
+    body.append(el('p', 'dim', 'คำสั่ง shell ที่โมเดลขอรัน'), pre);
   }
 
   const actions = $('modal-actions');
   actions.textContent = '';
   const answer = (decision) => { hideModal(); rpc('permission.answer', { id, decision }); };
-  const deny = el('button', null, 'deny');
+  const deny = el('button', null, 'ปฏิเสธ');
   deny.onclick = () => answer('deny');
-  const allow = el('button', 'primary', 'allow');
+  const allow = el('button', 'primary', 'อนุญาต');
   allow.onclick = () => answer('allow');
-  const always = el('button', null, 'always');
+  const always = el('button', null, 'อนุญาตตลอด');
   always.onclick = () => answer('always');
   actions.append(deny, always, allow);
   $('modal').classList.remove('hidden');
 }
 
 function askPlan() {
-  $('modal-title').textContent = 'start this plan?';
+  $('modal-title').textContent = 'เริ่มแผนนี้ไหม?';
   const body = $('modal-body');
   body.textContent = '';
-  body.append(el('p', null, 'The model wrote a plan. Approve it and the work begins; decline and the run stops before any change.'));
+  body.append(el('p', null, 'โมเดลเขียนแผนไว้แล้ว — อนุมัติแล้วงานเริ่มทันที, ไม่อนุมัติแล้วรันหยุดก่อนแตะไฟล์ใด ๆ'));
   const actions = $('modal-actions');
   actions.textContent = '';
-  const no = el('button', null, 'decline');
+  const no = el('button', null, 'ไม่เอา');
   no.onclick = () => { hideModal(); rpc('plan.answer', { ok: false }); };
-  const yes = el('button', 'primary', 'approve');
+  const yes = el('button', 'primary', 'อนุมัติ');
   yes.onclick = () => { hideModal(); rpc('plan.answer', { ok: true }); };
   actions.append(no, yes);
   $('modal').classList.remove('hidden');
@@ -269,10 +269,10 @@ stream.addEventListener('finished', async (e) => {
   const { summary, stopReason, spent, credits } = JSON.parse(e.data);
   endTurn();
   state.running = false;
-  $('send').textContent = 'send';
+  $('send').textContent = '➤';
   $('hint').textContent = '';
-  if (credits) addNote(`credits  ${credits.available?.toLocaleString?.() ?? credits.available} of ${credits.limit?.toLocaleString?.() ?? credits.limit} left${spent > 0 ? ` · ${spent.toLocaleString()} this run` : ''}`);
-  if (stopReason !== 'done') addNote(`stopped: ${stopReason}`);
+  if (credits) addNote(`credits เหลือ ${credits.available?.toLocaleString?.() ?? credits.available} จาก ${credits.limit?.toLocaleString?.() ?? credits.limit}${spent > 0 ? ` · รันนี้ใช้ไป ${spent.toLocaleString()}` : ''}`);
+  if (stopReason !== 'done') addNote(`หยุดก่อนเสร็จ: ${stopReason}`);
   // Attachments belong to the message they were sent with.
   for (const id of state.attachments.keys()) rpc('attachment.remove', { id }).catch(() => {});
   state.attachments.clear();
@@ -304,8 +304,8 @@ async function sendTask() {
   if (!text) return;
   $('task').value = '';
   state.running = true;
-  $('send').textContent = 'stop';
-  $('hint').textContent = 'working…';
+  $('send').textContent = '■';
+  $('hint').textContent = 'กำลังทำงาน…';
   try {
     await rpc('run', {
       task: text,
@@ -317,7 +317,7 @@ async function sendTask() {
   } catch (err) {
     addNote(`error: ${err.message}`);
     state.running = false;
-    $('send').textContent = 'send';
+    $('send').textContent = '➤';
     $('hint').textContent = '';
   }
 }
@@ -359,7 +359,7 @@ $('discard').onclick = async () => {
   await rpc('discard');
   await refreshPending();
 };
-$('mode').onchange = () => rpc('config.set', {}).catch(() => {});
+$('mode').onchange = () => rpc('settings.set', { mode: $('mode').value }).catch(() => {});
 $('model').onchange = () => rpc('config.set', { model: $('model').value }).catch(() => {});
 $('new-session').onclick = async () => {
   log.textContent = '';
@@ -374,6 +374,8 @@ async function refreshPending() {
 
 async function refreshSessions() {
   const list = await rpc('session.list').catch(() => []);
+  const count = $('card-sessions');
+  if (count) count.textContent = String(list.length);
   const ul = $('sessions');
   ul.textContent = '';
   for (const s of list.slice(0, 40)) {
@@ -478,7 +480,7 @@ function renderAttachments() {
       const img = document.createElement('img');
       img.src = `data:${item.mime};base64,`; // the backend holds the bytes; a thumbnail is a nice-to-have
       img.alt = '';
-      img.style.background = '#0b0e13';
+      img.style.background = '#e6edf7';
       li.append(img);
     } else {
       li.append(el('span', null, item.mime?.startsWith('video/') ? '🎬' : '📄'));
@@ -561,15 +563,16 @@ function nameToPath(name) { return `~/${name}`; }
 /* --------------------------------------------------------------- settings */
 
 const SETTINGS_FORM = [
-  { key: 'defaultModel', label: 'default model', type: 'text', note: 'model id, e.g. gemini-3.5-flash-lite' },
-  { key: 'mode', label: 'write permission', type: 'select', options: [['ask', 'ask — confirm every write'], ['auto', 'auto — writes go through'], ['yolo', 'yolo — writes and shell']] },
-  { key: 'allowRun', label: 'allow shell', type: 'checkbox' },
-  { key: 'maxSteps', label: 'max steps', type: 'number' },
-  { key: 'plan', label: 'plan mode', type: 'checkbox' },
-  { key: 'requirePlanApproval', label: 'wait for plan approval', type: 'checkbox' },
-  { key: 'subagent', label: 'helpers', type: 'checkbox' },
-  { key: 'theme', label: 'theme', type: 'select', options: [['dark', 'dark'], ['light', 'light']] },
-  { key: 'compaction.contextTokens', label: 'compaction budget', type: 'number', note: 'summarise and rotate past this' },
+  { key: 'displayName', label: 'ชื่อที่ใช้ทักทาย', type: 'text', note: 'แสดงในหน้าทักทายและโปรไฟล์มุมล่าง' },
+  { key: 'defaultModel', label: 'โมเดลเริ่มต้น', type: 'text', note: 'model id เช่น gemini-3.5-flash-lite' },
+  { key: 'mode', label: 'สิทธิ์การเขียน (mode)', type: 'select', options: [['ask', 'ask — ยืนยันก่อนเขียนทุกไฟล์'], ['auto', 'auto — เขียนผ่านอัตโนมัติ'], ['yolo', 'yolo — เขียนและ shell ผ่านหมด']] },
+  { key: 'allowRun', label: 'อนุญาตรัน shell', type: 'checkbox' },
+  { key: 'maxSteps', label: 'จำนวน step สูงสุด', type: 'number' },
+  { key: 'plan', label: 'โหมดวางแผน (plan)', type: 'checkbox' },
+  { key: 'requirePlanApproval', label: 'รออนุมัติแผนก่อนลงมือ', type: 'checkbox' },
+  { key: 'subagent', label: 'ผู้ช่วยย่อย (helpers)', type: 'checkbox' },
+  { key: 'theme', label: 'ธีม', type: 'select', options: [['light', 'สว่าง (light)'], ['dark', 'มืด (dark)']] },
+  { key: 'compaction.contextTokens', label: 'งบ context ก่อนสรุปย่อ', type: 'number', note: 'เกินแล้วจะสรุปงานเก่าและเริ่มบทสนทนาใหม่' },
 ];
 
 async function openSettings() {
@@ -577,7 +580,7 @@ async function openSettings() {
   if (!settings) { addNote('could not read settings'); return; }
   state.settings = settings;
 
-  $('modal-title').textContent = 'settings';
+  $('modal-title').textContent = 'ตั้งค่า';
   const body = $('modal-body');
   body.textContent = '';
   const form = el('div', 'settings-grid');
@@ -626,23 +629,23 @@ async function openSettings() {
   }
 
   // Playbook folders, one per line, resolved in order.
-  form.append(el('label', null, 'playbook folders'));
+  form.append(el('label', null, 'โฟลเดอร์ playbook'));
   const dirs = document.createElement('input');
   dirs.type = 'text';
   dirs.value = (settings.skillsDirs ?? []).join('; ');
   dirs.onchange = () => rpc('settings.set', { skillsDirs: dirs.value.split(';').map((s) => s.trim()).filter(Boolean) });
   form.append(dirs);
   form.append(el('span'));
-  form.append(el('span', 'dim', 'semicolon separated, first match wins'));
+  form.append(el('span', 'dim', 'คั่นด้วย ; — โฟลเดอร์แรกที่เจอใช้ก่อน'));
 
   body.append(form);
 
   // Plugins, listed from the manager.
   const details = await rpc('plugins.list').catch(() => null);
   if (details) {
-    body.append(el('h4', null, `plugins — ${details.dir}`));
+    body.append(el('h4', null, `ปลั๊กอิน — ${details.dir}`));
     if (!details.loaded.length && !details.failed.length) {
-      body.append(el('p', 'dim', `drop a .mjs file in ${details.dir} to add one`));
+      body.append(el('p', 'dim', `ลากไฟล์ .mjs ใส่ ${details.dir} เพื่อเพิ่มปลั๊กอิน`));
     }
     for (const p of details.loaded) {
       body.append(el('p', null, `${p.name} ${p.version} — ${p.description || 'no description'}`));
@@ -657,9 +660,9 @@ async function openSettings() {
 
   const actions = $('modal-actions');
   actions.textContent = '';
-  const reload = el('button', null, 'reload plugins');
+  const reload = el('button', null, 'โหลดปลั๊กอินใหม่');
   reload.onclick = async () => { await rpc('plugins.reload'); hideModal(); openSettings(); };
-  const close = el('button', 'primary', 'close');
+  const close = el('button', 'primary', 'ปิด');
   close.onclick = hideModal;
   actions.append(reload, close);
   $('modal').classList.remove('hidden');
@@ -675,7 +678,7 @@ async function refreshPanels() {
   if (!details?.panels?.length) { holder.classList.add('hidden'); return; }
   holder.classList.remove('hidden');
   holder.textContent = '';
-  holder.append(el('h3', null, 'plugins'));
+  holder.append(el('h3', null, 'ปลั๊กอิน'));
   for (const panel of details.panels) {
     const box = el('div', 'plugin-panel');
     box.id = `panel-${panel.id}`;
@@ -710,10 +713,33 @@ async function refreshHeader() {
     return s;
   };
   $('status').append(dot(st.bridge, 'bridge'), dot(st.extensions > 0, `extension ×${st.extensions}`));
+
+  // The greeting cards say the same thing in sentences instead of dots.
+  const line = (ok, text) => {
+    const s = el('span');
+    s.append(el('span', 'dot ' + (ok ? 'ok' : 'no')), document.createTextNode(' ' + text));
+    return s;
+  };
+  const bridgeCell = $('card-bridge');
+  if (bridgeCell) {
+    bridgeCell.textContent = '';
+    bridgeCell.append(line(st.bridge, st.bridge ? 'เชื่อมต่อ bridge แล้ว' : 'ยังไม่เชื่อมต่อ bridge — เปิด Chrome ที่ล็อกอิน de.aipass.net ไว้'));
+    const ext = $('card-ext');
+    ext.textContent = '';
+    ext.append(line(st.extensions > 0, st.extensions > 0 ? `extension พร้อมทำงาน ${st.extensions} ตัว` : 'ยังไม่เห็น extension'));
+  }
   if (st.model) {
     const credits = await rpc('credits').catch(() => null);
     if (credits) $('status').append(el('span', null, `credits ${credits.available?.toLocaleString?.() ?? credits.available} / ${credits.limit?.toLocaleString?.() ?? credits.limit}`));
+    const cell = $('card-credits');
+    if (cell) cell.textContent = credits ? `credits ${credits.available?.toLocaleString?.() ?? credits.available} / ${credits.limit?.toLocaleString?.() ?? credits.limit}` : '';
   }
+  const cur = (st.projects ?? []).find((p) => p.current);
+  const name = $('card-project-name');
+  if (name) name.textContent = cur?.name ?? st.root ?? 'ยังไม่ได้เปิดโฟลเดอร์';
+  const model = $('card-model');
+  if (model) model.textContent = st.model ?? 'auto';
+
   if (st.model && !$('model').options.length) {
     const models = await rpc('models').catch(() => null);
     const list = models?.data ?? models?.models ?? [];
@@ -723,15 +749,117 @@ async function refreshHeader() {
       opt.textContent = m.id ?? m;
       $('model').append(opt);
     }
+    // The upstream default may not be in the advertised list; keep it visible.
+    if (st.model && ![...$('model').options].some((o) => o.value === st.model)) {
+      const opt = document.createElement('option');
+      opt.value = st.model;
+      opt.textContent = st.model;
+      $('model').prepend(opt);
+    }
     if (st.model) $('model').value = st.model;
   }
 }
 
 setInterval(refreshHeader, 10_000);
 
+/* ---------------------------------------------------------- window chrome */
+
+// The sidebar collapses to nothing and its width is draggable; both choices
+// persist across reloads in localStorage.
+function applySide(open) {
+  document.body.classList.toggle('side-collapsed', !open);
+}
+$('side-toggle').onclick = () => {
+  const open = document.body.classList.contains('side-collapsed');
+  applySide(open);
+  localStorage.setItem('aipass.side', open ? '1' : '0');
+};
+applySide(localStorage.getItem('aipass.side') !== '0');
+
+const savedWidth = Number(localStorage.getItem('aipass.sideW'));
+if (savedWidth >= 220 && savedWidth <= 440) {
+  document.documentElement.style.setProperty('--side-w', `${savedWidth}px`);
+}
+$('side-resize').onpointerdown = (ev) => {
+  ev.preventDefault();
+  const move = (e) => {
+    const w = Math.min(440, Math.max(220, e.clientX));
+    document.documentElement.style.setProperty('--side-w', `${w}px`);
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    localStorage.setItem('aipass.sideW', document.documentElement.style.getPropertyValue('--side-w'));
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+};
+
+// Inside the Tauri shell the UI owns the window chrome: minimize, maximize and
+// close ride the global API (withGlobalTauri) — no npm dependency. In a plain
+// browser there is nothing to control, so the buttons stay hidden.
+const tauriWin = () => window.__TAURI__?.window?.getCurrentWindow?.();
+if (tauriWin()) {
+  $('win-controls').classList.remove('hidden');
+  $('win-min').onclick = () => tauriWin().minimize();
+  $('win-max').onclick = () => tauriWin().toggleMaximize();
+  $('win-close').onclick = () => tauriWin().close();
+}
+
+// Desktop keyboard conventions: Ctrl+B folds the sidebar, Ctrl+N starts a new
+// plan, Ctrl+, opens settings.
+document.addEventListener('keydown', (ev) => {
+  if (!ev.ctrlKey || ev.altKey || ev.shiftKey) return;
+  const key = ev.key.toLowerCase();
+  if (key === 'b') { ev.preventDefault(); $('side-toggle').click(); }
+  else if (key === ',') { ev.preventDefault(); openSettings(); }
+  else if (key === 'n') { ev.preventDefault(); $('new-session').click(); }
+});
+
+// The greeting is the empty-session view: it shows until the first message
+// lands in the log, and comes back when the log empties.
+new MutationObserver(() => {
+  $('chat').classList.toggle('has-messages', log.children.length > 0);
+}).observe(log, { childList: true });
+
+// Suggestion chips drop an opening line into the composer instead of sending
+// it blind — the task usually needs the user's own words appended.
+for (const chip of document.querySelectorAll('.chip')) {
+  chip.onclick = () => {
+    $('task').value = chip.dataset.prompt ?? '';
+    growTask();
+    $('task').focus();
+  };
+}
+
+// Theme and the greeting name ride the settings object; the backend emits a
+// `settings` event on every settings.set, so modal edits apply live.
+function applySettings(s) {
+  if (!s) return;
+  document.documentElement.dataset.theme = s.theme === 'dark' ? 'dark' : 'light';
+  const name = (s.displayName ?? '').trim();
+  $('greeting-title').textContent = name ? `สวัสดีครับ ${name}` : 'สวัสดีครับ 👋';
+  $('profile-name').textContent = name || 'aipass desktop';
+  $('profile-sub').textContent = name ? 'aipass desktop' : 'ตั้งชื่อได้ใน settings';
+  $('profile-avatar').textContent = (name[0] ?? 'A').toUpperCase();
+  if (document.activeElement !== $('mode')) $('mode').value = s.mode ?? 'ask';
+}
+stream.addEventListener('settings', (e) => applySettings(JSON.parse(e.data)));
+$('profile').onclick = () => openSettings();
+$('card-open-folder').onclick = () => $('add-project').click();
+
+// The composer textarea grows with its content, like the upstream pill.
+function growTask() {
+  const t = $('task');
+  t.style.height = 'auto';
+  t.style.height = Math.min(t.scrollHeight, 200) + 'px';
+}
+$('task').addEventListener('input', growTask);
+
 /* ------------------------------------------------------------------ boot */
 
 (async function boot() {
+  applySettings(await rpc('settings.get').catch(() => null));
   await refreshHeader();
   await refreshProjects((await rpc('status').catch(() => null))?.projects);
   await refreshSessions();
