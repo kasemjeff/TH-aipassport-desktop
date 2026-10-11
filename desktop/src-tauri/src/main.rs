@@ -6,8 +6,20 @@ use std::path::PathBuf;
 use std::process::Command;
 use tauri::Manager;
 
-const BACKEND_PORT: u16 = 8790;
 const MARKER: &str = "aipass-bridge/bridge/server.mjs";
+
+/// The port the Node backend answers on: AIPASS_DESKTOP_PORT when the
+/// environment names one, 8790 otherwise — the same override `desktop/main.mjs`
+/// honours, so a window started beside a custom-port backend adopts it instead
+/// of spawning a second one on a port nothing else is using.
+fn backend_port() -> Result<u16, String> {
+    match std::env::var("AIPASS_DESKTOP_PORT") {
+        Ok(v) if !v.trim().is_empty() => {
+            v.trim().parse::<u16>().map_err(|_| format!("AIPASS_DESKTOP_PORT is not a port: {v:?}"))
+        }
+        _ => Ok(8790),
+    }
+}
 
 /// Where the app finds the files it runs.
 ///
@@ -88,6 +100,7 @@ fn home_dir() -> PathBuf {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tauri::Builder::default()
         .setup(|app| {
+            let backend_port = backend_port()?;
             let exe = std::env::current_exe()?;
             let exe_dir = exe.parent().ok_or("no executable directory")?.to_path_buf();
             let root = find_root(app, &exe_dir);
@@ -98,13 +111,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // if it is not up, serves the window, and owns every agent run.
             // If something is already answering on that port — `aipass desktop`
             // in a browser, say — the window adopts it instead of fighting it.
-            let mut child = if std::net::TcpStream::connect(("127.0.0.1", BACKEND_PORT)).is_ok() {
+            let mut child = if std::net::TcpStream::connect(("127.0.0.1", backend_port)).is_ok() {
                 None
             } else {
                 Some(
                     Command::new(node_path(&exe_dir))
                         .arg(&entry)
-                        .args(["--port", &BACKEND_PORT.to_string()])
+                        .args(["--port", &backend_port.to_string()])
                         .args(["--root", project_root.to_str().unwrap_or(".")])
                         .current_dir(&project_root)
                         .spawn()
@@ -114,8 +127,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // The window opens only once the backend answers, so a cold start
             // never lands on a blank page.
-            let url = format!("http://127.0.0.1:{BACKEND_PORT}/");
-            let port_open = || std::net::TcpStream::connect(("127.0.0.1", BACKEND_PORT)).is_ok();
+            let url = format!("http://127.0.0.1:{backend_port}/");
+            let port_open = || std::net::TcpStream::connect(("127.0.0.1", backend_port)).is_ok();
             for _ in 0..80 {
                 if port_open() {
                     break;
