@@ -748,3 +748,13 @@ select.pill:empty { min-width: 110px; color: var(--dim); }
   .set-control input[type="text"], .set-control input[type="number"], .set-control select { min-width: 0; }
   .set-control input.wide { max-width: 100%; }
 }
+
+/* ---- toast & modal-x ---- */
+.modal-x { position:absolute; top:8px; right:10px; width:30px; height:30px; border:none; border-radius:8px; background:transparent; color:var(--dim); font-size:22px; line-height:1; cursor:pointer; z-index:2; }
+.sheet { position:relative; }
+.modal-x:hover { background:var(--line); color:var(--fg); }
+.toasts { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); display:flex; flex-direction:column; gap:8px; z-index:120; pointer-events:none; width:min(440px,92vw); }
+.toast { background:var(--surface); color:var(--fg); border:1px solid var(--line); border-radius:12px; padding:10px 14px; font-size:13px; box-shadow:0 6px 18px rgba(0,0,0,.18); opacity:0; transform:translateY(10px); transition:opacity .18s, transform .18s; }
+.toast.show { opacity:1; transform:translateY(0); }
+.toast.bad { border-color:var(--bad,#e25555); }
+.toast.good { border-color:var(--good,#3a9f5b); }

@@ -145,8 +145,11 @@
   <div id="status"></div>
 </footer>
 
-<div id="modal" class="hidden">
+<div id="toasts" class="toasts" aria-live="polite" aria-atomic="true"></div>
+
+<div id="modal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
   <div class="sheet">
+    <button id="modal-close" class="modal-x" aria-label="close" title="close (Esc)">&times;</button>
     <h3 id="modal-title"></h3>
     <div id="modal-body"></div>
     <div class="modal-actions" id="modal-actions"></div>

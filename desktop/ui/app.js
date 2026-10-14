@@ -60,6 +60,20 @@ function addNote(text) {
   scrollDown();
 }
 
+// Non-blocking toast for success/failure. Kept small and dependency-free;
+// nothing on the page blocks while one is up.
+function toast(text, kind = 'info', ms = 2600) {
+  const host = $('toasts');
+  if (!host) return;
+  const node = el('div', `toast ${kind}`, text);
+  host.append(node);
+  requestAnimationFrame(() => node.classList.add('show'));
+  setTimeout(() => {
+    node.classList.remove('show');
+    setTimeout(() => node.remove(), 180);
+  }, ms);
+}
+
 function ensureAssistant() {
   if (state.assistant) return state.assistant;
   const msg = el('div', 'msg assistant');
@@ -133,7 +147,8 @@ function renderPending(changes) {
   state.pending.clear();
   for (const c of changes ?? []) state.pending.set(c.file, { ...c, checked: true });
 
-  $('pending-count').textContent = `${state.pending.size} change${state.pending.size === 1 ? '' : 's'}`;
+  const totals = [...state.pending.values()].reduce((a, c) => ({ add: a.add + (c.added ?? 0), del: a.del + (c.removed ?? 0) }), { add: 0, del: 0 });
+  $('pending-count').textContent = `${state.pending.size} change${state.pending.size === 1 ? '' : 's'} · +${totals.add} / -${totals.del}`;
   list.textContent = '';
   for (const [file, info] of state.pending) {
     const li = el('li');
@@ -182,6 +197,8 @@ function hideModal() {
   $('modal').classList.add('hidden');
   $('modal-body').closest('.sheet').classList.remove('settings-sheet');
 }
+// every modal now has a visual close affordance, not just the Escape key.
+try { $('modal-close').onclick = hideModal; } catch { /* loaded outside the window (tests) is fine */ }
 
 /* ------------------------------------------------------------ permissions */
 
