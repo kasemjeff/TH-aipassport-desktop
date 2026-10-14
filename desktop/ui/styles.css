@@ -758,3 +758,8 @@ select.pill:empty { min-width: 110px; color: var(--dim); }
 .toast.show { opacity:1; transform:translateY(0); }
 .toast.bad { border-color:var(--bad,#e25555); }
 .toast.good { border-color:var(--good,#3a9f5b); }
+
+/* UX deepen */
+#pending-list li:hover { background: var(--surface-2); transition: background .12s; }
+.list li.empty { color: var(--dim); font-style: italic; pointer-events: none; }
+
