@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Something exploitable
+    url: https://github.com/niawjunior/aipass-bridge/security/advisories/new
+    about: Please report security problems privately rather than as an issue.
+  - name: Setup and usage
+    url: https://github.com/niawjunior/aipass-bridge/blob/main/aipass-bridge/README.md
+    about: Setup, the agent's action set, models, image generation, credits, configuration.

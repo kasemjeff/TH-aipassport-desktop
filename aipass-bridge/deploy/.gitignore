@@ -1,0 +1,7 @@
+# the logged-in browser profile — never commit this
+chrome-data/
+# local secrets
+.env
+!.env.example
+*.log
+Singleton*
