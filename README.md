@@ -2,7 +2,7 @@
 
 <img width="420" alt="aipass bridge" src="https://github.com/user-attachments/assets/e79fbcbb-0a47-494a-af70-b315586fe3a7" />
 
-# aipass bridge
+# TH-aipassport harness (desktop, derived from aipass-bridge)
 
 **Make AiPASS great again — now with a terminal.**
 

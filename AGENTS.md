@@ -1,9 +1,10 @@
-# aipass-bridge
+# TH-aipassport harness
 
-Node-only project: a localhost OpenAI-compatible bridge to AiPASS, a Chrome MV3 extension, and CLI tools. There is no Next.js app or build step.
+Desktop harness built on top of the aipass-bridge derivative: a local OpenAI-compatible
+bridge to AiPASS, an MV3 Chrome extension, and CLI tools (chat, agent, doctor, setup).
 
+- No Next.js app or build step; runtime is plain Node + the extension.
 - Run tests with `npm test` (or `npm run check` for lint + tests).
 - Primary code lives in `aipass-bridge/*.mjs` and `aipass-bridge/bridge/server.mjs`.
-- The bridge has no runtime dependencies; keep it that way unless there is a strong reason.
 - Security invariants: bind to `127.0.0.1` by default; keep CORS and admin routes off; do not bypass authentication or scrape sessions.
-- Before committing: `git config user.email` verified on GitHub, `npm test` green, and list every file touched.
+- Before committing: verify `git config user.email`, run `npm test`, and list every file touched.

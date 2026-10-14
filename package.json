@@ -1,6 +1,7 @@
 {
   "name": "th-aipassport-harness",
   "version": "0.2.0",
+  "description": "Desktop harness for AiPASS (derived from aipass-bridge): local OpenAI-compatible bridge, CLI, doctor, and file agent.",
   "private": true,
   "engines": {
     "node": ">=20"
