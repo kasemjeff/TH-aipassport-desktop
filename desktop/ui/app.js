@@ -398,6 +398,7 @@ async function refreshSessions() {
   if (count) count.textContent = String(list.length);
   const ul = $('sessions');
   ul.textContent = '';
+  if (!list.length) ul.append(el('li', 'empty', 'No sessions yet'));
   for (const s of list.slice(0, 40)) {
     const li = el('li', s.id === state.sessionId ? 'active' : '');
     li.append(el('span', null, s.title || '(untitled)'));
@@ -422,6 +423,7 @@ async function refreshSkills() {
   const skills = await rpc('skills.list').catch(() => []);
   const ul = $('skills');
   ul.textContent = '';
+  if (!skills.length) ul.append(el('li', 'empty', 'No playbooks loaded'));
   for (const s of skills) {
     const li = el('li');
     li.append(el('span', null, s.name));
@@ -447,6 +449,7 @@ async function refreshFiles() {
   const entries = await rpc('fs.list', { dir: '.' }).catch(() => []);
   const ul = $('files');
   ul.textContent = '';
+  if (!entries.length) ul.append(el('li', 'empty', 'No files visible'));
   for (const e of entries.slice(0, 200)) {
     const li = el('li', 'dim');
     li.textContent = e.dir ? e.name + '/' : e.name;
