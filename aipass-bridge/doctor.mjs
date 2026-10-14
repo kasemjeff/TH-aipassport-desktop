@@ -25,6 +25,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
   --chat         send a test message even when no free model is available
   --no-chat      skip the round trip entirely
   --json         print a machine-readable summary as the last line
+  --version      print version and exit
 
 Exits 0 when every check passes, 1 otherwise.`);
   process.exit(0);

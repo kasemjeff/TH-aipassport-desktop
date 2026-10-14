@@ -42,6 +42,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
                                             (default: the cwd)
   --paste-idle MS     how long to wait before treating pasted lines as one
                       message                          (default: 60)
+  --version           print version and exit
 
 With a question, it answers and exits. Without one it stays interactive, where
 /models lists what is available, /model <id> switches, and Ctrl+C quits.`);
