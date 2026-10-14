@@ -178,7 +178,10 @@ async function showDiff(file) {
   $('modal').classList.remove('hidden');
 }
 
-function hideModal() { $('modal').classList.add('hidden'); }
+function hideModal() {
+  $('modal').classList.add('hidden');
+  $('modal-body').closest('.sheet').classList.remove('settings-sheet');
+}
 
 /* ------------------------------------------------------------ permissions */
 
@@ -414,7 +417,7 @@ async function refreshSkills() {
       if (found.error) body.append(el('p', null, found.error));
       else body.append(el('pre', null, found.text));
       $('modal-actions').textContent = '';
-      const close = el('button', 'primary', 'close');
+      const close = el('button', 'primary', 'ปิด');
       close.onclick = hideModal;
       $('modal-actions').append(close);
       $('modal').classList.remove('hidden');
@@ -439,7 +442,7 @@ async function refreshFiles() {
       if (found.error) body.append(el('p', null, found.error));
       else body.append(el('pre', null, found.text.slice(0, 20000)));
       $('modal-actions').textContent = '';
-      const close = el('button', 'primary', 'close');
+      const close = el('button', 'primary', 'ปิด');
       close.onclick = hideModal;
       $('modal-actions').append(close);
       $('modal').classList.remove('hidden');
@@ -562,28 +565,144 @@ function nameToPath(name) { return `~/${name}`; }
 
 /* --------------------------------------------------------------- settings */
 
-const SETTINGS_FORM = [
-  { key: 'displayName', label: 'ชื่อที่ใช้ทักทาย', type: 'text', note: 'แสดงในหน้าทักทายและโปรไฟล์มุมล่าง' },
-  { key: 'defaultModel', label: 'โมเดลเริ่มต้น', type: 'text', note: 'model id เช่น gemini-3.5-flash-lite' },
-  { key: 'mode', label: 'สิทธิ์การเขียน (mode)', type: 'select', options: [['ask', 'ask — ยืนยันก่อนเขียนทุกไฟล์'], ['auto', 'auto — เขียนผ่านอัตโนมัติ'], ['yolo', 'yolo — เขียนและ shell ผ่านหมด']] },
-  { key: 'allowRun', label: 'อนุญาตรัน shell', type: 'checkbox' },
-  { key: 'maxSteps', label: 'จำนวน step สูงสุด', type: 'number' },
-  { key: 'plan', label: 'โหมดวางแผน (plan)', type: 'checkbox' },
-  { key: 'requirePlanApproval', label: 'รออนุมัติแผนก่อนลงมือ', type: 'checkbox' },
-  { key: 'subagent', label: 'ผู้ช่วยย่อย (helpers)', type: 'checkbox' },
-  { key: 'theme', label: 'ธีม', type: 'select', options: [['light', 'สว่าง (light)'], ['dark', 'มืด (dark)']] },
-  { key: 'compaction.contextTokens', label: 'งบ context ก่อนสรุปย่อ', type: 'number', note: 'เกินแล้วจะสรุปงานเก่าและเริ่มบทสนทนาใหม่' },
+// Settings are grouped into sections; the dialog shows one section at a time
+// behind a category rail. Every field saves on change — there is no OK button
+// to forget.
+const SETTINGS_SECTIONS = [
+  {
+    id: 'general',
+    icon: '👤',
+    title: 'ทั่วไป',
+    sub: 'ชื่อเรียกและหน้าตาของแอป',
+    fields: [
+      { key: 'displayName', label: 'ชื่อที่ใช้ทักทาย', type: 'text', note: 'แสดงในหน้าทักทายและโปรไฟล์มุมล่าง' },
+      { key: 'theme', label: 'ธีม', type: 'select', options: [['light', 'สว่าง (light)'], ['dark', 'มืด (dark)']], note: 'เปลี่ยนทั้งหน้าต่างทันที' },
+    ],
+  },
+  {
+    id: 'agent',
+    icon: '🤖',
+    title: 'โมเดล & การทำงาน',
+    sub: 'พฤติกรรมของ AI เวลารันงาน',
+    fields: [
+      { key: 'defaultModel', label: 'โมเดลเริ่มต้น', type: 'text', note: 'model id เช่น gemini-3.5-flash-lite' },
+      { key: 'maxSteps', label: 'จำนวน step สูงสุด', type: 'number', note: 'จำกัดความยาวของงานหนึ่งชิ้น' },
+      { key: 'subagent', label: 'ผู้ช่วยย่อย (helpers)', type: 'checkbox', note: 'แตกงานย่อยให้ผู้ช่วยทำแยกได้' },
+      { key: 'plan', label: 'โหมดวางแผน (plan)', type: 'checkbox', note: 'เขียนแผนก่อนลงมือทุกครั้ง' },
+      { key: 'requirePlanApproval', label: 'รออนุมัติแผนก่อนลงมือ', type: 'checkbox', note: 'แผนต้องผ่านคุณก่อนแตะไฟล์จริง' },
+      { key: 'compaction.contextTokens', label: 'งบ context ก่อนสรุปย่อ', type: 'number', note: 'เกินแล้วจะสรุปงานเก่าและเริ่มบทสนทนาใหม่' },
+    ],
+  },
+  {
+    id: 'permissions',
+    icon: '🛡️',
+    title: 'สิทธิ์ & ความปลอดภัย',
+    sub: 'คุมว่า AI เขียนไฟล์และรันคำสั่งได้แค่ไหน',
+    fields: [
+      { key: 'mode', label: 'สิทธิ์การเขียน (mode)', type: 'select', options: [['ask', 'ask — ยืนยันก่อนเขียนทุกไฟล์'], ['auto', 'auto — เขียนผ่านอัตโนมัติ'], ['yolo', 'yolo — เขียนและ shell ผ่านหมด']], note: 'เปลี่ยนได้เร็ว ๆ ที่แถบพิมพ์ข้อความ' },
+      { key: 'allowRun', label: 'อนุญาตรัน shell', type: 'checkbox', note: 'ปิดไว้เมื่อไม่อยากให้รันคำสั่งใด ๆ' },
+    ],
+  },
+  {
+    id: 'playbooks',
+    icon: '📘',
+    title: 'Playbooks',
+    sub: 'แหล่งที่ใช้ค้นหา playbook',
+    fields: [
+      { key: 'skillsDirs', label: 'โฟลเดอร์ playbook', type: 'dirs', note: 'คั่นด้วย ; — โฟลเดอร์แรกที่เจอใช้ก่อน' },
+    ],
+  },
 ];
+
+// One labelled row: title + note on the left, the control on the right.
+// Checkboxes render as switches, `dirs` is a ;-separated list of folders.
+function fieldRow(field, get, set) {
+  const row = el('div', 'set-row');
+  const info = el('div', 'set-info');
+  info.append(el('div', 'set-title', field.label));
+  if (field.note) info.append(el('div', 'set-note', field.note));
+  const control = el('div', 'set-control');
+  const value = get(field.key);
+
+  if (field.type === 'checkbox') {
+    const lab = el('label', 'switch');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = Boolean(value);
+    box.onchange = () => set(field.key, box.checked);
+    lab.append(box, el('span', 'track'));
+    control.append(lab);
+  } else if (field.type === 'select') {
+    const select = document.createElement('select');
+    for (const [v, text] of field.options) {
+      const opt = document.createElement('option');
+      opt.value = v; opt.textContent = text;
+      if (v === value) opt.selected = true;
+      select.append(opt);
+    }
+    select.onchange = () => set(field.key, select.value);
+    control.append(select);
+  } else if (field.type === 'dirs') {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.classList.add('wide');
+    input.value = (value ?? []).join('; ');
+    input.onchange = () => set(field.key, input.value.split(';').map((s) => s.trim()).filter(Boolean));
+    control.append(input);
+  } else {
+    const input = document.createElement('input');
+    input.type = field.type;
+    input.value = value ?? '';
+    if (field.type === 'number') { input.min = '0'; input.classList.add('narrow'); }
+    input.onchange = () => set(field.key, field.type === 'number' ? Number(input.value) : input.value);
+    control.append(input);
+  }
+
+  row.append(info, control);
+  return row;
+}
+
+// Cards for the plugins page: loaded ones, load failures, the marker list and
+// the reload action, which reopens the dialog to show the fresh state.
+function pluginNodes(details) {
+  const nodes = [];
+  const loaded = details?.loaded ?? [];
+  const failed = details?.failed ?? [];
+  if (!loaded.length && !failed.length) {
+    const hint = el('p', 'settings-empty');
+    hint.append('ยังไม่มีปลั๊กอิน — ลากไฟล์ .mjs ใส่ ');
+    hint.append(el('code', null, details?.dir ?? 'โฟลเดอร์ปลั๊กอิน'));
+    hint.append(' แล้วกดโหลดใหม่');
+    nodes.push(hint);
+  }
+  for (const p of loaded) {
+    const card = el('div', 'plugin-card');
+    card.append(el('div', 'plugin-name', `${p.name} ${p.version}`));
+    card.append(el('div', 'plugin-desc', p.description || 'ไม่มีคำอธิบาย'));
+    nodes.push(card);
+  }
+  for (const f of failed) {
+    const card = el('div', 'plugin-card bad');
+    card.append(el('div', 'plugin-name', `โหลดไม่สำเร็จ — ${f.file}`));
+    card.append(el('div', 'plugin-desc', f.error));
+    nodes.push(card);
+  }
+  if (details?.tools?.length) {
+    const p = el('p', 'plugin-markers');
+    p.append('markers: ');
+    p.append(el('code', null, details.tools.join(', ')));
+    nodes.push(p);
+  }
+  const reload = el('button', 'soft', '↻ โหลดปลั๊กอินใหม่');
+  reload.onclick = async () => { await rpc('plugins.reload'); hideModal(); openSettings(); };
+  nodes.push(reload);
+  return nodes;
+}
 
 async function openSettings() {
   const settings = await rpc('settings.get').catch(() => null);
   if (!settings) { addNote('could not read settings'); return; }
   state.settings = settings;
-
-  $('modal-title').textContent = 'ตั้งค่า';
-  const body = $('modal-body');
-  body.textContent = '';
-  const form = el('div', 'settings-grid');
 
   const get = (key) => key.split('.').reduce((o, k) => (o ?? {})[k], settings);
   const set = (key, value) => {
@@ -595,76 +714,52 @@ async function openSettings() {
     return rpc('settings.set', patch);
   };
 
-  for (const field of SETTINGS_FORM) {
-    const label = el('label', null, field.label);
-    form.append(label);
-    const value = get(field.key);
-    if (field.type === 'checkbox') {
-      const box = document.createElement('input');
-      box.type = 'checkbox';
-      box.checked = Boolean(value);
-      box.onchange = () => set(field.key, box.checked);
-      form.append(box);
-      if (field.note) { form.append(el('span')); form.append(el('span', 'dim', field.note)); }
-    } else if (field.type === 'select') {
-      const select = document.createElement('select');
-      for (const [v, text] of field.options) {
-        const opt = document.createElement('option');
-        opt.value = v; opt.textContent = text;
-        if (v === value) opt.selected = true;
-        select.append(opt);
-      }
-      select.onchange = () => set(field.key, select.value);
-      form.append(select);
-      if (field.note) { form.append(el('span')); form.append(el('span', 'dim', field.note)); }
+  const plugins = await rpc('plugins.list').catch(() => null);
+  const sections = plugins
+    ? [...SETTINGS_SECTIONS, { id: 'plugins', icon: '🧩', title: 'ปลั๊กอิน', sub: 'โค้ดเสริมที่โหลดจากโฟลเดอร์ปลั๊กอิน' }]
+    : SETTINGS_SECTIONS;
+
+  const root = el('div', 'settings');
+  const nav = el('nav', 'settings-nav');
+  const pages = el('div', 'settings-pages');
+  const show = (id) => {
+    for (const b of nav.querySelectorAll('button')) b.classList.toggle('active', b.dataset.cat === id);
+    for (const p of pages.querySelectorAll('.settings-page')) p.classList.toggle('active', p.dataset.page === id);
+  };
+
+  sections.forEach((section, i) => {
+    const tab = el('button', i === 0 ? 'active' : '');
+    tab.dataset.cat = section.id;
+    tab.append(el('span', 'nav-icon', section.icon), el('span', null, section.title));
+    tab.onclick = () => show(section.id);
+    nav.append(tab);
+
+    const page = el('section', i === 0 ? 'settings-page active' : 'settings-page');
+    page.dataset.page = section.id;
+    page.append(el('h4', 'settings-page-title', section.title));
+    page.append(el('p', 'settings-page-sub', section.sub));
+    if (section.id === 'plugins') {
+      page.append(...pluginNodes(plugins));
     } else {
-      const input = document.createElement('input');
-      input.type = field.type;
-      input.value = value ?? '';
-      if (field.type === 'number') input.min = '0';
-      input.onchange = () => set(field.key, field.type === 'number' ? Number(input.value) : input.value);
-      form.append(input);
-      if (field.note) { form.append(el('span')); form.append(el('span', 'dim', field.note)); }
+      const group = el('div', 'set-group');
+      for (const field of section.fields) group.append(fieldRow(field, get, set));
+      page.append(group);
     }
-  }
+    pages.append(page);
+  });
 
-  // Playbook folders, one per line, resolved in order.
-  form.append(el('label', null, 'โฟลเดอร์ playbook'));
-  const dirs = document.createElement('input');
-  dirs.type = 'text';
-  dirs.value = (settings.skillsDirs ?? []).join('; ');
-  dirs.onchange = () => rpc('settings.set', { skillsDirs: dirs.value.split(';').map((s) => s.trim()).filter(Boolean) });
-  form.append(dirs);
-  form.append(el('span'));
-  form.append(el('span', 'dim', 'คั่นด้วย ; — โฟลเดอร์แรกที่เจอใช้ก่อน'));
-
-  body.append(form);
-
-  // Plugins, listed from the manager.
-  const details = await rpc('plugins.list').catch(() => null);
-  if (details) {
-    body.append(el('h4', null, `ปลั๊กอิน — ${details.dir}`));
-    if (!details.loaded.length && !details.failed.length) {
-      body.append(el('p', 'dim', `ลากไฟล์ .mjs ใส่ ${details.dir} เพื่อเพิ่มปลั๊กอิน`));
-    }
-    for (const p of details.loaded) {
-      body.append(el('p', null, `${p.name} ${p.version} — ${p.description || 'no description'}`));
-    }
-    for (const f of details.failed) {
-      body.append(el('p', null, `failed: ${f.file} — ${f.error}`));
-    }
-    if (details.tools.length) {
-      body.append(el('p', 'dim', `markers: ${details.tools.join(', ')}`));
-    }
-  }
+  root.append(nav, pages);
+  $('modal-title').textContent = 'ตั้งค่า';
+  const body = $('modal-body');
+  body.textContent = '';
+  body.append(root);
+  body.closest('.sheet').classList.add('settings-sheet');
 
   const actions = $('modal-actions');
   actions.textContent = '';
-  const reload = el('button', null, 'โหลดปลั๊กอินใหม่');
-  reload.onclick = async () => { await rpc('plugins.reload'); hideModal(); openSettings(); };
   const close = el('button', 'primary', 'ปิด');
   close.onclick = hideModal;
-  actions.append(reload, close);
+  actions.append(close);
   $('modal').classList.remove('hidden');
 }
 
