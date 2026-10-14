@@ -768,3 +768,35 @@ select.pill:empty { min-width: 110px; color: var(--dim); }
 .root-bar { display:flex; gap:8px; align-items:center; padding:8px 14px; border-bottom:1px solid var(--line); font-size:12px; color:var(--dim); background:var(--surface-2); }
 .root-bar-path { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:56%; color:var(--fg); }
 .root-bar-label { font-weight:600; }
+
+
+/* command palette */
+.command-palette { position: fixed; inset: 0; background: rgba(0,0,0,.45); display:flex; align-items:flex-start; justify-content:center; z-index:200; }
+#command-palette { padding-top: 10vh; }
+#command-palette.hidden { display:none !important; }
+.palette-card { width: min(720px, 92vw); background: var(--bg); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow-strong,0 12px 40px rgba(0,0,0,.35)); overflow:hidden; display:flex; flex-direction:column; max-height: 60vh; }
+.palette-head { display:flex; gap:8px; align-items:center; padding:10px 12px; background: var(--surface-2); border-bottom:1px solid var(--line); }
+.palette-head input { flex:1; border:1px solid var(--line); border-radius:10px; padding:8px 10px; background: var(--surface); color:var(--fg); }
+.palette-close { border:none; background:transparent; color:var(--dim); font-size:22px; width:30px; height:30px; border-radius:8px; cursor:pointer; }
+.palette-results { overflow:auto; padding:4px; }
+.palette-row { display:flex; flex-direction:column; gap:2px; padding:9px 12px; border-radius:10px; cursor:pointer; }
+.palette-row.active { background: var(--accent, rgba(90,120,200,.18)); }
+.palette-row:hover { background: var(--surface-2); }
+.palette-title { font-size:14px; }
+.palette-sub { font-size:11px; color:var(--dim); }
+.palette-empty { margin:16px; color:var(--dim); font-style:italic; }
+.palette-foot { padding:8px 12px; font-size:11px; color:var(--dim); border-top:1px solid var(--line); background: var(--surface-2); }
+
+.side-search { width:100%; margin:0 0 8px; padding:6px 8px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--fg); font-size:12px; }
+
+
+/* nested file tree */
+.tree-list { list-style:none; padding-left:10px; margin:2px 0; }
+.tree-dir { margin:2px 0; }
+.tree-dir summary { cursor:pointer; user-select:none; color:var(--fg); padding:3px 4px; border-radius:6px; }
+.tree-dir summary:hover { background: var(--surface-2); }
+.tree-file { cursor:pointer; padding:3px 6px; border-radius:6px; list-style:none; color:var(--dim); }
+.tree-file:hover { background: var(--surface-2); color:var(--fg); }
+.tree-file::marker { content: ''; }
+
+.run-stats { font-size:12px; color:var(--dim); margin-right:8px; }

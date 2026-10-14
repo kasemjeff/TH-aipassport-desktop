@@ -112,12 +112,14 @@ function endTurn() {
 }
 
 function addTool({ kind, arg, ok, head, lines = [] }) {
+  if (state.runMetrics) { state.runMetrics.tools += 1; if (!ok) state.runMetrics.errors += 1; }
   const row = el('div', ok ? 'tool' : 'tool bad');
   const mark = el('span', 'mark', ok ? '✓ ' : '✗ ');
   row.append(mark, el('span', null, `${kind} ${arg ?? ''} `), el('span', 'dim', head ?? ''));
   for (const line of lines) log.append(el('div', 'note', '      ' + line));
   log.append(row);
   scrollDown();
+  renderRunStats();
 }
 
 /* ------------------------------------------------------------------ panel */
@@ -245,12 +247,14 @@ function askPlan() {
 
 const stream = new EventSource('/events');
 
-stream.addEventListener('task_start', (e) => { addTask(JSON.parse(e.data).task); });
+stream.addEventListener('task_start', (e) => { addTask(JSON.parse(e.data).task); state.runMetrics = { startedAt: Date.now(), step: 0, maxSteps: 0, tools: 0, errors: 0 }; renderRunStats(); });
 stream.addEventListener('assistant_delta', (e) => assistantText(JSON.parse(e.data).text));
 stream.addEventListener('reasoning_delta', (e) => thinkingText(JSON.parse(e.data).text));
 stream.addEventListener('step', (e) => {
   const { step, maxSteps, elapsed } = JSON.parse(e.data);
   addNote(`step ${step}/${maxSteps} · ${elapsed}s`);
+  if (state.runMetrics) { state.runMetrics.step = step; state.runMetrics.maxSteps = maxSteps; state.runMetrics.elapsed = elapsed; }
+  renderRunStats();
 });
 stream.addEventListener('thinking', (e) => {
   const { text } = JSON.parse(e.data);
@@ -289,6 +293,8 @@ stream.addEventListener('finished', async (e) => {
   const { summary, stopReason, spent, credits } = JSON.parse(e.data);
   endTurn();
   state.running = false;
+  state.runMetrics = null;
+  renderRunStats();
   $('send').textContent = '➤';
   $('hint').textContent = '';
   if (credits) addNote(`credits เหลือ ${credits.available?.toLocaleString?.() ?? credits.available} จาก ${credits.limit?.toLocaleString?.() ?? credits.limit}${spent > 0 ? ` · รันนี้ใช้ไป ${spent.toLocaleString()}` : ''}`);
@@ -367,7 +373,9 @@ $('send').onclick = (ev) => {
 
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && !$('modal').classList.contains('hidden')) hideModal();
+  else if (ev.key === 'Escape' && $('command-palette') && !$('command-palette').classList.contains('hidden')) commandPaletteClose();
   else if (ev.key === 'Escape' && state.running) rpc('cancel');
+  if (ev.ctrlKey && (ev.key === 'k' || ev.key === 'K' || ev.key === 'p' || ev.key === 'P')) { ev.preventDefault(); commandPaletteOpen(); }
 });
 
 $('apply').onclick = async () => {
@@ -394,15 +402,29 @@ async function refreshPending() {
 
 async function refreshSessions() {
   const list = await rpc('session.list').catch(() => []);
+  state.sessions = list;
   const count = $('card-sessions');
   if (count) count.textContent = String(list.length);
+  const q = ($('session-search')?.value || '').toLowerCase().trim();
+  const filtered = q ? list.filter((s) => String(s.title || '').toLowerCase().includes(q)) : list;
   const ul = $('sessions');
   ul.textContent = '';
-  if (!list.length) ul.append(el('li', 'empty', 'No sessions yet'));
-  for (const s of list.slice(0, 40)) {
+  if (!filtered.length) ul.append(el('li', 'empty', q ? 'No sessions match that filter' : 'No sessions yet'));
+  for (const s of filtered.slice(0, 40)) {
     const li = el('li', s.id === state.sessionId ? 'active' : '');
-    li.append(el('span', null, s.title || '(untitled)'));
-    li.onclick = async () => {
+    const row = el('div', 'sess-row');
+    const title = el('span', 'sess-title', s.title || '(untitled)');
+    const actions = el('div', 'sess-actions');
+    const openBtn = el('button', 'sess-action', '▸');
+    openBtn.title = 'Open session';
+    const renameBtn = el('button', 'sess-action', '✎');
+    renameBtn.title = 'Rename';
+    const forkBtn = el('button', 'sess-action', '⊢');
+    forkBtn.title = 'Fork from here';
+    const deleteBtn = el('button', 'sess-action danger', '×');
+    deleteBtn.title = 'Delete';
+    openBtn.onclick = async (ev) => {
+      ev.stopPropagation();
       const entries = await rpc('session.open', { id: s.id });
       state.sessionId = s.id;
       log.textContent = '';
@@ -415,6 +437,33 @@ async function refreshSessions() {
       endTurn();
       await refreshSessions();
     };
+    renameBtn.onclick = async (ev) => {
+      ev.stopPropagation();
+      const titleName = window.prompt('Rename this session:', s.title || '(untitled)');
+      if (titleName == null) return;
+      try { await rpc('session.rename', { id: s.id, title: titleName }); addNote('Renamed session.'); await refreshSessions(); }
+      catch (err) { addNote('Rename failed: ' + err.message); }
+    };
+    forkBtn.onclick = async (ev) => {
+      ev.stopPropagation();
+      if (state.sessionId !== s.id) {
+        try { await rpc('session.open', { id: s.id }); state.sessionId = s.id; } catch { /* ignore */ }
+      }
+      const forked = await rpc('session.fork', {}).catch((err) => ({ error: err.message }));
+      if (forked.error) addNote('Fork failed: ' + forked.error);
+      else { addNote('Forked into a new session.'); await refreshSessions(); }
+    };
+    deleteBtn.onclick = async (ev) => {
+      ev.stopPropagation();
+      if (!window.confirm('Delete this session?')) return;
+      await rpc('session.delete', { id: s.id }).catch((err) => addNote('Delete failed: ' + err.message));
+      await refreshSessions();
+      if (state.sessionId === s.id) { state.sessionId = null; log.textContent = ''; }
+    };
+    actions.append(openBtn, renameBtn, forkBtn, deleteBtn);
+    row.append(title, actions);
+    li.append(row);
+    li.onclick = async () => openBtn.onclick({ stopPropagation(){ } });
     ul.append(li);
   }
 }
@@ -447,28 +496,60 @@ async function refreshSkills() {
 
 async function refreshFiles() {
   const entries = await rpc('fs.list', { dir: '.' }).catch(() => []);
+  state.files = entries;
   const ul = $('files');
   ul.textContent = '';
-  if (!entries.length) ul.append(el('li', 'empty', 'No files visible'));
-  for (const e of entries.slice(0, 200)) {
-    const li = el('li', 'dim');
-    li.textContent = e.dir ? e.name + '/' : e.name;
-    li.onclick = async () => {
-      if (e.dir) return;
-      const found = await rpc('fs.read', { file: e.name }).catch((err) => ({ error: err.message }));
-      $('modal-title').textContent = e.name;
-      const body = $('modal-body');
-      body.textContent = '';
-      if (found.error) body.append(el('p', null, found.error));
-      else body.append(el('pre', null, found.text.slice(0, 20000)));
-      $('modal-actions').textContent = '';
-      const close = el('button', 'primary', 'ปิด');
-      close.onclick = hideModal;
-      $('modal-actions').append(close);
-      $('modal').classList.remove('hidden');
-    };
-    ul.append(li);
+  if (!Array.isArray(entries) || !entries.length) {
+    ul.append(el('li', 'empty', 'No files visible (hidden/excluded)'));
+    return;
   }
+  /* Nested file explorer: each folder is collapsible and lazy-loaded.
+   * The backend already guards paths, so we keep passing only relative roots. */
+  const joinPath = (base, name) => base === '.' ? name : base + '/' + name;
+  const openFile = async (rel) => {
+    const found = await rpc('fs.read', { file: rel }).catch((err) => ({ error: err.message }));
+    $('modal-title').textContent = rel;
+    const body = $('modal-body');
+    body.textContent = '';
+    if (found.error) body.append(el('p', null, found.error));
+    else body.append(el('pre', null, String(found.text).slice(0, 20000)));
+    $('modal-actions').textContent = '';
+    const close = el('button', 'primary', 'ปิด');
+    close.onclick = hideModal;
+    $('modal-actions').append(close);
+    $('modal').classList.remove('hidden');
+  };
+  const buildNode = (container, dir, list) => {
+    for (const e of (list || []).slice(0, 200)) {
+      const rel = joinPath(dir, e.name);
+      if (e.dir) {
+        const details = el('details', 'tree-dir');
+        const summary = el('summary', 'tree-dir-name', '▸ ' + e.name + '/');
+        const child = document.createElement('ul');
+        child.className = 'tree-list';
+        details.append(summary, child);
+        let loaded = false;
+        details.addEventListener('toggle', async () => {
+          if (!details.open || loaded) return;
+          loaded = true;
+          summary.textContent = '▾ ' + e.name + '/';
+          child.textContent = 'กำลังโหลด…';
+          let sub = await rpc('fs.list', { dir: rel }).catch((err) => []);
+          child.textContent = '';
+          if (!Array.isArray(sub) || !sub.length) child.append(el('li', 'empty', 'Empty'));
+          else buildNode(child, rel, sub);
+        });
+        container.append(details);
+      } else {
+        const li = el('li', 'tree-file');
+        li.textContent = e.name;
+        li.title = rel;
+        li.onclick = () => openFile(rel);
+        container.append(li);
+      }
+    }
+  };
+  buildNode(ul, '.', entries);
 }
 
 /* ------------------------------------------------------------ attachments */
@@ -536,6 +617,7 @@ $('file-picker').onchange = () => { stageFiles([...$('file-picker').files]); $('
 /* --------------------------------------------------------------- projects */
 
 async function refreshProjects(projects) {
+  state.projects = projects ?? state.projects;
   const select = $('project');
   const previous = select.value;
   select.textContent = '';
@@ -971,6 +1053,150 @@ function growTask() {
 }
 $('task').addEventListener('input', growTask);
 
+/* ------------------------------------------------------- command palette */
+function commandPaletteOpen() {
+  var elPalette = $('command-palette');
+  if (!elPalette) return;
+  elPalette.classList.remove('hidden');
+  var input = $('palette-query');
+  input.value = '';
+  state.paletteIndex = 0;
+  renderCommandPalette('');
+  input.focus();
+}
+function commandPaletteClose() {
+  var elPalette = $('command-palette');
+  if (elPalette) elPalette.classList.add('hidden');
+}
+function commandEntries() {
+  var sessions = state.sessions || [];
+  var files = state.files || [];
+  var projects = state.projects || [];
+  var sessionEntries = sessions.map(function(s) {
+    return {
+      id: 'session:' + s.id,
+      title: s.title || '(untitled)',
+      subtitle: 'session · open',
+      run: async function() {
+        var entries = await rpc('session.open', { id: s.id });
+        state.sessionId = s.id;
+        log.textContent = '';
+        for (var i = 0; i < entries.length; i++) {
+          var entry = entries[i];
+          if (entry.type === 'task') addTask(entry.text);
+          else if (entry.type === 'assistant') assistantText(entry.text ?? '');
+          else if (entry.type === 'tool') addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '' });
+          else if (entry.type === 'note') addNote(entry.text);
+        }
+        endTurn();
+        await refreshSessions();
+      },
+    };
+  });
+  var fileEntries = files.map(function(f) {
+    return {
+      id: 'file:' + f.name,
+      title: f.name,
+      subtitle: 'file · inspect' + (f.dir ? ' (dir)' : ''),
+      run: async function() {
+        if (!f.dir) {
+          var found = await rpc('fs.read', { file: f.name }).catch(function(err){ return { error: err.message }; });
+          $('modal-title').textContent = f.name;
+          var body = $('modal-body'); body.textContent = '';
+          if (found.error) body.append(el('p', null, found.error));
+          else body.append(el('pre', null, String(found.text).slice(0, 20000)));
+          var actions = $('modal-actions'); actions.textContent = '';
+          var close = el('button', 'primary', 'ปิด'); close.onclick = hideModal; actions.append(close);
+          $('modal').classList.remove('hidden');
+        } else {
+          addNote('Folder: ' + f.name);
+        }
+      },
+    };
+  });
+  var projectEntries = projects.map(function(p) {
+    return {
+      id: 'project:' + p.path,
+      title: p.name ?? p.path,
+      subtitle: 'project · switch',
+      run: async function() {
+        var result = await rpc('projects.switch', { path: p.path }).catch(function(err){ return { error: err.message }; });
+        if (result.error) { addNote('could not switch project: ' + result.error); return; }
+        log.textContent = '';
+        state.sessionId = null;
+        renderPending([]);
+        addNote('project: ' + p.path);
+        await Promise.all([refreshSessions(), refreshFiles(), refreshSkills(), refreshPanels()]);
+      },
+    };
+  });
+  return [
+    { id: 'action:new', title: '(new) start a new plan', subtitle: 'session · create', run: async function(){ log.textContent=''; await rpc('session.new'); await refreshSessions(); } },
+    { id: 'action:settings', title: '(settings) open preferences', subtitle: 'app · preferences', run: openSettings },
+    { id: 'action:sidebar', title: '(ui) toggle sidebar', subtitle: 'app · layout', run: function(){ $('side-toggle').click(); } },
+    { id: 'action:pending', title: '(pending) refresh diff queue', subtitle: 'files · approval', run: async function(){ await refreshPending(); } },
+    { id: 'action:theme', title: '(theme) toggle dark / light', subtitle: 'app · theme', run: function(){ document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; } },
+  ].concat(sessionEntries, fileEntries, projectEntries);
+}
+function paletteScore(text, query) {
+  var t = (text ?? '').toLowerCase();
+  var q = (query ?? '').toLowerCase().trim();
+  if (!q) return 1;
+  if (t.includes(q)) return 100 - (t.indexOf(q));
+  var i = 0, score = 0;
+  for (var ci = 0; ci < q.length; ci++) {
+    var ch = q[ci];
+    var pos = t.indexOf(ch, i);
+    if (pos >= 0) { score += 5; i = pos + 1; } else return 0;
+  }
+  return score;
+}
+function renderCommandPalette(query) {
+  var ul = $('palette-results');
+  if (!ul) return;
+  ul.textContent = '';
+  var items = commandEntries().map(function(item) {
+    return { item: item, score: paletteScore(item.title + ' ' + item.subtitle, query) };
+  }).filter(function(x){ return x.score; }).sort(function(a,b){ return b.score-a.score; }).slice(0, 30).map(function(x){ return x.item; });
+  state.paletteList = items;
+  if (!items.length) ul.append(el('div','palette-empty','No matches - try another keyword'));
+  if (typeof state.paletteIndex !== 'number') state.paletteIndex = 0;
+  if (state.paletteIndex >= items.length) state.paletteIndex = Math.max(0, items.length - 1);
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var li = el('div', 'palette-row' + (i === state.paletteIndex ? ' active' : ''));
+    li.setAttribute('data-palette-index', String(i));
+    li.append(el('div','palette-title', item.title), el('div','palette-sub', item.subtitle));
+    li.onclick = (function(item) { return async function() { commandPaletteClose(); await item.run().catch(function(err){ addNote('command failed: '+err.message); }); }; })(item);
+    ul.append(li);
+  }
+}
+function setupCommandPalette() {
+  var input = $('palette-query');
+  var list = $('palette-results');
+  if (!input || !list) return;
+  state.paletteIndex = 0;
+  input.addEventListener('input', function() { state.paletteIndex = 0; renderCommandPalette(input.value); });
+  input.addEventListener('keydown', async function(ev) {
+    var rows = list.querySelectorAll('.palette-row');
+    if (ev.key === 'ArrowDown') { ev.preventDefault(); state.paletteIndex = Math.min(state.paletteIndex + 1, rows.length - 1); renderCommandPalette(input.value); }
+    else if (ev.key === 'ArrowUp') { ev.preventDefault(); state.paletteIndex = Math.max(state.paletteIndex - 1, 0); renderCommandPalette(input.value); }
+    else if (ev.key === 'Enter') { ev.preventDefault(); var row = rows[state.paletteIndex]; if (row) row.click(); }
+  });
+  var palette = $('command-palette');
+  if (palette) palette.addEventListener('click', function(ev) { if (ev.target === palette) commandPaletteClose(); });
+}
+
+
+function renderRunStats() {
+  const node = $('run-stats');
+  if (!node || !state.runMetrics) { if (node) node.classList.add('hidden'); return; }
+  const m = state.runMetrics;
+  const secs = Math.max(1, Math.round((Date.now() - m.startedAt) / 1000));
+  node.textContent = `⚡ ${m.step}/${m.maxSteps || '?'} · tools ${m.tools}${m.errors ? ' · errors ' + m.errors : ''} · ${secs}s`;
+  node.classList.remove('hidden');
+}
+
 /* ------------------------------------------------------------------ boot */
 
 (async function boot() {
@@ -982,5 +1208,8 @@ $('task').addEventListener('input', growTask);
   await refreshFiles();
   await refreshPanels();
   await refreshPending();
+  try { setupCommandPalette(); } catch { /* optional */ }
+  try { $('palette-close').onclick = commandPaletteClose; } catch { /* optional */ }
+  try { $('session-search')?.addEventListener('input', refreshSessions); } catch { /* optional */ }
   $('task').focus();
 })();

@@ -37,6 +37,7 @@
 
       <details class="side-sec" open>
         <summary>รายการแผน</summary>
+        <input id="session-search" type="search" class="side-search" placeholder="กรองแผน..." />
         <ul id="sessions" class="list"></ul>
       </details>
 
@@ -143,6 +144,7 @@
 
 <footer id="statusbar">
   <span id="meta"></span>
+  <span id="run-stats" class="run-stats hidden"></span>
   <span class="grow"></span>
   <div id="status"></div>
 </footer>
@@ -160,5 +162,18 @@
 
 <script type="module" src="/md.js"></script>
 <script type="module" src="/app.js"></script>
+
+<div id="command-palette" class="hidden" role="dialog" aria-modal="true" aria-label="command palette">
+  <div class="palette-card">
+    <div class="palette-head">
+      <span>⌘ Ctrl+K</span>
+      <input id="palette-query" type="text" placeholder="Search sessions, files, projects and commands" />
+      <button id="palette-close" class="modal-x" title="close (Esc)">×</button>
+    </div>
+    <div id="palette-results" class="palette-results"></div>
+    <div class="palette-foot">↑↓ navigate · Enter run · Esc close · Ctrl+K palette</div>
+  </div>
+</div>
+
 </body>
 </html>
