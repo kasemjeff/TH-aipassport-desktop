@@ -30,7 +30,7 @@ const el = (tag, cls, text) => {
   if (text != null) n.textContent = text;
   return n;
 };
-const scrollDown = () => { log.scrollTop = log.scrollHeight; };
+const scrollDown = () => { if (state.autoScroll) log.scrollTop = log.scrollHeight; };
 
 const state = {
   running: false,
@@ -55,7 +55,7 @@ function addTask(text) {
   scrollDown();
 }
 
-function addNote(text) {
+// toggle auto-scroll from the root bar button.\ntry { $('auto-scroll-btn')?.addEventListener('click', () => { state.autoScroll = !state.autoScroll; const b = $('auto-scroll-btn'); if (b) b.textContent = `auto-scroll: ${state.autoScroll ? 'on' : 'off'}`; }); } catch { /* ignore outside UI */ }\nfunction addNote(text) {
   log.append(el('div', 'note', text));
   scrollDown();
 }

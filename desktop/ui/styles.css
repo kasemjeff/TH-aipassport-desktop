@@ -763,3 +763,8 @@ select.pill:empty { min-width: 110px; color: var(--dim); }
 #pending-list li:hover { background: var(--surface-2); transition: background .12s; }
 .list li.empty { color: var(--dim); font-style: italic; pointer-events: none; }
 
+
+/* root bar */
+.root-bar { display:flex; gap:8px; align-items:center; padding:8px 14px; border-bottom:1px solid var(--line); font-size:12px; color:var(--dim); background:var(--surface-2); }
+.root-bar-path { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:56%; color:var(--fg); }
+.root-bar-label { font-weight:600; }
