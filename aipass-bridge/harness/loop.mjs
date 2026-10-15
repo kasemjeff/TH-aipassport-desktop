@@ -306,9 +306,15 @@ export async function runTask(taskText, ctx = {}) {
       if (refused) stat.fail += 1;
       toolStats.set(call.kind, stat);
       const isLast = i === work.length - 1 && !done;
-      events?.emit('tool', { kind: call.kind, arg: call.arg, ok: !refused, head: head.slice(0, 70), lines: refused ? rest : [], isLast });
-      session?.append('tool', { kind: call.kind, arg: call.arg, out: text.slice(0, 20_000), ok: !refused });
-      results.push(`Result of ${call.kind} ${call.arg}:\n${outbound(result)}`);
+      // A RUN's label is its command: the parser puts the command in the body,
+      // so `arg` alone leaves a row that says "run" and nothing else — in the
+      // window, in the replayed session, and in the step result the model reads
+      // back. The first line is the label; a wrapped command reads until the
+      // first break, which is what fits a row.
+      const label = call.kind === 'run' && !call.arg ? String(call.body ?? '').split('\n')[0].trim() : call.arg;
+      events?.emit('tool', { kind: call.kind, arg: label, ok: !refused, head: head.slice(0, 70), lines: refused ? rest : [], isLast });
+      session?.append('tool', { kind: call.kind, arg: label, out: text.slice(0, 20_000), ok: !refused });
+      results.push(`Result of ${call.kind} ${label}:\n${outbound(result)}`);
     }
 
     // A plan the human has not signed off on stops the run here: the point of

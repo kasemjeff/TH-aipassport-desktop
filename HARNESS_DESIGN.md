@@ -483,6 +483,9 @@ Worth closing, in roughly the order the table reads:
    destructive bodies — `rm -rf`, `sudo`, `del /s`, `curl | sh`, git-writes —
    to a question in every mode, ahead of grants, because `RUN` carries
    `arg: ''` and one "always" would otherwise blanket every future command.
+   (The rows a reader sees label a run by its command: `loop.mjs` builds that
+   label for display only — the engine still sees `arg: ''`, so grants and the
+   classifier behave the same before and after the label existed.)
    The list is deliberately shallow (first word plus a substring net): a false
    positive costs one question, a false negative costs the repository. A
    checker child has no one to ask, so a shell-risk command there resolves to

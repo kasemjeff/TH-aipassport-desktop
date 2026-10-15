@@ -420,3 +420,33 @@ test('one repeat earns a correction, and a different move clears the guard (H7)'
   assert.deepEqual(seen.map((p) => p.action), ['warn'], 'warned once, never stopped');
   assert.match(bridge.received[2], /repeating it moves nothing/, 'the correction reached the model');
 });
+
+/* A RUN's label is its command --------------------------------------------- */
+
+test('a run row carries the command, not an empty string', async () => {
+  // The parser puts a RUN command in the body, so `arg` used to be '' — the
+  // window showed a row that said "Run" and nothing else, the replayed session
+  // the same, and the step result read "Result of run :" to the model.
+  const dir = tempDir({});
+  const store = new SessionStore(path.join(dir, 'sessions'));
+  const session = store.create({ root: dir });
+  const tools = createTools({ root: dir, overlay: new Overlay(dir) });
+  const events = new Emitter();
+  const seen = [];
+  events.on('tool', (p) => seen.push(p));
+
+  const bridge = scriptedLoop(['RUN\necho one\necho two\nEND', 'DONE ran it']);
+  const result = await runTask('run the check', {
+    bridge, tools, overlay: new Overlay(dir), session, events,
+    permissions: new PermissionEngine({ mode: 'yolo', allowRun: true }),
+    options: { maxSteps: 4 }, first: true,
+  });
+
+  assert.equal(result.stopReason, 'done');
+  const run = seen.find((p) => p.kind === 'run');
+  assert.ok(run, `the command ran:\n${JSON.stringify(seen)}`);
+  assert.equal(run.arg, 'echo one', 'the row shows the first line of the command');
+  // The session records the same label, so a replayed window reads the same row.
+  const entry = session.entries.find((e) => e.type === 'tool' && e.kind === 'run');
+  assert.equal(entry.arg, 'echo one');
+});
