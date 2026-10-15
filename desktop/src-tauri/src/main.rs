@@ -117,7 +117,19 @@ fn stop_backend(pid: u32) {
     let _ = Command::new("kill").args(["-TERM", &format!("-{pid}")]).status();
 }
 
-#[cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+/// The backend port, shared with the JS side: `AIPASS_DESKTOP_PORT` wins, the
+/// loopback default is 8790. A value that is not a port is refused rather than
+/// guessed — the window must look at the same port the backend is on.
+fn backend_port() -> Result<u16, Box<dyn std::error::Error>> {
+    match std::env::var("AIPASS_DESKTOP_PORT") {
+        Ok(raw) if !raw.trim().is_empty() => raw
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| format!("AIPASS_DESKTOP_PORT is not a port: {raw}").into()),
+        _ => Ok(8790),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tauri::Builder::default()
         // A second double-click must focus the window that is already there,
