@@ -143,6 +143,18 @@ test('git refuses the forms that delete, write or reach another repository', asy
   }
 });
 
+test('git outside a repository answers in one line, not a page of help', async () => {
+  // Live finding (2026-10-15): `git diff` in a plain folder printed the whole
+  // option help with exit 129 and spilled 4 KB of context. The one fact worth
+  // having fits in a line.
+  const dir = tempDir({ 'a.txt': 'hello\n' });
+  const tools = toolsIn(dir);
+
+  const out = await tools.git('diff');
+  assert.match(out, /^err: not a git repository/);
+  assert.ok(out.split('\n').length <= 2, `one line of reason, got:\n${out}`);
+});
+
 /* H4 — the header is rewritten in batches --------------------------------- */
 
 test('append batches the header rewrite, and rename still fixes it at once', (t) => {

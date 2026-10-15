@@ -352,7 +352,12 @@ export function createTools(ctx) {
         });
         return clip(stdout);
       } catch (err) {
-        return clip(`err: exit ${err.code ?? err.status ?? 1}\n${String(err.stderr ?? err.stdout ?? '')}`);
+        const detail = String(err.stderr ?? err.stdout ?? '');
+        // `git diff` outside a repository answers with a page of option help
+        // and exit 129 (live finding, 2026-10-15). The one fact worth having
+        // fits in a line — say the fact, not the wall.
+        if (/not a git repository/i.test(detail)) return 'err: not a git repository — GIT only works inside one. Run git init first, or skip git here.';
+        return clip(`err: exit ${err.code ?? err.status ?? 1}\n${detail}`);
       }
     },
     async fetch(url) {
