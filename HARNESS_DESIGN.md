@@ -465,7 +465,7 @@ The map, then what each gap is worth:
 | PostToolUse — compact an oversized result | Observation compressor | clip at `maxResult` + spill file with a `NEED` locator (`tools.mjs`) — reads keep the head, `RUN` keeps head+tail (ACI round); conversation summarise→rotate at the budget (`compact.mjs`) | done, three tiers; the elided middle of a command sits on disk, not lost |
 | Stop — tests fail, keep working | Verify | R4's one soft nudge (`verifyPrompts`); the checker at DONE — a read-only child runs the project's own check, the verdict computed from what it ran, one continuation on fail (`loop.mjs`, `harness.mjs#makeChecker`) | done v1 — the verdict is advisory: a second DONE is accepted with `checks`/`checkVerdict` recorded |
 | PreToolUse — count calls, log every event | Budget + trace | one `run_stats` line per run + one session JSONL entry per tool call, 20 000-char result and all | done; per-tool latency and a hard per-run cap are still not recorded |
-| PreToolUse — destructive commands, config files, red-test commits | Safety gates | modes + the H9 rule engine: path rules outrank the mode, reads included; no listener means deny | partial — the engine is strong, the specific gates are not written |
+| PreToolUse — destructive commands, config files, red-test commits | Safety gates | modes + the H9 rule engine: path rules outrank the mode, reads included; no listener means deny; `classifyRun` asks about hazardous `RUN` bodies in every mode, ahead of grants; `SAFETY_RULES` ask about config/lockfile mutations (`permissions.mjs`, `settings.mjs`) | done v1 — a red-test commit gate still needs a declared check command (`verifyCommand`) |
 
 Worth closing, in roughly the order the table reads:
 
@@ -474,18 +474,31 @@ Worth closing, in roughly the order the table reads:
    remaining edge of it: a declared check command (`verifyCommand`) would make
    verdicts comparable across runs, and it is also what a red-test commit gate
    needs.
-2. **The safety set** — a default rules block in `settings.mjs` covering
-   `package.json`, `tsconfig*.json`, `.*rc*` and lockfiles (the engine already
-   supports it; the UI already edits it), and a small command-risk classifier
-   for `RUN` so `rm`, `sudo`, `git`-writes and friends escalate to a question
-   even in yolo. `RUN` currently carries `arg: ''`, so no path rule can ever
-   match a command — the classifier is the only place a command can be seen.
-3. **Two bugs the review turned up, both real.** Plugin subscriptions are
-   documented (`plugins.mjs` header: `events.on(type, fn)`) but `PluginManager`
-   is constructed with a bare `{ emit }` object — a plugin that subscribes
-   throws at setup and lands in `failed`. And the sandbox projects `HEAVY`
-   directories as junctions, `.git` included — so a sandboxed `git commit`
-   still writes the real repository. Neither has a test that would catch it.
+2. **The safety set — shipped 2026-10-15** (`gates.test.mjs`). The floor is
+   `SAFETY_RULES` in `settings.mjs`: mutating `package.json`, `tsconfig*.json`,
+   `.*rc*` or a lockfile asks even in yolo, while reads stay ordinary; it is
+   deliberately not merged into the user's editable `rules` list (a save would
+   duplicate it into the file), and an explicit user rule still wins. The
+   command-risk classifier (`permissions.mjs#classifyRun`) escalates
+   destructive bodies — `rm -rf`, `sudo`, `del /s`, `curl | sh`, git-writes —
+   to a question in every mode, ahead of grants, because `RUN` carries
+   `arg: ''` and one "always" would otherwise blanket every future command.
+   The list is deliberately shallow (first word plus a substring net): a false
+   positive costs one question, a false negative costs the repository. A
+   checker child has no one to ask, so a shell-risk command there resolves to
+   an immediate deny, never a hang.
+3. **Two bugs the review turned up — fixed 2026-10-15** (`gates.test.mjs`).
+   Plugin subscriptions: `PluginManager` now gets a real `Emitter` bus in
+   `rpc.mjs`, harness events route onto it tagged with their project, and a
+   plugin's own `emit` still reaches the window. The `.git` junction: the
+   review's framing was wrong — dropping the junction is *not* enough, because
+   git discovers repositories by walking up and the sandbox lives under the
+   project root (verified: with no `.git` in the projection, git climbs to the
+   real one). The shipped fix is exclusion plus a boundary sentinel: when a
+   repository is reachable above the run, `sandbox.mjs` writes a `.git` file
+   with an unresolvable `gitdir:` — the one shape that halts the climb, since
+   an empty `.git` directory does not. A repo-less project keeps today's
+   sandbox, `git init` included.
 4. **Bootstrap snapshot** — git presence, `git status --short` and the package
    scripts quoted into turn 1, behind a `--snapshot` flag so the CLI's tuned
    bytes stay identical. Nice to have; the listing plus NEED covers the basics.
@@ -516,9 +529,10 @@ The queue, in dependency order:
    one recorded replay), six self-tests in `evals.test.mjs`; a live run needs
    an explicit `--live` and budgets on the free-credit `gemini-3.1-flash-lite`
    unless `--budget model=…` says otherwise.
-4. **The hook-review leftovers**: the safety defaults and the command
-   classifier, the plugin-subscription and `.git`-junction bugs, and the
-   red-test commit gate that falls out of (2).
+4. **The hook-review leftovers — the safety set and both bugs done
+   2026-10-15** (`gates.test.mjs`). What remains is the red-test commit gate,
+   which falls out of (2): it needs the declared check command
+   (`verifyCommand`) the checker section names.
 
 ## The tool ACI round (Oct 2026): the contracts, tightened
 

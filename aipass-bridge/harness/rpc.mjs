@@ -22,6 +22,7 @@ import { SessionStore } from './session.mjs';
 import { SkillLibrary } from './skills.mjs';
 import { Settings, aipassHome } from './settings.mjs';
 import { PluginManager } from './plugins.mjs';
+import { Emitter } from './events.mjs';
 // One resolver for "where the bridge is", shared with the harness's own client
 // and with desktop/main.mjs's probe: an explicit bridgeURL wins, otherwise
 // AIPASS_BRIDGE decides, otherwise the loopback default.
@@ -179,7 +180,15 @@ export function createRpc({
     }
   };
   void ensureBridge();
-  const plugins = new PluginManager({ settings: appSettings, events: { emit }, dir: pluginsDir ?? path.join(aipassHome(), 'plugins') });
+  // The plugin event surface. plugins.mjs documents `ctx.events.on(type, fn)`,
+  // and a bare `{ emit }` object made every subscribing plugin throw in setup
+  // and land in `failed`. This is a real Emitter: every harness event is
+  // routed onto it below (tagged with its project), and everything on it —
+  // a plugin's own emits included — reaches the window over SSE exactly like
+  // a harness event always did.
+  const bus = new Emitter();
+  bus.on('*', (type, payload) => emit(type, payload));
+  const plugins = new PluginManager({ settings: appSettings, events: bus, dir: pluginsDir ?? path.join(aipassHome(), 'plugins') });
 
   /* -------------------------------------------------------- harness per project */
 
@@ -226,7 +235,7 @@ export function createRpc({
       rules: appSettings.get('rules') ?? [],
       skills: skillLibraryFor(abs),
     });
-    h.events.on('*', (type, payload) => emit(type, { project: abs, ...payload }));
+    h.events.on('*', (type, payload) => bus.emit(type, { project: abs, ...payload }));
     harnesses.set(abs, h);
     return h;
   };
@@ -734,7 +743,7 @@ const openBrowser = async (url) => {
   });
 
   server.listen(port, '127.0.0.1');
-  return { server, harness: current, get current() { return current; }, plugins, settings: appSettings, events: { emit }, port, url: `http://127.0.0.1:${port}` };
+  return { server, harness: current, get current() { return current; }, plugins, settings: appSettings, events: bus, port, url: `http://127.0.0.1:${port}` };
 }
 
 const json = (res, code, body) => {

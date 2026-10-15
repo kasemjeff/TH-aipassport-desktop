@@ -62,6 +62,34 @@ export const DEFAULTS = {
   uploads: null,
 };
 
+/**
+ * The safety floor under every mode: a MUTATION of a file a build resolves
+ * through is asked about before anything changes, because that mistake is
+ * invisible until something else breaks (a dependency silently floats, a
+ * tsconfig stops being the tuned one, a lockfile drifts from the manifest).
+ *
+ * Deliberately NOT part of DEFAULTS.rules: the settings list is the user's
+ * editable one, and folding these into it would duplicate them into the file
+ * on every save (Settings.set writes every key) and freeze a copy there. The
+ * engine checks them after the user's own rules, so an explicit rule wins,
+ * and only for mutation kinds — opening package.json is how the model answers
+ * most questions, and a question per read would make the tool unusable.
+ *
+ * Each name appears twice: a nested pattern keeps its leading `**` and a
+ * separator, so it cannot also match the top-level spelling — each is a
+ * pattern of its own (globMatch has no implicit prefix).
+ */
+const MUTATIONS = ['write', 'replace', 'delete', 'move'];
+const asks = (pattern) => ({ pattern, decision: 'ask', kinds: MUTATIONS });
+export const SAFETY_RULES = [
+  asks('package.json'), asks('**/package.json'),
+  asks('tsconfig*.json'), asks('**/tsconfig*.json'),
+  asks('.*rc*'), asks('**/.*rc*'),
+  asks('package-lock.json'), asks('**/package-lock.json'),
+  asks('yarn.lock'), asks('**/yarn.lock'),
+  asks('pnpm-lock.yaml'), asks('**/pnpm-lock.yaml'),
+];
+
 export class Settings {
   /** @param {string} [dir] where the file lives; defaults to `aipassHome()` */
   constructor(dir = aipassHome(), file = 'settings.json') {

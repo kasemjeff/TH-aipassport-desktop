@@ -22,8 +22,10 @@ import { SKIP } from './overlay.mjs';
 
 // Directories that are junctioned instead of copied. `.aipass` is excluded
 // below: it holds the spill directory and the sandbox itself, and a run has no
-// business walking either.
-const HEAVY = new Set([...SKIP].filter((name) => name !== '.aipass'));
+// business walking either. `.git` too, for a harder reason — a junction into
+// the real repository would let a sandboxed `git commit` write it. The walk
+// skips `.git` entirely, and a boundary marker is written instead (below).
+const HEAVY = new Set([...SKIP].filter((name) => name !== '.aipass' && name !== '.git'));
 
 /** A fresh sandbox directory for one RUN. */
 export function createSandbox(root) {
@@ -37,7 +39,8 @@ export function createSandbox(root) {
  *   - every staged path (except deletes) is written as its staged content
  *   - everything else is copied, except HEAVY dirs, which are junctioned
  *     unless a staged edit lives inside them
- *   - `.aipass` never enters the projection
+ *   - `.aipass` never enters the projection, and neither does `.git` — a
+ *     projected run sees a tree with no repository (the marker below explains)
  */
 export function materializeTree(root, overlay, dest) {
   const staged = overlay.keys();
@@ -48,6 +51,7 @@ export function materializeTree(root, overlay, dest) {
   for (const abs of staged) {
     const rel = path.relative(root, abs);
     if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue; // outside the tree
+    if (rel.split(path.sep)[0] === '.git') continue; // never projected: see below
     const target = path.join(dest, rel);
     if (overlay.isDeleted(abs)) continue; // deleted for this run: not projected
     fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -60,7 +64,7 @@ export function materializeTree(root, overlay, dest) {
     let entries;
     try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
-      if (e.name === '.aipass') continue;
+      if (e.name === '.aipass' || e.name === '.git') continue;
       const src = path.join(srcDir, e.name);
       const dst = path.join(dstDir, e.name);
       if (skip.has(src)) continue; // projected already
@@ -82,7 +86,30 @@ export function materializeTree(root, overlay, dest) {
     }
   };
   walk(root, dest);
+
+  // Git discovers a repository by walking UP from the cwd, and this sandbox
+  // sits under the project root — so dropping `.git` from the projection is
+  // not enough by itself. Verified against git: with no `.git` in the sandbox
+  // it climbs the parent chain and finds the real one, and a `git commit`
+  // there writes the real repository; an empty `.git` DIRECTORY does not stop
+  // it either (git shrugs at the invalid directory and keeps climbing). A
+  // `.git` FILE whose `gitdir:` goes nowhere is what halts the search: git
+  // reports "not a git repository" and exits. Written only when a repository
+  // is actually reachable, so a project with none keeps today's sandbox,
+  // `git init` included.
+  if (repositoryAbove(root)) {
+    try { fs.writeFileSync(path.join(dest, '.git'), 'gitdir: no-repository\n'); } catch { /* the projection still has no .git of its own */ }
+  }
   return dest;
+}
+
+/** Is a `.git` in this directory or any parent — i.e. could git find a
+ *  repository by climbing from the sandbox? */
+function repositoryAbove(from) {
+  for (let dir = path.resolve(from); ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, '.git'))) return true;
+    if (path.dirname(dir) === dir) return false;
+  }
 }
 
 /**

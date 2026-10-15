@@ -492,12 +492,12 @@ async function execute(call, ctx) {
     }
   }
 
-  const risk = classify(call.kind);
+  const risk = classify(call.kind, call.body);
   // Shell when it was never enabled: the tool itself owns that message, and
   // letting the gate refuse it instead would hide why.
   if (call.kind === 'run' && !options.allowRun) return await tools.run('', call.body);
   if (permissions) {
-    const verdict = permissions.evaluate({ kind: call.kind, arg: call.arg });
+    const verdict = permissions.evaluate({ kind: call.kind, arg: call.arg, body: call.body });
     if (risk === 'read') {
       // Reads are never asked about, but a deny rule still stops one before
       // the file is opened — `.env* → deny` is how secrets stay local.
@@ -505,8 +505,13 @@ async function execute(call, ctx) {
         return `err: ${verdict.reason} denies reading ${call.arg}; the file stays on this machine`.slice(0, 300);
       }
     } else if (verdict.decision !== 'allow') {
-      const decision = await permissions.request({ kind: call.kind, arg: call.arg, preview: previewOf(call) });
-      if (decision === 'deny') return `err: the person watching declined ${call.kind} ${call.arg}`.slice(0, 300);
+      const decision = await permissions.request({ kind: call.kind, arg: call.arg, preview: previewOf(call), body: call.body });
+      if (decision === 'deny') {
+        // A RUN carries its command in `body`, not `arg` — name it so the
+        // model and the person watching can see exactly what was refused.
+        const what = call.kind === 'run' ? String(call.body ?? '').trim().split('\n')[0] : call.arg;
+        return `err: the person watching declined ${call.kind} ${what}`.slice(0, 300);
+      }
       if (decision === 'always') { permissions.grant(call.kind, call.arg); }
     }
   }
