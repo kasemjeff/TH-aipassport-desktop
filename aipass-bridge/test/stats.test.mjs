@@ -53,6 +53,39 @@ test('a finished run leaves one run_stats line with per-tool refusals', async ()
   assert.equal(stat.stepMs.length, 2, 'one timing per step');
 });
 
+test('a nudge the model recovers from still counts in run_stats', async () => {
+  // Live finding (2026-10-15): the counter was reset by any productive reply,
+  // so a run that needed a correction and moved on reported `nudges: 0` — the
+  // one line that exists to show protocol drift was hiding it.
+  const dir = tempDir({ 'a.txt': 'hello\n' });
+  const store = new SessionStore(path.join(dir, 'sessions'));
+  const session = store.create({ root: dir, model: 'test-model' });
+  const tools = createTools({ root: dir, overlay: new Overlay(dir) });
+
+  const replies = [
+    'The file looks fine to me.',          // no marker — nudge 1
+    'Looking.\n\nNEED file a.txt',         // productive — the streak ends
+    'DONE read what there was',
+  ];
+  let turn = 0;
+  const sent = [];
+  const bridge = {
+    async chat({ message }) { sent.push(message); return { text: replies[Math.min(turn++, replies.length - 1)], reasoning: '' }; },
+    async quota() { return { available: 1000 }; },
+  };
+
+  const result = await runTask('read the project', {
+    bridge, tools, overlay: new Overlay(dir), session,
+    options: { maxSteps: 5 },
+    first: true,
+  });
+
+  assert.equal(result.stopReason, 'done');
+  assert.equal(session.entries.find((e) => e.type === 'run_stats').nudges, 1, 'the correction is counted even though the run recovered');
+  assert.match(sent[1], /a marker only counts when it starts its own line/, 'the nudge states the rule the reply broke');
+  assert.match(sent[2], /wire spellings/, 'every turn after the first carries the wire note');
+});
+
 test('collectRuns and summarize aggregate sessions the reader can print', () => {
   const dir = tempDir();
   const store = new SessionStore(path.join(dir, 'sessions'));

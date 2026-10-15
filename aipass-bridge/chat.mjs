@@ -881,7 +881,7 @@ To rename or move a file:
 
 MOVE old-name.ts new-name.ts${allowRun ? '\n\nTo have me run something in the terminal:\n\nRUN\nwhat to run\nEND' : ''}
 
-Once you have everything you need and are giving me your final answer, finish with:
+Once you have everything you need and are giving me your final answer, finish with DONE on its own line:
 
 DONE one sentence about what you found or changed
 
@@ -1703,7 +1703,7 @@ async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApp
       }
       if (++nudges > 2) { out(red('  no marker after three replies — stopping.')); break; }
       out(red(`  no marker in that reply — nudging (${nudges}/2)`));
-      next = `I could not tell what to open from that. I have the project open here and I am pasting you whatever you name — nothing happens on your side. ${AGENT_REMINDER}`;
+      next = `That reply had no marker I could act on — a marker only counts when it starts its own line. If you are done, write DONE on its own line with one sentence after it; if you need something, name it with one marker per line (NEED file path, SEARCH text, …) and I will paste the result straight back. ${AGENT_REMINDER}`;
       continue;
     }
     nudges = 0;

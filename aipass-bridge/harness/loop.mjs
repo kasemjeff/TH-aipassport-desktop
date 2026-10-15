@@ -134,7 +134,8 @@ export async function runTask(taskText, ctx = {}) {
   // instead of a bare task: the fresh conversation has no memory of anything.
   if (first && seedText) next = seedText;
 
-  let nudges = 0;
+  let nudges = 0;            // (stats) every "no marker" nudge the run needed
+  let nudgeStreak = 0;       // consecutive ones — the third stops the run
   let toolsRun = 0;
   let stagnationWarns = 0;   // (H7) steps corrected by the stagnation guard
   let stagnantStep = 0;      // consecutive steps with the same signature
@@ -204,12 +205,13 @@ export async function runTask(taskText, ctx = {}) {
         stopReason = 'done';
         break;
       }
-      if (++nudges > 2) { events?.emit('give_up', {}); stopReason = 'stalled'; break; }
-      events?.emit('nudge', { n: nudges });
-      next = `I could not tell what to open from that. I have the project open here and I am pasting you whatever you name — nothing happens on your side. ${REMINDER}`;
+      nudges += 1;
+      if (++nudgeStreak > 2) { events?.emit('give_up', {}); stopReason = 'stalled'; break; }
+      events?.emit('nudge', { n: nudgeStreak });
+      next = `That reply had no marker I could act on — a marker only counts when it starts its own line. If you are done, write DONE on its own line with one sentence after it; if you need something, name it with one marker per line (NEED file path, SEARCH text, …) and I will paste the result straight back. ${REMINDER}`;
       continue;
     }
-    nudges = 0;
+    nudgeStreak = 0;
 
     // Helpers fan out when the run opts in (P2-B): each carries its own
     // conversation, so several can work beside each other. Results are
