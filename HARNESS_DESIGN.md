@@ -450,10 +450,67 @@ Block by block, against the code as it stands:
   the extension; the smoke cannot be faked). Meta-Harness's own held-out caveat
   is why an automated evals harness is queued, not assumed.
 
-The queue, in dependency order: (1) the RUN-vs-overlay decision — **done
-2026-10-15** as the projection (`sandbox.mjs`, tests in
-`run-overlay.test.mjs`); (2) a verification `SUBAGENT`, the natural first typed
-helper, which pairs with the earlier note that subagents carry no
-task-specific instructions; (3) an evals harness with held-out tasks and
-budget-matched baselines, so "the harness improved" stops being an argument
-from memory.
+## The hook points, mapped onto the spine (Oct 2026)
+
+A review brought the Claude-Code-style hook vocabulary to this design: six
+places a harness can intervene, each checked against the code as it stands.
+Four are already the behaviour of a named module, one is deliberately soft, and
+one is the safety set the engine supports but does not yet ship as defaults.
+The map, then what each gap is worth:
+
+| hook | spine stage | mechanism today | status |
+|---|---|---|---|
+| SessionStart — inject a snapshot | Bootstrap | preamble + top-level listing on turn 1, the same listing after every rotation (`loop.mjs` the `again` message, `compact.mjs` re-seed) | partial — the listing is the only snapshot; everything else costs a NEED |
+| PreToolUse — validate the shape, deny with a reason | Action validator | per-tool checks returning `err: …` and the fix (F5); fenced protocol text never executes (F1); `node --check` on staged JS (R2); permission denials carry the rule name | done per tool — no single pre-dispatch layer, and plugin markers skip the gate entirely |
+| PostToolUse — compact an oversized result | Observation compressor | clip at `maxResult` + spill file with a `NEED` locator (`tools.mjs`); conversation summarise→rotate at the budget (`compact.mjs`) | done, two tiers; the elision tier stays noted-not-shipped |
+| Stop — tests fail, keep working | Verify | R4's one soft nudge; `verifyPrompts` counts every firing | partial — nothing reads a verdict, and a stage+DONE reply exits before the nudge (`loop.mjs:197`, `:286`); the checker spec closes it |
+| PreToolUse — count calls, log every event | Budget + trace | one `run_stats` line per run + one session JSONL entry per tool call, 20 000-char result and all | done; per-tool latency and a hard per-run cap are still not recorded |
+| PreToolUse — destructive commands, config files, red-test commits | Safety gates | modes + the H9 rule engine: path rules outrank the mode, reads included; no listener means deny | partial — the engine is strong, the specific gates are not written |
+
+Worth closing, in roughly the order the table reads:
+
+1. **A verdict behind DONE** — the checker spec
+   ([`SPEC_CHECKER.md`](SPEC_CHECKER.md)) is the mechanical fix; its
+   `verifyCommand` follow-up is also what a red-test commit gate needs.
+2. **The safety set** — a default rules block in `settings.mjs` covering
+   `package.json`, `tsconfig*.json`, `.*rc*` and lockfiles (the engine already
+   supports it; the UI already edits it), and a small command-risk classifier
+   for `RUN` so `rm`, `sudo`, `git`-writes and friends escalate to a question
+   even in yolo. `RUN` currently carries `arg: ''`, so no path rule can ever
+   match a command — the classifier is the only place a command can be seen.
+3. **Two bugs the review turned up, both real.** Plugin subscriptions are
+   documented (`plugins.mjs` header: `events.on(type, fn)`) but `PluginManager`
+   is constructed with a bare `{ emit }` object — a plugin that subscribes
+   throws at setup and lands in `failed`. And the sandbox projects `HEAVY`
+   directories as junctions, `.git` included — so a sandboxed `git commit`
+   still writes the real repository. Neither has a test that would catch it.
+4. **Bootstrap snapshot** — git presence, `git status --short` and the package
+   scripts quoted into turn 1, behind a `--snapshot` flag so the CLI's tuned
+   bytes stay identical. Nice to have; the listing plus NEED covers the basics.
+5. **Per-tool latency** — the loop already walks per call; one `ms` field in
+   `toolStats` and its line in `stats.mjs`.
+
+On the architecture question the vocabulary invites: keep the gate-class checks
+core. Their invariant — "a run cannot be unsafe because a plugin is absent" —
+is why they sit in the loop and the permission engine; a hook system that can
+fail open would move the wrong thing. The observable event surface, though, is
+already rich (every harness event reaches the window over SSE), so the cheap
+win is making that surface subscribable in-process for plugins too — after
+which "hooks" are just events with better names.
+
+The queue, in dependency order:
+
+1. **RUN-vs-overlay — done 2026-10-15** as the projection (`sandbox.mjs`,
+   tests in `run-overlay.test.mjs`).
+2. **A verification `SUBAGENT`** — the natural first typed helper, which pairs
+   with the earlier note that subagents carry no task-specific instructions.
+   Spec: [`SPEC_CHECKER.md`](SPEC_CHECKER.md) — a child that reads the staged
+   tree (projection included), may not write, and reports `pass`/`fail`/`none`
+   as a computed verdict; one continuation on fail.
+3. **An evals harness** with held-out tasks and budget-matched baselines, so
+   "the harness improved" stops being an argument from memory. Spec:
+   [`SPEC_EVALS.md`](SPEC_EVALS.md) — check-command scoring, live + replay
+   modes, runner self-tests.
+4. **The hook-review leftovers**: the safety defaults and the command
+   classifier, the plugin-subscription and `.git`-junction bugs, and the
+   red-test commit gate that falls out of (2).
