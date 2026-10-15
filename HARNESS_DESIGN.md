@@ -463,15 +463,17 @@ The map, then what each gap is worth:
 | SessionStart — inject a snapshot | Bootstrap | preamble + top-level listing on turn 1, the same listing after every rotation (`loop.mjs` the `again` message, `compact.mjs` re-seed) | partial — the listing is the only snapshot; everything else costs a NEED |
 | PreToolUse — validate the shape, deny with a reason | Action validator | per-tool checks returning `err: …` and the fix (F5); fenced protocol text never executes (F1); `node --check` on staged JS (R2); permission denials carry the rule name | done per tool — no single pre-dispatch layer, and plugin markers skip the gate entirely |
 | PostToolUse — compact an oversized result | Observation compressor | clip at `maxResult` + spill file with a `NEED` locator (`tools.mjs`); conversation summarise→rotate at the budget (`compact.mjs`) | done, two tiers; the elision tier stays noted-not-shipped |
-| Stop — tests fail, keep working | Verify | R4's one soft nudge; `verifyPrompts` counts every firing | partial — nothing reads a verdict, and a stage+DONE reply exits before the nudge (`loop.mjs:197`, `:286`); the checker spec closes it |
+| Stop — tests fail, keep working | Verify | R4's one soft nudge (`verifyPrompts`); the checker at DONE — a read-only child runs the project's own check, the verdict computed from what it ran, one continuation on fail (`loop.mjs`, `harness.mjs#makeChecker`) | done v1 — the verdict is advisory: a second DONE is accepted with `checks`/`checkVerdict` recorded |
 | PreToolUse — count calls, log every event | Budget + trace | one `run_stats` line per run + one session JSONL entry per tool call, 20 000-char result and all | done; per-tool latency and a hard per-run cap are still not recorded |
 | PreToolUse — destructive commands, config files, red-test commits | Safety gates | modes + the H9 rule engine: path rules outrank the mode, reads included; no listener means deny | partial — the engine is strong, the specific gates are not written |
 
 Worth closing, in roughly the order the table reads:
 
-1. **A verdict behind DONE** — the checker spec
-   ([`SPEC_CHECKER.md`](SPEC_CHECKER.md)) is the mechanical fix; its
-   `verifyCommand` follow-up is also what a red-test commit gate needs.
+1. **A verdict behind DONE — shipped 2026-10-15** as the checker
+   ([`SPEC_CHECKER.md`](SPEC_CHECKER.md), tests `checker.test.mjs`). The
+   remaining edge of it: a declared check command (`verifyCommand`) would make
+   verdicts comparable across runs, and it is also what a red-test commit gate
+   needs.
 2. **The safety set** — a default rules block in `settings.mjs` covering
    `package.json`, `tsconfig*.json`, `.*rc*` and lockfiles (the engine already
    supports it; the UI already edits it), and a small command-risk classifier
@@ -502,11 +504,10 @@ The queue, in dependency order:
 
 1. **RUN-vs-overlay — done 2026-10-15** as the projection (`sandbox.mjs`,
    tests in `run-overlay.test.mjs`).
-2. **A verification `SUBAGENT`** — the natural first typed helper, which pairs
-   with the earlier note that subagents carry no task-specific instructions.
-   Spec: [`SPEC_CHECKER.md`](SPEC_CHECKER.md) — a child that reads the staged
-   tree (projection included), may not write, and reports `pass`/`fail`/`none`
-   as a computed verdict; one continuation on fail.
+2. **A verification `SUBAGENT` — done 2026-10-15** as the checker: a child
+   that reads the staged tree (projection included), may not write, and
+   reports a computed `pass`/`fail`/`none`; one continuation on fail. Spec:
+   [`SPEC_CHECKER.md`](SPEC_CHECKER.md); tests in `checker.test.mjs`.
 3. **An evals harness** with held-out tasks and budget-matched baselines, so
    "the harness improved" stops being an argument from memory. Spec:
    [`SPEC_EVALS.md`](SPEC_EVALS.md) — check-command scoring, live + replay

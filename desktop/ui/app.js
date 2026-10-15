@@ -369,6 +369,15 @@ stream.addEventListener('stagnation', (e) => {
   addNote(action === 'stop' ? `ลูปไม่เดินหน้า (${what}) — หยุดให้แล้ว` : `ลูปไม่เดินหน้า (${what}) — สั่งให้เปลี่ยนวิธีแล้ว`);
 });
 stream.addEventListener('verify_prompt', () => addNote('ขอให้โมเดลพิสูจน์สิ่งที่แก้ก่อนจบ — รันเช็ค หรืออ่านการแก้กลับมา'));
+stream.addEventListener('check_start', (e) => addNote(`ก่อนรับ DONE — ให้ read-only child ตรวจงานที่ค้างอยู่ (${JSON.parse(e.data).files.length} ไฟล์)`));
+stream.addEventListener('check_end', (e) => {
+  const { verdict, ran, skipped } = JSON.parse(e.data);
+  const what = skipped ? 'ข้ามการตรวจ — เปิด conversation แยกไม่สำเร็จ'
+    : verdict === 'pass' ? `ตรวจผ่านแล้ว (${ran} command)`
+      : verdict === 'fail' ? `ตรวจไม่ผ่าน (${ran} command) — ส่งผลให้โมเดลแก้ต่อ`
+        : 'ตรวจแล้ว ไม่มีคำสั่งให้รัน';
+  addNote(what);
+});
 stream.addEventListener('step_limit', () => {
   addNote('reached the step limit');
   // A run that stops for want of steps is a dead end unless the next move is

@@ -45,6 +45,8 @@ export function collectRuns(session) {
       nudges: e.nudges ?? 0,
       stagnations: e.stagnations ?? 0,
       verifyPrompts: e.verifyPrompts ?? 0,
+      checks: e.checks ?? 0,
+      checkVerdict: e.checkVerdict ?? null,
       firewallNotes: e.firewallNotes ?? 0,
       stepMs: Array.isArray(e.stepMs) ? e.stepMs : [],
       spent: e.spent ?? null,
@@ -63,6 +65,8 @@ export function summarize(rows) {
     nudges: 0,
     stagnations: 0,
     verifyPrompts: 0,
+    checks: 0,
+    checkFails: 0,
     firewallNotes: 0,
     spent: 0,
     byTool: {},
@@ -76,6 +80,8 @@ export function summarize(rows) {
     totals.nudges += r.nudges;
     totals.stagnations += r.stagnations;
     totals.verifyPrompts += r.verifyPrompts;
+    totals.checks += r.checks;
+    if (r.checkVerdict === 'fail') totals.checkFails += 1;
     totals.firewallNotes += r.firewallNotes;
     totals.spent += r.spent ?? 0;
     totals.byStop[r.stopReason] = (totals.byStop[r.stopReason] ?? 0) + 1;
@@ -116,7 +122,7 @@ function main() {
   }
 
   const totals = summarize(rows);
-  console.log(`lifetime  ${totals.runs} run(s) · ${totals.calls} tool call(s) · refusals ${pct(totals.calls ? totals.refusals / totals.calls : 0)} · nudges ${totals.nudges} · stagnation ${totals.stagnations} · verify ${totals.verifyPrompts} · firewall ${totals.firewallNotes} · ${credits(totals.spent)} credits`);
+  console.log(`lifetime  ${totals.runs} run(s) · ${totals.calls} tool call(s) · refusals ${pct(totals.calls ? totals.refusals / totals.calls : 0)} · nudges ${totals.nudges} · stagnation ${totals.stagnations} · verify ${totals.verifyPrompts} · checks ${totals.checks}${totals.checkFails ? ` (${totals.checkFails}✗)` : ''} · firewall ${totals.firewallNotes} · ${credits(totals.spent)} credits`);
   const avgStep = totals.stepMsCount ? Math.round(totals.stepMsTotal / totals.stepMsCount / 100) / 10 : null;
   const stops = Object.entries(totals.byStop).map(([k, n]) => `${k}×${n}`).join(', ');
   if (avgStep !== null) console.log(`          avg step ${avgStep}s · ends: ${stops}`);
@@ -127,13 +133,14 @@ function main() {
   if (toolLine) console.log(`          tools: ${toolLine}`);
 
   console.log(`\nlast ${Math.min(last, rows.length)} of ${rows.length}:`);
-  console.log('  when           stop      calls  ✗rate  nudge stag  fw  credits');
+  console.log('  when           stop      calls  ✗rate  nudge stag  fw  chk  credits');
   for (const r of rows.slice(0, last)) {
     const title = r.title.length > 34 ? `${r.title.slice(0, 33)}…` : r.title;
     console.log(
       `  ${when(r.ts)}  ${String(r.stopReason ?? '?').padEnd(9)} ${String(r.calls).padStart(5)}  `
       + `${pct(r.refusalRate).padStart(5)}  ${String(r.nudges).padStart(5)}  ${String(r.stagnations).padStart(4)}  `
       + `${String(r.firewallNotes).padStart(2)}  `
+      + `${(r.checks ? (r.checkVerdict ?? '?').slice(0, 1).toUpperCase() : '-').padStart(3)}  `
       + `${credits(r.spent).padStart(7)}  ${title}`,
     );
   }

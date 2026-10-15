@@ -45,6 +45,7 @@ const previewOf = (call) => {
  * @param {object} [ctx.permissions] PermissionEngine
  * @param {object} [ctx.events]    Emitter
  * @param {Function} [ctx.subagent] async (task) => summary text
+ * @param {Function} [ctx.check]    async ({files}) => {verdict, text, ran}
  * @param {Function} [ctx.approvePlan] async () => boolean
  * @param {Function} [ctx.runPluginTool] async (marker, {arg, body}) => string
  * @param {object} [ctx.options]
@@ -53,7 +54,7 @@ const previewOf = (call) => {
 export async function runTask(taskText, ctx = {}) {
   const {
     bridge, tools, overlay, session = null, permissions = null, events = null,
-    subagent = null, approvePlan = null, options = {}, first = true,
+    subagent = null, check = null, approvePlan = null, options = {}, first = true,
     runPluginTool = null, compactor = null, rotate = null,
     conversation = null, conversationTemporary = null,
   } = ctx;  const maxSteps = Number(options.maxSteps ?? 10);
@@ -149,6 +150,41 @@ export async function runTask(taskText, ctx = {}) {
   let summary = null;
   let stopReason = 'steps';
 
+  // (checker, SPEC_CHECKER.md) A DONE over staged code earns one read-only
+  // check before it is accepted. The gate mirrors R4's so the two stages
+  // cannot disagree — code staged, nothing verified it — plus the two
+  // conditions only a check has: it is an execution, so it runs only where
+  // the run itself could run things, and it is one per run (up before the
+  // first await).
+  let checkTried = false;
+  let checks = 0;            // (stats) 1 when a check actually ran
+  let checkResult = null;    // what the check answered, or null
+
+  const finishCheck = async () => {
+    if (checkTried || !check || !options.subagent || !options.allowRun) return null;
+    if (!overlay.size || !codeTouched || verifiedSinceChange) return null;
+    checkTried = true;
+    verifySent = true; // the run is being checked; R4 stands down
+    const files = overlay.keys()
+      .map((abs) => ({ path: posix(path.relative(overlay.root, abs)), deleted: overlay.isDeleted(abs) }))
+      .slice(0, 20);
+    const label = files.map((f) => (f.deleted ? `${f.path} (deleted)` : f.path)).join(', ') || 'the staged tree';
+    session?.append('note', { text: `check: ${label} staged — a read-only child is looking at the tree Apply would produce` });
+    events?.emit('check_start', { files });
+    try {
+      checkResult = await check({ files });
+    } catch (err) {
+      // Structural failure never crosses the boundary.
+      checkResult = { verdict: 'none', text: `check could not run: ${err.message}`, ran: 0 };
+    }
+    if (!checkResult.skipped) checks = 1;
+    session?.append('note', { text: `check ${checkResult.verdict}: ${String(checkResult.text ?? '').slice(0, 2000)}` });
+    events?.emit('check_end', { verdict: checkResult.verdict, ran: checkResult.ran ?? 0, skipped: Boolean(checkResult.skipped) });
+    return checkResult.verdict === 'fail'
+      ? `Before DONE, a check of the staged tree ran and did not pass:\n${String(checkResult.text ?? '').slice(0, 4000)}\n\nFix the staged files, or explain why the failure is not yours to fix.`
+      : null;
+  };
+
   // Attachments ride the first message only: the server keeps the history, so
   // re-sending the same image on every step would re-upload it and occupy the
   // context again for nothing. ATTACH queues (the tool's own) drain into the
@@ -201,6 +237,13 @@ export async function runTask(taskText, ctx = {}) {
         summary = cleanArg || 'done';
         const extra = proseText && effectiveDone.arg && proseText.trim() !== effectiveDone.arg.trim() && proseText.trim() !== cleanArg
           ? '\n' + proseText.trim() : '';
+        // A DONE with a staged tree behind it gets the check first; a fail
+        // rides the next message instead of ending the run.
+        const checkMsg = await finishCheck();
+        if (checkMsg && step < maxSteps) {
+          next = `${checkMsg}\n\n${REMINDER}`;
+          continue;
+        }
         events?.emit('done_line', { text: cleanArg || 'done', extra });
         stopReason = 'done';
         break;
@@ -286,12 +329,22 @@ export async function runTask(taskText, ctx = {}) {
     if (done && !stillLooking) {
       summary = (done.arg || proseText || 'done').replace(/^[-—–:]\s*/, '').trim() || 'done';
       const extra = proseText && done.arg && proseText.trim() !== done.arg.trim() ? '\n' + proseText.trim() : '';
-      events?.emit('done_line', { text: summary, extra });
-      stopReason = 'done';
-      break;
+      // A stage-and-DONE reply is exactly the case R4 cannot see: the check
+      // runs here, and a fail rides the next message the way the nudge does —
+      // through the stagnation guard and the compaction estimate like any
+      // other step, so the correction is a step the run actually took.
+      const checkMsg = await finishCheck();
+      if (checkMsg && step < maxSteps) {
+        next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${checkMsg}`;
+      } else {
+        events?.emit('done_line', { text: summary, extra });
+        stopReason = 'done';
+        break;
+      }
+    } else {
+      if (done) events?.emit('ignore_done', {});
+      next = `${results.join('\n\n')}\n\n${REMINDER}`;
     }
-    if (done) events?.emit('ignore_done', {});
-    next = `${results.join('\n\n')}\n\n${REMINDER}`;
 
     // (H7/R1) Stagnation guard. Two shapes of a run that cannot move:
     //   - the same step over and over (identical calls, identical results)
@@ -380,6 +433,8 @@ export async function runTask(taskText, ctx = {}) {
     stagnations: stagnationWarns,
     verifyPrompts,
     firewallNotes,
+    checks,
+    checkVerdict: checkResult?.verdict ?? null,
     stepMs,
     spent,
   };
@@ -389,6 +444,7 @@ export async function runTask(taskText, ctx = {}) {
   events?.emit('finished', {
     summary, steps: toolsRun, stopReason, spent,
     credits: creditsAfter,
+    check: checkResult,
     changes: changes.map((c) => ({ file: c.file, added: c.added, removed: c.removed, deleted: c.deleted, isNew: c.isNew })),
   });
 

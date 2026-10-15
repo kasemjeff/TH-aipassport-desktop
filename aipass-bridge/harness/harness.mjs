@@ -288,6 +288,7 @@ export class Harness {
         permissions: this.permissions,
         events: this.events,
         subagent: this.options.subagent ? this.#makeHelper() : null,
+        check: this.#makeChecker(task),
         runPluginTool: runPluginTool ?? this.runPluginTool ?? null,
         approvePlan: this.options.requirePlanApproval
           ? () => new Promise((resolve) => { this.events.emit('plan_request', {}); this.#planResolve = resolve; })
@@ -402,6 +403,96 @@ export class Harness {
       const lines = [result.summary ?? 'The helper finished without a summary.'];
       if (prepared.length) lines.push(`Files prepared and waiting for approval: ${prepared.join(', ')}`);
       return lines.join('\n\n');
+    };
+  }
+
+  /**
+   * The checker (SPEC_CHECKER.md): one read-only child run over the staged
+   * tree — the piece that puts a verdict behind a DONE. Its tools read a
+   * snapshot of the parent's staged files, so `read` and `run` see the tree
+   * Apply would produce, and every `run` goes through the projection for the
+   * same reason any run does. It may not write anything, and its verdict is
+   * computed from what it actually ran, never from its prose. A fail report
+   * rides back to the model; a pass finishes silently.
+   */
+  #makeChecker(taskText) {
+    return async ({ files }) => {
+      const label = files.map((f) => (f.deleted ? `${f.path} (deleted)` : f.path)).join(', ') || 'the staged tree';
+      // Its own conversation, adopt:false — the P2-B pattern. The parent's
+      // context is the exact resource a check exists to protect, so falling
+      // back to it is never allowed; a check without its own conversation is
+      // skipped, and the skip says why.
+      const made = await this.bridge
+        .createConversation({ temporary: true, message: `Checking the staged changes: ${label}`, adopt: false })
+        .catch(() => null);
+      const checkerConversation = made?.id ?? null;
+      if (!checkerConversation) {
+        this.session?.append('note', { text: 'check skipped: could not open a separate conversation for it' });
+        return { verdict: 'none', text: 'check could not run: no separate conversation is available', ran: 0, skipped: true };
+      }
+
+      // The tools' view: the parent's staged map, one-for-one (deletes
+      // included, so the projection leaves those files out). The run's own
+      // overlay stays empty — the checker stages nothing, and runTask clears
+      // its overlay on entry, so these have to be two objects.
+      const staged = new Overlay(this.root);
+      for (const [abs, value] of this.overlay.map) staged.map.set(abs, value);
+
+      const childSession = this.store?.create({ root: this.root, model: this.bridge.model, title: `check: ${label.slice(0, 60)}` });
+      // The parent's path rules travel, as they do to a helper. The engine is
+      // permissive because the readOnly tools are the real gate: the checker
+      // cannot write even where a rule would have allowed it.
+      const childPermissions = new PermissionEngine({ mode: 'yolo', allowRun: true, rules: this.permissions.rules });
+      const prompt = [
+        `You are the checker: a read-only pass over work that is already staged for this project.`,
+        taskText ? `The run was working on: ${String(taskText).slice(0, 500)}` : '',
+        `These pending edits are already applied in the tree you are looking at: ${label}.`,
+        `Run the project's own checks against them — the test command, a build, a typecheck, node --check on the changed files. Prefer the smallest command that would prove or disprove the change.`,
+        `You cannot edit anything, and a fix is not yours to make. Say DONE with one line on what you ran and what it showed; if nothing can be run from here, say exactly that.`,
+      ].filter(Boolean).join('\n\n');
+
+      // A fresh, silent emitter: the checker's own `done_line` and `finished`
+      // must not render as the parent's (the window would end the wrong
+      // turn), while the outer loop brackets the whole lookup with
+      // check_start / check_end.
+      const childEvents = new Emitter();
+
+      let result;
+      try {
+        result = await runTask(prompt, {
+          bridge: this.bridge,
+          tools: createTools({
+            root: this.root, overlay: staged, skills: this.skills, bridge: this.bridge,
+            model: this.bridge.model, allowRun: true, events: childEvents,
+            conversation: checkerConversation, temporary: true, readOnly: true,
+          }),
+          overlay: new Overlay(this.root),
+          session: childSession,
+          permissions: childPermissions,
+          events: childEvents,
+          conversation: checkerConversation,
+          conversationTemporary: true,
+          options: {
+            ...this.options,
+            maxSteps: Math.min(this.options.maxSteps, 6),
+            plan: false,
+            requirePlanApproval: false,
+            subagent: false,
+            signal: this.abort.signal,
+          },
+          first: true,
+        });
+      } catch (err) {
+        result = { summary: `check could not run: ${err.message}` };
+      }
+
+      // The verdict is computed, not read: from what the child actually ran.
+      const runs = (childSession?.entries ?? []).filter((e) => e.type === 'tool' && e.kind === 'run');
+      const failed = runs.filter((e) => !e.ok);
+      const verdict = failed.length ? 'fail' : runs.length ? 'pass' : 'none';
+      const evidence = failed.slice(0, 3).map((e) => String(e.out ?? '').trim()).filter(Boolean).join('\n\n');
+      const text = [result.summary, evidence].filter(Boolean).join('\n\n').slice(0, 4000) || 'the check produced no output';
+      return { verdict, text, ran: runs.length };
     };
   }
 }

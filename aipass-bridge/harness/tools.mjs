@@ -122,6 +122,7 @@ export function createTools(ctx) {
     overlay,
     skills,
     allowRun = false,
+    readOnly = false,
     maxResult = 3000,
     readLines = 250,
     bridge = null,
@@ -521,6 +522,15 @@ export function createTools(ctx) {
       return clip(outbound(result || 'no results found'));
     },
   };
+
+  // The checker's hand is tied (SPEC_CHECKER.md): every marker that would
+  // change the tree answers with the reason instead, so a read-only run
+  // cannot stage a proposal that lands after the run it was checking.
+  if (readOnly) {
+    for (const kind of ['write', 'replace', 'delete', 'move']) {
+      TOOLS[kind] = () => 'err: the checker is read-only — report it in your summary instead.';
+    }
+  }
 
   TOOLS.pendingParts = queuedParts;
   return TOOLS;
