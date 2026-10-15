@@ -51,6 +51,7 @@ can only be answered by rotating conversations, not trimming messages.
 | `loop.mjs` | send → parse → execute → paste results | results go back as ONE message; writes stop at the overlay; a plan gates the work |
 | `tools.mjs` | string in, string out, one function per marker | no tool ever writes to disk; a read cannot change anything |
 | `overlay.mjs` | a pending-edit filesystem over `Map<abs, string \| DELETED>` | a run that dies halfway leaves the tree untouched; diffs exist before anything changes |
+| `sandbox.mjs` | the overlay projected into a child-visible tree for one `RUN` | a child process sees the staged edit, and the disk is still never written by a run |
 | `permissions.mjs` | classify → rules → mode → ask | path rules outrank the mode — reads included (H9); nobody listening to a question means deny, not hang |
 | `compact.mjs` | estimate bytes/4 → summarise → rotate → re-seed | summarisation happens in the conversation that still holds the history |
 | `harness.mjs` | the facade a CLI, the window and tests all drive | the one-conversation resource is managed nowhere else; helpers propose into the parent overlay |
@@ -370,6 +371,29 @@ copy); say it in the protocol (a run sees disk until the end); or write
 straight to disk in `auto`/`yolo`, where the person already said yes.
 Deciding this is queued, not guessed.
 
+**Decided and shipped (2026-10-15): the projection.** The first option was the
+only one that keeps every invariant — the protocol cannot say "a run sees
+disk" without making the Verify stage structurally impossible, and writing
+straight to disk in `auto`/`yolo` would trade away diff-before-apply, the
+crash-safety of a dead run, and helpers' proposals. `sandbox.mjs` now projects
+the tree into `.aipass/run/run-*` with the staged edits written in: source
+files copied (a copy means an in-place write cannot touch the real file),
+heavy directories — `node_modules`, `.git`, build outputs — junctioned so a
+check does not pay to copy them, staged deletes left out. The command runs
+there, its stdout/stderr have the sandbox path swapped back to the project
+root (which also keeps identical commands byte-identical across steps, so the
+stagnation guard still recognizes a repeat), and the copy is deleted in a
+`finally`. A run with nothing staged skips the projection entirely and
+behaves exactly as before. What the model sees is now the truth it always
+assumed: stage a fix, run `node check.mjs`, get `PASS`.
+
+Proven live the same day, on a broken `total.mjs` with `check.mjs` printing
+FAIL: the model staged the one-word fix and ran the check in the same step —
+`run {n:1, fail:0}`, output `PASS`, and since the run counted as the in-step
+check, `verifyPrompts 0`. Three sends, `stagnations 0`, and the applied tree
+passes on the real disk. The shape of the original smoke now completes in one
+step.
+
 ## Research round 2 (Oct 2026): the five-stage spine
 
 A second research digest — Self-Harness, Meta-Harness, HarnessBridge,
@@ -404,9 +428,10 @@ Block by block, against the code as it stands:
   one-round-trip correction.
 - **Verify — done, soft form (R4).** One nudge after the first staged code
   change. The digest's stronger reading — *done means a runnable check passed*
-  — is blocked by the queued RUN-vs-overlay gap: `RUN` executes against disk,
-  so a verification run reads the stale file. That decision is now a
-  prerequisite for hardening this stage, not only a UX wart.
+  — was blocked by the RUN-vs-overlay gap; that gap is closed by the
+  projection (above), so a verification run now reads the staged tree and
+  this stage can be hardened next. `verifyPrompts` already tracks how often
+  the nudge fires.
 - **Stop/Recover — done, five exits.** Stagnation (repeat ×3 or oscillation ×2,
   after one correction), no-marker nudge ×3 → give up, `ignore_done`, the step
   limit, and `resilientSay`'s redact → split → omit chain.
@@ -425,9 +450,10 @@ Block by block, against the code as it stands:
   the extension; the smoke cannot be faked). Meta-Harness's own held-out caveat
   is why an automated evals harness is queued, not assumed.
 
-The queue, in dependency order: (1) the RUN-vs-overlay decision — Verify and
-test-time scaling both stand on it; (2) a verification `SUBAGENT`, the natural
-first typed helper, which pairs with the earlier note that subagents carry no
+The queue, in dependency order: (1) the RUN-vs-overlay decision — **done
+2026-10-15** as the projection (`sandbox.mjs`, tests in
+`run-overlay.test.mjs`); (2) a verification `SUBAGENT`, the natural first typed
+helper, which pairs with the earlier note that subagents carry no
 task-specific instructions; (3) an evals harness with held-out tasks and
 budget-matched baselines, so "the harness improved" stops being an argument
 from memory.
