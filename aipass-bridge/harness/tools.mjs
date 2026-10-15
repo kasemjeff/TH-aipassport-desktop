@@ -16,6 +16,7 @@ import path from 'node:path';
 import { exec, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { SKIP, binaryKind, posix, stripGutter } from './overlay.mjs';
+import { createSandbox, materializeTree, restorePaths } from './sandbox.mjs';
 import { outbound, inbound } from './waf.mjs';
 import { isPrivateHost } from '../bridge/private-hosts.mjs';
 import { loadGitignore } from './gitignore.mjs';
@@ -275,17 +276,36 @@ export function createTools(ctx) {
     },
     async run(_arg, body) {
       if (!allowRun) return 'err: shell commands are disabled for this run';
+      // With anything staged, the command runs against a projection of the
+      // tree that has the staged edits written in (sandbox.mjs) — the disk
+      // itself is untouched. Without staged changes it runs in the project,
+      // exactly as before. Either way the child's own paths are put back to
+      // the project's, so the output reads as if it ran where the model
+      // thinks it did.
+      let sandbox = null;
+      if (overlay.size) {
+        try {
+          sandbox = createSandbox(root);
+          materializeTree(root, overlay, sandbox);
+        } catch {
+          if (sandbox) { try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* left under .aipass */ } }
+          sandbox = null; // a projection that cannot be built must not block the run
+        }
+      }
+      const scrub = (text) => (sandbox ? restorePaths(text, sandbox, root) : text);
       try {
         // Async, not execSync: this runs in the backend's process, and a
         // blocked event loop there freezes every window call for the length
         // of the command. The platform shell is picked for us: /bin/sh on
         // POSIX, cmd.exe on Windows.
         const { stdout } = await execP(body, {
-          cwd: root, timeout: 120_000, windowsHide: true, maxBuffer: 10 * 1024 * 1024,
+          cwd: sandbox ?? root, timeout: 120_000, windowsHide: true, maxBuffer: 10 * 1024 * 1024,
         });
-        return clip(stdout);
+        return clip(scrub(stdout));
       } catch (err) {
-        return clip(`err: exit ${err.code ?? err.signal ?? '?'}\n${String(err.stdout ?? '')}${String(err.stderr ?? '')}`);
+        return clip(scrub(`err: exit ${err.code ?? err.signal ?? '?'}\n${String(err.stdout ?? '')}${String(err.stderr ?? '')}`));
+      } finally {
+        if (sandbox) { try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* left under .aipass */ } }
       }
     },
     glob(pattern) {
