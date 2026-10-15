@@ -11,7 +11,6 @@
 // business, shared unchanged with `aipass agent`.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -22,6 +21,9 @@ const REPO = fs.existsSync(path.join(HERE, 'aipass-bridge', 'bridge', 'server.mj
 // A static relative import can only ever see one of the two layouts, so resolve
 // the backend from REPO — `node main.mjs` then works from both.
 const { createRpc, resolveBridgeURL } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'rpc.mjs')));
+// The one resolver for state, shared with the backend and the CLI, so
+// AIPASS_HOME steers every surface including the detached log below.
+const { aipassHome } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'settings.mjs')));
 // One resolver for the probe and the harness client alike: AIPASS_BRIDGE
 // (http(s)://host:port, host:port or a bare port) or the loopback default.
 const BRIDGE_URL = resolveBridgeURL();
@@ -75,7 +77,7 @@ if (DETACH) {
   // before it launches the window, and the window then adopts what is already
   // running rather than starting a second backend. Everything lands in
   // ~/.aipass/logs, so a detach that misbehaves is still diagnosable.
-  const logDir = path.join(os.homedir(), '.aipass', 'logs');
+  const logDir = path.join(aipassHome(), 'logs');
   fs.mkdirSync(logDir, { recursive: true });
   const log = fs.openSync(path.join(logDir, 'desktop-backend.log'), 'a');
   const bridge = await ensureBridge({ detached: true, log });

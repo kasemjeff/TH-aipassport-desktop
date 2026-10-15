@@ -25,7 +25,7 @@ const sibling = (name) => join(HERE, '..', name);          // aipass-bridge/<nam
 const HOST = process.env.AIPASS_HOST || '127.0.0.1';
 const PORT = process.env.AIPASS_PORT || '8787';
 const BRIDGE = `http://${HOST}:${PORT}`;
-const STATE = join(homedir(), '.aipass');
+const STATE = process.env.AIPASS_HOME?.trim() || join(homedir(), '.aipass');
 const PIDFILE = join(STATE, 'bridge.pid');
 
 const tty = Boolean(process.stdout.isTTY);

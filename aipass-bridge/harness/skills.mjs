@@ -10,7 +10,7 @@
 // how the original single-folder behaviour stays byte-identical.
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
+import { aipassHome } from './settings.mjs';
 
 export const SKILL_NAME = /^[a-z0-9][a-z0-9-]*$/i;
 
@@ -23,7 +23,7 @@ export class SkillLibrary {
   static default({ root = process.cwd(), repoDir = null, extra = [] } = {}) {
     const dirs = [
       path.join(root, '.aipass', 'skills'),
-      path.join(os.homedir(), '.aipass', 'skills'),
+      path.join(aipassHome(), 'skills'),
       ...(repoDir ? [repoDir] : []),
       ...extra,
     ].filter(Boolean);
@@ -60,7 +60,7 @@ export class SkillLibrary {
     const items = this.list();
     if (!items.length) return 'the skills library folder is missing or empty.';
     if (this.dirs.length === 1) return items.map((s) => s.name).join('\n');
-    const label = (dir) => (dir === this.dirs[0] ? 'project' : dir === path.join(os.homedir(), '.aipass', 'skills') ? 'user' : 'built-in');
+    const label = (dir) => (dir === this.dirs[0] ? 'project' : dir === path.join(aipassHome(), 'skills') ? 'user' : 'built-in');
     return items.map((s) => `${s.name}  (${label(s.dir)})`).join('\n');
   }
 

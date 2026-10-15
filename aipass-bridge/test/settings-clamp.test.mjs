@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Settings } from '../harness/settings.mjs';
+import { SkillLibrary } from '../harness/skills.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const scratch = () => fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-clamp-'));
@@ -39,3 +40,24 @@ test('a value that would break a run is clamped, not stored', () => {
 });
 
 void repo;
+
+test('the user skills folder follows AIPASS_HOME, not the real home', () => {
+  const home = scratch();
+  const root = scratch();
+  const prev = process.env.AIPASS_HOME;
+  process.env.AIPASS_HOME = home;
+  try {
+    fs.mkdirSync(path.join(home, 'skills'), { recursive: true });
+    fs.writeFileSync(path.join(home, 'skills', 'probe.md'), '# probe\n');
+    const lib = SkillLibrary.default({ root });
+    assert.ok(
+      lib.dirs.includes(path.resolve(home, 'skills')),
+      `the user folder answers to AIPASS_HOME:\n${lib.dirs.join('\n')}`,
+    );
+    assert.equal(lib.has('probe'), true, 'and a skill in it is found');
+  } finally {
+    if (prev === undefined) delete process.env.AIPASS_HOME; else process.env.AIPASS_HOME = prev;
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
