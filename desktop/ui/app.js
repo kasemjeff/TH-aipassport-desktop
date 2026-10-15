@@ -502,7 +502,9 @@ async function sendTask(seed = null) {
   try {
     await rpc('run', {
       task: text,
-      mode: $('mode').value,
+      // The select's 'plan' view is not a permission mode: the approved plan is
+      // the consent, so the run works under 'auto'. Everything else goes as-is.
+      mode: $('mode').value === 'plan' ? 'auto' : ($('mode').value || undefined),
       model: $('model').value || undefined,
       attachments: [...state.attachments.keys()],
       title: text.slice(0, 60),
@@ -526,6 +528,10 @@ $('composer').onsubmit = (ev) => {
 
 $('task').addEventListener('keydown', (ev) => {
   const value = ev.currentTarget.value;
+
+  // Shift+Tab belongs to nobody else in here: it cycles the mode. (The
+  // document-level twin only serves focus that is not in this textarea.)
+  if (ev.key === 'Tab' && ev.shiftKey) { ev.preventDefault(); cycleMode(); return; }
 
   // The palette owns the arrow keys, Tab and Enter while a command is being
   // typed; anything typed as an argument belongs to the textarea.
@@ -567,6 +573,15 @@ $('send').onclick = (ev) => {
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && !$('modal').classList.contains('hidden')) hideModal();
   else if (ev.key === 'Escape' && state.running) rpc('cancel');
+  // Shift+Tab cycles ask → auto → plan from the composer or anywhere the
+  // window itself has the focus — the one shortcut that has to work without
+  // someone typing first. Form controls (the select, the settings sheet) keep
+  // their own Tab behaviour.
+  else if (ev.key === 'Tab' && ev.shiftKey && ev.target !== $('task')
+    && !['INPUT', 'TEXTAREA', 'SELECT'].includes(ev.target?.tagName ?? '')) {
+    ev.preventDefault();
+    cycleMode();
+  }
 });
 
 $('slash-btn').onclick = () => {
@@ -587,13 +602,44 @@ $('new-session').onclick = startNewSession;
 // for what is on screen.
 $('session-filter').oninput = () => void refreshSessions();
 
+// Mode is the one setting that decides everything else it might do — may it
+// write, may it run, must it plan first — so the header select and the
+// Shift+Tab cycle share one apply path. 'plan' is a view, not a permission
+// mode: it means plan first, and the approval of that plan is the consent the
+// run then works under, which is why its runs use 'auto'.
+const MODE_VIEWS = {
+  ask: { mode: 'ask', plan: false, requirePlanApproval: false },
+  auto: { mode: 'auto', plan: false, requirePlanApproval: false },
+  yolo: { mode: 'yolo', plan: false, requirePlanApproval: false },
+  plan: { mode: 'auto', plan: true, requirePlanApproval: true },
+};
+const MODE_CYCLE = ['ask', 'auto', 'plan'];
+
+/** What the select should show for the mode and plan flags on record. */
+function applyModeFromSettings() {
+  const settings = state.settings ?? {};
+  const value = settings.requirePlanApproval ? 'plan' : (settings.mode ?? 'ask');
+  $('mode').value = MODE_VIEWS[value] ? value : 'ask';
+}
+
+/**
+ * Move through ask → auto → plan. A view that is not in the cycle (yolo) steps
+ * back to the start. The select changes first — it is the state the keypress
+ * left behind — and the save follows without blocking the next press.
+ */
+function cycleMode() {
+  const current = $('mode').value;
+  const at = MODE_CYCLE.indexOf(current);
+  const next = at === -1 ? 'ask' : MODE_CYCLE[(at + 1) % MODE_CYCLE.length];
+  const label = setMode(next);
+  if (label) addCommandOut(`โหมด: ${label}`);
+}
+
 // The two header dropdowns write through to settings, so the choice survives a
 // restart and the backend runs with it — not just this window. Changing the mode
 // also moves the live policy, which is why it goes through settings.set and not
 // a config call that only touches the bridge.
-$('mode').onchange = () => rpc('settings.set', { mode: $('mode').value })
-  .then(() => addCommandOut(`สิทธิ์: ${$('mode').selectedOptions[0].textContent}`))
-  .catch((err) => addNote(`เปลี่ยนสิทธิ์ไม่ได้: ${err.message}`));
+$('mode').onchange = () => { setMode($('mode').value); };
 $('model').onchange = () => rpc('config.set', { model: $('model').value })
   .then(() => { state.settings = { ...(state.settings ?? {}), defaultModel: $('model').value }; refreshMeter(); })
   .catch((err) => addNote(`เปลี่ยนโมเดลไม่ได้: ${err.message}`));
@@ -1252,6 +1298,7 @@ async function openSettings() {
     applyTheme(next.theme);
     hideModal();
     await refreshHeader();
+    applyModeFromSettings();
     addCommandOut('บันทึกการตั้งค่าแล้ว');
   };
 
@@ -1582,11 +1629,13 @@ function pickModel() {
   }).catch((err) => addNote(err.message));
 }
 
-async function setMode(mode) {
-  if (!['ask', 'auto', 'yolo'].includes(mode)) { addNote('mode ที่ใช้ได้: ask | auto | yolo'); return; }
+function setMode(mode) {
+  if (!MODE_VIEWS[mode]) { addNote('โหมดที่ใช้ได้: ask | auto | yolo | plan'); return null; }
   $('mode').value = mode;
-  await rpc('settings.set', { mode });
-  addCommandOut(`สิทธิ์: ${$('mode').selectedOptions[0].textContent}`);
+  const patch = MODE_VIEWS[mode];
+  state.settings = { ...(state.settings ?? {}), ...patch };
+  rpc('settings.set', patch).catch((err) => addNote(`เปลี่ยนโหมดไม่ได้: ${err.message}`));
+  return $('mode').selectedOptions[0].textContent;
 }
 
 function pickMode() {
@@ -1595,8 +1644,9 @@ function pickMode() {
   body.textContent = '';
   const rows = [
     ['ask', 'ถามก่อนเขียนทุกไฟล์ — เห็น diff แล้วติ๊กก่อนลงดิสก์'],
-    ['auto', 'เขียนเลย — ไฟล์ที่แก้ลงดิสก์ทันที (ยังรัน shell ไม่ได้)'],
+    ['auto', 'เขียนเลย — ไม่ต้องอนุมัติทีละไฟล์'],
     ['yolo', 'เขียน + รันคำสั่ง shell ได้ด้วย'],
+    ['plan', 'วางแผนก่อน — ร่างแผนให้อนุมัติ แล้วทำตามแผนในโหมด auto'],
   ];
   for (const [value, text] of rows) {
     const row = el('button', value === $('mode').value ? 'primary' : null, `${value} — ${text}`);
@@ -1959,5 +2009,6 @@ function applyTheme(theme) {
   await refreshSkills();
   await refreshPanels();
   await refreshPending();
+  applyModeFromSettings();
   $('task').focus();
 })();

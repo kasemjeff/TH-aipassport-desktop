@@ -77,10 +77,11 @@
   <button id="add-project" class="icon-btn" title="เปิดโฟลเดอร์อื่น">+</button>
 
   <label class="field" title="สิทธิ์แก้ไฟล์">
-    <select id="mode" title="สิทธิ์">
+    <select id="mode" title="โหมด: สิทธิ์แก้ไฟล์ + plan · Shift+Tab วนโหมด">
       <option value="ask" title="ถามก่อนเขียนทุกไฟล์">ask</option>
       <option value="auto" title="เขียนเลยไม่ถาม">auto</option>
       <option value="yolo" title="เขียน+รันคำสั่งได้">yolo</option>
+      <option value="plan" title="ร่างแผนให้อนุมัติก่อน แล้วทำตามแผน">plan</option>
     </select>
   </label>
 
@@ -279,7 +280,7 @@
       </p>
 
       <div id="slash" class="hidden">
-        <div class="slash-head">คำสั่ง <span class="dim">↑↓ เลื่อน · Enter/Tab เลือก · Esc ปิด</span></div>
+        <div class="slash-head">คำสั่ง <span class="dim">↑↓ เลื่อน · Enter/Tab เลือก · Esc ปิด · Shift+Tab เปลี่ยนโหมด</span></div>
         <ul id="slash-list"></ul>
       </div>
     </form>

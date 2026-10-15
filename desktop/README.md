@@ -64,7 +64,7 @@ changes appear at the bottom with per-file checkboxes and a diff view.
 
 Header: project, model, permission mode — three controls, one thin row.
 
-Keys: `Enter` sends, `Shift+Enter` is a newline, `Esc` cancels a running turn
+Keys: `Enter` sends, `Shift+Enter` is a newline, `Shift+Tab` cycles the mode (ask → auto → plan), `Esc` cancels a running turn
 (or closes a dialog).
 
 ### `/` — every command, from the keyboard

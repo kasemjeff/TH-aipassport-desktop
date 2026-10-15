@@ -121,6 +121,8 @@ async function bootApp(backend) {
   const nodes = new Map();
   const node = (id) => { if (!nodes.has(id)) nodes.set(id, new El()); return nodes.get(id); };
   const calls = [];
+  /** Every rpc with its params — some assertions need the payload, not the name. */
+  const sent = [];
   const docHandlers = {};
 
   globalThis.document = {
@@ -149,6 +151,7 @@ async function bootApp(backend) {
   globalThis.fetch = async (_url, init = {}) => {
     const { method, params } = JSON.parse(init.body ?? '{}');
     calls.push(method);
+    sent.push({ method, params });
     const result = backend[method]?.(params) ?? { ok: true };
     return { json: async () => ({ ok: true, result }) };
   };
@@ -159,6 +162,7 @@ async function bootApp(backend) {
   return {
     node,
     calls,
+    sent,
     tick,
     dispatch: (type, ev) => globalThis.document.dispatch(type, ev),
     /** The built screen, for everything app.js creates with an id at runtime. */
@@ -547,6 +551,44 @@ test('the header dropdowns save what you pick', async () => {
   node('model').dispatch('change');
   await tick();
   assert.ok(calls.includes('config.set'), 'model goes to the bridge');
+});
+
+test('shift+tab cycles ask, auto and plan — and writes each through', async () => {
+  // The mode is the one control worth its own key: it decides what the next
+  // run may do, and "just edit it" lived in chat before.
+  const { node, sent, tick } = await bootApp(BACKEND);
+  assert.equal(node('mode').value, 'ask', 'the window starts where the settings say');
+
+  node('task').dispatch('keydown', { key: 'Tab', shiftKey: true });
+  await tick();
+  assert.equal(node('mode').value, 'auto', 'one press: it may edit');
+  assert.deepEqual(sent.at(-1), { method: 'settings.set', params: { mode: 'auto', plan: false, requirePlanApproval: false } }, 'and the backend is told, plan flags and all');
+
+  node('task').dispatch('keydown', { key: 'Tab', shiftKey: true });
+  await tick();
+  assert.equal(node('mode').value, 'plan', 'two presses: plan first');
+  assert.deepEqual(sent.at(-1).params, { mode: 'auto', plan: true, requirePlanApproval: true }, 'plan runs under auto once the plan is approved');
+
+  node('task').dispatch('keydown', { key: 'Tab', shiftKey: true });
+  await tick();
+  assert.equal(node('mode').value, 'ask', 'three presses: back to square one');
+});
+
+test('a plan-mode run sends a real permission mode, not the view name', async () => {
+  // The select shows 'plan'; the engine only knows ask/auto/yolo.
+  const { node, sent, tick } = await bootApp({
+    ...BACKEND,
+    'settings.get': () => ({ ...BACKEND['settings.get'](), mode: 'auto', plan: true, requirePlanApproval: true }),
+  });
+  assert.equal(node('mode').value, 'plan', 'a saved plan mode boots as the plan view');
+
+  node('task').value = 'จัดบ้านให้หน่อย';
+  node('task').dispatch('keydown', { key: 'Enter' });
+  await tick();
+  const run = [...sent].reverse().find((c) => c.method === 'run');
+  assert.ok(run, 'the task went out');
+  assert.equal(run.params.mode, 'auto', 'under the hood it is auto');
+  assert.equal(run.params.task, 'จัดบ้านให้หน่อย');
 });
 
 test('the context meter reports a budget and a trigger', async () => {
