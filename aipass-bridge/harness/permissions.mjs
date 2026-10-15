@@ -1,9 +1,10 @@
 // Who is allowed to touch what.
 //
 // The upstream model speaks in prose markers, so a "write" is any of
-// CREATE/EDIT/DELETE/MOVE and "shell" is RUN. Reads are always allowed — they
-// cannot change anything, and holding the whole loop hostage to a question
-// per file read would make the tool unusable.
+// CREATE/EDIT/DELETE/MOVE and "shell" is RUN. Reads are allowed by default —
+// they cannot change anything, and holding the whole loop hostage to a question
+// per file read would make the tool unusable — but a deny rule still outranks
+// that default, because `.env* → deny` exists to keep secrets on this machine.
 //
 // Three modes, matching how the CLI already worked:
 //   ask      — every write and every shell command is confirmed (dry run)
@@ -58,11 +59,11 @@ export class PermissionEngine {
   /** What the policy says, before any question is asked. */
   evaluate({ kind, arg = '' }) {
     const risk = classify(kind);
-    if (risk === 'read') return { decision: 'allow', risk };
+    if (risk !== 'read' && this.grants.has(`${kind}:${arg}`)) return { decision: 'allow', risk, granted: true };
 
-    if (this.grants.has(`${kind}:${arg}`)) return { decision: 'allow', risk, granted: true };
-
-    // Path rules outrank the mode; first match wins.
+    // Path rules outrank the mode — and they cover reads too, because
+    // `.env* → deny` is how secrets stay on this machine even when the model
+    // asks for the file with NEED. First match wins.
     const file = arg.trim().split(/\s+/)[0] ?? '';
     for (const rule of this.rules) {
       if (rule.kinds && !rule.kinds.includes(kind)) continue;
@@ -71,6 +72,8 @@ export class PermissionEngine {
       }
     }
 
+    // A read that no rule named is allowed: it cannot change anything.
+    if (risk === 'read') return { decision: 'allow', risk };
     if (this.mode === 'yolo') return { decision: 'allow', risk };
     if (risk === 'write' && this.mode === 'auto') return { decision: 'allow', risk };
     if (risk === 'shell' && this.mode === 'auto' && this.allowRun) return { decision: 'allow', risk };

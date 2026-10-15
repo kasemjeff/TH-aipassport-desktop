@@ -14,6 +14,8 @@
 //      results until the step limit — a loop that burns the whole budget
 //   H8 #makeHelper() built its engine with no rules, so a `.env* → deny` rule
 //      was bypassed by every helper run
+//   H9 the same `.env* → deny` rule stopped writes but not reads — `NEED file
+//      .env` still sent the secrets upstream; reads consult the rules now
 // (H6, the compaction estimate measuring the message before the WAF rewrites
 // it, lives in compact.test.mjs with the rest of the compactor's tests.)
 import { test, after } from 'node:test';
@@ -239,6 +241,60 @@ test('a helper run that edits a denied path is declined, and nothing is staged',
   assert.equal(h.overlay.size, 0, 'and nothing was staged in the overlay');
   assert.deepEqual(h.pendingChanges(), []);
   assert.equal(fs.existsSync(path.join(root, '.env')), false, 'nothing was written to disk either');
+});
+
+/* H9 — a deny rule stops reads as well -------------------------------------- */
+
+test('a deny rule keeps secrets out of reads too (H9)', () => {
+  const engine = new PermissionEngine({ mode: 'yolo', allowRun: false, rules: [{ pattern: '.env*', decision: 'deny' }] });
+  assert.equal(engine.evaluate({ kind: 'read', arg: '.env' }).decision, 'deny');
+  assert.equal(engine.evaluate({ kind: 'read', arg: '.env.local' }).decision, 'deny');
+  assert.equal(engine.evaluate({ kind: 'read', arg: '.env 1-20' }).decision, 'deny', 'a ranged read is the same file');
+  assert.equal(engine.evaluate({ kind: 'read', arg: 'src/app.ts' }).decision, 'allow',
+    'every read a rule does not name is still always allowed');
+
+  // `kinds` still narrows a rule, so a writes-only rule stays out of reads.
+  const writesOnly = new PermissionEngine({ mode: 'yolo', allowRun: false, rules: [{ pattern: '.env*', decision: 'deny', kinds: ['write'] }] });
+  assert.equal(writesOnly.evaluate({ kind: 'read', arg: '.env' }).decision, 'allow');
+  assert.equal(writesOnly.evaluate({ kind: 'write', arg: '.env' }).decision, 'deny');
+});
+
+test('a denied read is refused with a reason before the file is opened (H9)', async () => {
+  const root = tempDir({ '.env': 'SECRET=1\n' });
+
+  class StubBridge extends BridgeClient {
+    constructor(replies) {
+      super('http://127.0.0.1:1');
+      this.model = 'stub';
+      this.replies = replies;
+      this.turn = 0;
+    }
+    async chat() {
+      return { text: this.replies[Math.min(this.turn++, this.replies.length - 1)], reasoning: '' };
+    }
+    async quota() { return { available: 10 }; }
+    async createConversation() { return { id: 'stub-conversation' }; }
+    async config() {}
+    async status() { return { conversation: 'stub-conversation' }; }
+  }
+  const events = new Emitter();
+  const h = new Harness({
+    root,
+    bridge: new StubBridge(['NEED file .env\n', 'DONE kept it local\n']),
+    store: new SessionStore(tempDir()),
+    rules: [{ pattern: '.env*', decision: 'deny' }],
+    events,
+    options: { mode: 'yolo', maxSteps: 3 },
+  });
+
+  const seen = [];
+  events.on('tool', (p) => seen.push(p));
+  const result = await h.run('read the env file');
+
+  assert.equal(result.stopReason, 'done');
+  const denied = seen.find((p) => p.kind === 'read' && p.arg === '.env');
+  assert.ok(denied, `the model asked for the file:\n${JSON.stringify(seen)}`);
+  assert.match(denied.head, /denies reading \.env/, `the rule answered before the read happened:\n${denied.head}`);
 });
 
 /* H5 — only the sends the server accepted are recorded --------------------- */
