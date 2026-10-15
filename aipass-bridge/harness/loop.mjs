@@ -58,6 +58,11 @@ export async function runTask(taskText, ctx = {}) {
     conversation = null, conversationTemporary = null,
   } = ctx;  const maxSteps = Number(options.maxSteps ?? 10);
   const model = options.model ?? null;
+  // How hard the model thinks before each reply. 'off' (or nothing) means the
+  // request never asks; the level that does go out is checked by the bridge
+  // against the model, so a level it lacks never breaks a run.
+  const thinking = options.thinking && String(options.thinking).toLowerCase() !== 'off'
+    ? String(options.thinking).toLowerCase() : null;
   const useSlim = Boolean(options.slim);
   const seedText = options.seedText ?? null;
   const pluginTools = options.pluginTools ?? [];
@@ -82,6 +87,7 @@ export async function runTask(taskText, ctx = {}) {
       message: text,
       parts: withParts ?? null,
       model,
+      thinkingLevel: thinking,
       ...(conversation ? { conversation, temporary: conversationTemporary } : {}),
       signal: options.signal ?? null,
       onText: (t) => events?.emit('assistant_delta', { text: t }),

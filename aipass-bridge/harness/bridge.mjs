@@ -75,8 +75,10 @@ export class BridgeClient {
    * current one — how a helper run or a WEB scratch space keeps its traffic
    * out of the working conversation. `temporary` rides along so a temporary
    * conversation is told so on every turn, as the upstream requires.
+   * `thinkingLevel` asks the model to reason at that level for this turn; the
+   * bridge checks it against the model and strips what the model does not offer.
    */
-  async chat({ message, parts = null, model = null, conversation = null, temporary = null, onText = () => {}, onReasoning = () => {}, signal = null } = {}) {
+  async chat({ message, parts = null, model = null, conversation = null, temporary = null, thinkingLevel = null, onText = () => {}, onReasoning = () => {}, signal = null } = {}) {
     const content = Array.isArray(parts) && parts.length
       ? [{ type: 'text', text: message }, ...parts]
       : message;
@@ -86,6 +88,7 @@ export class BridgeClient {
       body: JSON.stringify({
         ...(model ?? this.model ? { model: model ?? this.model } : {}),
         ...(conversation ? { conversation, ...(temporary === null ? {} : { temporary: temporary === true }) } : {}),
+        ...(thinkingLevel ? { thinking_level: thinkingLevel } : {}),
         stream: true,
         messages: [{ role: 'user', content }],
       }),

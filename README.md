@@ -135,6 +135,7 @@ aipass "Describe this" --image ./img.png # Send with attached image file
 aipass agent "Fix the navbar bug"      # Run autonomous agent on the current directory
 aipass agent "Refactor utils" --apply  # Run agent and apply file modifications automatically
 aipass agent "Run tests" --allow-run   # Allow shell execution (`RUN` commands)
+aipass agent "Fix it" --thinking high  # How hard the model thinks (off|low|medium|high|max)
 
 # Utility & Management
 aipass dev                             # Run bridge in foreground (live logs, Ctrl+C to stop)

@@ -629,3 +629,52 @@ test('a --watch follow-up re-states the frame and the current listing', async (t
   assert.match(followUp, /still open in front of me/, 'the frame is restated');
   assert.match(followUp, /a\.txt/, 'with ground truth to correct a drifted belief against');
 });
+
+test('thinking is on by default and rides every send as thinking_level', async (t) => {
+  // The model's reasoning is a channel of its own: asked for on every message
+  // at the configured level, streamed back as reasoning_content, rendered
+  // apart from the steps — never mixed into the tools or the answer.
+  const dir = tempDir({ 'README.md': 'a starter project\n' });
+  const handler = scripted([
+    'Let me look.\n\nNEED file README.md',
+    'It is a starter project.\n\nDONE It is a starter project.',
+  ]);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir);
+  assert.ok(ext.chats.length >= 2, 'the run sent more than one message');
+  for (const job of ext.chats) assert.equal(job.thinkingLevel, 'low', 'every send carries the default level');
+  assert.match(out, /think low/, 'the header names the level');
+});
+
+test('--thinking off asks for nothing and a bad level stops the start', async (t) => {
+  const dir = tempDir({ 'README.md': 'x\n' });
+  const handler = scripted(['DONE nothing to do']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  await agent(dir, ['--thinking', 'off']);
+  assert.equal(ext.chats.at(-1).thinkingLevel, undefined, 'off means the request never asks');
+
+  const bad = await agent(dir, ['--thinking', 'banana']);
+  assert.equal(bad.code, 1, 'a typo is refused before any message is sent');
+  assert.match(bad.out, /bad --thinking/);
+});
+
+test('reasoning streams as its own dim line, apart from the step', async (t) => {
+  const dir = tempDir({ 'README.md': 'a starter project\n' });
+  const onChat = async (job, e) => {
+    await e.reasoning('Weighing the options\n');
+    await e.reasoning('the README looks like a starter\n');
+    await e.text('DONE It is a starter project.');
+    await e.done();
+  };
+  const ext = await new FakeExtension(bridge.base, { onChat }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir);
+  assert.match(out, /⟡ Weighing the options/, 'thinking keeps its own gutter');
+  assert.match(out, /⟡ the README looks like a starter/);
+  assert.match(out, /✓ It is a starter project/, 'and the answer still reads as the answer');
+});

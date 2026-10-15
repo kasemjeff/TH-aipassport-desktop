@@ -325,6 +325,8 @@ export class FakeExtension {
     const emit = {
       text: (t) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'text', text: t }] }),
       status: (t) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'status', text: t }] }),
+      // The model's own thinking, as opposed to tool-activity status notes.
+      reasoning: (t) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'reasoning', text: t }] }),
       image: (url) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'image', text: url }] }),
       // Generated media of any kind — the extension routes by media type, so a
       // video arrives as kind 'video' rather than being called an image.

@@ -212,6 +212,7 @@ export function createRpc({
         plan: appSettings.get('plan'),
         requirePlanApproval: appSettings.get('requirePlanApproval'),
         subagent: appSettings.get('subagent'),
+        thinking: appSettings.get('thinking'),
         searchI: appSettings.get('searchI'),
         attach: appSettings.get('attach'),
         webScratch: appSettings.get('webScratch'),
@@ -442,6 +443,7 @@ const openBrowser = async (url) => {
       if (params.plan != null) current.options.plan = appSettings.get('plan');
       if (params.requirePlanApproval != null) current.options.requirePlanApproval = appSettings.get('requirePlanApproval');
       if (params.subagent != null) current.options.subagent = appSettings.get('subagent');
+      if (params.thinking != null) current.options.thinking = appSettings.get('thinking');
       if (params.defaultModel != null) current.bridge.model = params.defaultModel;
       if (params.compaction) current.compactor = Object.assign(current.compactor, params.compaction);
       // The rotation share is its own setting, not part of the budget object:

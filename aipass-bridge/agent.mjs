@@ -36,6 +36,10 @@ const MAX_STEPS = Number(flag('max', 10));
 const APPLY = has('apply');
 const ALLOW_RUN = has('allow-run');
 const MAX_RESULT = Number(flag('max-result', 3000));
+// How hard the model thinks before each step: off | low | medium | high | max.
+// Same default as the window's (settings.mjs 'thinking'): 'off' asks for
+// nothing and lets each model's own default stand.
+const THINKING = String(flag('thinking', 'low')).toLowerCase();
 const CONVERSATION = flag('conversation', null);
 // A conversation carries its own history, so reusing one drags in whatever was
 // said before — including any refusal. Each run gets a fresh one by default.
@@ -104,6 +108,7 @@ if (!task || HELP) {
   --root DIR      project root the agent may touch   (default: cwd)
   --skills DIR    playbook library for SKILL         (default: one level above the repo)
   --model ID      model id                           (default: bridge default)
+  --thinking LVL  model thinking: off|low|medium|high|max  (default: low)
   --apply         write without asking               (default: ask after the diff)
   --allow-run     let the agent run shell commands   (default: off)
   --max N         max steps                          (default: 10)
@@ -131,6 +136,12 @@ A dry run prints a unified diff; reply 'y' or pass --apply to write it to disk.`
   process.exit(HELP ? 0 : 1);
 }
 
+const THINKING_LEVELS = ['off', 'low', 'medium', 'high', 'max'];
+if (!THINKING_LEVELS.includes(THINKING)) {
+  console.error(`bad --thinking: "${THINKING}" — expected ${THINKING_LEVELS.join(' | ')}`);
+  process.exit(1);
+}
+
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;
 const bold = (s) => `\x1b[1m${s}\x1b[0m`;
 const green = (s) => `\x1b[32m${s}\x1b[0m`;
@@ -139,32 +150,37 @@ const gray = (s) => `\x1b[90m${s}\x1b[0m`;
 
 /* ------------------------------------------------------- terminal rendering */
 
-function renderTool(block) {
-  const lines = block.split('\n').map((l) => l.replace(/\s+$/, '')).filter(Boolean);
-  const w = Math.max(40, (process.stdout.columns ?? 80) - 2);
-  let sources = false;
-  let shown = 0;
-  let hidden = 0;
+// The model's live reasoning gets its own channel and its own look: one dim
+// ⟡ line per completed line, capped per step so a long chain cannot push the
+// work off the screen. The prose the model writes is a different thing — the
+// 'thinking' event below keeps a line of its own for that.
+let thoughtBuf = '';
+let thoughtShown = 0;
+let thoughtHidden = 0;
 
-  for (const l of lines) {
-    if (/^sources:?\s*$/i.test(l)) { sources = true; console.log(''); console.log('  ' + dim('sources')); continue; }
+function emitThought(line) {
+  const t = line.trim();
+  if (!t) return;
+  if (thoughtShown >= 12) { thoughtHidden++; return; }
+  thoughtShown++;
+  console.log('  ' + dim('⟡ ' + truncate(t, Math.max(40, (process.stdout.columns ?? 80) - 4))));
+}
 
-    if (sources) {
-      const entry = (l.match(/^\s*[-*]\s+(.*)$/)?.[1] ?? l).trim();
-      if (shown >= 6) { hidden++; continue; }
-      shown++;
-      const u = entry.match(/^(.*?)\s+(https?:\/\/\S+)\s*$/);
-      if (u) { console.log('  ' + dim('· ' + truncate(u[1].trim(), w - 6))); console.log('    ' + gray(truncate(u[2], w - 6))); }
-      else console.log('  ' + dim('· ' + truncate(entry, w - 6)));
-      continue;
-    }
-
-    const t = l.match(/^\[([a-z0-9_]+)\]\s*(.*)$/i);
-    if (t) console.log('  ' + green('⏺') + ' ' + dim('[' + t[1] + ']') + (t[2] ? ' ' + dim(truncate(t[2], w - 14)) : ''));
-    else if (shown < 8) { shown++; console.log('  ' + dim('⎿ ' + truncate(l.trim(), w - 6))); }
-    else hidden++;
+function processReasoning(text) {
+  thoughtBuf += text;
+  let cut;
+  while ((cut = thoughtBuf.indexOf('\n')) !== -1) {
+    emitThought(thoughtBuf.slice(0, cut));
+    thoughtBuf = thoughtBuf.slice(cut + 1);
   }
-  if (hidden) console.log('  ' + dim('· … +' + hidden + ' more'));
+}
+
+function flushThought() {
+  if (thoughtBuf.trim()) emitThought(thoughtBuf);
+  thoughtBuf = '';
+  if (thoughtHidden) console.log('  ' + dim('⟡ … +' + thoughtHidden + ' more'));
+  thoughtShown = 0;
+  thoughtHidden = 0;
 }
 const truncate = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 
@@ -290,6 +306,7 @@ const harness = new Harness({
   skills: SKILLS_DIR ? new SkillLibrary([SKILLS_DIR], { maxResult: MAX_RESULT }) : undefined,
   options: {
     maxSteps: MAX_STEPS,
+    thinking: THINKING,
     allowRun: ALLOW_RUN,
     mode: 'auto',
     slim: SLIM || Boolean(ASSISTANT),
@@ -313,9 +330,11 @@ const harness = new Harness({
 const { events } = harness;
 
 events.on('assistant_delta', ({ text }) => process.stdout.write(dim(text)));
-events.on('reasoning_delta', ({ text }) => renderTool(text));
-events.on('step', ({ step, maxSteps, elapsed }) =>
-  console.log(bold(`\n○ agent step ${step}/${maxSteps}`) + ' ' + dim(`(${elapsed}s)`)));
+events.on('reasoning_delta', ({ text }) => processReasoning(text));
+events.on('step', ({ step, maxSteps, elapsed }) => {
+  flushThought();
+  console.log(bold(`\n○ agent step ${step}/${maxSteps}`) + ' ' + dim(`(${elapsed}s)`));
+});
 events.on('thinking', ({ text, hasMore }) =>
   console.log(`  ${gray(hasMore ? '├── ' : '└── ')}${dim('thinking:')} ${truncate(text, 80)}`));
 events.on('nudge', ({ n }) => console.log(red(`\nno marker in that reply — nudging (${n}/2)`)));
@@ -323,7 +342,7 @@ events.on('give_up', () => console.log(red('\nno marker after three replies — 
 events.on('ignore_done', () => console.log(dim('  (ignoring DONE — it came before the results it asked for)')));
 events.on('step_limit', () => console.log(red('\nreached the step limit')));
 events.on('firewall_note', ({ text }) => console.log(dim(`  ${text}`)));
-events.on('error', ({ message }) => console.error(red(`\n${message}`)));
+events.on('error', ({ message }) => { flushThought(); console.error(red(`\n${message}`)); });
 events.on('tool', ({ kind, arg, ok, head, lines, isLast }) => {
   console.log(`  ${gray(isLast ? '└── ' : '├── ')}${!ok ? red('✗') : green('✓')} ${kind} ${arg} ${dim(head)}`);
   for (const line of lines) console.log(dim(`      ${line}`));
@@ -368,6 +387,7 @@ console.log(bold('mode  ') + (APPLY ? green('APPLY — files will be written') :
 console.log(bold('chat  ') + (bridgeStatus?.conversation ?? 'resolves on first message') +
   dim(CONVERSATION ? '  (continuing)' : REUSE ? '  (reusing the most recent)' : PERMANENT ? '  (new)' : '  (new, temporary)') +
   (ASSISTANT ? dim(`  · assistant ${ASSISTANT}`) : ''));
+console.log(bold('think ') + (THINKING === 'off' ? dim('off') : THINKING));
 
 const runOne = async (text, first) => {
   await harness.run(text, { first });

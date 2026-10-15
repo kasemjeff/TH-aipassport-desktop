@@ -31,6 +31,10 @@ export const DEFAULTS = {
   plan: false,
   requirePlanApproval: false,
   subagent: true,
+  // how hard the model thinks before each step: off | low | medium | high |
+  // max. It rides every send as `thinking_level`; the bridge drops a level the
+  // chosen model does not advertise, so the setting never breaks a run.
+  thinking: 'low',
   // when the context budget is close to full, summarise and rotate
   compaction: { contextTokens: 24_000, reserveTokens: 4_096, keepRecentBytes: 6_000 },
   // rotate at this share of the budget. The upstream keeps its own history and
@@ -111,6 +115,10 @@ export class Settings {
       return Math.min(max, Math.max(min, Math.round(n)));
     };
     next.maxSteps = num(next.maxSteps, 1, 200, 10);
+    // An unknown thinking level would reach the bridge and come back stripped,
+    // which reads as "thinking is on" in the form and "off" in the run. The
+    // one place every surface writes keeps the two equal.
+    if (!['off', 'low', 'medium', 'high', 'max'].includes(next.thinking)) next.thinking = DEFAULTS.thinking;
     // Path rules are policy, and policy that a typo silently disables is worse
     // than no policy: a rule with no pattern would never match anything, and a
     // decision of "yes" would never be honoured by the engine. Both are dropped

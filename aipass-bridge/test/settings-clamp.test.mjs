@@ -22,6 +22,8 @@ test('a value that would break a run is clamped, not stored', () => {
     assert.equal(s.set({ maxSteps: 9_999 }).maxSteps, 200, 'and neither is an absurd one');
     assert.equal(s.set({ compaction: { contextTokens: 10 } }).compaction.contextTokens, 1000, 'the budget has a floor');
     assert.equal(s.set({ compactAtPercent: 9_999 }).compactAtPercent, 100, 'the rotation share has a ceiling');
+    assert.equal(s.set({ thinking: 'banana' }).thinking, 'low', 'an unknown thinking level falls back, never stores');
+    assert.equal(s.set({ thinking: 'high' }).thinking, 'high', 'and a real level passes through');
     assert.equal('chatUrl' in s.set({ chatUrl: 'javascript:alert(1)' }), false, 'a chat URL must be http(s)');
 
     // A hand-edited file is clamped as it is read, not trusted.

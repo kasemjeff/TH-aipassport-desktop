@@ -178,6 +178,7 @@ const BACKEND = {
     plan: false,
     requirePlanApproval: false,
     subagent: true,
+    thinking: 'low',
     compaction: { contextTokens: 24000, reserveTokens: 4096, keepRecentBytes: 6000 },
     compactAtPercent: 40,
     skillsDirs: [],
@@ -399,6 +400,24 @@ test('a compaction shows what the model carried over', async () => {
   const card = node('log').children.find((c) => /compaction-card/.test(c.className));
   assert.ok(card, 'the summary is shown in the conversation');
   assert.match(card.textContent, /still to do: tests/);
+});
+
+test('thinking streams into an open fold that closes when the turn ends', async () => {
+  // The model's reasoning is its own channel: a box you can watch while it
+  // thinks, which folds itself away and leaves one line when the turn ends —
+  // so the thinking never reads as the answer.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('reasoning_delta', { text: '**Solving the Riddle**\n' });
+  await tick();
+  const box = node('log').children.find((c) => c.tagName === 'DETAILS' && /think/.test(c.className));
+  assert.ok(box, 'the reasoning box appears with the first delta');
+  assert.equal(box.open, true, 'open while it is still thinking');
+  assert.match(box.textContent, /Solving the Riddle/);
+
+  globalThis.__stream.emit('finished', { summary: 'done', stopReason: 'done', spent: 1, credits: { available: 99, limit: 100 } });
+  await tick();
+  assert.equal(box.open, false, 'folded away when the turn ends');
+  assert.match(box.textContent, /reasoning · \d+s/, 'and the summary says it happened');
 });
 
 test('a run with no chat tab gets a banner with a one-click fix', async () => {

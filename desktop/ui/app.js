@@ -97,11 +97,12 @@ function assistantText(delta) {
 function thinkingText(delta) {
   if (!state.thinking) {
     const box = el('details', 'think');
+    box.open = true;      // watch it think; the fold closes when the turn ends
     const summary = el('summary', null, 'reasoning…');
     const pre = el('pre');
     box.append(summary, pre);
     log.append(box);
-    state.thinking = { el: pre, text: '' };
+    state.thinking = { el: pre, text: '', box, summary, since: Date.now() };
   }
   state.thinking.text += delta;
   state.thinking.el.textContent = state.thinking.text;
@@ -109,6 +110,14 @@ function thinkingText(delta) {
 }
 
 function endTurn() {
+  const t = state.thinking;
+  if (t) {
+    // Like the terminal's steps: when the turn ends the reasoning folds away,
+    // leaving one line that says it happened and for how long.
+    const secs = Math.max(1, Math.round((Date.now() - t.since) / 1000));
+    t.summary.textContent = `reasoning · ${secs}s`;
+    t.box.open = false;
+  }
   state.assistant = null;
   state.thinking = null;
 }
@@ -887,6 +896,7 @@ const SETTINGS_SECTIONS = [
     sub: 'โมเดล สิทธิ์ และขีดจำกัดของแต่ละรัน',
     fields: [
       { key: 'defaultModel', label: 'โมเดลเริ่มต้น', type: 'text', note: 'id ของโมเดล — ดูรายการได้ที่ /models หรือกดที่หัวหน้าต่าง' },
+      { key: 'thinking', label: 'thinking level', type: 'select', options: [['off', 'off — ไม่คิดก่อนตอบ'], ['low', 'low — เร็ว (ค่าเริ่มต้น)'], ['medium', 'medium — สมดุล'], ['high', 'high — ลึก'], ['max', 'max — ลึกสุด']], note: 'โมเดลคิดก่อนแต่ละ step — ความคิดแยกมาแสดงเป็นกล่อง reasoning… · ใช้ได้กับโมเดลที่รองรับ เช่น gemini-3.5-flash-lite' },
       { key: 'mode', label: 'สิทธิ์แก้ไฟล์', type: 'select', options: [['ask', 'ถามก่อนเขียนทุกไฟล์'], ['auto', 'เขียนเลยไม่ถาม'], ['yolo', 'เขียน + รันคำสั่ง shell']] },
       { key: 'allowRun', label: 'อนุญาตให้รันคำสั่ง shell', type: 'checkbox', note: 'ปิด = โมเดลแก้ไฟล์ได้อย่างอื่นไม่ได้' },
       { key: 'maxSteps', label: 'สูงสุดกี่ Step ต่อคำสั่ง', type: 'number', note: 'กันเรื่องราวยาวไม่จบ — ตัวเลขสูง = เสียเครดิตรัวกว่า' },
