@@ -438,6 +438,9 @@ stream.addEventListener('applied', (e) => {
   const { written, deleted, files } = JSON.parse(e.data);
   addNote(`applied  ${written ?? 0} written, ${deleted ?? 0} deleted${files?.length ? ` — ${files.join(', ')}` : ''}`);
   renderPending([]);
+  // The panel is a picture of the tree from a moment ago: without this, a file
+  // that just landed on disk stays invisible until a reload.
+  void refreshFiles();
 });
 stream.addEventListener('discarded', () => { renderPending([]); addNote('discarded.'); });
 stream.addEventListener('session', (e) => {

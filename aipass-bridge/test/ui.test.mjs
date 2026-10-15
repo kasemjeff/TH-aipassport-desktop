@@ -513,6 +513,20 @@ test('the file panel walks into folders and attaches a file', async () => {
   assert.match(node('log').textContent, /แนบแล้ว: guide\.md/);
 });
 
+test('an apply refreshes the file panel, so the new file is on screen', async () => {
+  // The panel is a listing from a moment ago; a just-applied file used to stay
+  // invisible until somebody reloaded the window or walked out of the folder.
+  let entries = [{ name: 'desktop', dir: true }];
+  const { node, tick } = await bootApp({ ...BACKEND, 'fs.list': () => entries });
+  await tick(); await tick(); await tick();
+  assert.ok(!node('files').children.some((li) => li.textContent.includes('overview.md')), 'nothing there before the apply');
+
+  entries = [{ name: 'desktop', dir: true }, { name: 'overview.md', dir: false }];
+  globalThis.__stream.emit('applied', { written: 1, deleted: 0, files: ['overview.md'] });
+  await tick(); await tick(); await tick();
+  assert.ok(node('files').children.some((li) => li.textContent.includes('overview.md')), 'and it is listed right after the apply');
+});
+
 test('the saved theme is applied when the window boots', async () => {
   // A theme setting that only takes effect after you open the settings sheet is
   // a setting that lies on every reload.
