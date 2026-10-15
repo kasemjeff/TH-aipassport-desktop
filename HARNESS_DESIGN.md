@@ -256,3 +256,43 @@ The contract every tool keeps — new tools included:
    bytes must not move;
 5. a test that runs it through the loop with the gate in `ask` mode;
 6. a playbook file only if the tool needs technique, not just syntax.
+
+
+## Research round (Oct 2026): four deltas, each from a named source
+
+The loop was reviewed component by component against recent harness research.
+Four changes made the cut; the rest of the review is noted below as
+candidates, not shipped.
+
+**R1 - Oscillation, the other no-progress loop.** Analyses of infinite agentic
+loops (IAL-Scan, arXiv:2607.01641) flag "two states trading places" beside
+plain repetition: every individual step looks new, the pair goes nowhere.
+`loop.mjs` keeps the last step signatures and stops an A/B/A/B run the same
+way it stops an A/A/A one - one correction, then out.
+
+**R2 - Edit diagnostics are free here.** Ablations of coding harnesses ("An
+Empirical Study of Harness Design for Coding Agents", arXiv:2609.20804;
+"Beyond the Model", arXiv:2609.32459) put structured tools with validation
+among the few components that pay off consistently. The cheapest hard check
+available is the runtime itself: a staged `.mjs`/`.cjs`/`.js` edit is written
+to a temp file and passed through `node --check`; the verdict rides the tool
+result, so a syntax error costs one round trip instead of a broken apply.
+
+**R3 - Tool output is data, never instructions.** The prompt-injection design
+patterns paper (arXiv:2506.08837) reduces to one rule this harness can hold
+without losing utility: content that arrives through a tool is reported on,
+never obeyed. The preamble says it plainly and the REMINDER repeats it every
+step, because the marker protocol means file content and requests share one
+channel.
+
+**R4 - Verification before DONE, the soft form.** Strong models over-verify
+and weak ones under-verify; the cheap correction is one nudge. After the
+first staged code change, the next message asks for a test run, a read-back,
+or an explicit "nothing can be run here" - once per run, never blocking.
+`run_stats` counts it (`verifyPrompts`) so the trend shows in `npm run stats`.
+
+**Noted, not shipped:** per-run tool-call caps and wall-clock budgets (the
+"default hard caps" argument applies to runs, not only steps); an elision
+tier that replaces stale, bulky tool results with stubs before paying for
+summarisation; task-specific subagent instructions (a "verification agent"),
+which the SUBAGENT marker currently lacks.

@@ -354,6 +354,12 @@ stream.addEventListener('firewall_note', (e) => addNote(JSON.parse(e.data).text)
 stream.addEventListener('nudge', (e) => addNote(`no marker in that reply — nudging (${JSON.parse(e.data).n}/2)`));
 stream.addEventListener('give_up', () => addNote('no marker after three replies — stopping.'));
 stream.addEventListener('ignore_done', () => addNote('(ignoring DONE — it came before the results it asked for)'));
+stream.addEventListener('stagnation', (e) => {
+  const { action, pattern } = JSON.parse(e.data);
+  const what = pattern === 'oscillation' ? 'สองคำสั่งสลับกันไปมา' : 'คำสั่งเดิมซ้ำ';
+  addNote(action === 'stop' ? `ลูปไม่เดินหน้า (${what}) — หยุดให้แล้ว` : `ลูปไม่เดินหน้า (${what}) — สั่งให้เปลี่ยนวิธีแล้ว`);
+});
+stream.addEventListener('verify_prompt', () => addNote('ขอให้โมเดลพิสูจน์สิ่งที่แก้ก่อนจบ — รันเช็ค หรืออ่านการแก้กลับมา'));
 stream.addEventListener('step_limit', () => {
   addNote('reached the step limit');
   // A run that stops for want of steps is a dead end unless the next move is

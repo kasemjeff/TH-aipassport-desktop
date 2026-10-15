@@ -44,6 +44,7 @@ export function collectRuns(session) {
       refusalRate: calls ? refusals / calls : 0,
       nudges: e.nudges ?? 0,
       stagnations: e.stagnations ?? 0,
+      verifyPrompts: e.verifyPrompts ?? 0,
       firewallNotes: e.firewallNotes ?? 0,
       stepMs: Array.isArray(e.stepMs) ? e.stepMs : [],
       spent: e.spent ?? null,
@@ -61,6 +62,7 @@ export function summarize(rows) {
     refusals: 0,
     nudges: 0,
     stagnations: 0,
+    verifyPrompts: 0,
     firewallNotes: 0,
     spent: 0,
     byTool: {},
@@ -73,6 +75,7 @@ export function summarize(rows) {
     totals.refusals += r.refusals;
     totals.nudges += r.nudges;
     totals.stagnations += r.stagnations;
+    totals.verifyPrompts += r.verifyPrompts;
     totals.firewallNotes += r.firewallNotes;
     totals.spent += r.spent ?? 0;
     totals.byStop[r.stopReason] = (totals.byStop[r.stopReason] ?? 0) + 1;
@@ -113,7 +116,7 @@ function main() {
   }
 
   const totals = summarize(rows);
-  console.log(`lifetime  ${totals.runs} run(s) · ${totals.calls} tool call(s) · refusals ${pct(totals.calls ? totals.refusals / totals.calls : 0)} · nudges ${totals.nudges} · stagnation ${totals.stagnations} · firewall ${totals.firewallNotes} · ${credits(totals.spent)} credits`);
+  console.log(`lifetime  ${totals.runs} run(s) · ${totals.calls} tool call(s) · refusals ${pct(totals.calls ? totals.refusals / totals.calls : 0)} · nudges ${totals.nudges} · stagnation ${totals.stagnations} · verify ${totals.verifyPrompts} · firewall ${totals.firewallNotes} · ${credits(totals.spent)} credits`);
   const avgStep = totals.stepMsCount ? Math.round(totals.stepMsTotal / totals.stepMsCount / 100) / 10 : null;
   const stops = Object.entries(totals.byStop).map(([k, n]) => `${k}×${n}`).join(', ');
   if (avgStep !== null) console.log(`          avg step ${avgStep}s · ends: ${stops}`);

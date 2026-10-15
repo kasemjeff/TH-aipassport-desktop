@@ -11,8 +11,9 @@
 // text. The loop reads that one word to light the ✗; no tool learns a new
 // failure phrase that a regex somewhere has to be taught about.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { exec } from 'node:child_process';
+import { exec, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { SKIP, binaryKind, posix, stripGutter } from './overlay.mjs';
 import { outbound, inbound } from './waf.mjs';
@@ -51,6 +52,36 @@ function spill(text, cap, root) {
   } catch {
     // A read-only project still deserves the head of the result.
     return `${text.slice(0, cap)}\n. truncated`;
+  }
+}
+
+// Deterministic edit diagnostics (research round R2): an edit whose target is
+// JavaScript is syntax-checked with the runtime that will load it, and the
+// verdict rides the tool result. Of the harness components that survive
+// ablations — structured tools carrying validation — this is the cheapest
+// check there is: a syntax error is either there or it is not, and catching
+// it inside the run costs one round trip instead of a broken apply later.
+const JS_FILE = /\.(mjs|cjs|js)$/i;
+
+function syntaxNote(rel, text) {
+  if (!JS_FILE.test(rel) || text.length > 512 * 1024) return '';
+  // The extension decides the grammar: .mjs is a module, .cjs a script. A
+  // project .js file is whichever its package.json says, so sniff the one
+  // marker that changes the parse.
+  let ext = path.extname(rel).toLowerCase();
+  if (ext === '.js') ext = /^\s*(import\b|export\b)/m.test(text) ? '.mjs' : '.cjs';
+  const tmp = path.join(os.tmpdir(), `aipass-check-${process.pid}-${Math.random().toString(16).slice(2, 8)}${ext}`);
+  try {
+    fs.writeFileSync(tmp, text);
+    const res = spawnSync(process.execPath, ['--check', tmp], { encoding: 'utf8', timeout: 15_000 });
+    if (res.error || res.status === null) return '';
+    if (res.status === 0) return 'syntax check ok';
+    const line = String(res.stderr ?? '').split('\n').map((l) => l.trim()).find((l) => /^\w*Error\b/.test(l)) || 'the content does not parse';
+    return `syntax check failed — the staged content does not parse:\n${line}`;
+  } catch {
+    return '';
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* the temp copy is best-effort */ }
   }
 }
 
@@ -178,7 +209,8 @@ export function createTools(ctx) {
     write(arg, rawBody) {
       const body = inbound(rawBody);
       overlay.set(safe(arg), body);
-      return `wrote ${arg}, ${body.split('\n').length} lines`;
+      const note = syntaxNote(arg, body);
+      return `wrote ${arg}, ${body.split('\n').length} lines${note ? '\n' + note : ''}`;
     },
     replace(arg, rawBody) {
       const abs = safe(arg);
@@ -192,8 +224,10 @@ export function createTools(ctx) {
       if (count === 0) return `err: the text to change was not found in ${arg}. Read it again with NEED file ${arg} and copy the lines exactly.`;
       if (count > 1) return `err: that text appears ${count} times in ${arg}. Include a few more surrounding lines under FIND so it matches exactly one place.`;
 
-      overlay.set(abs, text.replace(before, after));
-      return `updated ${arg} (1 change)`;
+      const updated = text.replace(before, after);
+      overlay.set(abs, updated);
+      const note = syntaxNote(arg, updated);
+      return `updated ${arg} (1 change)${note ? '\n' + note : ''}`;
     },
     search(arg) {
       const raw = String(arg).trim();

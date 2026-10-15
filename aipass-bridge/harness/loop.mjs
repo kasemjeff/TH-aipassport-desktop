@@ -12,6 +12,7 @@
 //   - writes pass a permission gate (ask / auto / yolo) before they land in the
 //     overlay, rather than all-or-nothing at the end of the run
 //   - PLAN / TODO / SUBAGENT markers exist on top of the original set
+import path from 'node:path';
 import { outbound } from './waf.mjs';
 import {
   REMINDER, prose, parse, parseTodo, mergeTodo, READING,
@@ -19,6 +20,12 @@ import {
 } from './protocol.mjs';
 import { resilientSay, decode } from './bridge.mjs';
 import { classify } from './permissions.mjs';
+import { posix } from './overlay.mjs';
+
+// (R1/R4) The research round's two sets: which call kinds change the overlay,
+// and which files count as code for the verification nudge.
+const MUTATING = new Set(['write', 'replace', 'delete', 'move']);
+const CODE_FILE = /\.(m?js|cjs|tsx?|jsx|py|rb|go|rs|java|cs|php|swift|kt|c|h|cpp|hpp|sh|ps1|css|html?|sql)$/i;
 
 const previewOf = (call) => {
   if (call.kind === 'replace') return String(call.body?.[1] ?? '').slice(0, 4000);
@@ -126,6 +133,12 @@ export async function runTask(taskText, ctx = {}) {
   let stagnationWarns = 0;   // (H7) steps corrected by the stagnation guard
   let stagnantStep = 0;      // consecutive steps with the same signature
   let lastStepSig = null;
+  let prevSigs = [];         // (R1) recent step signatures, for oscillation
+  let oscillate = 0;         // consecutive A/B swings with identical results
+  let verifyPrompts = 0;     // (R4) one "prove it" nudge per run
+  let verifySent = false;
+  let codeTouched = false;   // a code file was staged this run
+  let verifiedSinceChange = false;
   let summary = null;
   let stopReason = 'steps';
 
@@ -225,6 +238,18 @@ export async function runTask(taskText, ctx = {}) {
       // failure phrases — every new failure message used to miss the old
       // regexes silently.
       const refused = blocked || /^err:/i.test(text.trimStart());
+      // (R4) What counts as touching code, and what counts as having checked
+      // it: a shell command run in the same step, or a read-back of a file
+      // the overlay holds. A refused call changed nothing.
+      if (!refused && MUTATING.has(call.kind)) {
+        codeTouched = codeTouched || CODE_FILE.test(String(call.arg ?? ''));
+        verifiedSinceChange = false;
+      } else if (!refused && call.kind === 'run') {
+        verifiedSinceChange = true;
+      } else if (!refused && call.kind === 'read') {
+        const target = overlay.trySafe(String(call.arg ?? '').replace(/\s+\d+-\d+$/, ''));
+        if (target && overlay.has(target)) verifiedSinceChange = true;
+      }
       const stat = toolStats.get(call.kind) ?? { n: 0, fail: 0 };
       stat.n += 1;
       if (refused) stat.fail += 1;
@@ -260,23 +285,52 @@ export async function runTask(taskText, ctx = {}) {
     if (done) events?.emit('ignore_done', {});
     next = `${results.join('\n\n')}\n\n${REMINDER}`;
 
-    // (H7) Stagnation guard: a step that repeats the previous one exactly —
-    // same calls, same results — is a loop the model cannot see out of from
-    // inside. One repeat earns a correction; the third stops the run instead
-    // of burning the rest of the budget on a call that changes nothing.
+    // (H7/R1) Stagnation guard. Two shapes of a run that cannot move:
+    //   - the same step over and over (identical calls, identical results)
+    //   - two steps trading places (A, B, A, B …) — every step looks new,
+    //     the pair goes nowhere
+    // One strike earns a correction; the next stops the run instead of
+    // burning the rest of the budget on calls that change nothing.
     const stepSig = work.map((c, i) => JSON.stringify([c.kind, String(c.arg ?? ''), String(results[i] ?? '').slice(0, 2000)])).join('\n');
+    const prevSig = prevSigs.at(-1) ?? null;
+    const prev2Sig = prevSigs.at(-2) ?? null;
+    prevSigs.push(stepSig);
+    if (prevSigs.length > 6) prevSigs.shift();
+
     if (stepSig === lastStepSig) stagnantStep += 1; else { lastStepSig = stepSig; stagnantStep = 1; }
-    if (stagnantStep >= 3) {
-      session?.append('note', { text: `stagnation guard: the same step ran ${stagnantStep} times with identical results — stopping the run` });
-      events?.emit('stagnation', { repeats: stagnantStep, action: 'stop' });
+    if (stepSig === prevSig) oscillate = 0;
+    else if (prev2Sig !== null && stepSig === prev2Sig) oscillate += 1;
+    else oscillate = 0;
+
+    if (stagnantStep >= 3 || oscillate >= 2) {
+      const pattern = stagnantStep >= 3 ? 'repeat' : 'oscillation';
+      const n = pattern === 'repeat' ? stagnantStep : oscillate;
+      session?.append('note', { text: `stagnation guard: ${pattern === 'repeat' ? `the same step ran ${n} times` : 'two steps kept trading places'} with identical results — stopping the run` });
+      events?.emit('stagnation', { repeats: n, action: 'stop', pattern });
       stopReason = 'stagnation';
       break;
     }
-    if (stagnantStep === 2) {
+    if (stagnantStep === 2 || oscillate === 1) {
+      const pattern = stagnantStep === 2 ? 'repeat' : 'oscillation';
       stagnationWarns += 1;
-      session?.append('note', { text: 'stagnation guard: the step repeated exactly — asking for a different move' });
-      events?.emit('stagnation', { repeats: stagnantStep, action: 'warn' });
-      next += `\n\nThat was the same call with the same result as the step before, so repeating it moves nothing. Do something different — open other files, change the call — or say DONE and tell me what is still open.`;
+      session?.append('note', { text: `stagnation guard: ${pattern === 'repeat' ? 'the step repeated exactly' : 'the calls are trading places'} — asking for a different move` });
+      events?.emit('stagnation', { repeats: pattern === 'repeat' ? stagnantStep : oscillate, action: 'warn', pattern });
+      next += pattern === 'repeat'
+        ? `\n\nThat was the same call with the same result as the step before, so repeating it moves nothing. Do something different — open other files, change the call — or say DONE and tell me what is still open.`
+        : `\n\nThe calls are going back and forth between the same two moves with identical results, so the pair moves nothing. Do something different — open something new, change the call — or say DONE and tell me what is still open.`;
+    }
+
+    // (R4) Verification before DONE, the soft form: once a run has staged
+    // code and nothing checked it in the same step, the next message asks
+    // for proof — once. The model may still finish, but it has to run a
+    // check, read the change back, or say why neither is possible.
+    if (codeTouched && !verifiedSinceChange && !verifySent) {
+      verifySent = true;
+      verifyPrompts += 1;
+      const files = overlay.keys().map((abs) => posix(path.relative(overlay.root, abs))).slice(0, 5);
+      session?.append('note', { text: `verify nudge: ${files.join(', ') || 'code'} staged and nothing has checked it yet` });
+      events?.emit('verify_prompt', { files });
+      next += `\n\nBefore we finish: the change(s) in ${files.join(', ') || 'the staged files'} have not been checked by anything yet. Run what proves them — a test, node --check, a build — or read them back and say what you saw; if nothing can be run from here, say DONE and name the check that could not be run.`;
     }
 
     // The budget is re-checked here, against the message that is about to go
@@ -308,14 +362,15 @@ export async function runTask(taskText, ctx = {}) {
   for (const c of changes) session?.append('diff', { file: c.file, added: c.added, removed: c.removed, deleted: c.deleted, decision: 'pending' });
 
   // One line per run that `npm run stats` aggregates — refusals, nudges,
-  // stagnation corrections and firewall notes are how protocol drift shows up
-  // before it is guessed at.
+  // stagnation corrections, verification nudges and firewall notes are how
+  // protocol drift shows up before it is guessed at.
   const runStats = {
     stopReason,
     steps: toolsRun,
     tools: Object.fromEntries(toolStats),
     nudges,
     stagnations: stagnationWarns,
+    verifyPrompts,
     firewallNotes,
     stepMs,
     spent,
