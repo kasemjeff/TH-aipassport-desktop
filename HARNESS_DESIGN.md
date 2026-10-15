@@ -49,9 +49,9 @@ can only be answered by rotating conversations, not trimming messages.
 | `protocol.mjs` | the marker grammar and the preamble, and nothing else | markers are prose — no brackets, no JSON, no key=value; everything structural drew a 403 |
 | `waf.mjs` | the one substitution table (`outbound`/`inbound`) + the risky-line drop list | every surface substitutes the same way; bytes on disk are exactly what the file had |
 | `loop.mjs` | send → parse → execute → paste results | results go back as ONE message; writes stop at the overlay; a plan gates the work |
-| `tools.mjs` | string in, string out, one function per marker | no tool ever writes to disk; reads are always allowed |
+| `tools.mjs` | string in, string out, one function per marker | no tool ever writes to disk; a read cannot change anything |
 | `overlay.mjs` | a pending-edit filesystem over `Map<abs, string \| DELETED>` | a run that dies halfway leaves the tree untouched; diffs exist before anything changes |
-| `permissions.mjs` | classify → rules → mode → ask | path rules outrank the mode; nobody listening to a question means deny, not hang |
+| `permissions.mjs` | classify → rules → mode → ask | path rules outrank the mode — reads included (H9); nobody listening to a question means deny, not hang |
 | `compact.mjs` | estimate bytes/4 → summarise → rotate → re-seed | summarisation happens in the conversation that still holds the history |
 | `harness.mjs` | the facade a CLI, the window and tests all drive | the one-conversation resource is managed nowhere else; helpers propose into the parent overlay |
 | `session.mjs` | JSONL append with a forkable tree | a session opened next week reads as one continuous piece of work |
@@ -120,7 +120,7 @@ line, skip until it closes. Fenced content stays visible as prose.
 freezes the Node event loop — in the desktop backend that is the same process
 serving `/rpc` and `/events`, so every `git status` on a slow repo stops the
 UI's heart for up to 15s (120s for RUN in yolo). `GIT` is classified read and
-always allowed, so this happens in the default mode. The loop already awaits
+allowed by default, so this happens in the default mode. The loop already awaits
 tools (`fetch` and `web` are async), so the fix is mechanical: promisified
 `exec` with the same timeouts.
 
