@@ -38,7 +38,7 @@ const MAX_SEARCH_FILE = 1_000_000;
  * file it read. (The directory is in overlay's SKIP, so walks never surface
  * it; read() still reaches it, because that is what the locator is for.)
  */
-function spill(text, cap, root) {
+function spill(text, cap, root, tailShare = 0) {
   const id = Math.random().toString(16).slice(2, 10);
   const dir = path.join(root, '.aipass', 'spill');
   try {
@@ -47,6 +47,23 @@ function spill(text, cap, root) {
     fs.writeFileSync(file, text);
     const rel = `.aipass/spill/${id}.txt`;
     const lines = text.split('\n').length;
+    if (tailShare > 0) {
+      // Shell output is the one result whose diagnosis sits in the tail — a
+      // runner prints "3 failing" and the assertion last — while the head
+      // still carries the first error. Keeping only one end costs the model
+      // a round trip to the other, so the budget is split and the locator
+      // names the elided middle. "Lost in the middle" (Liu et al. 2023) is
+      // the same bet: beginnings and ends get attended to, middles do not.
+      const headCap = Math.max(1, Math.round(cap * (1 - tailShare)));
+      const tailCap = Math.max(1, cap - headCap);
+      const head = text.slice(0, headCap);
+      const tail = text.slice(-tailCap);
+      const elidedStart = head.split('\n').length; // first line whose end is gone
+      const elidedEnd = Math.max(elidedStart, lines - tail.split('\n').length + 1);
+      return `${head}\n… ${text.length - cap} more bytes, lines ${elidedStart}-${elidedEnd} of ${lines} `
+        + `are on disk at ${rel} - read them with: NEED file ${rel} ${elidedStart}-${elidedEnd}. `
+        + `Do not ask for it again; it is already saved.\n${tail}`;
+    }
     return `${text.slice(0, cap)}\n. ${text.length - cap} more bytes, ${lines} lines in total. `
       + `The rest is on disk at ${rel} - read it with: NEED file ${rel} ${Math.ceil(cap / 80) + 1}-${lines}. `
       + `Do not ask for it again; it is already saved.`;
@@ -138,6 +155,10 @@ export function createTools(ctx) {
   // head still rides the message, and the locator tells the model how to read
   // the rest with the tool it already has.
   const clip = (s) => (s.length > maxResult ? spill(s, maxResult, root) : s);
+  // Command output gets the split view instead — head and tail, middle on
+  // disk (spill's tailShare). The last lines of a failing command are the
+  // diagnosis; the first are where it went wrong first.
+  const clipRun = (s) => (s.length > maxResult ? spill(s, maxResult, root, 0.6) : s);
   const safe = (p) => overlay.safe(p);
   const existsAt = (abs) => overlay.existsAt(abs);
   const readAt = (abs) => overlay.readAt(abs);
@@ -239,10 +260,11 @@ export function createTools(ctx) {
       const needle = inbound(query); // the model may type placeholders like LCLHST
       const wanted = ci ? needle.toLowerCase() : needle;
       const hits = [];
+      let matches = 0; // only match lines count toward MAX; context rides along
       const MAX = 50;
       const ign = loadGitignore(root);
       const walk = (dir) => {
-        if (hits.length >= MAX) return;
+        if (matches >= MAX) return;
         let entries;
         try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
         for (const e of entries) {
@@ -253,7 +275,7 @@ export function createTools(ctx) {
             if (!ign.ignored(rel, true)) walk(full);
             continue;
           }
-          if (hits.length >= MAX) return;
+          if (matches >= MAX) return;
           if (ign.ignored(rel, false)) continue;
           let size = 0;
           try { size = fs.statSync(full).size; } catch { /* overlay-only or vanished: read it anyway */ }
@@ -262,21 +284,44 @@ export function createTools(ctx) {
           try { text = readAt(full); } catch { continue; }
           if (text.includes('\u0000')) continue; // skip binary
           const lines = text.split('\n');
-          for (let i = 0; i < lines.length && hits.length < MAX; i++) {
-            const line = ci ? lines[i].toLowerCase() : lines[i];
-            if (line.includes(wanted)) {
-              hits.push(`${rel}:${i + 1}: ${lines[i].trim().slice(0, 140)}`);
+          // One line of context on each side, ripgrep-style: a match line
+          // keeps the `rel:N: text` shape every other tool prints, a context
+          // line trades the colon for a dash. A bare hit line makes the model
+          // read the file just to learn what surrounds it, and the line
+          // around a hit is usually what says whether it is the hit it wants
+          // (Anthropic's tool-writing guidance, 2025: return the relevant
+          // lines and some surrounding context).
+          const shown = new Map(); // idx → slot in hits, so a line first seen as context can be upgraded to a match
+          const show = (idx, isMatch) => {
+            if (idx < 0 || idx >= lines.length) return;
+            const line = `${rel}:${idx + 1}${isMatch ? ':' : '-'} ${lines[idx].trim().slice(0, 140)}`;
+            if (shown.has(idx)) {
+              if (isMatch) hits[shown.get(idx)] = line;
+              return;
             }
+            shown.set(idx, hits.length);
+            hits.push(line);
+          };
+          for (let i = 0; i < lines.length && matches < MAX; i++) {
+            const line = ci ? lines[i].toLowerCase() : lines[i];
+            if (!line.includes(wanted)) continue;
+            matches++;
+            show(i - 1, false);
+            show(i, true);
+            show(i + 1, false);
           }
         }
       };
       walk(root);
       if (!hits.length) return `no matches for "${query}".`;
-      const more = hits.length >= MAX ? `\n… stopped at ${MAX} matches; make the search more specific for the rest.` : '';
-      return hits.join('\n') + more;
+      const more = matches >= MAX ? `\n… stopped at ${MAX} matches; make the search more specific for the rest.` : '';
+      return clip(hits.join('\n') + more);
     },
     async run(_arg, body) {
       if (!allowRun) return 'err: shell commands are disabled for this run';
+      if (!String(body ?? '').trim()) {
+        return 'err: the RUN block has no command. One command per RUN, e.g. RUN\nnode check.mjs\nEND.';
+      }
       // With anything staged, the command runs against a projection of the
       // tree that has the staged edits written in (sandbox.mjs) — the disk
       // itself is untouched. Without staged changes it runs in the project,
@@ -302,9 +347,9 @@ export function createTools(ctx) {
         const { stdout } = await execP(body, {
           cwd: sandbox ?? root, timeout: 120_000, windowsHide: true, maxBuffer: 10 * 1024 * 1024,
         });
-        return clip(scrub(stdout));
+        return clipRun(scrub(stdout));
       } catch (err) {
-        return clip(scrub(`err: exit ${err.code ?? err.signal ?? '?'}\n${String(err.stdout ?? '')}${String(err.stderr ?? '')}`));
+        return clipRun(scrub(`err: exit ${err.code ?? err.signal ?? '?'}\n${String(err.stdout ?? '')}${String(err.stderr ?? '')}`));
       } finally {
         if (sandbox) { try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* left under .aipass */ } }
       }
@@ -352,7 +397,10 @@ export function createTools(ctx) {
       walk(root);
       if (!hits.length) return `no files matched "${pattern}".`;
       const more = hits.length >= MAX ? `\n… stopped at ${MAX} results.` : '';
-      return hits.join('\n') + more;
+      // A glob answer goes through the same cap as every other result: a
+      // deep tree can name thousands of files, and the raw list used to ride
+      // the message whole.
+      return clip(hits.join('\n') + more);
     },
     async git(arg) {
       const sub = arg.trim();
@@ -451,6 +499,12 @@ export function createTools(ctx) {
       const fromAbs = safe(fromRel);
       const toAbs = safe(toRel);
       if (!existsAt(fromAbs)) return `err: no such file: ${fromRel}`;
+      if (existsAt(toAbs)) {
+        // Landing on an existing file would read as success while one file's
+        // content displaced another's — a data-loss shape the model almost
+        // never intends. Refuse, and name both ways out.
+        return `err: ${toRel} already exists. Delete it first (DELETE ${toRel}) or move to another name.`;
+      }
       const content = readAt(fromAbs);
       overlay.set(toAbs, content);
       if (fs.existsSync(fromAbs)) {

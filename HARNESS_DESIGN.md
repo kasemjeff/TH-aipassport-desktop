@@ -462,7 +462,7 @@ The map, then what each gap is worth:
 |---|---|---|---|
 | SessionStart — inject a snapshot | Bootstrap | preamble + top-level listing on turn 1, the same listing after every rotation (`loop.mjs` the `again` message, `compact.mjs` re-seed) | partial — the listing is the only snapshot; everything else costs a NEED |
 | PreToolUse — validate the shape, deny with a reason | Action validator | per-tool checks returning `err: …` and the fix (F5); fenced protocol text never executes (F1); `node --check` on staged JS (R2); permission denials carry the rule name | done per tool — no single pre-dispatch layer, and plugin markers skip the gate entirely |
-| PostToolUse — compact an oversized result | Observation compressor | clip at `maxResult` + spill file with a `NEED` locator (`tools.mjs`); conversation summarise→rotate at the budget (`compact.mjs`) | done, two tiers; the elision tier stays noted-not-shipped |
+| PostToolUse — compact an oversized result | Observation compressor | clip at `maxResult` + spill file with a `NEED` locator (`tools.mjs`) — reads keep the head, `RUN` keeps head+tail (ACI round); conversation summarise→rotate at the budget (`compact.mjs`) | done, three tiers; the elided middle of a command sits on disk, not lost |
 | Stop — tests fail, keep working | Verify | R4's one soft nudge (`verifyPrompts`); the checker at DONE — a read-only child runs the project's own check, the verdict computed from what it ran, one continuation on fail (`loop.mjs`, `harness.mjs#makeChecker`) | done v1 — the verdict is advisory: a second DONE is accepted with `checks`/`checkVerdict` recorded |
 | PreToolUse — count calls, log every event | Budget + trace | one `run_stats` line per run + one session JSONL entry per tool call, 20 000-char result and all | done; per-tool latency and a hard per-run cap are still not recorded |
 | PreToolUse — destructive commands, config files, red-test commits | Safety gates | modes + the H9 rule engine: path rules outrank the mode, reads included; no listener means deny | partial — the engine is strong, the specific gates are not written |
@@ -515,3 +515,39 @@ The queue, in dependency order:
 4. **The hook-review leftovers**: the safety defaults and the command
    classifier, the plugin-subscription and `.git`-junction bugs, and the
    red-test commit gate that falls out of (2).
+
+## The tool ACI round (Oct 2026): the contracts, tightened
+
+The tool layer — not the loop — audited against the tool-writing literature:
+
+- **Anthropic, "Writing effective tools for agents" (Sep 2025)**: results
+  should be token-efficient and steer the model; a search should answer with
+  the relevant lines *and their surroundings*; errors should point at the fix.
+- **"Lost in the middle" (Liu et al., TACL 2024)**: attention favors the
+  beginning and the end; a head-only truncation throws away the half models
+  actually read.
+- **The verified-tool-calls line (2025)**: validate at the boundary, and make
+  a failed precondition loud rather than half-applying the operation.
+
+Five changes, each with a test in `tools-aci.test.mjs`:
+
+1. **`RUN` keeps head and tail.** `clipRun` splits the inline budget (about a
+   third head, two thirds tail) and the locator names the elided middle by
+   line range. A failing command's diagnosis lives in its last lines; the old
+   head-only clip spilled exactly the part a model needs most.
+2. **`SEARCH` returns context.** One line each side of a hit — match lines
+   keep `path:N: text`, context lines trade the colon for a dash,
+   ripgrep-style. Adjacent hits share a window instead of repeating it, and a
+   line first shown as context upgrades to a match when it is one.
+3. **`GLOB` goes through the cap.** The path list was the one result that
+   skipped `clip`; a deep tree could ride the message whole.
+4. **An empty `RUN` is refused with the shape to copy**, instead of running
+   nothing and letting an empty success read as done.
+5. **`MOVE` refuses a taken target** (`DELETE` it first, or rename) — landing
+   on an existing file was the one write that could destroy bytes while
+   reporting success.
+
+Not taken, and why: task-shaped tool mergers (the tool count here is small and
+each name is a distinct verb), and per-tool pagination defaults (the spill
+locator already pages). Both stay candidates if the evals ever show tool
+friction.
