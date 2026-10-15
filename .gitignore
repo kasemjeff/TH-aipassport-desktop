@@ -15,5 +15,10 @@
 /.aipass/
 .mimosa/
 
+# Evals run artifacts: one JSONL per run, machine-local like sessions. The
+# directory itself ships (its .gitkeep) so `npm run evals` has somewhere to
+# write; a run worth keeping can be added deliberately with git add -f.
+/evals/results/*.jsonl
+
 node_modules/
 *.log

@@ -196,3 +196,28 @@ real `~/.aipass` (`harness-fixes.test.mjs` convention):
    refused, env scrubbed (AIPASS_* stripped), and whether `node_modules` is
    junctioned into the attempt (the `sandbox.mjs` precedent) for tasks that
    need deps.
+
+## As shipped (2026-10-15)
+
+`scripts/evals.mjs` with fixtures under `evals/`; the six §6 self-tests live
+in `aipass-bridge/test/evals.test.mjs` and are offline (replay + StubBridge
+only — `globalThis.fetch` throws during the transcript test). Decisions the
+text left open, as built:
+
+- **Open question 1** resolved as: run output is machine-local
+  (`/evals/results/*.jsonl` in `.gitignore`); a result worth keeping is added
+  deliberately. The `.gitkeep` ships.
+- **Live mode always needs `--live`** — a bare invocation refuses with exit 2
+  rather than guessing. Exit is 0 only when every row is solved or stale;
+  `--advisory` forces 0; unknown flags and a refused live run exit 2.
+- **`wallMs`** may ride a task budget (runner-level wall kill, default
+  10 minutes); a wall-killed attempt is invalid, not unsolved.
+- **Shipped fixtures budget on `gemini-3.1-flash-lite`** — the bridge's
+  free-credit default — so live runs do not burn credits; `--budget model=…`
+  overrides for a production-model matrix.
+- **Extra flags**: `--results DIR` (JSONL output location); `--budget`
+  accepts maxSteps, model, thinking only.
+- **Replay fingerprint**: sha256 over task bytes + preamble bytes + reply
+  count (CRLF normalised, BOM tolerated); the digest rides the fixture's
+  `fingerprint` block and every row, and a mismatch marks rows `stale` —
+  never scored.

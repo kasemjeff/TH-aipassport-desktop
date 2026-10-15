@@ -1,0 +1,14 @@
+{
+  "taskId": "math-fix",
+  "note": "Recorded replies in order, taken from a session's assistant entries — raw enough to replay: the loop decodes exactly these bytes. Two replies: read both files, then stage the one-line fix and DONE. If this replay is used against a changed task.md or preamble, the runner marks the row stale instead of scoring it (SPEC_EVALS.md §5).",
+  "fingerprint": {
+    "taskBytes": 156,
+    "preambleBytes": 4027,
+    "replies": 2,
+    "digest": "df5dff664d0fb505"
+  },
+  "replies": [
+    "Let me look at the file and its check first.\n\nNEED file math.mjs\nNEED file check.mjs\n",
+    "The bug is the subtraction in total(). One line fixes it.\n\nEDIT math.mjs\nFIND\n  for (const n of numbers) sum = sum - n;\nNEW\n  for (const n of numbers) sum = sum + n;\nEND\n\nDONE fixed total() so it adds; node check.mjs should print PASS\n"
+  ]
+}

@@ -511,7 +511,11 @@ The queue, in dependency order:
 3. **An evals harness** with held-out tasks and budget-matched baselines, so
    "the harness improved" stops being an argument from memory. Spec:
    [`SPEC_EVALS.md`](SPEC_EVALS.md) — check-command scoring, live + replay
-   modes, runner self-tests.
+   modes, runner self-tests. **Done 2026-10-15**: runner `scripts/evals.mjs`
+   (`npm run evals`), fixtures under `evals/` (two smoke tasks, one holdout,
+   one recorded replay), six self-tests in `evals.test.mjs`; a live run needs
+   an explicit `--live` and budgets on the free-credit `gemini-3.1-flash-lite`
+   unless `--budget model=…` says otherwise.
 4. **The hook-review leftovers**: the safety defaults and the command
    classifier, the plugin-subscription and `.git`-junction bugs, and the
    red-test commit gate that falls out of (2).
