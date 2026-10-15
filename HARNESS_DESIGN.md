@@ -289,7 +289,8 @@ channel.
 and weak ones under-verify; the cheap correction is one nudge. After the
 first staged code change, the next message asks for a test run, a read-back,
 or an explicit "nothing can be run here" - once per run, never blocking.
-`run_stats` counts it (`verifyPrompts`) so the trend shows in `npm run stats`.
+`run_stats` counts it (`verifyPrompts`) so the trend shows in `npm run stats`;
+its first live firing was the smoke re-run below.
 
 **Noted, not shipped:** per-run tool-call caps and wall-clock budgets (the
 "default hard caps" argument applies to runs, not only steps); an elision
@@ -328,12 +329,43 @@ carrying `console.log` and `if … !== …` is sent encoded and lands on disk
 byte-exact. The retry chain stays as the safety net for what the table does
 not know yet.
 
-Two operational notes from the same session. Probes are not side-effect free:
-after a burst of roughly a hundred automated messages the edge escalated to a
-session-level block that refused everything, `hello there` included —
-apparently a rate/bot score, not a content rule; real runs send far fewer
-messages, and the tell is that even a plain greeting is refused. And one
-suspected third rule — a bare relative path (`./math.mjs`) drawing a 403 —
-was only ever seen after that escalation began, so it is left unencoded and
-waits for a retest from a quiet edge. The smoke task itself is queued to
-re-run once the edge is quiet, to prove the fix end to end.
+Two operational notes from the same session, both now closed. Probes are not
+side-effect free: after a burst of roughly a hundred automated messages the
+edge escalated to a session-level block that refused everything, `hello there`
+included — a rate/bot score, not a content rule; the tell is that even a plain
+greeting is refused. The block is time-boxed rather than sticky: the last
+blocked probe drew a 403 at 20:26, and the same probe passed in full about
+twenty minutes later. Its smaller sibling is quicker to draw: a three-probe
+check followed immediately by one live run — ten messages in four minutes —
+collected a **429 Too Many Requests** mid-run. The suspected third rule is
+closed too: a bare relative path (`./math.mjs`) was never a rule, it only
+403'd while the block was up. With the edge quiet, `h1` carrying
+`import … from './math.mjs';` was accepted, and every read result in the
+re-run below carried `./` unencoded with zero rejects, so it stays as it is.
+
+## The re-run that passed, and the gap it stepped on (Oct 2026)
+
+The smoke task ran once more after the block lifted — same task, same project,
+the whole loop live — and the fix proved out end to end. Both reads were
+accepted with no retry chain and no omitted fragment; the operator landed as a
+one-line diff and was written at the end; the applied tree makes
+`node check.mjs` exit 0 printing `PASS`. The session counters say it in
+numbers: `firewallNotes 0` (the first run's four rejects are gone — encoded
+content sails through), `verifyPrompts 1` — the R4 nudge fired for real, note
+entry "verify nudge: math.mjs staged and nothing has checked it yet" — and
+`stagnations 0`. What ended the run was volume, not content: the 429 above
+arrived mid-run, so `stopReason: error`, and the CLI still wrote the staged
+diff — which is the behaviour it was built to have.
+
+**The gap it stepped on: a run cannot see its own staged edits.** `RUN`
+executes against the tree on disk, and the overlay is invisible to a child
+process by design — so when the model staged its one-line fix and ran
+`node check.mjs` to verify it, it read the *old* file's `FAIL`, concluded the
+save had failed, and spent the rest of the run re-reading and re-editing until
+the 429 closed the door. The smoke's own task — "fix it, then run the check" —
+cannot complete mid-run under these semantics, and a model that trusts its
+tools over its doubts will keep tripping on it. The options, none free:
+materialize staged files for the length of a `RUN` (a child-visible temp
+copy); say it in the protocol (a run sees disk until the end); or write
+straight to disk in `auto`/`yolo`, where the person already said yes.
+Deciding this is queued, not guessed.
