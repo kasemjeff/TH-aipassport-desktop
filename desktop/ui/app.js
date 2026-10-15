@@ -397,7 +397,7 @@ stream.addEventListener('compacted', (e) => {
   // what it chose to carry".
   if (summary) {
     const box = el('div', 'compaction-card');
-    box.append(el('h4', null, 'สิ่งที่ยังจำอยู่ после rotation'));
+    box.append(el('h4', null, 'สิ่งที่ยังจำอยู่หลัง rotation'));
     box.append(el('div', 'summary', summary));
     log.append(box);
   }
