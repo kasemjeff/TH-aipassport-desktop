@@ -369,3 +369,65 @@ materialize staged files for the length of a `RUN` (a child-visible temp
 copy); say it in the protocol (a run sees disk until the end); or write
 straight to disk in `auto`/`yolo`, where the person already said yes.
 Deciding this is queued, not guessed.
+
+## Research round 2 (Oct 2026): the five-stage spine
+
+A second research digest — Self-Harness, Meta-Harness, HarnessBridge,
+Harness-Bench, the Claw-SWE-Bench adapter ablation and the AI2/UW
+test-time-scaling result — arrived as a proposed spine, and it is adopted:
+
+```
+[Bootstrap] → [Loop: observe → decide → act] → [Verify] → [Stop/Recover]
+                     ↑ obs compressor   ↓ action validator
+          [Budget + Trace]       [Test-time scaling when a verifier exists]
+          [Offline tuning (outer loop) with a regression gate]
+```
+
+Block by block, against the code as it stands:
+
+- **Bootstrap — done.** Turn 1 carries the preamble, the tool protocol and the
+  listing; every later turn opens with "the project is still open in front of
+  me" plus the listing again (`loop.mjs`, the `again` message). The digest's
+  "2–4 turns spent rediscovering the tree" is what these two messages buy back.
+- **Loop — done.** One user message per turn; the whole reply is parsed; every
+  marker runs in order and all results return as ONE message.
+- **Observation compressor — done, two tiers.** A single tool result is clipped
+  at `maxResult` with a paging hint (`read` paginates properly); the
+  conversation itself is summarised and rotated at the budget line
+  (`compact.mjs`). The elision tier stays on the noted-not-shipped list.
+- **Action validator — done.** Fenced protocol text never executes (F1); a
+  malformed marker comes back as `err: …` pointing at the fix (F5); a staged
+  `.mjs`/`.cjs`/`.js` edit passes `node --check` (R2); REPLACE refuses an
+  ambiguous FIND; every write passes the permission engine and everything
+  outbound passes the WAF table. Harness-Bench's "format violations are the
+  most common failure class" is the failure this layer turns into a
+  one-round-trip correction.
+- **Verify — done, soft form (R4).** One nudge after the first staged code
+  change. The digest's stronger reading — *done means a runnable check passed*
+  — is blocked by the queued RUN-vs-overlay gap: `RUN` executes against disk,
+  so a verification run reads the stale file. That decision is now a
+  prerequisite for hardening this stage, not only a UX wart.
+- **Stop/Recover — done, five exits.** Stagnation (repeat ×3 or oscillation ×2,
+  after one correction), no-marker nudge ×3 → give up, `ignore_done`, the step
+  limit, and `resilientSay`'s redact → split → omit chain.
+- **Budget + Trace — done.** Every run appends one `run_stats` line (stop
+  reason, per-tool counts, nudges, stagnations, verify prompts, firewall notes,
+  step timings, credits spent) and the session keeps every tool call. "Tokens
+  per solved task" cannot be reported literally — the upstream exposes no token
+  counts — so credits spent is the observable denominator.
+- **Test-time scaling — not shipped.** The pieces exist (`SUBAGENT`; the
+  conversation pool behind `--parallel-helpers`, still off pending a live
+  concurrent-generation proof), but nothing runs a task N ways and keeps the
+  attempt that passes. It shares Verify's prerequisite.
+- **Offline tuning — manual.** The outer loop already is the working style:
+  run_stats and session logs → findings with a reproduction → patch → the suite
+  as the regression gate → a live smoke against the real edge (the suite fakes
+  the extension; the smoke cannot be faked). Meta-Harness's own held-out caveat
+  is why an automated evals harness is queued, not assumed.
+
+The queue, in dependency order: (1) the RUN-vs-overlay decision — Verify and
+test-time scaling both stand on it; (2) a verification `SUBAGENT`, the natural
+first typed helper, which pairs with the earlier note that subagents carry no
+task-specific instructions; (3) an evals harness with held-out tasks and
+budget-matched baselines, so "the harness improved" stops being an argument
+from memory.
