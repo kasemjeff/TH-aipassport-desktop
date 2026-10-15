@@ -155,6 +155,11 @@ export class PluginManager {
       loaded: this.loaded,
       failed: this.failed,
       tools: [...this._tools.keys()],
+      // The same table the protocol parser gets, for callers that have to
+      // consume a marker's body or not — the window's transcript renderer
+      // hides plugin marker blocks, and a body it eats wrongly would be a
+      // paragraph the reader never saw.
+      toolDefs: this.toolTable(),
       panels: this._panels.map((p) => ({ id: p.id, title: p.title, plugin: p.plugin })),
       settings: this._settingDefs,
     };

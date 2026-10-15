@@ -5,6 +5,7 @@
  * `/events` — the window only has to render what it is told.
  */
 import { renderMarkdown } from './md.js';
+import { scan, transcript } from './markers.js';
 
 const $ = (id) => document.getElementById(id);
 const log = $('log');
@@ -40,13 +41,14 @@ const scrollDown = (force = false) => {
 
 const state = {
   running: false,
-  assistant: null,      // { el, text }
-  thinking: null,       // { el, text }
+  assistant: null,      // { el, text, tail }
+  thinking: null,       // { el, text, box, summary, since }
   pending: new Map(),   // file → {checked, added, removed, deleted, isNew}
   attachments: new Map(), // id → {name, bytes, mime}
   sessionId: null,
   settings: null,
   plugins: null,
+  pluginTools: [],      // {marker, takesBody} — what the transcript must hide
   needsTab: false,      // the last run could not proceed for want of a chat tab
   needsCompaction: false, // the budget is close to full and a rotation is coming
 };
@@ -83,22 +85,63 @@ function ensureAssistant() {
   const body = el('div', 'body');
   msg.append(body);
   log.append(msg);
-  state.assistant = { el: body, text: '' };
+  state.assistant = { el: body, text: '', tail: '' };
   return state.assistant;
+}
+
+/**
+ * The bubble is the reply's prose — markers never render. Every call the model
+ * made already showed up as its own tool row when the loop executed it, so
+ * repeating "EDIT … END" inside the bubble would show one change twice, once
+ * as wire protocol and once as the thing that happened. `tail` carries the
+ * sentences appended out-of-band (the DONE summary), which are already clean
+ * text and must not be scanned like a reply.
+ */
+function paintAssistant(a) {
+  a.el.innerHTML = renderMarkdown(transcript(a.text, state.pluginTools) + a.tail);
+  scrollDown();
 }
 
 function assistantText(delta) {
   const a = ensureAssistant();
   a.text += delta;
-  a.el.innerHTML = renderMarkdown(a.text);
-  scrollDown();
+  paintAssistant(a);
+}
+
+/**
+ * The sentence a DONE carried, said once. The streamed prose is already on
+ * screen, so a summary the reader can already see is not repeated — the raw
+ * reply shows "DONE …" nowhere (it is a marker), and the streamed prose above
+ * it may well be the same sentence.
+ */
+function assistantSummary(text) {
+  const a = ensureAssistant();
+  const line = String(text ?? '').trim() || 'done';
+  const visible = transcript(a.text, state.pluginTools).trim();
+  if (visible && visible.toLowerCase().includes(line.toLowerCase())) return;
+  a.tail += (visible ? '\n\n' : '') + line;
+  paintAssistant(a);
+}
+
+/**
+ * An assistant entry read back from a session log is a whole raw reply,
+ * markers and all. The live path showed its prose plus the DONE summary the
+ * loop harvested, so a replay reconstructs the same picture instead of a
+ * bubble that ends mid-thought.
+ */
+function replayAssistant(raw) {
+  const text = String(raw ?? '');
+  assistantText(text);
+  const done = scan(text, { plugins: state.pluginTools }).reverse().find((c) => c.kind === 'done');
+  if (!done) return;
+  assistantSummary(done.arg || transcript(text, state.pluginTools).trim() || 'done');
 }
 
 function thinkingText(delta) {
   if (!state.thinking) {
     const box = el('details', 'think');
     box.open = true;      // watch it think; the fold closes when the turn ends
-    const summary = el('summary', null, 'reasoning…');
+    const summary = el('summary', null, '✻ reasoning…');
     const pre = el('pre');
     box.append(summary, pre);
     log.append(box);
@@ -109,30 +152,45 @@ function thinkingText(delta) {
   scrollDown();
 }
 
-function endTurn() {
+/** Like the terminal's steps: when the turn ends the reasoning folds away,
+ *  leaving one line that says it happened and for how long. Each step gets its
+ *  own fold — the assistant bubble is closed at the same moment, so a run
+ *  reads as a sequence of steps instead of one balloon. */
+function foldThinking() {
   const t = state.thinking;
-  if (t) {
-    // Like the terminal's steps: when the turn ends the reasoning folds away,
-    // leaving one line that says it happened and for how long.
-    const secs = Math.max(1, Math.round((Date.now() - t.since) / 1000));
-    t.summary.textContent = `reasoning · ${secs}s`;
-    t.box.open = false;
-  }
-  state.assistant = null;
+  if (!t) return;
+  const secs = Math.max(1, Math.round((Date.now() - t.since) / 1000));
+  t.summary.textContent = `✻ reasoning · ${secs}s`;
+  t.box.open = false;
   state.thinking = null;
+}
+
+function endTurn() {
+  foldThinking();
+  state.assistant = null;
 }
 
 /**
  * One line per tool call, opening to the detail. A run of ten steps has to read
  * as ten lines — what the model asked for and what it changed stay one click
- * away without filling the conversation.
+ * away without filling the conversation. The label is the verb a reader would
+ * use for the call ("Edit", "Run"), not the wire's kind name; the raw kind
+ * stays in the row's tooltip.
  */
+const TOOL_LABEL = {
+  read: 'Read', list: 'List', search: 'Search', glob: 'Glob', run: 'Run',
+  replace: 'Edit', write: 'Create', delete: 'Delete', move: 'Move',
+  git: 'Git', fetch: 'Fetch', web: 'Web', skill: 'Skill', attach: 'Attach',
+  plan: 'Plan', todo: 'Todo', subagent: 'Agent', plugin: 'Plugin',
+};
+
 function addTool({ kind, arg, ok, head, lines = [] }) {
   const row = document.createElement('details');
   row.className = ok ? 'tool' : 'tool bad';
+  row.title = kind;
   const summary = el('summary');
-  summary.append(el('span', 'mark', ok ? '✓' : '✗'));
-  summary.append(el('span', 'kind', kind));
+  summary.append(el('span', 'mark', ok ? '⏺' : '✗'));
+  summary.append(el('span', 'kind', TOOL_LABEL[kind] ?? kind));
   if (arg) summary.append(el('span', 'arg', String(arg)));
   if (head) summary.append(el('span', 'head', head));
   row.append(summary);
@@ -291,8 +349,11 @@ async function restoreFromSnapshot() {
   if (log.childNodes.length) { renderPending(snap.pending); refreshMeter(); return; }
   for (const entry of snap.entries ?? []) {
     if (entry.type === 'task') addTask(entry.text);
-    else if (entry.type === 'assistant') assistantText(entry.text ?? '');
-    else if (entry.type === 'tool') addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '' });
+    else if (entry.type === 'assistant') replayAssistant(entry.text ?? '');
+    // A tool entry is the replay's step boundary: the reply above it is done
+    // and the next assistant entry starts a new bubble, the way the live
+    // stream splits them at every `step` event.
+    else if (entry.type === 'tool') { addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '' }); state.assistant = null; }
     else if (entry.type === 'note') addNote(entry.text);
   }
   endTurn();
@@ -350,6 +411,12 @@ stream.addEventListener('assistant_delta', (e) => assistantText(JSON.parse(e.dat
 stream.addEventListener('reasoning_delta', (e) => thinkingText(JSON.parse(e.data).text));
 stream.addEventListener('step', (e) => {
   const { step, maxSteps, elapsed } = JSON.parse(e.data);
+  // A step is a boundary: the reply that just streamed is finished and its
+  // tools are about to land, so its bubble and reasoning fold close here.
+  // Without this reset one balloon collects every step of a run and the tool
+  // rows trail prose that was written after them.
+  foldThinking();
+  state.assistant = null;
   addNote(`step ${step}/${maxSteps} · ${elapsed}s`);
 });
 stream.addEventListener('thinking', (e) => {
@@ -419,8 +486,8 @@ stream.addEventListener('helper_end', (e) => {
 });
 stream.addEventListener('done_line', (e) => {
   const { text, extra } = JSON.parse(e.data);
-  assistantText('\n\n' + (text || 'done'));
-  if (extra) assistantText(extra);
+  assistantSummary(text || 'done');
+  if (extra) assistantSummary(extra);
   endTurn();
 });
 stream.addEventListener('plugin_call', (e) => {
@@ -606,6 +673,9 @@ $('slash-btn').onclick = () => {
 $('apply').onclick = applyChecked;
 $('discard').onclick = discardAll;
 $('new-session').onclick = startNewSession;
+// The line under the chat list says "New Conversation", so it has to be one —
+// it was an unwired label, which is a promise the window made and broke.
+$('new-conv').onclick = startNewSession;
 
 // The filter re-renders the list it filters, so there is one source of truth
 // for what is on screen.
@@ -1342,11 +1412,28 @@ async function openSettings() {
 
 $('settings-btn').onclick = () => openSettings();
 
+// The moon in the header used to be a label with nothing behind it — a control
+// whose name is the promise it broke. It flips the theme now and writes the
+// choice through, because a theme that flips back on the next reload is worse
+// than one that never moved.
+$('theme-toggle').onclick = async () => {
+  const current = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+  const next = current === 'light' ? 'dark' : 'light';
+  applyTheme(next);
+  state.settings = await rpc('settings.set', { theme: next }).catch(() => state.settings ?? {});
+};
+
 /* ---------------------------------------------------------- plugin panels */
 
 async function refreshPanels() {
   const holder = $('plugin-panels');
   const details = await rpc('plugins.list').catch(() => null);
+  // The transcript renderer hides plugin marker calls from the bubble, so it
+  // has to know the current marker table; takesBody decides whether a block's
+  // inner lines are eaten with the header. An older backend without toolDefs
+  // still works: plain markers, single-line.
+  state.pluginTools = (details?.toolDefs ?? (details?.tools ?? []).map((marker) => ({ marker })))
+    .filter((t) => t?.marker);
   if (!details?.panels?.length) { holder.classList.add('hidden'); return; }
   holder.classList.remove('hidden');
   holder.textContent = '';
@@ -1857,8 +1944,8 @@ async function openSession(id) {
   log.textContent = '';
   for (const entry of entries) {
     if (entry.type === 'task') addTask(entry.text);
-    else if (entry.type === 'assistant') assistantText(entry.text ?? '');
-    else if (entry.type === 'tool') addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '' });
+    else if (entry.type === 'assistant') replayAssistant(entry.text ?? '');
+    else if (entry.type === 'tool') { addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '' }); state.assistant = null; }
     else if (entry.type === 'note') addNote(entry.text);
   }
   endTurn();

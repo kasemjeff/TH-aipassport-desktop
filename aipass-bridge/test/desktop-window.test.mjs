@@ -363,6 +363,11 @@ export default {
   assert.equal(details.loaded.length, 1);
   assert.equal(details.loaded[0].name, 'echo');
   assert.ok(details.tools.includes('ECHO'));
+  // The window's transcript hides plugin calls from the bubble; it needs the
+  // marker's shape, not just its name — a takesBody marker whose body was
+  // guessed wrong would show up as prose the reader never wrote.
+  const def = details.toolDefs.find((d) => d.marker === 'ECHO');
+  assert.equal(def?.takesBody, false);
 
   // The window's sidebar can render the panel.
   const panel = await env.call('panel.render', { id: 'echo' });

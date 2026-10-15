@@ -718,3 +718,133 @@ test('pasting an image attaches it', async () => {
   assert.deepEqual(staged, ['screenshot.png'], 'the pasted file is staged');
   assert.equal(node('attachments').classList.contains('hidden'), false, 'the attachment strip opens');
 });
+
+/* ------------------------------------------------- the transcript */
+
+test('the bubble holds the prose, never the wire — calls live in their rows', async () => {
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('assistant_delta', { text: 'I checked the file.\nEDIT notes.md\nFIND\nline two\nNEW\nline 2\nEND\nLooks right.' });
+  await tick();
+  const bubble = node('log').children.find((c) => c.className.includes('assistant'));
+  const html = bubble.children[0].innerHTML;
+  assert.match(html, /I checked the file\./, 'the prose before the block is there');
+  assert.match(html, /Looks right\./, 'and so is the prose after it');
+  assert.equal(/EDIT|FIND|NEW|END/.test(html), false, 'no raw marker survives in the bubble');
+  assert.equal(/line 2/.test(html), false, 'the block body is wire, not prose');
+
+  globalThis.__stream.emit('tool', { kind: 'replace', arg: 'notes.md', ok: true, head: '2 lines → 2 lines' });
+  await tick();
+  const row = node('log').children.find((c) => c.className.includes('tool'));
+  assert.ok(row, 'the call has its own row');
+  assert.match(row.textContent, /⏺/);
+  assert.match(row.textContent, /Edit/, 'labelled with the verb, not the wire kind');
+  assert.match(row.textContent, /notes\.md/);
+});
+
+test('each step gets its own bubble, so rows sit under the step that made them', async () => {
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('assistant_delta', { text: 'first step prose' });
+  globalThis.__stream.emit('step', { step: 1, maxSteps: 10, elapsed: '1.2' });
+  globalThis.__stream.emit('tool', { kind: 'read', arg: 'a.txt', ok: true, head: '3 lines' });
+  globalThis.__stream.emit('assistant_delta', { text: 'second step prose' });
+  await tick();
+  const kids = node('log').children;
+  const bubbles = kids.filter((c) => c.className.includes('assistant'));
+  assert.equal(bubbles.length, 2, 'one bubble per step');
+  assert.match(bubbles[0].children[0].innerHTML, /first step prose/);
+  assert.match(bubbles[1].children[0].innerHTML, /second step prose/);
+  const firstAt = kids.findIndex((c) => c.className.includes('assistant'));
+  const rowAt = kids.findIndex((c) => c.className.includes('tool'));
+  const lastAt = kids.map((c) => c.className.includes('assistant')).lastIndexOf(true);
+  assert.ok(firstAt < rowAt && rowAt < lastAt, 'order on screen: prose, its rows, the next step');
+});
+
+test('a DONE is said once — streamed prose and the harvested summary never double', async () => {
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('assistant_delta', { text: 'Wired it up.\nDONE wired the widget' });
+  globalThis.__stream.emit('done_line', { text: 'wired the widget' });
+  await tick();
+  const first = node('log').children.find((c) => c.className.includes('assistant'));
+  const html = first.children[0].innerHTML;
+  const count = (needle) => html.split(needle).length - 1;
+  assert.equal(count('Wired it up.'), 1, 'prose once');
+  assert.equal(count('wired the widget'), 1, 'the summary once');
+  assert.equal(/DONE/.test(html), false, 'the marker word never renders');
+
+  // When the DONE carried no sentence of its own, the prose above it is the
+  // summary — appending it again would say the same thing twice.
+  globalThis.__stream.emit('assistant_delta', { text: 'All clear.\nDONE' });
+  globalThis.__stream.emit('done_line', { text: 'All clear.' });
+  await tick();
+  const second = node('log').children.filter((c) => c.className.includes('assistant')).at(-1);
+  assert.equal(second.children[0].innerHTML.split('All clear.').length - 1, 1, 'not doubled');
+
+  // A bare DONE with no prose above it still leaves the reader something.
+  globalThis.__stream.emit('assistant_delta', { text: 'DONE fixed the bug' });
+  globalThis.__stream.emit('done_line', { text: 'fixed the bug' });
+  await tick();
+  const third = node('log').children.filter((c) => c.className.includes('assistant')).at(-1);
+  assert.match(third.children[0].innerHTML, /fixed the bug/);
+});
+
+test('opening a session replays prose without markers, DONE summary included', async () => {
+  const backend = {
+    ...BACKEND,
+    'session.open': () => [
+      { type: 'task', text: 'look at things' },
+      { type: 'assistant', text: 'Read the file.\nNEED file a.txt' },
+      { type: 'tool', kind: 'read', arg: 'a.txt', ok: true },
+      { type: 'assistant', text: 'All clear.\nDONE read it all' },
+    ],
+  };
+  const { node, tick } = await bootApp(backend);
+  await tick();
+  node('sessions').children[0].dispatch('click');
+  await tick(); await tick();
+  const bodies = node('log').children
+    .filter((c) => c.className.includes('assistant'))
+    .map((c) => c.children[0].innerHTML);
+  assert.equal(bodies.length, 2, 'one bubble per replayed reply');
+  assert.match(bodies[0], /Read the file\./);
+  assert.equal(/NEED|DONE/.test(bodies[0]), false, 'no raw wire in the replay');
+  assert.match(bodies[1], /All clear\./);
+  assert.match(bodies[1], /read it all/, 'the DONE summary survived the round trip');
+});
+
+test('a plugin marker the backend reports is hidden too', async () => {
+  const backend = {
+    ...BACKEND,
+    'plugins.list': () => ({ dir: '', loaded: [], failed: [], tools: ['ECHO'], toolDefs: [{ marker: 'ECHO', takesBody: false }], panels: [] }),
+  };
+  const { node, tick } = await bootApp(backend);
+  await tick();
+  globalThis.__stream.emit('assistant_delta', { text: 'Echoing now.\nECHO hello there\nThat is all.' });
+  await tick();
+  const bubble = node('log').children.find((c) => c.className.includes('assistant'));
+  const html = bubble.children[0].innerHTML;
+  assert.match(html, /Echoing now\./);
+  assert.match(html, /That is all\./);
+  assert.equal(/ECHO hello there/.test(html), false, 'the plugin call is a row, not prose');
+});
+
+/* ------------------------------------------------- the chrome */
+
+test('the theme button flips the window and remembers', async () => {
+  const { node, sent, tick } = await bootApp(BACKEND);
+  assert.equal(globalThis.document.documentElement.dataset.theme, 'dark', 'the saved theme boots first');
+  node('theme-toggle').dispatch('click');
+  await tick();
+  assert.equal(globalThis.document.documentElement.dataset.theme, 'light');
+  assert.deepEqual(sent.at(-1), { method: 'settings.set', params: { theme: 'light' } }, 'the choice is written through');
+  node('theme-toggle').dispatch('click');
+  await tick();
+  assert.equal(globalThis.document.documentElement.dataset.theme, 'dark');
+});
+
+test('the New Conversation line starts a session like the button above it', async () => {
+  const { node, calls, tick } = await bootApp(BACKEND);
+  const before = calls.length;
+  node('new-conv').dispatch('click');
+  await tick();
+  assert.ok(calls.slice(before).includes('session.new'), 'the line does what it says');
+});

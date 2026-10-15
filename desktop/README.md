@@ -57,10 +57,14 @@ So the harness works *around* it rather than pretending otherwise:
 Left column: sessions (click to open, fork from the session menu), playbooks
 (click to read), and the project's files.
 
-Centre: the conversation. Your messages sit on the right; the assistant answers
-on the left; every tool call is one line that opens to show what it read or
-changed, reasoning folds away, plan/todo renders as a checklist, and pending
-changes appear at the bottom with per-file checkboxes and a diff view.
+Centre: the conversation, read like a harness. Your messages come back as a
+prompt block — `❯` and what you typed. The assistant's prose lands in a bubble
+of its own per step: marker traffic never reaches it (the protocol is wire, and
+the wire is what the tool rows are for). Every tool call is one `⏺ Verb arg`
+line carrying the first line of its result, opening for the detail; reasoning
+folds away, plan/todo renders as a checklist, and pending changes appear at the
+bottom with per-file checkboxes and a diff view. The moon in the header flips
+the theme, and the choice is written through.
 
 Header: project, model, permission mode — three controls, one thin row.
 
@@ -318,7 +322,7 @@ surface read. The gear in the header opens it as a form; `settings.get` and
 `settings.set` over `/rpc` do the same thing from a script.
 
 What it holds: default model (+ the **thinking level** the model reasons at
-before each step — it streams into a fold labeled `reasoning…` and closes when
+before each step — it streams into a fold labeled `✻ reasoning…` and closes when
 the turn ends, and only models that advertise thinking levels honour it), write
 permission (`ask` / `auto` / `yolo`), `allowRun`, `maxSteps`, plan mode (+
 whether a plan waits for approval), helpers on/off, the compaction budget
