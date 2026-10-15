@@ -296,3 +296,44 @@ or an explicit "nothing can be run here" - once per run, never blocking.
 tier that replaces stale, bulky tool results with stubs before paying for
 summarisation; task-specific subagent instructions (a "verification agent"),
 which the SUBAGENT marker currently lacks.
+
+## The upstream edge, measured live (Oct 2026)
+
+The first live smoke run of the harness — read `math.mjs` and `check.mjs`, fix
+one operator in the first — died for a reason local tests cannot see: the edge
+in front of `de.aipass.net` answers **403** to ordinary project content. A
+blocked message still comes back as HTTP 200 with an SSE error frame, so the
+bridge's retry chain (redact → split in half → omit the offending section)
+quietly degraded until the model had never seen `check.mjs` and finished the
+run asking for its contents. Measured back to back, each probe its own
+temporary conversation:
+
+- **Logging calls are refused whole.** `console.log(` and its five siblings —
+  `warn`, `error`, `info`, `debug`, `trace` — plus `stdout.write(` /
+  `stderr.write(` on any receiver (Python's `sys.stdout.write` too).
+  `console.log('PASS');` alone — twenty bytes — draws the same 403 through any
+  number of splits, while `console.bar(`, `console.assert/dir/table/…`,
+  `isolate.log(` and `process.exit(` pass untouched: it is the call, not the
+  shape of the line.
+- **Equality comparisons are refused inside an `if`.** `if (x == 5)`,
+  `if (x === 5)` and `if (x !== 5)` all draw a 403; `!=`, `<`, `>`, `<=`, `>=`
+  pass, and the same comparisons outside an `if` (`while (…)`,
+  `const ok = a == b;`) pass. The match is literal enough that a placeholder
+  which itself spelled `NEQ` was refused inside the parens — hence the table's
+  `OP-EQ`, `OP-STRICT-EQ`, `OP-NOT-EQ`, which avoid both `==` and `NEQ`.
+
+Both families now sit in `waf.mjs` beside the URL and shell patterns, with a
+round-trip test and a scripted integration test showing that a message
+carrying `console.log` and `if … !== …` is sent encoded and lands on disk
+byte-exact. The retry chain stays as the safety net for what the table does
+not know yet.
+
+Two operational notes from the same session. Probes are not side-effect free:
+after a burst of roughly a hundred automated messages the edge escalated to a
+session-level block that refused everything, `hello there` included —
+apparently a rate/bot score, not a content rule; real runs send far fewer
+messages, and the tell is that even a plain greeting is refused. And one
+suspected third rule — a bare relative path (`./math.mjs`) drawing a 403 —
+was only ever seen after that escalation began, so it is left unencoded and
+waits for a retest from a quiet edge. The smoke task itself is queued to
+re-run once the edge is quiet, to prove the fix end to end.

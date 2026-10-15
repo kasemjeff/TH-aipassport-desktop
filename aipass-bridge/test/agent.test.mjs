@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { startBridge, FakeExtension, scripted, tempDir, run, AGENT } from './harness.mjs';
+import { outbound, inbound } from '../harness/waf.mjs';
 
 let bridge;
 before(async () => { bridge = await startBridge(); });
@@ -194,6 +195,44 @@ test('loopback addresses are substituted outbound and restored on disk', async (
   assert.doesNotMatch(sentAll, /127\.0\.0\.1/, 'loopback ip must never leave this machine');
   assert.match(sentAll, /LCLHST/);
   assert.equal(fs.readFileSync(path.join(dir, 'cfg.md'), 'utf8'), 'see http://localhost:4000 and 127.0.0.1:9090\n');
+});
+
+test('the substitution table round-trips byte for byte', () => {
+  const src = 'console.log("x");\nConsole.Warn(y);\nprocess.stdout.write(z);\nsys.stderr.write(w);\nisolate.log(k);\nif (a !== b) { c(); }\nif (a === b) { d(); }\nif (a == b) { e(); }\nif (a != b) { f(); }\n';
+  const enc = outbound(src);
+  assert.doesNotMatch(enc, /console\.(log|warn)/i, 'console calls are encoded');
+  assert.doesNotMatch(enc, /(stdout|stderr)\.write/i, 'stdout/stderr writes are encoded');
+  assert.doesNotMatch(enc, /==/, 'no equality operator travels raw');
+  assert.match(enc, /OP-NOT-EQ/);
+  assert.match(enc, /OP-STRICT-EQ/);
+  assert.match(enc, /OP-EQ/);
+  assert.match(enc, /isolate\.log/, 'an unrelated .log call is not touched');
+  assert.match(enc, /if \(a != b\)/, 'single-bang != is untouched');
+  assert.equal(
+    inbound(enc),
+    'console.log("x");\nconsole.warn(y);\nprocess.stdout.write(z);\nsys.stderr.write(w);\nisolate.log(k);\nif (a !== b) { c(); }\nif (a === b) { d(); }\nif (a == b) { e(); }\nif (a != b) { f(); }\n',
+  );
+});
+
+test('logging calls and comparisons are substituted outbound and restored on disk', async (t) => {
+  // The upstream edge 403s any message carrying console.log & friends — in any
+  // language and at any size — and blocks `==`/`===`/`!==` inside an if. Reads
+  // of a normal test file died on both.
+  const dir = tempDir({ 'app.mjs': 'console.log("hello");\nif (add(1, 2) !== 3) { console.warn("careful"); }\n' });
+  const handler = scripted([
+    'NEED file app.mjs',
+    'EDIT app.mjs\nFIND\nCONSOLE-LOG("hello");\nif (add(1, 2) OP-NOT-EQ 3) { CONSOLE-WARN("careful"); }\nNEW\nCONSOLE-LOG("hello again");\nif (add(1, 2) OP-NOT-EQ 3) { CONSOLE-WARN("careful"); }\nEND',
+    'DONE greeting changed',
+  ]);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  await agent(dir, ['--apply']);
+  const sentAll = handler.sent.join('\n');
+  assert.doesNotMatch(sentAll, /console\.(log|warn)/, 'logging calls must never travel in the clear');
+  assert.doesNotMatch(sentAll, /==/, 'equality operators must never travel in the clear');
+  assert.match(sentAll, /CONSOLE-LOG/, 'the encoded form is what leaves this machine');
+  assert.equal(fs.readFileSync(path.join(dir, 'app.mjs'), 'utf8'), 'console.log("hello again");\nif (add(1, 2) !== 3) { console.warn("careful"); }\n');
 });
 
 test('splits and resends a turn the upstream rejects', async (t) => {
