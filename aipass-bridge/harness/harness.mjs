@@ -7,7 +7,6 @@
 // have to work around that, and both of them live here.
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { Emitter } from './events.mjs';
 import { Overlay } from './overlay.mjs';
@@ -20,10 +19,13 @@ import { Compactor } from './compact.mjs';
 import { runTask, applyOverlay } from './loop.mjs';
 import { preamble as buildPreamble } from './protocol.mjs';
 import { RulesStore } from './rules.mjs';
+// One address for "where this app keeps its state", shared with the rpc layer:
+// AIPASS_HOME when a surface (a test) names one, ~/.aipass otherwise.
+import { aipassHome } from './settings.mjs';
 
 const REPO_SKILLS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills');
 
-const home = () => path.join(os.homedir(), '.aipass');
+const home = () => aipassHome();
 
 export class Harness {
   /** Resolves the plan-approval gate; null when nobody is waiting on it. */
@@ -79,10 +81,25 @@ export class Harness {
       // WEB on a scratch conversation (P2-B), when the run opts in.
       webConversation: this.options.webScratch ? () => this.#scratchConversation() : null,
     });
-    // Permission rules: the caller's own first, then the project's persisted
-    // ones (harness/rules.mjs) — first match wins, so explicit beats stored.
-    // "Always" answers write through to the same file, so they survive a
-    // restart; previously they died with the process.
+    /* ------------------------------------------------------------- path rules *
+     *
+     * Two stores have held permission rules, and this is where they meet.
+     *
+     * `settings.rules` (settings.mjs) is the single EDITABLE surface: it is
+     * what the window's rules page and rules.get/rules.set speak, and the CLI
+     * writes the same file - so there is one list to read and one to edit
+     * rather than two that quietly disagree. An explicit `rules` option is that
+     * surface, and it is placed AHEAD of the stored ones so an explicit rule
+     * always outranks a stored one. The desktop's rpc passes it on every
+     * harness it builds.
+     *
+     * RulesStore (harness/rules.mjs) is the fallback for a caller that passes
+     * none, so a rule the CLI persisted for this project still applies to the
+     * next run - and it KEEPS owning the persisted "always" grants either way.
+     * Those are answers, not policy: they are what makes the desktop stop
+     * asking the same question on every run, and they must survive a restart
+     * whether or not a settings file exists.
+     */
     this.rulesStore = opts.rulesStore ?? (opts.rulesFile ? new RulesStore(opts.rulesFile) : new RulesStore());
     const persisted = this.rulesStore.forRoot(this.root);
     this.permissions = new PermissionEngine({
@@ -92,7 +109,7 @@ export class Harness {
       events: this.events,
       // How long an unanswered permission question waits before it resolves
       // to deny. The CLI's default suits a terminal someone is watching; the
-      // desktop passes 0 — the human may be three minutes into reading a
+      // desktop passes 0 - the human may be three minutes into reading a
       // diff, and a silent deny is worse than a wait.
       timeoutMs: opts.permissionTimeoutMs ?? 120_000,
       onGrant: (kind, arg) => this.rulesStore.addGrant(this.root, kind, arg),
@@ -156,6 +173,21 @@ export class Harness {
     if (allowRun != null) { this.options.allowRun = Boolean(allowRun); this.permissions.allowRun = Boolean(allowRun); }
     return this.options;
   }
+
+  /**
+   * Replace the path rules on the live engine, mid-session.
+   *
+   * The engine reads `this.rules` on every evaluate(), so swapping the array
+   * is enough - but it has to happen on the *engine*, not just in settings:
+   * a rule that only exists in the file changes nothing until the next
+   * start, which is precisely the lie the window must not tell. The caller
+   * (rpc's rules.set / settings.set) has already written the settings file;
+   * this is the half that makes the save true right now.
+   */
+  setRules(rules = []) {
+    this.permissions.rules = Array.isArray(rules) ? rules : [];
+    return this.permissions.rules;
+  }
   async #rotate(summary, task) {
     await this.bridge.createConversation({ temporary: true, message: 'Continuing earlier work.' });
     const st = await this.bridge.status().catch(() => null);
@@ -175,39 +207,79 @@ export class Harness {
     return this.#scratch;
   }
 
+  /**
+   * Rotate the conversation now, carrying the work so far as a summary.
+   *
+   * The upstream cannot trim its own history, so this is the only lever there
+   * is: ask the model for a summary of what has been done, record it in the
+   * session, start a fresh conversation, and re-seed it with the summary and
+   * the task. It runs automatically when the budget is close to full and on
+   * demand from the window's compact button - the same path, because a manual
+   * rotation that behaved differently would be a surprise waiting to happen.
+   *
+   * @returns {Promise<{summary: string, seedText: string}>}
+   */
+  async compactNow(task = '') {
+    if (!this.session) throw new Error('no session to compact');
+    const summary = await this.compactor.summarize(this.session, { task, model: this.bridge.model });
+    this.session.append('compaction', { summary, firstKeptEntryId: this.session.entries.at(-1)?.id ?? null });
+    await this.#rotate(summary, task);
+    this.events.emit('compacted', { summary });
+    const seedText = this.compactor.seed({
+      summary,
+      task,
+      listing: '',
+      preambleText: buildPreamble({
+        allowRun: Boolean(this.options.allowRun),
+        plan: Boolean(this.options.plan),
+        subagent: Boolean(this.options.subagent),
+      }),
+    });
+    return { summary, seedText };
+  }
+
+  /** How full the context budget is right now, for whoever is watching. */
+  contextUsage() {
+    const used = this.compactor.estimate(this.session);
+    const budget = this.compactor.budgetFor(this.bridge.model);
+    const percent = budget ? Math.min(100, Math.round((used / budget) * 100)) : 0;
+    return {
+      used,
+      budget,
+      reserved: this.compactor.reserveTokens,
+      percent,
+      compactAt: this.compactor.triggerPercent,
+      needsCompaction: this.compactor.needsCompaction(this.session),
+      entries: this.session?.entries.length ?? 0,
+    };
+  }
+
   /* ------------------------------------------------------------------ run */
 
   async run(task, { first = null, runPluginTool = null } = {}) {
     if (!task?.trim()) throw new Error('no task given');
-    if (!this.session) await this.startSession();
+    // One run per harness. The bridge holds exactly one current conversation
+    // and one position in it, so a second run would overwrite the first's
+    // abort controller and interleave its replies into the same conversation.
+    // The flag goes up before the first await: two callers arriving at once
+    // must not both squeeze past the check while `startSession` is pending.
+    if (this.running) throw new Error('a run is already in flight - cancel it first (/stop)');
     this.running = true;
-    this.abort = new AbortController();
-
-    const isFirst = first ?? this.session.entries.every((e) => e.type !== 'task');
-
-    // Context is a rotating resource here, so check it before the turn, not after.
-    let seedText = null;
-    if (this.compactor.needsCompaction(this.session)) {
-      this.events.emit('note', { text: 'context is filling up — summarising earlier work and starting a fresh conversation' });
-      const summary = await this.compactor.summarize(this.session, { task, model: this.bridge.model });
-      this.session.append('compaction', { summary, firstKeptEntryId: this.session.entries.at(-1)?.id ?? null });
-      await this.#rotate(summary, task);
-      this.events.emit('compacted', { summary });
-      seedText = this.compactor.seed({
-        summary,
-        task,
-        listing: '',
-        preambleText: buildPreamble({
-          allowRun: Boolean(this.options.allowRun),
-          plan: Boolean(this.options.plan),
-          subagent: Boolean(this.options.subagent),
-        }),
-      });
-    }
-
-    await this.#ensureConversation();
-
     try {
+      if (!this.session) await this.startSession();
+      this.abort = new AbortController();
+
+      const isFirst = first ?? this.session.entries.every((e) => e.type !== 'task');
+
+      // Context is a rotating resource here, so check it before the turn, not after.
+      let seedText = null;
+      if (this.compactor.needsCompaction(this.session)) {
+        this.events.emit('note', { text: 'context is filling up - summarising earlier work and starting a fresh conversation' });
+        seedText = (await this.compactNow(task)).seedText;
+      }
+
+      await this.#ensureConversation();
+
       return await runTask(task, {
         bridge: this.bridge,
         tools: this.tools,
@@ -230,6 +302,9 @@ export class Harness {
         first: isFirst,
       });
     } finally {
+      // Every failure before the loop - a session that will not open, a
+      // compaction that fails - has to clear the flag too, or one bad run
+      // locks the project out for the rest of the process's life.
       this.running = false;
     }
   }
@@ -277,7 +352,11 @@ export class Harness {
     return async (task) => {
       const child = new Overlay(this.root);
       const childSession = this.store.create({ root: this.root, model: this.bridge.model, title: `helper: ${task.slice(0, 60)}` });
-      const childPermissions = new PermissionEngine({ mode: 'yolo', allowRun: false });
+      // The parent's path rules travel with the helper. They are statements
+      // about the project (`.env*  deny`), not about which run is editing, so
+      // a rule-free engine here would make every one of them a lie the moment
+      // the model handed the work to a helper.
+      const childPermissions = new PermissionEngine({ mode: 'yolo', allowRun: false, rules: this.permissions.rules });
       // The helper borrows its own conversation (P2-B) instead of moving the
       // bridge's current one and restoring it afterwards — the old dance left
       // the parent pointing at the child's conversation if anything died

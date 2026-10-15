@@ -268,6 +268,10 @@ async function startEnvRpc() {
     settings: new Settings(tempDir(), 'settings.json'),
     pluginsDir: tempDir(),
     rulesFile: path.join(tempDir(), 'rules.json'),
+    // The suite runs its own bridge; a backend that autostarts one would
+    // spawn a second listener (and a detached process) for a test that only
+    // asks which address the harness client resolved.
+    autostartBridge: false,
   });
 }
 

@@ -104,9 +104,12 @@ try {
     if (q.video) console.log(`video ${q.video.remaining} of ${q.video.limit} left this ${q.video.period}`);
   } else {
     console.error(`unknown: ${what}`);
-    process.exit(1);
+    // exitCode, not exit(): process.exit() right after a fetch can trip the
+    // Windows libuv assertion about a half-closed handle, turning a success
+    // into a crash exit code for whoever called this.
+    process.exitCode = 1;
   }
 } catch (err) {
   console.error(`${err.message} — is the bridge running? npm run dev`);
-  process.exit(1);
+  process.exitCode = 1;
 }

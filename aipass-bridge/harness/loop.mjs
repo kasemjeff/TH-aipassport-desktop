@@ -71,7 +71,6 @@ export async function runTask(taskText, ctx = {}) {
   const stepMs = [];
 
   const say = async (text, withParts = null) => {
-    session?.append('user', { text, bytes: Buffer.byteLength(text) });
     const res = await bridge.chat({
       message: text,
       parts: withParts ?? null,
@@ -81,6 +80,14 @@ export async function runTask(taskText, ctx = {}) {
       onText: (t) => events?.emit('assistant_delta', { text: t }),
       onReasoning: (t) => events?.emit('reasoning_delta', { text: t }),
     });
+    // (H5) Recorded only after the send was accepted. A message the firewall
+    // rejected never reached the server's context, and recording it before the
+    // attempt would turn every resilientSay retry into a duplicate — the
+    // session must hold the conversation the server actually remembers, or the
+    // compaction estimate counts ghosts. `text` is the outbound-encoded (and
+    // possibly redacted/split) version here, which is exactly what the server
+    // saw; an error raised after acceptance is the one case this can miss.
+    session?.append('user', { text, bytes: Buffer.byteLength(text) });
     session?.append('assistant', { text: res.text, reasoning: res.reasoning });
     return res.text;
   };
@@ -116,6 +123,9 @@ export async function runTask(taskText, ctx = {}) {
 
   let nudges = 0;
   let toolsRun = 0;
+  let stagnationWarns = 0;   // (H7) steps corrected by the stagnation guard
+  let stagnantStep = 0;      // consecutive steps with the same signature
+  let lastStepSig = null;
   let summary = null;
   let stopReason = 'steps';
 
@@ -135,7 +145,19 @@ export async function runTask(taskText, ctx = {}) {
     const stepStart = Date.now();
     let reply;
     try { reply = await saySafe(next, partsForSend()); sends++; }
-    catch (err) { events?.emit('error', { message: err.message }); stopReason = 'error'; break; }
+    catch (err) {
+      events?.emit('error', { message: err.message });
+      // The one failure with an obvious cause and an obvious fix: the bridge is
+      // up and the extension is connected, but no logged-in chat tab is open, so
+      // there is nowhere for the request to run. Say so on its own event, and
+      // whoever is watching gets to fix it in one click instead of reading a
+      // stack trace.
+      if (/no de\.aipass\.net tab is open/i.test(err.message)) {
+        events?.emit('needs_tab', { url: options.chatUrl ?? 'https://de.aipass.net/chat', reason: err.message });
+      }
+      stopReason = 'error';
+      break;
+    }
     reply = decode(reply);
 
     const elapsed = ((Date.now() - stepStart) / 1000).toFixed(1);
@@ -238,13 +260,34 @@ export async function runTask(taskText, ctx = {}) {
     if (done) events?.emit('ignore_done', {});
     next = `${results.join('\n\n')}\n\n${REMINDER}`;
 
+    // (H7) Stagnation guard: a step that repeats the previous one exactly —
+    // same calls, same results — is a loop the model cannot see out of from
+    // inside. One repeat earns a correction; the third stops the run instead
+    // of burning the rest of the budget on a call that changes nothing.
+    const stepSig = work.map((c, i) => JSON.stringify([c.kind, String(c.arg ?? ''), String(results[i] ?? '').slice(0, 2000)])).join('\n');
+    if (stepSig === lastStepSig) stagnantStep += 1; else { lastStepSig = stepSig; stagnantStep = 1; }
+    if (stagnantStep >= 3) {
+      session?.append('note', { text: `stagnation guard: the same step ran ${stagnantStep} times with identical results — stopping the run` });
+      events?.emit('stagnation', { repeats: stagnantStep, action: 'stop' });
+      stopReason = 'stagnation';
+      break;
+    }
+    if (stagnantStep === 2) {
+      stagnationWarns += 1;
+      session?.append('note', { text: 'stagnation guard: the step repeated exactly — asking for a different move' });
+      events?.emit('stagnation', { repeats: stagnantStep, action: 'warn' });
+      next += `\n\nThat was the same call with the same result as the step before, so repeating it moves nothing. Do something different — open other files, change the call — or say DONE and tell me what is still open.`;
+    }
+
     // The budget is re-checked here, against the message that is about to go
     // out: tool results reach the server's conversation through it, so a long
     // task crosses the line mid-run, not only between runs. If the summarise
     // or the rotation itself fails, the results still go out — losing the
     // step's work to a compaction error would be worse than an over-budget
-    // conversation.
-    if (compactor && session && compactor.needsCompaction(session, { pendingBytes: Buffer.byteLength(next) })) {
+    // conversation. (H6) `pending` is the raw local text; the compactor
+    // measures it after outbound() rewrites, because that is the size the
+    // server will actually receive.
+    if (compactor && session && compactor.needsCompaction(session, { pending: next })) {
       try {
         events?.emit('note', { text: 'context is filling up — summarising this conversation and rotating to a fresh one' });
         const note = await compactor.summarize(session, { task: taskText, model });
@@ -264,13 +307,15 @@ export async function runTask(taskText, ctx = {}) {
   const changes = overlay.changes();
   for (const c of changes) session?.append('diff', { file: c.file, added: c.added, removed: c.removed, deleted: c.deleted, decision: 'pending' });
 
-  // One line per run that `npm run stats` aggregates — refusals, nudges and
-  // firewall notes are how protocol drift shows up before it is guessed at.
+  // One line per run that `npm run stats` aggregates — refusals, nudges,
+  // stagnation corrections and firewall notes are how protocol drift shows up
+  // before it is guessed at.
   const runStats = {
     stopReason,
     steps: toolsRun,
     tools: Object.fromEntries(toolStats),
     nudges,
+    stagnations: stagnationWarns,
     firewallNotes,
     stepMs,
     spent,

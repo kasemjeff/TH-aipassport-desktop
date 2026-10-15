@@ -1,14 +1,17 @@
 # Build artifacts: Rust's target dir lives outside the repo (see the README),
-# and the Node sidecar is a 92 MB copy of the local node.exe that belongs on
-# nobody's disk. This checkout sits in its build workspace, so the workspace's
-# own target dir is ignored here too.
+# and the Node sidecar is a ~93 MB copy of the local node binary that belongs on
+# nobody's disk - on every platform, not just the .exe one. This checkout sits
+# in its build workspace, so the workspace's own target dir is ignored here too.
 /target/
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/
 /desktop/sidecar/*.exe
 /desktop/sidecar/*.dll
+/desktop/sidecar/node
+/desktop/sidecar/node-*
 
-# Local state — sessions, staged uploads and logs are machine-local by design.
+# Local state - sessions, staged uploads, spilled tool output and logs are
+# machine-local by design.
 /.aipass/
 .mimosa/
 

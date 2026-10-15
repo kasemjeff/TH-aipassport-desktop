@@ -47,6 +47,7 @@ test('a finished run leaves one run_stats line with per-tool refusals', async ()
   assert.equal(stat.steps, 2);
   assert.deepEqual(stat.tools.read, { n: 2, fail: 1 }, 'one read refused, one succeeded');
   assert.equal(stat.nudges, 0);
+  assert.equal(stat.stagnations, 0, 'the run never repeated a step');
   assert.equal(stat.firewallNotes, 0);
   assert.equal(stat.spent, 0, 'quota did not move');
   assert.equal(stat.stepMs.length, 2, 'one timing per step');
@@ -59,7 +60,7 @@ test('collectRuns and summarize aggregate sessions the reader can print', () => 
   one.append('run_stats', {
     stopReason: 'done', steps: 3,
     tools: { read: { n: 4, fail: 1 }, replace: { n: 1, fail: 0 } },
-    nudges: 1, firewallNotes: 2, stepMs: [100, 200], spent: 5,
+    nudges: 1, stagnations: 1, firewallNotes: 2, stepMs: [100, 200], spent: 5,
   });
   const two = store.create({ root: dir, title: 'two' });
   two.append('run_stats', {
@@ -77,6 +78,7 @@ test('collectRuns and summarize aggregate sessions the reader can print', () => 
   assert.equal(totals.calls, 14);
   assert.equal(totals.refusals, 1);
   assert.equal(totals.nudges, 1);
+  assert.equal(totals.stagnations, 1);
   assert.equal(totals.firewallNotes, 2);
   assert.equal(totals.spent, 7);
   assert.equal(totals.byTool.read.n, 13);

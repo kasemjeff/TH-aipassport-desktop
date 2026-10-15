@@ -4,22 +4,30 @@
   "private": true,
   "license": "MIT",
   "description": "AiPASS in a desktop window — bridge, chat and a file agent with a pi-style harness.",
+  "bin": {
+    "aipass": "aipass-bridge/bin/aipass.mjs"
+  },
   "scripts": {
     "dev": "node aipass-bridge/bridge/server.mjs",
     "test": "node scripts/test.mjs",
     "verify": "node scripts/verify.mjs",
+    "qa": "node scripts/qa-loop.mjs",
+    "qa:loop": "node scripts/qa-loop.mjs",
     "chat": "node aipass-bridge/chat.mjs",
     "agent": "node aipass-bridge/agent.mjs",
     "models": "node aipass-bridge/list.mjs models",
+    "styles": "node aipass-bridge/list.mjs styles",
     "conversations": "node aipass-bridge/list.mjs conversations",
     "credits": "node aipass-bridge/list.mjs credits",
     "doctor": "node aipass-bridge/doctor.mjs",
     "stats": "node aipass-bridge/stats.mjs",
     "setup-assistant": "node aipass-bridge/setup-assistant.mjs",
     "desktop": "node desktop/main.mjs",
-    "desktop:sidecar": "powershell -File desktop/sidecar/fetch-node.ps1",
+    "desktop:sidecar": "node desktop/sidecar/fetch-node.mjs",
     "tauri:dev": "tauri dev --config desktop/src-tauri/tauri.conf.json",
-    "tauri:build": "tauri build --config desktop/src-tauri/tauri.conf.json"
+    "tauri:build": "tauri build --config desktop/src-tauri/tauri.conf.json",
+    "tauri:build:mac": "tauri build --config desktop/src-tauri/tauri.conf.json --bundles app,dmg",
+    "tauri:build:linux": "tauri build --config desktop/src-tauri/tauri.conf.json --bundles deb,appimage"
   },
   "engines": {
     "node": ">=20"

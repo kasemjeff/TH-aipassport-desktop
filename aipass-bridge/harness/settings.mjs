@@ -9,6 +9,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
+/**
+ * Where the app's state lives, whichever surface is asking.
+ *
+ * `AIPASS_HOME` is the override, and it exists for one reason: a test run must
+ * not write the user's real settings, sessions or plugins. A suite that resets
+ * the live file eats the configuration of whoever is using the app right now.
+ */
+export const aipassHome = () => process.env.AIPASS_HOME?.trim() || path.join(os.homedir(), '.aipass');
+
 export const DEFAULTS = {
   // the model a new run starts on; the window can still switch per session
   defaultModel: null,
@@ -24,6 +33,10 @@ export const DEFAULTS = {
   subagent: true,
   // when the context budget is close to full, summarise and rotate
   compaction: { contextTokens: 24_000, reserveTokens: 4_096, keepRecentBytes: 6_000 },
+  // rotate at this share of the budget. The upstream keeps its own history and
+  // cannot be trimmed, so waiting until the budget is nearly spent means the
+  // last stretch of a run is spent re-sending a context that no longer fits.
+  compactAtPercent: 40,
   // where the playbooks are looked up, in order; first match wins
   skillsDirs: [],
   // projects the window offers, most recent first: [{name, path}]
@@ -32,14 +45,22 @@ export const DEFAULTS = {
   root: null,
   // plugins to load, by name, from ~/.aipass/plugins
   plugins: [],
+  // permission path rules, checked before the mode: [{pattern, decision, kinds?}]
+  // — `docs/** → allow` stops a run asking about its own docs, `.env* → deny`
+  // keeps secrets out of every mode including yolo. First match wins.
+  rules: [],
   // theme: 'dark' | 'light' | follow the system with 'auto'
   theme: 'dark',
+  // where the chat tab lives, and whether a run that needs one opens it itself
+  chatUrl: 'https://de.aipass.net/chat',
+  autoOpenTab: true,
   // where staged uploads wait before they are sent
   uploads: null,
 };
 
 export class Settings {
-  constructor(dir = path.join(os.homedir(), '.aipass'), file = 'settings.json') {
+  /** @param {string} [dir] where the file lives; defaults to `aipassHome()` */
+  constructor(dir = aipassHome(), file = 'settings.json') {
     this.dir = dir;
     this.file = path.join(dir, file);
     this.values = structuredClone(DEFAULTS);
@@ -49,17 +70,77 @@ export class Settings {
   reload() {
     try {
       const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      this.values = { ...structuredClone(DEFAULTS), ...parsed, compaction: { ...DEFAULTS.compaction, ...(parsed.compaction ?? {}) } };
+      this.values = Settings.sane({ ...structuredClone(DEFAULTS), ...parsed, compaction: { ...DEFAULTS.compaction, ...(parsed.compaction ?? {}) } });
     } catch {
       // Missing or unreadable is the normal first-run case; defaults apply.
     }
     return this.values;
   }
 
+  /**
+   * Back to the shipped defaults, written through the same atomic path as `set`.
+   *
+   * `root` and `projects` are deliberately kept: resetting the form should not
+   * teleport the user out of the folder they are working in.
+   */
+  reset() {
+    const keep = { root: this.values.root, projects: this.values.projects };
+    const next = Settings.sane({ ...structuredClone(DEFAULTS), ...keep });
+    fs.mkdirSync(this.dir, { recursive: true });
+    const tmp = `${this.file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n');
+    fs.renameSync(tmp, this.file);
+    this.values = next;
+    return next;
+  }
+
+  /**
+   * Clamp the values that can silently break a run.
+   *
+   * `maxSteps: 0` is the case that justifies this: the loop exits before its
+   * first step, the window accepts the message and answers nothing, and no error
+   * appears anywhere. Rather than trusting every caller, the numbers that govern
+   * a run are clamped here — the one place the CLI, the window and any future
+   * surface all write through.
+   */
+  static sane(values) {
+    const next = structuredClone(values);
+    const num = (v, min, max, fallback) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return fallback;
+      return Math.min(max, Math.max(min, Math.round(n)));
+    };
+    next.maxSteps = num(next.maxSteps, 1, 200, 10);
+    // Path rules are policy, and policy that a typo silently disables is worse
+    // than no policy: a rule with no pattern would never match anything, and a
+    // decision of "yes" would never be honoured by the engine. Both are dropped
+    // here rather than stored where they look like protection.
+    next.rules = Array.isArray(next.rules)
+      ? next.rules
+        .filter((r) => r && typeof r.pattern === 'string' && r.pattern.trim())
+        .map((r) => ({
+          pattern: r.pattern.trim(),
+          decision: ['allow', 'deny', 'ask'].includes(r.decision) ? r.decision : 'ask',
+          ...(Array.isArray(r.kinds) && r.kinds.length ? { kinds: r.kinds.map(String) } : {}),
+        }))
+        .slice(0, 100)
+      : [];
+    if (next.compaction) {
+      const budget = num(next.compaction.contextTokens, 1000, 4_000_000, 24_000);
+      const reserve = num(next.compaction.reserveTokens, 128, budget - 1, 4_096);
+      next.compaction = { ...next.compaction, contextTokens: budget, reserveTokens: reserve };
+    }
+    const share = Number(next.compactAtPercent);
+    if (next.compactAtPercent != null) next.compactAtPercent = Number.isFinite(share) ? Math.min(100, Math.max(5, Math.round(share))) : 40;
+    if (next.chatUrl && !/^https?:\/\//.test(String(next.chatUrl))) delete next.chatUrl;
+    return next;
+  }
+
   /** Merge a patch in and write it back. Returns the whole object. */
   set(patch = {}) {
-    const next = { ...this.values, ...patch };
+    let next = { ...this.values, ...patch };
     if (patch.compaction) next.compaction = { ...this.values.compaction, ...patch.compaction };
+    next = Settings.sane(next);
     fs.mkdirSync(this.dir, { recursive: true });
     const tmp = `${this.file}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n');

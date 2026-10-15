@@ -203,8 +203,12 @@ Type `/` to open the command menu — **↑/↓** to choose, **Tab** to fill it 
 | `npm run doctor` | run comprehensive diagnostic checks |
 | `npm run setup-assistant` | set up or bind custom coding assistant |
 | `npm test` | run the test suite |
+| `npm run desktop` | bridge + harness backend + the window, in a browser |
+| `npm run qa` | one QA pass: static wiring, suite, window logic, live backend |
 
-`npm run dev:next` still starts the Next.js app in this repo.
+The desktop app is the same bridge and the same agent with a window on top —
+see `desktop/README.md`. Nothing in this repo needs `npm install`: every file
+imports only `node:*` builtins.
 
 ## What you get
 
@@ -480,7 +484,6 @@ most recent.
 | env | default | |
 |---|---|---|
 | `AIPASS_PORT` | `8787` | |
-| `AIPASS_BRIDGE` | *(unset → 8787)* | client side: where to find the bridge — full URL, `host:port` or a bare port; anything else fails at start |
 | `AIPASS_MODEL` | `gemini-3.1-flash-lite` | used when no model is given |
 | `AIPASS_MODELS` | two known ids | fallback list when no extension is attached |
 | `AIPASS_MODEL_FILTER` | `chat` | `all` keeps image/video/audio models |

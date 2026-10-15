@@ -18,6 +18,14 @@ export const SKIP = new Set([
   // The usual suspects the walks kept drowning in: build outputs and
   // dependency/vendor trees that are data to this project, not source.
   'target', 'vendor', 'coverage', '__pycache__', '.venv', 'venv',
+  // The harness's own spill directory. spill() in tools.mjs drops long tool
+  // results there, so without this every earlier run of this project sits in
+  // `.aipass/spill` waiting to be walked and re-read as if it were source -
+  // which both buries the real files and spends context re-reading output the
+  // model has already been shown. SKIP governs listing/search/glob only:
+  // read() is deliberately NOT filtered, because the locator spill() returns
+  // points the model straight back at one of those files.
+  '.aipass',
 ]);
 export const DELETED = '\x00DELETE\x00';
 

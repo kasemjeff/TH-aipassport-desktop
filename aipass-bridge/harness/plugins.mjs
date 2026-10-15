@@ -16,10 +16,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
+import { aipassHome } from './settings.mjs';
 import { pathToFileURL } from 'node:url';
 
 export class PluginManager {
-  constructor({ dir = path.join(os.homedir(), '.aipass', 'plugins'), settings = null, events = null, log = () => {} } = {}) {
+  constructor({ dir = path.join(aipassHome(), 'plugins'), settings = null, events = null, log = () => {} } = {}) {
     this.dir = dir;
     this.settings = settings;
     this.events = events;
@@ -66,6 +68,12 @@ export class PluginManager {
 
     for (const file of this.discover()) {
       try {
+        // Provenance, not security: a plugin is code the user installed, and
+        // the record of what was actually loaded — content hash, size, mtime —
+        // is what makes "did that plugin change since it last behaved?" an
+        // answerable question without re-reading every file by hand.
+        const bytes = fs.readFileSync(file);
+        const stat = fs.statSync(file);
         const mod = await import(`${pathToFileURL(file).href}?t=${Date.now()}`);
         const plugin = mod.default ?? mod;
         if (typeof plugin?.setup !== 'function') throw new Error('no default export with a setup(ctx) function');
@@ -80,6 +88,9 @@ export class PluginManager {
           version: plugin.version ?? '0.0.0',
           description: plugin.description ?? '',
           file,
+          sha256: crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16),
+          bytes: stat.size,
+          modified: Math.round(stat.mtimeMs),
         });
       } catch (err) {
         this.failed.push({ file, error: String(err.message ?? err) });

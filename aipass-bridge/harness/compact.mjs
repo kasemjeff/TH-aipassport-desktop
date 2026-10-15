@@ -34,9 +34,14 @@ export class Compactor {
    *                                     { 'flash': 100_000 }. Unknown models get
    *                                     contextTokens — conservative by default.
    * @param {number} opts.reserveTokens  headroom to leave for the reply
+   * @param {number} [opts.compactAtPercent] share of the budget at which a rotation
+   *                                     fires early. null (the default) leaves the
+   *                                     budget-minus-reserve ceiling in sole charge,
+   *                                     which is what the CLI runs on; the window's
+   *                                     settings sheet owns that knob.
    * @param {number} opts.keepRecentBytes recent traffic never summarised away
    */
-  constructor({ bridge, events = null, contextTokens = 24_000, budgets = null, reserveTokens = 4_096, keepRecentBytes = 6_000 } = {}) {
+  constructor({ bridge, events = null, contextTokens = 24_000, budgets = null, reserveTokens = 4_096, compactAtPercent = null, keepRecentBytes = 6_000 } = {}) {
     this.bridge = bridge;
     this.events = events;
     this.budgets = budgets ?? {};
@@ -46,7 +51,11 @@ export class Compactor {
     this.contextTokens = envPositive('AIPASS_CONTEXT_TOKENS', contextTokens);
     this.keepRecentBytes = envPositive('AIPASS_KEEP_RECENT_BYTES', keepRecentBytes);
     this.reserveTokens = reserveTokens;
+    this.compactAtPercent = compactAtPercent == null ? null : Math.min(100, Math.max(1, Number(compactAtPercent)));
   }
+
+  /** The share of the budget the window rotates at, or null when unset. */
+  get triggerPercent() { return this.compactAtPercent; }
 
   /** The budget for the model this run talks to. */
   budgetFor(model = null) {
@@ -70,18 +79,22 @@ export class Compactor {
    *     later run, forever
    *   - the model's replies sit in the server's context too, so assistant
    *     entries count alongside the user ones
-   *   - `pendingBytes` is the message being assembled right now — the paste
-   *     of tool results the server is about to receive. Without it the check
-   *     always ran one message behind the reality.
+   *   - `pending` is the message being assembled right now — the paste of
+   *     tool results the server is about to receive. Without it the check
+   *     always ran one message behind the reality. It arrives as the raw
+   *     local text and is measured after outbound() rewrites: the session's
+   *     own entries already record the encoded form (that is what the server
+   *     holds), and the pending message has to be counted the same way or a
+   *     step full of URLs and HTML sails under the budget it actually exceeds.
    */
-  estimate(session, { pendingBytes = 0 } = {}) {
+  estimate(session, { pending = '' } = {}) {
     if (!session) return 0;
     const entries = session.entries;
     let start = 0;
     for (let i = entries.length - 1; i >= 0; i--) {
       if (entries[i].type === 'compaction') { start = i + 1; break; }
     }
-    let bytes = pendingBytes;
+    let bytes = pending ? Buffer.byteLength(outbound(String(pending))) : 0;
     for (let i = start; i < entries.length; i++) {
       const e = entries[i];
       if (e.type === 'user') bytes += e.bytes ?? Buffer.byteLength(e.text ?? '');
@@ -110,9 +123,17 @@ export class Compactor {
     return share > 0.3 ? 2 : share > 0.08 ? 3 : 4;
   }
 
-  needsCompaction(session, { pendingBytes = 0 } = {}) {
+  needsCompaction(session, { pending = '' } = {}) {
     if (!session) return false;
-    return this.estimate(session, { pendingBytes }) > this.budgetFor() - this.reserveTokens;
+    const budget = this.budgetFor();
+    // Two ceilings, whichever comes first: the share of the budget the window's
+    // sheet names (when it names one), and the hard budget minus the reserve.
+    // The second is the safety net that stops a reply being cut off by a
+    // context that no longer fits; the first is the knob, and the reason it
+    // exists is that waiting until the budget is nearly spent means the last
+    // stretch of a run re-sends a context that is already too big.
+    if (this.compactAtPercent != null && this.estimate(session, { pending }) >= Math.round(budget * (this.compactAtPercent / 100))) return true;
+    return this.estimate(session, { pending }) > budget - this.reserveTokens;
   }
 
   /**

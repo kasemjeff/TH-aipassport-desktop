@@ -17,7 +17,7 @@
 // that does not parse as a rule or grant is skipped rather than loaded.
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
+import { aipassHome } from './settings.mjs';
 
 const isRule = (r) => r && typeof r === 'object'
   && typeof r.pattern === 'string' && r.pattern
@@ -28,7 +28,10 @@ const isGrant = (g) => g && typeof g === 'object'
   && typeof g.kind === 'string' && typeof g.arg === 'string';
 
 export class RulesStore {
-  constructor(file = path.join(os.homedir(), '.aipass', 'rules.json')) {
+  // The default honours AIPASS_HOME like every other surface: a test run must
+  // not read - let alone write - the configuration of whoever is using the app
+  // right now.
+  constructor(file = path.join(aipassHome(), 'rules.json')) {
     this.file = file;
   }
 

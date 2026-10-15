@@ -35,11 +35,20 @@ test('assistant replies sit in the server context and count alongside the user m
   assert.equal(c.estimate(sessionLike(entries)), 1000);
 });
 
-test('pendingBytes count the message being assembled, before it is sent', () => {
+test('pending counts the message being assembled, before it is sent', () => {
   const c = new Compactor({ keepRecentBytes: 0 });
   const entries = [user('a'.repeat(4000))];
   assert.equal(c.estimate(sessionLike(entries)), 1000);
-  assert.equal(c.estimate(sessionLike(entries), { pendingBytes: 4000 }), 2000);
+  assert.equal(c.estimate(sessionLike(entries), { pending: 'a'.repeat(4000) }), 2000);
+});
+
+test('pending is measured after the WAF rewrites, not before (H6)', () => {
+  const c = new Compactor({ keepRecentBytes: 0 });
+  // 571 URLs, 7 bytes each as written on disk: the server receives HTTP-URL,
+  // 8 bytes each. The expansion is part of what the next request carries, so
+  // the rotation decision has to see 4568 bytes (1142 tokens), not 3997.
+  const raw = 'http://'.repeat(571);
+  assert.equal(c.estimate(sessionLike([]), { pending: raw }), 1142);
 });
 
 test('keepRecentBytes stays out of the estimate', () => {
@@ -115,6 +124,12 @@ test('a long run rotates mid-run: summarise, fresh conversation, results still d
   assert.match(handler.sent[1], /Summarise the work carried out so far/);
   assert.match(handler.sent[2], /Earlier work, already done/);
   assert.match(handler.sent[2], /a short summary of the work so far/, 'the summary the fresh conversation is seeded with');
-  assert.match(handler.sent[2], /marker-end/, 'the step results survive the rotation');
+  // The step's results survive the rotation clipped, and with a locator for the
+  // rest: read() caps a long page and spills it to .aipass/spill, so the tail
+  // of big.txt is on disk and the seeded message names where to read it. What
+  // no longer holds is that the whole file rides the message verbatim - the
+  // cap is the point, and the locator is what keeps the tail reachable.
+  assert.match(handler.sent[2], /Result of read big\.txt:/, 'the step results survive the rotation');
+  assert.match(handler.sent[2], /\.aipass\/spill\/[a-f0-9]+\.txt/, 'and the spilled tail is reachable from it');
   assert.equal(ext.created.length, 2, 'the starting conversation plus the rotation');
 });

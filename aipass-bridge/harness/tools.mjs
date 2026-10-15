@@ -26,6 +26,64 @@ const execP = promisify(exec);
 // line by line, synchronously, in the backend's process.
 const MAX_SEARCH_FILE = 1_000_000;
 
+/**
+ * A tool result longer than the inline cap is not thrown away.
+ *
+ * The first `cap` bytes still go to the model, and the whole thing is written
+ * to `<root>/.aipass/spill/<id>.txt`, with a locator telling the model how to
+ * read the rest with the file tool it already has. Truncation used to end the
+ * story at ". truncated", which silently cost the model the tail of every long
+ * file it read. (The directory is in overlay's SKIP, so walks never surface
+ * it; read() still reaches it, because that is what the locator is for.)
+ */
+function spill(text, cap, root) {
+  const id = Math.random().toString(16).slice(2, 10);
+  const dir = path.join(root, '.aipass', 'spill');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${id}.txt`);
+    fs.writeFileSync(file, text);
+    const rel = `.aipass/spill/${id}.txt`;
+    const lines = text.split('\n').length;
+    return `${text.slice(0, cap)}\n. ${text.length - cap} more bytes, ${lines} lines in total. `
+      + `The rest is on disk at ${rel} - read it with: NEED file ${rel} ${Math.ceil(cap / 80) + 1}-${lines}. `
+      + `Do not ask for it again; it is already saved.`;
+  } catch {
+    // A read-only project still deserves the head of the result.
+    return `${text.slice(0, cap)}\n. truncated`;
+  }
+}
+
+// Subcommands whose reading form and their writing form share a name -
+// `branch -D`, `tag -d`, `remote add` all delete or push somewhere - so they
+// are allowed bare, with no arguments at all.
+const GIT_BARE = new Set(['branch', 'tag', 'remote']);
+const GIT_READONLY = new Set(['status', 'diff', 'log', 'show', 'branch', 'tag', 'remote', 'stash', 'ls-files', 'rev-parse', 'describe']);
+// Options that turn a reading command into something else: another repo
+// (--git-dir/--work-tree), a file on disk (--no-index writes a diff patch,
+// --output writes one too), a config override (-c) or a transport the model
+// gets to choose.
+const GIT_FLAGS = new Set(['--no-index', '--output', '-o', '-D', '-d', '--delete', '--force', '-f', '--exec-path', '--git-dir', '--work-tree', '-c', '--upload-pack', '--receive-pack']);
+
+/**
+ * The whole GIT gate, as one predicate.
+ *
+ * A prefix test is not a gate: `git -c core.pager=sh status` and
+ * `git branch -D main` both start with an allowed word. So only the first
+ * token is matched, against the whole set rather than as a prefix; `stash`
+ * must be exactly `stash list`; `branch`/`tag`/`remote` must be bare; and no
+ * argument may carry one of GIT_FLAGS.
+ */
+function gitAllowed(sub) {
+  const parts = sub.split(/\s+/);
+  const cmd = parts[0].toLowerCase();
+  if (!GIT_READONLY.has(cmd)) return false;
+  const args = parts.slice(1);
+  if (GIT_BARE.has(cmd)) return args.length === 0;
+  if (cmd === 'stash') return args.length === 1 && args[0].toLowerCase() === 'list';
+  return !args.some((a) => GIT_FLAGS.has(a));
+}
+
 export function createTools(ctx) {
   const {
     root,
@@ -43,7 +101,10 @@ export function createTools(ctx) {
     log = () => {},
   } = ctx;
 
-  const clip = (s) => (s.length > maxResult ? `${s.slice(0, maxResult)}\n… truncated` : s);
+  // A result past the inline cap is spilled to disk rather than truncated: the
+  // head still rides the message, and the locator tells the model how to read
+  // the rest with the tool it already has.
+  const clip = (s) => (s.length > maxResult ? spill(s, maxResult, root) : s);
   const safe = (p) => overlay.safe(p);
   const existsAt = (abs) => overlay.existsAt(abs);
   const readAt = (abs) => overlay.readAt(abs);
@@ -107,7 +168,12 @@ export function createTools(ctx) {
       let note = '';
       if (end < total) note = `\n… ${total - end} more line(s). To see them: NEED file ${rel} ${end + 1}-${Math.min(total, end + readLines)}`;
       else if (start > 1) note = `\n(lines ${start}-${end} of ${total})`;
-      return numbered + note;
+      // A page of a minified file is as big as a page of a hundred short ones,
+      // so the page itself is capped through clip() — which spills the whole
+      // thing to disk and hands the model a locator — but the note that says
+      // how to continue is appended after, because losing it strands the model
+      // on half a file.
+      return clip(numbered) + note;
     },
     write(arg, rawBody) {
       const body = inbound(rawBody);
@@ -236,15 +302,14 @@ export function createTools(ctx) {
     async git(arg) {
       const sub = arg.trim();
       if (!sub) return 'err: give me a git subcommand, e.g. status';
-      const ALLOWED = /^(status|diff|log|show|branch|tag|remote|stash\s+list|ls-files|rev-parse|describe)/i;
-      if (!ALLOWED.test(sub))
-        return `err: only read-only git subcommands are allowed (status, diff, log, show, branch, ls-files, …). Got: ${sub}`;
-      // The allowlist matches the *start* of the string, and git is classified
-      // read — always allowed, never gated. So shell punctuation has to be
-      // refused outright, or `GIT status & del *` rides through it as a second
-      // command on the platform shell.
+      // Shell punctuation first: whether this string is one command at all is a
+      // question about the transport, and `status; echo pwned` is answered more
+      // honestly by this refusal than by the allowlist's. Without it, whatever
+      // reaches execP could ride a second command on the platform shell.
       if (/[;&|`$<>]/.test(sub))
         return `err: one read-only git subcommand, no shell punctuation. Got: ${sub}`;
+      if (!gitAllowed(sub))
+        return `err: only read-only git subcommands are allowed (status, diff, log, show, branch, ls-files, …). Got: ${sub}`;
       try {
         // Async for the same reason `run` is: a slow `git log` must not stop
         // the backend's event loop while the window waits on it.

@@ -20,6 +20,25 @@ import path from 'node:path';
 const id = () => Math.random().toString(16).slice(2, 10);
 const slug = (s) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'root';
 
+/**
+ * How many appends share one header rewrite.
+ *
+ * The header is the first line of the session file, and rewriting it used to
+ * happen on every entry - a read of the whole file plus a write of the whole
+ * file, per entry, which is O(n^2) IO on a session that has had a long
+ * conversation. The header only carries presentation facts (title, updated,
+ * entryCount) that list() reads to build the picker, so it is refreshed on the
+ * first append and then once per batch of this many.
+ *
+ * The trade-off, stated plainly: list() ordering and entryCount can lag a
+ * session by up to this many entries - the file's header says "updated 25
+ * entries ago" for a session that is live right now. Everything that has to be
+ * exact is: append() itself appends one line per entry, rename() and fork()
+ * rewrite the header unconditionally, and meta() reads the last entry from
+ * memory rather than from the file.
+ */
+export const HEADER_EVERY = 25;
+
 // The header is the first line; rewriting it keeps list() cheap enough that
 // the session picker never has to parse whole files.
 function rewriteHeader(session) {
@@ -34,6 +53,8 @@ export class Session {
     this.file = file;
     this.header = header;
     this.entries = entries;
+    /** Appends since the last header rewrite; see HEADER_EVERY. */
+    this.appendsSinceRewrite = 0;
   }
 
   get id() { return this.header.id; }
@@ -54,7 +75,12 @@ export class Session {
     if (type !== 'header') {
       this.header.updated = entry.ts;
       this.header.entryCount = (this.header.entryCount ?? 1) + 1;
-      rewriteHeader(this);
+      this.appendsSinceRewrite += 1;
+      // Monotonic on purpose: resetting here would make "the first append" true
+      // again after every rewrite, and the batching would quietly do nothing.
+      if (this.appendsSinceRewrite === 1 || this.appendsSinceRewrite % HEADER_EVERY === 0) {
+        rewriteHeader(this);
+      }
     }
     return entry;
   }

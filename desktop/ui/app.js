@@ -30,7 +30,13 @@ const el = (tag, cls, text) => {
   if (text != null) n.textContent = text;
   return n;
 };
-const scrollDown = () => { if (state.autoScroll) log.scrollTop = log.scrollHeight; };
+/** Follow the conversation only while the reader is already at the bottom.
+ *  Scrolling up to read something and being yanked back down by the next line
+ *  is the kind of small thing that makes a window feel hostile. */
+const atBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+const scrollDown = (force = false) => {
+  if (force || atBottom()) log.scrollTop = log.scrollHeight;
+};
 
 const state = {
   running: false,
@@ -41,13 +47,14 @@ const state = {
   sessionId: null,
   settings: null,
   plugins: null,
+  needsTab: false,      // the last run could not proceed for want of a chat tab
+  needsCompaction: false, // the budget is close to full and a rotation is coming
 };
 
 /* -------------------------------------------------------------- transcript */
 
 function addTask(text) {
   const msg = el('div', 'msg task');
-  msg.append(el('div', 'who', 'คุณ'));
   const body = el('div', 'body');
   body.append(el('span', null, text));
   msg.append(body);
@@ -55,29 +62,24 @@ function addTask(text) {
   scrollDown();
 }
 
-// toggle auto-scroll from the root bar button.\ntry { $('auto-scroll-btn')?.addEventListener('click', () => { state.autoScroll = !state.autoScroll; const b = $('auto-scroll-btn'); if (b) b.textContent = `auto-scroll: ${state.autoScroll ? 'on' : 'off'}`; }); } catch { /* ignore outside UI */ }\nfunction addNote(text) {
+function addNote(text) {
   log.append(el('div', 'note', text));
   scrollDown();
 }
 
-// Non-blocking toast for success/failure. Kept small and dependency-free;
-// nothing on the page blocks while one is up.
-function toast(text, kind = 'info', ms = 2600) {
-  const host = $('toasts');
-  if (!host) return;
-  const node = el('div', `toast ${kind}`, text);
-  host.append(node);
-  requestAnimationFrame(() => node.classList.add('show'));
-  setTimeout(() => {
-    node.classList.remove('show');
-    setTimeout(() => node.remove(), 180);
-  }, ms);
+/**
+ * What a slash command printed. The conversation is dim by design, so command
+ * output gets its own accent-barred line — otherwise "hard to see" is literally
+ * true: a command that answers and cannot be found has not answered.
+ */
+function addCommandOut(text) {
+  log.append(el('div', 'cmd-out', text));
+  scrollDown();
 }
 
 function ensureAssistant() {
   if (state.assistant) return state.assistant;
   const msg = el('div', 'msg assistant');
-  msg.append(el('div', 'who', 'aipass'));
   const body = el('div', 'body');
   msg.append(body);
   log.append(msg);
@@ -111,15 +113,23 @@ function endTurn() {
   state.thinking = null;
 }
 
+/**
+ * One line per tool call, opening to the detail. A run of ten steps has to read
+ * as ten lines — what the model asked for and what it changed stay one click
+ * away without filling the conversation.
+ */
 function addTool({ kind, arg, ok, head, lines = [] }) {
-  if (state.runMetrics) { state.runMetrics.tools += 1; if (!ok) state.runMetrics.errors += 1; }
-  const row = el('div', ok ? 'tool' : 'tool bad');
-  const mark = el('span', 'mark', ok ? '✓ ' : '✗ ');
-  row.append(mark, el('span', null, `${kind} ${arg ?? ''} `), el('span', 'dim', head ?? ''));
-  for (const line of lines) log.append(el('div', 'note', '      ' + line));
+  const row = document.createElement('details');
+  row.className = ok ? 'tool' : 'tool bad';
+  const summary = el('summary');
+  summary.append(el('span', 'mark', ok ? '✓' : '✗'));
+  summary.append(el('span', 'kind', kind));
+  if (arg) summary.append(el('span', 'arg', String(arg)));
+  if (head) summary.append(el('span', 'head', head));
+  row.append(summary);
+  if (lines.length) row.append(el('pre', null, lines.map((line) => String(line)).join('\n')));
   log.append(row);
   scrollDown();
-  renderRunStats();
 }
 
 /* ------------------------------------------------------------------ panel */
@@ -129,7 +139,7 @@ function renderTodo(items) {
   if (!panel) {
     panel = el('div', 'panel');
     panel.id = 'todo-panel';
-    panel.append(el('h4', null, 'แผน & สิ่งที่ต้องทำ'));
+    panel.append(el('h4', null, 'plan & todo'));
     const ul = el('ul');
     panel.append(ul);
     $('pending').before(panel);
@@ -149,8 +159,7 @@ function renderPending(changes) {
   state.pending.clear();
   for (const c of changes ?? []) state.pending.set(c.file, { ...c, checked: true });
 
-  const totals = [...state.pending.values()].reduce((a, c) => ({ add: a.add + (c.added ?? 0), del: a.del + (c.removed ?? 0) }), { add: 0, del: 0 });
-  $('pending-count').textContent = `${state.pending.size} change${state.pending.size === 1 ? '' : 's'} · +${totals.add} / -${totals.del}`;
+  $('pending-count').textContent = `${state.pending.size} change${state.pending.size === 1 ? '' : 's'}`;
   list.textContent = '';
   for (const [file, info] of state.pending) {
     const li = el('li');
@@ -186,10 +195,10 @@ async function showDiff(file) {
     }
     body.append(el('p', 'dim', `${file}  +${change.added} −${change.removed}${change.isNew ? '  (new file)' : ''}`), pre);
   }
-  $('modal-title').textContent = 'การแก้ไขที่รออนุมัติ';
+  $('modal-title').textContent = 'changes';
   const actions = $('modal-actions');
   actions.textContent = '';
-  const close = el('button', 'primary', 'ปิด');
+  const close = el('button', 'primary', 'close');
   close.onclick = hideModal;
   actions.append(close);
   $('modal').classList.remove('hidden');
@@ -197,47 +206,45 @@ async function showDiff(file) {
 
 function hideModal() {
   $('modal').classList.add('hidden');
-  $('modal-body').closest('.sheet').classList.remove('settings-sheet');
+  $('modal').classList.remove('settings-sheet');
 }
-// every modal now has a visual close affordance, not just the Escape key.
-try { $('modal-close').onclick = hideModal; } catch { /* loaded outside the window (tests) is fine */ }
 
 /* ------------------------------------------------------------ permissions */
 
 function askPermission({ id, kind, arg, risk }) {
-  $('modal-title').textContent = `${risk === 'shell' ? 'รันคำสั่งนี้ไหม' : 'ให้แก้ไฟล์นี้ไหม'}?`;
+  $('modal-title').textContent = `${risk === 'shell' ? 'run this command' : 'change this file'}?`;
   const body = $('modal-body');
   body.textContent = '';
   body.append(el('p', null, arg || kind));
   if (risk === 'shell') {
     const pre = el('pre', null, arg || '');
     body.textContent = '';
-    body.append(el('p', 'dim', 'คำสั่ง shell ที่โมเดลขอรัน'), pre);
+    body.append(el('p', 'dim', 'shell command the model wants to run'), pre);
   }
 
   const actions = $('modal-actions');
   actions.textContent = '';
   const answer = (decision) => { hideModal(); rpc('permission.answer', { id, decision }); };
-  const deny = el('button', null, 'ปฏิเสธ');
+  const deny = el('button', null, 'deny');
   deny.onclick = () => answer('deny');
-  const allow = el('button', 'primary', 'อนุญาต');
+  const allow = el('button', 'primary', 'allow');
   allow.onclick = () => answer('allow');
-  const always = el('button', null, 'อนุญาตตลอด');
+  const always = el('button', null, 'always');
   always.onclick = () => answer('always');
   actions.append(deny, always, allow);
   $('modal').classList.remove('hidden');
 }
 
 function askPlan() {
-  $('modal-title').textContent = 'เริ่มแผนนี้ไหม?';
+  $('modal-title').textContent = 'start this plan?';
   const body = $('modal-body');
   body.textContent = '';
-  body.append(el('p', null, 'โมเดลเขียนแผนไว้แล้ว — อนุมัติแล้วงานเริ่มทันที, ไม่อนุมัติแล้วรันหยุดก่อนแตะไฟล์ใด ๆ'));
+  body.append(el('p', null, 'The model wrote a plan. Approve it and the work begins; decline and the run stops before any change.'));
   const actions = $('modal-actions');
   actions.textContent = '';
-  const no = el('button', null, 'ไม่เอา');
+  const no = el('button', null, 'decline');
   no.onclick = () => { hideModal(); rpc('plan.answer', { ok: false }); };
-  const yes = el('button', 'primary', 'อนุมัติ');
+  const yes = el('button', 'primary', 'approve');
   yes.onclick = () => { hideModal(); rpc('plan.answer', { ok: true }); };
   actions.append(no, yes);
   $('modal').classList.remove('hidden');
@@ -247,14 +254,94 @@ function askPlan() {
 
 const stream = new EventSource('/events');
 
-stream.addEventListener('task_start', (e) => { addTask(JSON.parse(e.data).task); state.runMetrics = { startedAt: Date.now(), step: 0, maxSteps: 0, tools: 0, errors: 0 }; renderRunStats(); });
+// The transport, not the run. When the backend process goes away the stream
+// drops and the window used to sit there with a live spinner on a run that no
+// longer existed. Now it says so, and gives the run a deadline: if nothing
+// arrives for a while, the run is treated as lost rather than hanging forever.
+let lastEventAt = Date.now();
+stream.addEventListener('open', () => { lastEventAt = Date.now(); void restoreFromSnapshot(); });
+stream.addEventListener('message', () => { lastEventAt = Date.now(); });
+
+/**
+ * Put the window back where it was after a reload or a reconnect.
+ *
+ * The stream itself replays what this listener missed — the backend keeps the
+ * last frames and a reconnect carries `Last-Event-ID` — but that only covers
+ * the live tail. The parts of the state that live in the session log on disk
+ * (a run that finished before the reload, a session opened yesterday) are
+ * asked for here, so a window that was reloaded mid-run comes back looking
+ * like the run it left instead of a blank page. A window that merely
+ * reconnected — the log is not empty — gets the pending list refreshed and
+ * nothing redrawn.
+ */
+async function restoreFromSnapshot() {
+  const snap = await rpc('snapshot').catch(() => null);
+  if (!snap) return;
+  state.sessionId = snap.session?.id ?? null;
+  if (!state.sessionId) return;
+  if (log.childNodes.length) { renderPending(snap.pending); refreshMeter(); return; }
+  for (const entry of snap.entries ?? []) {
+    if (entry.type === 'task') addTask(entry.text);
+    else if (entry.type === 'assistant') assistantText(entry.text ?? '');
+    else if (entry.type === 'tool') addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '' });
+    else if (entry.type === 'note') addNote(entry.text);
+  }
+  endTurn();
+  renderPending(snap.pending);
+  refreshMeter();
+  await refreshSessions();
+}
+
+stream.onerror = () => {
+  if (stream.readyState === EventSource.CONNECTING) {
+    addNote('backend ตัดการเชื่อม — กำลังลองเชื่อมใหม่…');
+  }
+};
+
+// Every event refreshes the watchdog; a run that stops sending anything is
+// reported as lost instead of blocking the composer forever.
+setInterval(() => {
+  if (!state.running) return;
+  if (Date.now() - lastEventAt > 20_000) {
+    state.running = false;
+    $('send').textContent = 'ส่ง';
+    $('hint').textContent = '';
+    addNote('run นี้เงียบไป 20 วินาที — ถือว่าหยุดแล้ว (backend อาจหลุด) · ลองส่งใหม่ หรือเช็ค aipass doctor');
+    refreshMeter();
+  }
+}, 5_000);
+
+stream.addEventListener('task_start', (e) => {
+  addTask(JSON.parse(e.data).task);
+  hideWelcome();
+  refreshMeter();
+  lastEventAt = Date.now();
+});
+
+// A run that cannot proceed because no logged-in chat tab is open is the one
+// failure with a one-click fix, so it gets a banner instead of a log line.
+stream.addEventListener('needs_tab', (e) => {
+  const { url } = JSON.parse(e.data);
+  state.needsTab = true;
+  refreshReadiness();
+  const bar = el('div', 'note needs-tab');
+  bar.append(el('span', null, 'bridge ต้องมีหน้า chat ที่ล็อกอินอยู่ — '));
+  const open = el('button', 'mini', 'เปิดให้');
+  open.onclick = () => rpc('browser.open', { url }).catch(() => {});
+  bar.append(open, el('span', null, `  (${url})`));
+  log.append(bar);
+  scrollDown();
+});
+stream.addEventListener('tab_opened', (e) => {
+  state.needsTab = false;
+  addNote(`เปิด ${JSON.parse(e.data).url} ในบราวเซอร์แล้ว — รอสักครู่แล้วส่งใหม่`);
+  refreshReadiness();
+});
 stream.addEventListener('assistant_delta', (e) => assistantText(JSON.parse(e.data).text));
 stream.addEventListener('reasoning_delta', (e) => thinkingText(JSON.parse(e.data).text));
 stream.addEventListener('step', (e) => {
   const { step, maxSteps, elapsed } = JSON.parse(e.data);
   addNote(`step ${step}/${maxSteps} · ${elapsed}s`);
-  if (state.runMetrics) { state.runMetrics.step = step; state.runMetrics.maxSteps = maxSteps; state.runMetrics.elapsed = elapsed; }
-  renderRunStats();
 });
 stream.addEventListener('thinking', (e) => {
   const { text } = JSON.parse(e.data);
@@ -267,13 +354,40 @@ stream.addEventListener('firewall_note', (e) => addNote(JSON.parse(e.data).text)
 stream.addEventListener('nudge', (e) => addNote(`no marker in that reply — nudging (${JSON.parse(e.data).n}/2)`));
 stream.addEventListener('give_up', () => addNote('no marker after three replies — stopping.'));
 stream.addEventListener('ignore_done', () => addNote('(ignoring DONE — it came before the results it asked for)'));
-stream.addEventListener('step_limit', () => addNote('reached the step limit'));
+stream.addEventListener('step_limit', () => {
+  addNote('reached the step limit');
+  // A run that stops for want of steps is a dead end unless the next move is
+  // offered: "carry on" is one click instead of retyping what to do next.
+  const row = el('div', 'note continue-row');
+  row.append(el('span', null, 'หยุดเพราะใช้ครบ step — '));
+  const on = el('button', 'mini', 'ให้ทำต่อ');
+  on.onclick = () => {
+    row.remove();
+    sendTask('Continue where you left off — pick up the outstanding work and finish it.');
+  };
+  row.append(on);
+  log.append(row);
+  scrollDown();
+});
 stream.addEventListener('error', (e) => addNote(`error: ${JSON.parse(e.data).message}`));
 stream.addEventListener('todo', (e) => renderTodo(JSON.parse(e.data).items));
 stream.addEventListener('diff_update', (e) => renderPending(JSON.parse(e.data).changes));
 stream.addEventListener('permission_request', (e) => askPermission(JSON.parse(e.data)));
 stream.addEventListener('plan_request', () => askPlan());
-stream.addEventListener('compacted', (e) => addNote(`context full — earlier work summarised and a fresh conversation started`));
+stream.addEventListener('compacted', (e) => {
+  const { summary } = JSON.parse(e.data);
+  addCommandOut(`context เต็ม — สรุปงานที่ผ่านมาแล้วไว้ในบทสนทนาใหม่`);
+  // The summary is what survives the rotation. Showing it turns an
+  // "it forgot everything" moment into "it carried this forward, and I can see
+  // what it chose to carry".
+  if (summary) {
+    const box = el('div', 'compaction-card');
+    box.append(el('h4', null, 'สิ่งที่ยังจำอยู่ после rotation'));
+    box.append(el('div', 'summary', summary));
+    log.append(box);
+  }
+  scrollDown();
+});
 stream.addEventListener('helper_start', (e) => addNote(`helper started: ${JSON.parse(e.data).task}`));
 stream.addEventListener('helper_end', (e) => {
   const { summary, prepared } = JSON.parse(e.data);
@@ -293,12 +407,11 @@ stream.addEventListener('finished', async (e) => {
   const { summary, stopReason, spent, credits } = JSON.parse(e.data);
   endTurn();
   state.running = false;
-  state.runMetrics = null;
-  renderRunStats();
-  $('send').textContent = '➤';
+  $('send').textContent = 'ส่ง';
   $('hint').textContent = '';
-  if (credits) addNote(`credits เหลือ ${credits.available?.toLocaleString?.() ?? credits.available} จาก ${credits.limit?.toLocaleString?.() ?? credits.limit}${spent > 0 ? ` · รันนี้ใช้ไป ${spent.toLocaleString()}` : ''}`);
-  if (stopReason !== 'done') addNote(`หยุดก่อนเสร็จ: ${stopReason}`);
+  refreshMeter();
+  if (credits) addNote(`credits  ${credits.available?.toLocaleString?.() ?? credits.available} of ${credits.limit?.toLocaleString?.() ?? credits.limit} left${spent > 0 ? ` · ${spent.toLocaleString()} this run` : ''}`);
+  if (stopReason !== 'done') addNote(`stopped: ${stopReason}`);
   // Attachments belong to the message they were sent with.
   for (const id of state.attachments.keys()) rpc('attachment.remove', { id }).catch(() => {});
   state.attachments.clear();
@@ -315,8 +428,15 @@ stream.addEventListener('discarded', () => { renderPending([]); addNote('discard
 stream.addEventListener('session', (e) => {
   const s = JSON.parse(e.data);
   state.sessionId = s.id;
-  $('meta').textContent = `${s.title}  ·  ${s.file}`;
+  refreshMeta(s);
 });
+
+/** The line above the conversation: what session this is, on what model. */
+function refreshMeta(s = null) {
+  const model = $('model').value || state.settings?.defaultModel || '';
+  const file = s?.file ? s.file.split(/[\\/]/).slice(-2).join('/') : '';
+  $('meta').textContent = [s?.title ?? 'บทสนทนาใหม่', model, s?.id ? `#${s.id.slice(0, 6)}` : '', file].filter(Boolean).join('  ·  ');
+}
 
 /* -------------------------------------------------------------- composer */
 
@@ -324,14 +444,43 @@ stream.addEventListener('session', (e) => {
 // form, the button and the Enter key. They all land here so the rules live in
 // one spot — Enter sends, Shift+Enter is a newline, and while a run is live the
 // same controls stop it instead.
-async function sendTask() {
-  if (state.running) return;
-  const text = $('task').value.trim();
+/* A typed paragraph lost to a stray reload is a small betrayal, so the draft
+   lives in the window's storage and comes back on the next boot. */
+const DRAFT_KEY = 'aipass.draft';
+const loadDraft = () => {
+  try { return localStorage.getItem(DRAFT_KEY) ?? ''; } catch { return ''; }
+};
+const saveDraft = () => {
+  try { localStorage.setItem(DRAFT_KEY, $('task').value); } catch { /* storage off */ }
+};
+$('task').addEventListener('input', saveDraft);
+$('task').value = loadDraft();
+
+async function sendTask(seed = null) {
+  const text = (seed ?? $('task').value).trim();
   if (!text) return;
+
+  // A line that starts with "/" is a command, not a message — that is how the
+  // whole app stays reachable from the keyboard. Commands run while a turn is in
+  // flight too: /stop and /status are the two you want exactly then.
+  if (text.startsWith('/')) {
+    const [name, ...rest] = text.slice(1).split(/\s+/);
+    const arg = rest.join(' ').trim();
+    const item = COMMANDS.find((c) => c.cmd === name.toLowerCase());
+    $('task').value = '';
+    closeSlash();
+    hideWelcome();
+    if (item) { void runCommand(item, arg); return; }
+    addNote(`ไม่มีคำสั่ง /${name} — พิมพ์ / ลงไปดูรายการ`);
+    return;
+  }
+
+  if (state.running) return;
   $('task').value = '';
+  closeSlash();
   state.running = true;
-  $('send').textContent = '■';
-  $('hint').textContent = 'กำลังทำงาน…';
+  $('send').textContent = 'หยุด';
+  $('hint').textContent = 'ทำงานอยู่…';
   try {
     await rpc('run', {
       task: text,
@@ -343,7 +492,7 @@ async function sendTask() {
   } catch (err) {
     addNote(`error: ${err.message}`);
     state.running = false;
-    $('send').textContent = '➤';
+    $('send').textContent = 'ส่ง';
     $('hint').textContent = '';
   }
 }
@@ -358,10 +507,36 @@ $('composer').onsubmit = (ev) => {
 };
 
 $('task').addEventListener('keydown', (ev) => {
+  const value = ev.currentTarget.value;
+
+  // The palette owns the arrow keys, Tab and Enter while a command is being
+  // typed; anything typed as an argument belongs to the textarea.
+  if (slashTyping(value)) {
+    if (!slash.open) openSlash(value);
+    if (ev.key === 'ArrowDown') { ev.preventDefault(); moveSlash(1); return; }
+    if (ev.key === 'ArrowUp') { ev.preventDefault(); moveSlash(-1); return; }
+    if (ev.key === 'Tab' || (ev.key === 'Enter' && !ev.shiftKey)) {
+      ev.preventDefault();
+      // Nothing matches: let Send deal with it, so "/nosuch" is reported as an
+      // unknown command instead of being silently swallowed.
+      if (!slash.items.length) { void sendTask(); return; }
+      pickSlash(slash.index);
+      return;
+    }
+    if (ev.key === 'Escape') { ev.preventDefault(); closeSlash(); return; }
+  }
+
   if (ev.key === 'Enter' && !ev.shiftKey) {
     ev.preventDefault();
     sendTask();
   }
+});
+
+// Typing filters the palette; deleting the "/" dismisses it.
+$('task').addEventListener('input', (ev) => {
+  const value = ev.currentTarget.value;
+  if (slashTyping(value)) { slash.index = 0; renderSlash(value); }
+  else closeSlash();
 });
 
 // The button stops a live run and sends an idle one.
@@ -373,97 +548,122 @@ $('send').onclick = (ev) => {
 
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && !$('modal').classList.contains('hidden')) hideModal();
-  else if (ev.key === 'Escape' && $('command-palette') && !$('command-palette').classList.contains('hidden')) commandPaletteClose();
   else if (ev.key === 'Escape' && state.running) rpc('cancel');
-  if (ev.ctrlKey && (ev.key === 'k' || ev.key === 'K' || ev.key === 'p' || ev.key === 'P')) { ev.preventDefault(); commandPaletteOpen(); }
 });
 
-$('apply').onclick = async () => {
-  const files = [...state.pending.entries()].filter(([, info]) => info.checked).map(([file]) => file);
-  await rpc('apply', { files });
-  await refreshPending();
+$('slash-btn').onclick = () => {
+  // A visible, clickable route into the palело for anyone who does not think to
+  // type "/" first. It behaves exactly like typing it.
+  $('task').value = '/';
+  $('task').focus();
+  slash.index = 0;
+  renderSlash('/');
+  slash.open = true;
 };
-$('discard').onclick = async () => {
-  await rpc('discard');
-  await refreshPending();
-};
-$('mode').onchange = () => rpc('settings.set', { mode: $('mode').value }).catch(() => {});
-$('model').onchange = () => rpc('config.set', { model: $('model').value }).catch(() => {});
-$('new-session').onclick = async () => {
-  log.textContent = '';
-  await rpc('session.new');
-  await refreshSessions();
-};
+
+$('apply').onclick = applyChecked;
+$('discard').onclick = discardAll;
+$('new-session').onclick = startNewSession;
+
+// The filter re-renders the list it filters, so there is one source of truth
+// for what is on screen.
+$('session-filter').oninput = () => void refreshSessions();
+
+// The two header dropdowns write through to settings, so the choice survives a
+// restart and the backend runs with it — not just this window. Changing the mode
+// also moves the live policy, which is why it goes through settings.set and not
+// a config call that only touches the bridge.
+$('mode').onchange = () => rpc('settings.set', { mode: $('mode').value })
+  .then(() => addCommandOut(`สิทธิ์: ${$('mode').selectedOptions[0].textContent}`))
+  .catch((err) => addNote(`เปลี่ยนสิทธิ์ไม่ได้: ${err.message}`));
+$('model').onchange = () => rpc('config.set', { model: $('model').value })
+  .then(() => { state.settings = { ...(state.settings ?? {}), defaultModel: $('model').value }; refreshMeter(); })
+  .catch((err) => addNote(`เปลี่ยนโมเดลไม่ได้: ${err.message}`));
+
+/* ------------------------------------------------------------------- help */
+
+function openHelp() {
+  $('modal-title').textContent = 'วิธีใช้';
+  const body = $('modal-body');
+  body.textContent = '';
+
+  const section = (title, lines) => {
+    const h = el('h4', null, title);
+    const ul = el('ul');
+    for (const line of lines) ul.append(el('li', null, line));
+    body.append(h, ul);
+  };
+
+  section('พิมพ์ / เพื่อสั่งงาน', [
+    'พิมพ์ / ลงไปในช่องพิมพ์ จะขึ้นรายการคำสั่ง — เลื่อนด้วยลูกศร เลือกด้วย Enter/Tab',
+    'คุยกับโมเดล: /model /models /mode /status /conversations /fresh /compact',
+    'บทสนทนา: /new /resume /fork /plan /stop',
+    'ไฟล์: /attach /clip /file /image /open /diff /apply /discard /skills',
+    'อื่น ๆ อีก: /project /settings /help',
+    'ใส่ argument ได้คราว ๆ เช่น /mode auto หรือ /open README.md',
+  ]);
+  section('บอกมันทำอะไร', [
+    'พิมพ์แล้วกด Enter — ถามคำถาม หรือสั่งแก้ไฟล์ก็ได้',
+    'Shift+Enter = ขึ้นบรรทัดใหม่ · Esc = ยกเลิกรันที่กำลังทำ',
+    'มันอ่านไฟล์เอง (NEED/SEARCH) เมื่อจำเป็น — ไม่ต้องบอกว่าอ่านแค่ไหน',
+  ]);
+  section('มันแก้ไฟล์ยังไง', [
+    'ไม่มีอะไรเขียนลงดิสก์จนกว่าคุณจะกด "เขียนเลย"',
+    'แต่ละไฟล์ติ๊กแยกกันได้ · กดดู diff ก่อนได้',
+    'สิทธิ์ "ถามก่อนเขียน" = ยืนยันทุกครั้ง · "เขียนเลย" = ไม่ถาม · "เขียน+รันคำสั่ง" = อนุญาต shell ด้วย',
+  ]);
+  section('แนบไฟล์', [
+    'ลากรูป/เอกสาร/วิดีโอทับหน้านี้ หรือกด "แนบไฟล์"',
+    'ไฟล์แนบไปกับข้อความถัดไป แล้วหายไปเองหลังส่ง',
+  ]);
+  section('เปลี่ยนโปรเจกต์', [
+    'เลือกที่ "โปรเจกต์" ด้านบน หรือกด + โฟลเดอร์',
+    'แต่ละโปรเจกต์มีบทสนทนา คู่มือ และไฟล์แยกกัน',
+  ]);
+  section('ถ้าไม่ได้', [
+    'แถบด้านบน tells you what is missing: bridge / extension / tab',
+    'no tab → กด "เปิดให้" แล้วล็อกอินในหน้า de.aipass.net',
+    'settings (gear) ปรับได้หมด: model, สิทธิ์, ขนาด compaction, ปลั๊กอิน',
+  ]);
+
+  const actions = $('modal-actions');
+  actions.textContent = '';
+  const close = el('button', 'primary', 'ปิด');
+  close.onclick = hideModal;
+  actions.append(close);
+  $('modal').classList.remove('hidden');
+}
+$('help-btn').onclick = openHelp;
 
 async function refreshPending() {
   const pending = await rpc('pending').catch(() => []);
   renderPending(pending);
 }
 
+/**
+ * The session list. 99 sessions on this machine and counting — a list of 40 with
+ * no filter is a list nobody scrolls, so it filters as you type, shows the date
+ * a session is from, and keeps the newest first.
+ */
 async function refreshSessions() {
   const list = await rpc('session.list').catch(() => []);
-  state.sessions = list;
-  const count = $('card-sessions');
-  if (count) count.textContent = String(list.length);
-  const q = ($('session-search')?.value || '').toLowerCase().trim();
-  const filtered = q ? list.filter((s) => String(s.title || '').toLowerCase().includes(q)) : list;
   const ul = $('sessions');
   ul.textContent = '';
-  if (!filtered.length) ul.append(el('li', 'empty', q ? 'No sessions match that filter' : 'No sessions yet'));
-  for (const s of filtered.slice(0, 40)) {
+  const query = ($('session-filter')?.value ?? '').trim().toLowerCase();
+  const shown = list
+    .filter((s) => !query || `${s.title ?? ''} ${s.id}`.toLowerCase().includes(query))
+    .slice(0, 60);
+  if (!shown.length) {
+    ul.append(el('li', 'dim', query ? 'ไม่พบบทสนทนาที่ค้น' : 'ยังไม่มีบทสนทนา'));
+    return;
+  }
+  for (const s of shown) {
     const li = el('li', s.id === state.sessionId ? 'active' : '');
-    const row = el('div', 'sess-row');
-    const title = el('span', 'sess-title', s.title || '(untitled)');
-    const actions = el('div', 'sess-actions');
-    const openBtn = el('button', 'sess-action', '▸');
-    openBtn.title = 'Open session';
-    const renameBtn = el('button', 'sess-action', '✎');
-    renameBtn.title = 'Rename';
-    const forkBtn = el('button', 'sess-action', '⊢');
-    forkBtn.title = 'Fork from here';
-    const deleteBtn = el('button', 'sess-action danger', '×');
-    deleteBtn.title = 'Delete';
-    openBtn.onclick = async (ev) => {
-      ev.stopPropagation();
-      const entries = await rpc('session.open', { id: s.id });
-      state.sessionId = s.id;
-      log.textContent = '';
-      for (const entry of entries) {
-        if (entry.type === 'task') addTask(entry.text);
-        else if (entry.type === 'assistant') assistantText(entry.text ?? '');
-        else if (entry.type === 'tool') addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '' });
-        else if (entry.type === 'note') addNote(entry.text);
-      }
-      endTurn();
-      await refreshSessions();
-    };
-    renameBtn.onclick = async (ev) => {
-      ev.stopPropagation();
-      const titleName = window.prompt('Rename this session:', s.title || '(untitled)');
-      if (titleName == null) return;
-      try { await rpc('session.rename', { id: s.id, title: titleName }); addNote('Renamed session.'); await refreshSessions(); }
-      catch (err) { addNote('Rename failed: ' + err.message); }
-    };
-    forkBtn.onclick = async (ev) => {
-      ev.stopPropagation();
-      if (state.sessionId !== s.id) {
-        try { await rpc('session.open', { id: s.id }); state.sessionId = s.id; } catch { /* ignore */ }
-      }
-      const forked = await rpc('session.fork', {}).catch((err) => ({ error: err.message }));
-      if (forked.error) addNote('Fork failed: ' + forked.error);
-      else { addNote('Forked into a new session.'); await refreshSessions(); }
-    };
-    deleteBtn.onclick = async (ev) => {
-      ev.stopPropagation();
-      if (!window.confirm('Delete this session?')) return;
-      await rpc('session.delete', { id: s.id }).catch((err) => addNote('Delete failed: ' + err.message));
-      await refreshSessions();
-      if (state.sessionId === s.id) { state.sessionId = null; log.textContent = ''; }
-    };
-    actions.append(openBtn, renameBtn, forkBtn, deleteBtn);
-    row.append(title, actions);
-    li.append(row);
-    li.onclick = async () => openBtn.onclick({ stopPropagation(){ } });
+    const when = s.updated ? new Date(s.updated) : null;
+    li.append(el('span', null, s.title || '(untitled)'));
+    if (when) li.append(el('span', 'sub', when.toLocaleDateString(undefined, { day: '2-digit', month: 'short' })));
+    li.title = `${s.title ?? '(untitled)'}\n${s.id}\n${when ? when.toLocaleString() : ''}`;
+    li.onclick = () => void openSession(s.id);
     ul.append(li);
   }
 }
@@ -472,7 +672,6 @@ async function refreshSkills() {
   const skills = await rpc('skills.list').catch(() => []);
   const ul = $('skills');
   ul.textContent = '';
-  if (!skills.length) ul.append(el('li', 'empty', 'No playbooks loaded'));
   for (const s of skills) {
     const li = el('li');
     li.append(el('span', null, s.name));
@@ -485,7 +684,7 @@ async function refreshSkills() {
       if (found.error) body.append(el('p', null, found.error));
       else body.append(el('pre', null, found.text));
       $('modal-actions').textContent = '';
-      const close = el('button', 'primary', 'ปิด');
+      const close = el('button', 'primary', 'close');
       close.onclick = hideModal;
       $('modal-actions').append(close);
       $('modal').classList.remove('hidden');
@@ -494,62 +693,58 @@ async function refreshSkills() {
   }
 }
 
-async function refreshFiles() {
-  const entries = await rpc('fs.list', { dir: '.' }).catch(() => []);
-  state.files = entries;
+/* --------------------------------------------------------------- the files */
+
+// The file panel used to list one directory and stop: clicking a folder did
+// nothing at all. It now walks, keeps a breadcrumb so you can get back, and each
+// row carries the two things you actually want to do with a file — read it or
+// attach it.
+const filesState = { dir: '.', stack: [] };
+
+async function refreshFiles(dir = filesState.dir) {
+  filesState.dir = dir;
+  const entries = await rpc('fs.list', { dir }).catch(() => []);
   const ul = $('files');
   ul.textContent = '';
-  if (!Array.isArray(entries) || !entries.length) {
-    ul.append(el('li', 'empty', 'No files visible (hidden/excluded)'));
-    return;
+
+  const up = el('li', 'dim up');
+  up.textContent = dir === '.' ? '' : '..';
+  if (dir !== '.') {
+    up.onclick = async () => {
+      const parent = dir.split(/[\\/]/).slice(0, -1).join('/') || '.';
+      await refreshFiles(parent);
+    };
+    ul.append(up);
   }
-  /* Nested file explorer: each folder is collapsible and lazy-loaded.
-   * The backend already guards paths, so we keep passing only relative roots. */
-  const joinPath = (base, name) => base === '.' ? name : base + '/' + name;
-  const openFile = async (rel) => {
-    const found = await rpc('fs.read', { file: rel }).catch((err) => ({ error: err.message }));
-    $('modal-title').textContent = rel;
-    const body = $('modal-body');
-    body.textContent = '';
-    if (found.error) body.append(el('p', null, found.error));
-    else body.append(el('pre', null, String(found.text).slice(0, 20000)));
-    $('modal-actions').textContent = '';
-    const close = el('button', 'primary', 'ปิด');
-    close.onclick = hideModal;
-    $('modal-actions').append(close);
-    $('modal').classList.remove('hidden');
-  };
-  const buildNode = (container, dir, list) => {
-    for (const e of (list || []).slice(0, 200)) {
-      const rel = joinPath(dir, e.name);
-      if (e.dir) {
-        const details = el('details', 'tree-dir');
-        const summary = el('summary', 'tree-dir-name', '▸ ' + e.name + '/');
-        const child = document.createElement('ul');
-        child.className = 'tree-list';
-        details.append(summary, child);
-        let loaded = false;
-        details.addEventListener('toggle', async () => {
-          if (!details.open || loaded) return;
-          loaded = true;
-          summary.textContent = '▾ ' + e.name + '/';
-          child.textContent = 'กำลังโหลด…';
-          let sub = await rpc('fs.list', { dir: rel }).catch((err) => []);
-          child.textContent = '';
-          if (!Array.isArray(sub) || !sub.length) child.append(el('li', 'empty', 'Empty'));
-          else buildNode(child, rel, sub);
-        });
-        container.append(details);
-      } else {
-        const li = el('li', 'tree-file');
-        li.textContent = e.name;
-        li.title = rel;
-        li.onclick = () => openFile(rel);
-        container.append(li);
-      }
+
+  const shown = [...entries].sort((a, b) => (b.dir ? 1 : 0) - (a.dir ? 1 : 0));
+  for (const e of shown.slice(0, 300)) {
+    const li = el('li', 'dim');
+    li.textContent = e.dir ? `${e.name}/` : e.name;
+    if (e.dir) {
+      li.onclick = () => void refreshFiles(dir === '.' ? e.name : `${dir}/${e.name}`);
+    } else {
+      const rel = dir === '.' ? e.name : `${dir}/${e.name}`;
+      li.onclick = () => void openFile(rel);
+      // Attach straight from the panel: the file is right there, and a picker is
+      // a detour.
+      const attach = el('button', 'mini', 'แนบ');
+      attach.onclick = async (ev) => {
+        ev?.stopPropagation?.();
+        const item = await rpc('attachment.stage', { path: rel }).catch((err) => ({ error: err.message }));
+        if (item.error) { addNote(`แนบไม่ได้: ${item.error}`); return; }
+        state.attachments.set(item.id, item);
+        renderAttachments();
+        addCommandOut(`แนบแล้ว: ${item.name}`);
+      };
+      li.append(attach);
     }
-  };
-  buildNode(ul, '.', entries);
+    ul.append(li);
+  }
+
+  // A header above the list, so a deep path is visible instead of implied.
+  const head = $('files-head');
+  if (head) head.textContent = dir === '.' ? 'ไฟล์ในโปรเจกต์' : dir;
 }
 
 /* ------------------------------------------------------------ attachments */
@@ -584,7 +779,7 @@ function renderAttachments() {
       const img = document.createElement('img');
       img.src = `data:${item.mime};base64,`; // the backend holds the bytes; a thumbnail is a nice-to-have
       img.alt = '';
-      img.style.background = '#e6edf7';
+      img.style.background = '#0b0e13';
       li.append(img);
     } else {
       li.append(el('span', null, item.mime?.startsWith('video/') ? '🎬' : '📄'));
@@ -614,10 +809,19 @@ $('file-picker').onchange = () => { stageFiles([...$('file-picker').files]); $('
   });
 });
 
+// Ctrl+V with an image on the clipboard attaches it. The gesture a desktop user
+// reaches for first — a screenshot is one keystroke away — used to do nothing at
+// all, because only drag-drop and the picker were wired.
+document.addEventListener('paste', (ev) => {
+  const files = [...(ev.clipboardData?.files ?? [])];
+  if (!files.length) return;
+  ev.preventDefault();
+  stageFiles(files);
+});
+
 /* --------------------------------------------------------------- projects */
 
 async function refreshProjects(projects) {
-  state.projects = projects ?? state.projects;
   const select = $('project');
   const previous = select.value;
   select.textContent = '';
@@ -639,7 +843,7 @@ $('project').onchange = async () => {
   state.sessionId = null;
   renderPending([]);
   addNote(`project: ${$('project').value}`);
-  await Promise.all([refreshSessions(), refreshFiles(), refreshSkills(), refreshPanels()]);
+  await Promise.all([refreshSessions(), refreshFiles('.'), refreshSkills(), refreshPanels()]);
 };
 
 $('add-project').onclick = async () => {
@@ -667,161 +871,123 @@ function nameToPath(name) { return `~/${name}`; }
 
 /* --------------------------------------------------------------- settings */
 
-// Settings are grouped into sections; the dialog shows one section at a time
-// behind a category rail. Every field saves on change — there is no OK button
-// to forget.
+/* Grouped into pages behind the category rail; every field says what it
+   changes. A flat list of thirteen settings is a form nobody reads. */
 const SETTINGS_SECTIONS = [
   {
-    id: 'general',
-    icon: '👤',
-    title: 'ทั่วไป',
-    sub: 'ชื่อเรียกและหน้าตาของแอป',
-    fields: [
-      { key: 'displayName', label: 'ชื่อที่ใช้ทักทาย', type: 'text', note: 'แสดงในหน้าทักทายและโปรไฟล์มุมล่าง' },
-      { key: 'theme', label: 'ธีม', type: 'select', options: [['light', 'สว่าง (light)'], ['dark', 'มืด (dark)']], note: 'เปลี่ยนทั้งหน้าต่างทันที' },
-    ],
-  },
-  {
-    id: 'agent',
+    id: 'model',
     icon: '🤖',
-    title: 'โมเดล & การทำงาน',
-    sub: 'พฤติกรรมของ AI เวลารันงาน',
+    title: 'คุยกับโมเดล',
+    sub: 'โมเดล สิทธิ์ และขีดจำกัดของแต่ละรัน',
     fields: [
-      { key: 'defaultModel', label: 'โมเดลเริ่มต้น', type: 'text', note: 'model id เช่น gemini-3.5-flash-lite' },
-      { key: 'maxSteps', label: 'จำนวน step สูงสุด', type: 'number', note: 'จำกัดความยาวของงานหนึ่งชิ้น' },
-      { key: 'subagent', label: 'ผู้ช่วยย่อย (helpers)', type: 'checkbox', note: 'แตกงานย่อยให้ผู้ช่วยทำแยกได้' },
-      { key: 'plan', label: 'โหมดวางแผน (plan)', type: 'checkbox', note: 'เขียนแผนก่อนลงมือทุกครั้ง' },
-      { key: 'requirePlanApproval', label: 'รออนุมัติแผนก่อนลงมือ', type: 'checkbox', note: 'แผนต้องผ่านคุณก่อนแตะไฟล์จริง' },
-      { key: 'compaction.contextTokens', label: 'งบ context ก่อนสรุปย่อ', type: 'number', note: 'เกินแล้วจะสรุปงานเก่าและเริ่มบทสนทนาใหม่' },
+      { key: 'defaultModel', label: 'โมเดลเริ่มต้น', type: 'text', note: 'id ของโมเดล — ดูรายการได้ที่ /models หรือกดที่หัวหน้าต่าง' },
+      { key: 'mode', label: 'สิทธิ์แก้ไฟล์', type: 'select', options: [['ask', 'ถามก่อนเขียนทุกไฟล์'], ['auto', 'เขียนเลยไม่ถาม'], ['yolo', 'เขียน + รันคำสั่ง shell']] },
+      { key: 'allowRun', label: 'อนุญาตให้รันคำสั่ง shell', type: 'checkbox', note: 'ปิด = โมเดลแก้ไฟล์ได้อย่างอื่นไม่ได้' },
+      { key: 'maxSteps', label: 'สูงสุดกี่ Step ต่อคำสั่ง', type: 'number', note: 'กันเรื่องราวยาวไม่จบ — ตัวเลขสูง = เสียเครดิตรัวกว่า' },
+      { key: 'plan', label: 'plan mode', type: 'checkbox', note: 'โมเดลร่างแผนก่อนลงมือ' },
+      { key: 'requirePlanApproval', label: 'รอให้อนุมัติแผนก่อนทำ', type: 'checkbox', note: 'ใช้ได้ก็ต่อเมื่อ plan mode เปิด' },
+      { key: 'subagent', label: 'ให้เรียก helper ย่อย', type: 'checkbox', note: 'งานยาวถูกแบ่งให้ตัวช่วย แล้วรีพอร์ตกลับ' },
     ],
   },
-  {
-    id: 'permissions',
-    icon: '🛡️',
-    title: 'สิทธิ์ & ความปลอดภัย',
-    sub: 'คุมว่า AI เขียนไฟล์และรันคำสั่งได้แค่ไหน',
-    fields: [
-      { key: 'mode', label: 'สิทธิ์การเขียน (mode)', type: 'select', options: [['ask', 'ask — ยืนยันก่อนเขียนทุกไฟล์'], ['auto', 'auto — เขียนผ่านอัตโนมัติ'], ['yolo', 'yolo — เขียนและ shell ผ่านหมด']], note: 'เปลี่ยนได้เร็ว ๆ ที่แถบพิมพ์ข้อความ' },
-      { key: 'allowRun', label: 'อนุญาตรัน shell', type: 'checkbox', note: 'ปิดไว้เมื่อไม่อยากให้รันคำสั่งใด ๆ' },
-    ],
-  },
-  {
-    id: 'playbooks',
-    icon: '📘',
-    title: 'Playbooks',
-    sub: 'แหล่งที่ใช้ค้นหา playbook',
-    fields: [
-      { key: 'skillsDirs', label: 'โฟลเดอร์ playbook', type: 'dirs', note: 'คั่นด้วย ; — โฟลเดอร์แรกที่เจอใช้ก่อน' },
-    ],
-  },
+  { id: 'context', icon: '📊', title: 'บริบท (context)', sub: 'งบ token และจังหวะการบีบเอ็น', custom: 'context' },
+  { id: 'window', icon: '🪟', title: 'หน้าต่าง', sub: 'ธีมและหน้า chat ที่ใช้เชื่อมต่อ', fields: [
+    { key: 'theme', label: 'ธีม', type: 'select', options: [['dark', 'มืด'], ['light', 'สว่าง'], ['auto', 'ตามเครื่อง']], note: 'สลับดูได้ทันทีตอนเลือก' },
+    { key: 'chatUrl', label: 'หน้า chat ที่ล็อกอินอยู่', type: 'text', note: 'bridge ใช้ tab นี้พูดกับโมเดล' },
+    { key: 'autoOpenTab', label: 'เปิด tab ให้เองเมื่อต้องการ', type: 'checkbox', note: 'run ที่ไม่มี tab จะเปิดบราวเซอร์ให้แทนที่จะพัง' },
+  ] },
+  { id: 'skills', icon: '📘', title: 'คู่มือ (playbook)', sub: 'โฟลเดอร์ที่ใช้ค้นหาคู่มือ', custom: 'skillsDirs' },
+  { id: 'rules', icon: '🛡️', title: 'กฎไฟล์', sub: 'path ที่มีกฎละเว้นโหมด — first match wins', custom: 'rules' },
 ];
+/**
+ * The settings sheet — a category rail on the left, one page of settings on the
+ * right, so a section you never touch is one click away instead of one scroll
+ * away. What the older sheet got right, this keeps: edits are staged in a draft
+ * and only "บันทึก" writes them, validation names the problem instead of saving
+ * a bad number, and the context meter ticks live while the sheet is open.
+ */
+async function openSettings() {
+  const settings = await rpc('settings.get').catch(() => null);
+  if (!settings) { addNote('อ่านการตั้งค่าไม่ได้'); return; }
+  state.settings = settings;
 
-// One labelled row: title + note on the left, the control on the right.
-// Checkboxes render as switches, `dirs` is a ;-separated list of folders.
-function fieldRow(field, get, set) {
-  const row = el('div', 'set-row');
-  const info = el('div', 'set-info');
-  info.append(el('div', 'set-title', field.label));
-  if (field.note) info.append(el('div', 'set-note', field.note));
-  const control = el('div', 'set-control');
-  const value = get(field.key);
+  const draft = structuredClone(settings);
+  draft.compaction = { contextTokens: 24000, reserveTokens: 4096, keepRecentBytes: 6000, ...(settings.compaction ?? {}) };
 
-  if (field.type === 'checkbox') {
-    const lab = el('label', 'switch');
-    const box = document.createElement('input');
-    box.type = 'checkbox';
-    box.checked = Boolean(value);
-    box.onchange = () => set(field.key, box.checked);
-    lab.append(box, el('span', 'track'));
-    control.append(lab);
-  } else if (field.type === 'select') {
-    const select = document.createElement('select');
-    for (const [v, text] of field.options) {
-      const opt = document.createElement('option');
-      opt.value = v; opt.textContent = text;
-      if (v === value) opt.selected = true;
-      select.append(opt);
+  $('modal-title').textContent = 'การตั้งค่า';
+  $('modal').classList.add('settings-sheet');
+  const body = $('modal-body');
+  body.textContent = '';
+
+  const read = (key) => key.split('.').reduce((o, k) => (o ?? {})[k], draft);
+  const write = (key, value) => {
+    if (!key.includes('.')) { draft[key] = value; return; }
+    const [head, tail] = key.split('.');
+    draft[head] = { ...(draft[head] ?? {}), [tail]: value };
+  };
+
+  const control = (field) => {
+    const value = read(field.key);
+    if (field.type === 'checkbox') {
+      const lab = el('label', 'switch');
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = Boolean(value);
+      box.onchange = () => write(field.key, box.checked);
+      lab.append(box, el('span', 'track'));
+      return lab;
     }
-    select.onchange = () => set(field.key, select.value);
-    control.append(select);
-  } else if (field.type === 'dirs') {
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.classList.add('wide');
-    input.value = (value ?? []).join('; ');
-    input.onchange = () => set(field.key, input.value.split(';').map((s) => s.trim()).filter(Boolean));
-    control.append(input);
-  } else {
+    if (field.type === 'select') {
+      const select = document.createElement('select');
+      for (const [v, text] of field.options) {
+        const opt = document.createElement('option');
+        opt.value = v;
+        opt.textContent = text;
+        if (v === value) opt.selected = true;
+        select.append(opt);
+      }
+      select.onchange = () => {
+        write(field.key, select.value);
+        // The theme shows its effect immediately: a setting you have to save
+        // before you can see it is a setting you guess at.
+        if (field.key === 'theme') applyTheme(select.value);
+      };
+      return select;
+    }
+    if (field.type === 'textarea') {
+      const area = document.createElement('textarea');
+      area.rows = 4;
+      area.value = Array.isArray(value) ? value.join('\n') : String(value ?? '');
+      area.oninput = () => write(field.key, area.value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean));
+      return area;
+    }
     const input = document.createElement('input');
     input.type = field.type;
     input.value = value ?? '';
-    if (field.type === 'number') { input.min = '0'; input.classList.add('narrow'); }
-    input.onchange = () => set(field.key, field.type === 'number' ? Number(input.value) : input.value);
-    control.append(input);
-  }
-
-  row.append(info, control);
-  return row;
-}
-
-// Cards for the plugins page: loaded ones, load failures, the marker list and
-// the reload action, which reopens the dialog to show the fresh state.
-function pluginNodes(details) {
-  const nodes = [];
-  const loaded = details?.loaded ?? [];
-  const failed = details?.failed ?? [];
-  if (!loaded.length && !failed.length) {
-    const hint = el('p', 'settings-empty');
-    hint.append('ยังไม่มีปลั๊กอิน — ลากไฟล์ .mjs ใส่ ');
-    hint.append(el('code', null, details?.dir ?? 'โฟลเดอร์ปลั๊กอิน'));
-    hint.append(' แล้วกดโหลดใหม่');
-    nodes.push(hint);
-  }
-  for (const p of loaded) {
-    const card = el('div', 'plugin-card');
-    card.append(el('div', 'plugin-name', `${p.name} ${p.version}`));
-    card.append(el('div', 'plugin-desc', p.description || 'ไม่มีคำอธิบาย'));
-    nodes.push(card);
-  }
-  for (const f of failed) {
-    const card = el('div', 'plugin-card bad');
-    card.append(el('div', 'plugin-name', `โหลดไม่สำเร็จ — ${f.file}`));
-    card.append(el('div', 'plugin-desc', f.error));
-    nodes.push(card);
-  }
-  if (details?.tools?.length) {
-    const p = el('p', 'plugin-markers');
-    p.append('markers: ');
-    p.append(el('code', null, details.tools.join(', ')));
-    nodes.push(p);
-  }
-  const reload = el('button', 'soft', '↻ โหลดปลั๊กอินใหม่');
-  reload.onclick = async () => { await rpc('plugins.reload'); hideModal(); openSettings(); };
-  nodes.push(reload);
-  return nodes;
-}
-
-async function openSettings() {
-  const settings = await rpc('settings.get').catch(() => null);
-  if (!settings) { addNote('could not read settings'); return; }
-  state.settings = settings;
-
-  const get = (key) => key.split('.').reduce((o, k) => (o ?? {})[k], settings);
-  const set = (key, value) => {
-    const patch = {};
-    if (key.includes('.')) {
-      const [head, tail] = key.split('.');
-      patch[head] = { ...(settings[head] ?? {}), [tail]: value };
-    } else patch[key] = value;
-    return rpc('settings.set', patch);
+    if (field.type === 'number') input.min = '0';
+    input.onchange = () => write(field.key, field.type === 'number' ? Number(input.value) : input.value);
+    return input;
   };
 
-  const plugins = await rpc('plugins.list').catch(() => null);
-  const sections = plugins
-    ? [...SETTINGS_SECTIONS, { id: 'plugins', icon: '🧩', title: 'ปลั๊กอิน', sub: 'โค้ดเสริมที่โหลดจากโฟลเดอร์ปลั๊กอิน' }]
+  // One labelled row: title + note on the left, control on the right. `stack`
+  // drops the control underneath — a textarea in a side-by-side row would be
+  // 300px wide for four lines of paths.
+  const row = (label, note, node) => {
+    const r = el('div', 'set-row');
+    const info = el('div', 'set-info');
+    info.append(el('div', 'set-title', label));
+    if (note) info.append(el('div', 'set-note', note));
+    const c = el('div', 'set-control');
+    if (node.tagName === 'TEXTAREA') r.classList.add('stack');
+    c.append(node);
+    r.append(info, c);
+    return r;
+  };
+
+  const details = await rpc('plugins.list').catch(() => null);
+  const sections = details
+    ? [...SETTINGS_SECTIONS, { id: 'plugins', icon: '🧩', title: 'ปลั๊กอิน', sub: `โค้ดเสริมจาก ${details.dir}`, custom: 'plugins' }]
     : SETTINGS_SECTIONS;
 
-  const root = el('div', 'settings');
   const nav = el('nav', 'settings-nav');
   const pages = el('div', 'settings-pages');
   const show = (id) => {
@@ -829,41 +995,275 @@ async function openSettings() {
     for (const p of pages.querySelectorAll('.settings-page')) p.classList.toggle('active', p.dataset.page === id);
   };
 
-  sections.forEach((section, i) => {
-    const tab = el('button', i === 0 ? 'active' : '');
+  for (const section of sections) {
+    const tab = el('button');
     tab.dataset.cat = section.id;
     tab.append(el('span', 'nav-icon', section.icon), el('span', null, section.title));
     tab.onclick = () => show(section.id);
     nav.append(tab);
 
-    const page = el('section', i === 0 ? 'settings-page active' : 'settings-page');
+    const page = el('section', 'settings-page');
     page.dataset.page = section.id;
     page.append(el('h4', 'settings-page-title', section.title));
     page.append(el('p', 'settings-page-sub', section.sub));
-    if (section.id === 'plugins') {
-      page.append(...pluginNodes(plugins));
-    } else {
-      const group = el('div', 'set-group');
-      for (const field of section.fields) group.append(fieldRow(field, get, set));
-      page.append(group);
-    }
     pages.append(page);
-  });
 
+    if (section.custom === 'context') {
+      // The context meter, live: what is used, what happens at the limit, and
+      // the three numbers that decide when the rotation fires.
+      const meter = el('div', 'ctx-meter');
+      const st = await rpc('status').catch(() => null);
+      const use = st?.context ?? {};
+      const pct = use.percent ?? 0;
+      const at = use.compactAt ?? 40;
+      const bar = el('div', `ctx-bar ${use.needsCompaction ? 'full' : pct >= at ? 'warm' : ''}`);
+      bar.id = 'ctx-bar';
+      bar.style.setProperty('--pct', `${pct}%`);
+      bar.style.setProperty('--at', `${at}%`);
+      bar.title = `ใช้ ${pct}% — จะบีบเอ็นตอน ${at}%`;
+      meter.append(bar, el('span', 'dim', `ใช้ ~${(use.used ?? 0).toLocaleString()} จากงบ ${(use.budget ?? 0).toLocaleString()} token (${pct}%) · ${use.entries ?? 0} รายการในบทสนทนา`));
+      page.append(meter);
+      page.append(el('p', 'settings-empty', `de.aipass.net เก็บบริบทไว้บนเซิร์ฟเวอร์และลบไม่ได้ — พอ context ถึง ${at}% ระบบจะสรุปงานเก่าแล้วเริ่มบทสนทนาใหม่เอง (หรือพิมพ์ /compact ตอนนี้)`));
+      const group = el('div', 'set-group');
+      group.append(row('บีบเอ็นตอน context เต็มกี่ %', `ตอนนี้ ${at}% — ค่าต่ำ = สรุปบ่อย ประหยัดบริบทแต่เสียรายละเอียด`, control({ key: 'compactAtPercent', type: 'number' })));
+      group.append(row('งบบริบทก่อนหมุนเวียน (token)', 'ยิ่งสูงยิ่งจำได้มาก แต่เสียเครดิตเร็วขึ้น เพราะส่งบริบทเก่าซ้ำ', control({ key: 'compaction.contextTokens', type: 'number' })));
+      group.append(row('สำรองสำหรับคำตอบ (token)', 'ที่ว่างไว้ให้โมเดลตอบ — ต้องน้อยกว่างบทั้งหมด', control({ key: 'compaction.reserveTokens', type: 'number' })));
+      group.append(row('บทสนทนาล่าสุดที่เก็บดิบ (bytes)', 'ส่วนท้ายของบทสนทนาจะคงอยู่ตรง ๆ ไม่ถูกย่อรวม', control({ key: 'compaction.keepRecentBytes', type: 'number' })));
+      page.append(group);
+      continue;
+    }
+
+    if (section.custom === 'skillsDirs') {
+      const group = el('div', 'set-group');
+      group.append(row('โฟลเดอร์คู่มือ', 'ทีละ path ต่อบรรทัด · ลองโฟลเดอร์ในโปรเจกต์ก่อน แล้วค่อย ~/.aipass/skills · /skills = ดูที่มี', control({ key: 'skillsDirs', type: 'textarea' })));
+      page.append(group);
+      continue;
+    }
+
+    if (section.custom === 'plugins') {
+      if (!details.loaded.length && !details.failed.length) {
+        const hint = el('p', 'settings-empty');
+        hint.append('ยังไม่มีปลั๊กอิน — วางไฟล์ .mjs ลง ');
+        hint.append(el('code', null, details.dir));
+        hint.append(' แล้วกดโหลดใหม่');
+        page.append(hint);
+      }
+      for (const pl of details.loaded) {
+        const card = el('div', 'plugin-card');
+        card.append(el('div', 'plugin-name', `${pl.name} ${pl.version}`));
+        card.append(el('div', 'plugin-desc', pl.description || 'ไม่มีคำอธิบาย'));
+        page.append(card);
+      }
+      for (const f of details.failed) {
+        const card = el('div', 'plugin-card bad');
+        card.append(el('div', 'plugin-name', `โหลดไม่ได้ — ${f.file}`));
+        card.append(el('div', 'plugin-desc', f.error));
+        page.append(card);
+      }
+      if (details.tools.length) {
+        const marks = el('p', 'plugin-markers');
+        marks.append('markers: ');
+        marks.append(el('code', null, details.tools.join(', ')));
+        page.append(marks);
+      }
+      const reload = el('button', null, 'โหลดปลั๊กอินใหม่');
+      reload.onclick = async () => { await rpc('plugins.reload'); hideModal(); openSettings(); };
+      page.append(reload);
+      continue;
+    }
+
+    if (section.custom === 'rules') {
+      draft.rules = Array.isArray(draft.rules) ? draft.rules : [];
+      page.append(el('p', 'settings-empty',
+        'กฎถูกเช็คก่อนโหมดเสมอ — กฎเองก่อน · `docs/** → อนุญาต` = เลิกถามเรื่องไฟล์ใน docs · '
+        + '`.env* → ห้าม` = ล็อก secrets ไม่ให้เขียนแม้ในโหมด yolo · `**` ข้ามโฟลเดอร์ได้ `*` ไม่ได้ · '
+        + 'ทีละ pattern เพียง 1 กฎ — กฎแรกที่ match ชนะ'));
+      const group = el('div', 'set-group');
+
+      // The same glob the engine uses, copied on purpose: a tester that matched
+      // differently from the gate would prove nothing at all.
+      const globMatch = (pattern, text) => new RegExp('^' + String(pattern)
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*\*/g, '\u0000')
+        .replace(/\*/g, '[^/]*')
+        .replace(/\u0000/g, '.*') + '$', 'i').test(text);
+
+      const probe = document.createElement('input');
+      probe.type = 'text';
+      probe.placeholder = 'ลองพิมพ์ path — .env.local';
+      const probeKind = document.createElement('select');
+      for (const [v, text] of [['write', 'แก้ไฟล์'], ['run', 'รันคำสั่ง']]) {
+        const opt = document.createElement('option');
+        opt.value = v;
+        opt.textContent = text;
+        probeKind.append(opt);
+      }
+      const verdict = el('span', 'rule-verdict dim', 'ยังไม่ทดสอบ');
+      const drawVerdict = () => {
+        const p = probe.value.trim().split(/\s+/)[0] ?? '';
+        if (!p) { verdict.textContent = 'ยังไม่ทดสอบ'; verdict.className = 'rule-verdict dim'; return; }
+        const kind = probeKind.value;
+        const idx = draft.rules.findIndex((r) => r.pattern
+          && globMatch(r.pattern, p)
+          && (!(r.kinds ?? []).length || r.kinds.includes(kind)));
+        if (idx === -1) {
+          verdict.textContent = `ไม่มีกฎ — ${p} ไปใช้โหมดที่ตั้งไว้`;
+          verdict.className = 'rule-verdict dim';
+          return;
+        }
+        const r = draft.rules[idx];
+        const label = { allow: 'อนุญาต (ไม่ถาม)', deny: 'ห้ามหยุดอยู่ ๆ', ask: 'ถามก่อน' }[r.decision ?? 'ask'];
+        verdict.textContent = `กฎที่ ${idx + 1} (${r.pattern}) → ${label}`;
+        verdict.className = `rule-verdict ${r.decision === 'allow' ? 'ok' : r.decision === 'deny' ? 'bad' : ''}`;
+      };
+      probe.oninput = drawVerdict;
+      probeKind.onchange = drawVerdict;
+
+      const tester = el('div', 'rule-test');
+      tester.append(probe, probeKind, verdict);
+      group.append(tester);
+
+      const list = el('div', 'set-group');
+      const redraw = () => {
+        list.textContent = '';
+        if (!draft.rules.length) {
+          list.append(el('p', 'settings-empty', 'ยังไม่มีกฎ — ทุกอย่างไปใช้โหมดที่เลือกข้างบน · กด “เพิ่มกฎ” เอาอันแรก'));
+        }
+        draft.rules.forEach((rule, i) => {
+          const row = el('div', 'rule-row');
+          row.append(el('span', 'rule-index', String(i + 1)));
+          const pattern = document.createElement('input');
+          pattern.type = 'text';
+          pattern.value = rule.pattern ?? '';
+          pattern.placeholder = 'docs/** · .env* · src/**/*.test.*';
+          pattern.oninput = () => { rule.pattern = pattern.value; drawVerdict(); };
+          const decision = document.createElement('select');
+          for (const [v, text] of [['allow', 'อนุญาต'], ['deny', 'ห้าม'], ['ask', 'ถาม']]) {
+            const opt = document.createElement('option');
+            opt.value = v;
+            opt.textContent = text;
+            if ((rule.decision ?? 'ask') === v) opt.selected = true;
+            decision.append(opt);
+          }
+          decision.onchange = () => { rule.decision = decision.value; drawVerdict(); };
+          const kinds = document.createElement('select');
+          for (const [v, text] of [['', 'ทุกอย่าง'], ['write,replace,delete,move', 'แก้ไฟล์'], ['run', 'รันคำสั่ง']]) {
+            const opt = document.createElement('option');
+            opt.value = v;
+            opt.textContent = text;
+            if ((rule.kinds ?? []).join(',') === v) opt.selected = true;
+            kinds.append(opt);
+          }
+          kinds.onchange = () => { rule.kinds = kinds.value ? kinds.value.split(',') : undefined; drawVerdict(); };
+          const del = el('button', 'mini', 'ลบ');
+          del.onclick = () => { draft.rules.splice(i, 1); redraw(); };
+          row.append(pattern, decision, kinds, del);
+          list.append(row);
+        });
+      };
+      redraw();
+      group.append(list);
+      const add = el('button', null, 'เพิ่มกฎ');
+      add.onclick = () => { draft.rules.push({ pattern: '', decision: 'ask' }); redraw(); };
+      group.append(add);
+      page.append(group);
+      continue;
+    }
+
+    const group = el('div', 'set-group');
+    for (const field of section.fields) group.append(row(field.label, field.note, control(field)));
+    page.append(group);
+  }
+
+  show(sections[0].id);
+  const root = el('div', 'settings');
   root.append(nav, pages);
-  $('modal-title').textContent = 'ตั้งค่า';
-  const body = $('modal-body');
-  body.textContent = '';
   body.append(root);
-  body.closest('.sheet').classList.add('settings-sheet');
+
+  // Inserted, not just built: a Save that says nothing when it refuses is the
+  // same silence the sheet exists to prevent.
+  const error = el('p', 'settings-error hidden');
+  body.append(error);
 
   const actions = $('modal-actions');
   actions.textContent = '';
-  const close = el('button', 'primary', 'ปิด');
-  close.onclick = hideModal;
-  actions.append(close);
+
+  const reset = el('button', null, 'คืนค่าเดิม');
+  reset.onclick = async () => {
+    await rpc('settings.reset');
+    hideModal();
+    openSettings();
+    addCommandOut('คืนการตั้งค่าทั้งหมดเป็นค่าเริ่มต้นแล้ว');
+  };
+
+  const save = el('button', 'primary', 'บันทึก');
+  save.onclick = async () => {
+    // Check before writing: a budget under its reserve, or a step limit of
+    // zero, is a mistake the person should hear about — not a setting that
+    // quietly misbehaves on the next run.
+    const problems = [];
+    const maxSteps = Number(draft.maxSteps);
+    if (!Number.isFinite(maxSteps) || maxSteps < 1) problems.push('สูงสุดกี่ step ต้องเป็นตัวเลขอย่างน้อย 1');
+    const budget = Number(draft.compaction?.contextTokens);
+    const reserve = Number(draft.compaction?.reserveTokens);
+    if (!Number.isFinite(budget) || budget < 1000) problems.push('งบบริบทควร 1000 token ขึ้นไป');
+    if (!Number.isFinite(reserve) || reserve < 128) problems.push('ส่วนสำรองควรอย่างน้อย 128 token');
+    if (Number.isFinite(budget) && Number.isFinite(reserve) && reserve >= budget) problems.push('ส่วนสำรองต้องน้อยกว่างบทั้งหมด');
+    if (draft.chatUrl && !/^https?:\/\//.test(String(draft.chatUrl))) problems.push('หน้า chat ต้องขึ้นต้นด้วย http:// หรือ https://');
+    // Path rules get the same treatment: an empty pattern would be dropped by
+    // the server silently, and a duplicate pattern is a rule that can never be
+    // reached — first match wins. Both look like protection and behave like
+    // nothing, which is the exact failure the sheet exists to prevent.
+    const rules = Array.isArray(draft.rules) ? draft.rules : [];
+    for (const [i, r] of rules.entries()) {
+      if (!r.pattern?.trim()) problems.push(`กฎที่ ${i + 1} ยังไม่มี pattern`);
+    }
+    const seen = new Set();
+    for (const r of rules) {
+      const p = r.pattern?.trim();
+      if (!p) continue;
+      if (seen.has(p)) problems.push(`pattern "${p}" ซ้ำ — กฎแรกที่ match ชนะ อันหลังไม่ทำงาน`);
+      seen.add(p);
+    }
+    if (problems.length) { error.textContent = problems.join(' · '); error.classList.remove('hidden'); return; }
+    error.classList.add('hidden');
+    const next = await rpc('settings.set', draft).catch((err) => ({ error: err.message }));
+    if (next.error) { error.textContent = next.error; error.classList.remove('hidden'); return; }
+    state.settings = next;
+    applyTheme(next.theme);
+    hideModal();
+    await refreshHeader();
+    addCommandOut('บันทึกการตั้งค่าแล้ว');
+  };
+
+  const close = el('button', null, 'ปิด');
+  close.onclick = () => { hideModal(); applyTheme(state.settings?.theme ?? 'dark'); };
+  actions.append(error, reset, close, save);
   $('modal').classList.remove('hidden');
+
+  // The meter follows the live session while the sheet is open.
+  const timer = setInterval(async () => {
+    if ($('modal').classList.contains('hidden')) { clearInterval(timer); return; }
+    const live = await rpc('status').catch(() => null);
+    const bar = $('ctx-bar');
+    if (!bar) { clearInterval(timer); return; }
+    const pct = live?.context?.percent ?? 0;
+    bar.className = `ctx-bar ${pct >= 85 ? 'full' : pct >= 60 ? 'warm' : ''}`;
+    bar.style.setProperty('--pct', `${pct}%`);
+    bar.title = `${pct}% ของงบบริบท`;
+  }, 2000);
+  $('modal').dataset.meterTimer = String(timer);
 }
+
+
+/**
+ * Apply the theme for real. `theme` sat in settings doing nothing at all — a
+ * setting that changes nothing is worse than no setting, because it looks like
+ * a feature and behaves like a lie.
+ */
+
+
+/* --------------------------------------------------------------- settings */
 
 $('settings-btn').onclick = () => openSettings();
 
@@ -910,306 +1310,635 @@ async function refreshHeader() {
     return s;
   };
   $('status').append(dot(st.bridge, 'bridge'), dot(st.extensions > 0, `extension ×${st.extensions}`));
-
-  // The greeting cards say the same thing in sentences instead of dots.
-  const line = (ok, text) => {
-    const s = el('span');
-    s.append(el('span', 'dot ' + (ok ? 'ok' : 'no')), document.createTextNode(' ' + text));
-    return s;
-  };
-  const bridgeCell = $('card-bridge');
-  if (bridgeCell) {
-    bridgeCell.textContent = '';
-    bridgeCell.append(line(st.bridge, st.bridge ? 'เชื่อมต่อ bridge แล้ว' : 'ยังไม่เชื่อมต่อ bridge — เปิด Chrome ที่ล็อกอิน de.aipass.net ไว้'));
-    const ext = $('card-ext');
-    ext.textContent = '';
-    ext.append(line(st.extensions > 0, st.extensions > 0 ? `extension พร้อมทำงาน ${st.extensions} ตัว` : 'ยังไม่เห็น extension'));
-  }
+  refreshMeter();
   if (st.model) {
     const credits = await rpc('credits').catch(() => null);
     if (credits) $('status').append(el('span', null, `credits ${credits.available?.toLocaleString?.() ?? credits.available} / ${credits.limit?.toLocaleString?.() ?? credits.limit}`));
-    const cell = $('card-credits');
-    if (cell) cell.textContent = credits ? `credits ${credits.available?.toLocaleString?.() ?? credits.available} / ${credits.limit?.toLocaleString?.() ?? credits.limit}` : '';
   }
-  const cur = (st.projects ?? []).find((p) => p.current);
-  const name = $('card-project-name');
-  if (name) name.textContent = cur?.name ?? st.root ?? 'ยังไม่ได้เปิดโฟลเดอร์';
-  const model = $('card-model');
-  if (model) model.textContent = st.model ?? 'auto';
+  if (st.model && !$('model').options.length) await fillModels(st.model);
+}
 
-  if (st.model && !$('model').options.length) {
-    const models = await rpc('models').catch(() => null);
-    const list = models?.data ?? models?.models ?? [];
-    for (const m of list) {
-      const opt = document.createElement('option');
-      opt.value = m.id ?? m;
-      opt.textContent = m.id ?? m;
-      $('model').append(opt);
-    }
-    // The upstream default may not be in the advertised list; keep it visible.
-    if (st.model && ![...$('model').options].some((o) => o.value === st.model)) {
-      const opt = document.createElement('option');
-      opt.value = st.model;
-      opt.textContent = st.model;
-      $('model').prepend(opt);
-    }
-    if (st.model) $('model').value = st.model;
+/**
+ * Fill the model dropdown with the models that can actually hold a
+ * conversation.
+ *
+ * The bridge offers 38 of them, 15 of which make images, video, or music — a chat
+ * run cannot use those, and picking one fails in a way that looks like the app
+ * broke. The list is filtered to kind === 'chat', labelled with the human name
+ * (the id stays the value), and the model in use is always kept in view so the
+ * header never shows a different model than the one that would run.
+ */
+async function fillModels(currentModel) {
+  const models = await rpc('models').catch(() => null);
+  const all = models?.data ?? models?.models ?? [];
+  const chat = all.filter((m) => !m.kind || m.kind === 'chat');
+  const list = chat.some((m) => (m.id ?? m) === currentModel)
+    ? chat
+    : [...chat, ...all.filter((m) => (m.id ?? m) === currentModel)];
+  for (const m of list) {
+    const opt = document.createElement('option');
+    const id = m.id ?? m;
+    opt.value = id;
+    opt.textContent = m.name && m.name !== id ? m.name : id;
+    opt.title = `${id}${m.description ? ` — ${m.description}` : ''}`;
+    $('model').append(opt);
   }
+  if (list.length) $('model').value = currentModel;
 }
 
 setInterval(refreshHeader, 10_000);
 
-/* ---------------------------------------------------------- window chrome */
-
-// The sidebar collapses to nothing and its width is draggable; both choices
-// persist across reloads in localStorage.
-function applySide(open) {
-  document.body.classList.toggle('side-collapsed', !open);
-}
-$('side-toggle').onclick = () => {
-  const open = document.body.classList.contains('side-collapsed');
-  applySide(open);
-  localStorage.setItem('aipass.side', open ? '1' : '0');
-};
-applySide(localStorage.getItem('aipass.side') !== '0');
-
-const savedWidth = Number(localStorage.getItem('aipass.sideW'));
-if (savedWidth >= 220 && savedWidth <= 440) {
-  document.documentElement.style.setProperty('--side-w', `${savedWidth}px`);
-}
-$('side-resize').onpointerdown = (ev) => {
-  ev.preventDefault();
-  const move = (e) => {
-    const w = Math.min(440, Math.max(220, e.clientX));
-    document.documentElement.style.setProperty('--side-w', `${w}px`);
-  };
-  const up = () => {
-    window.removeEventListener('pointermove', move);
-    window.removeEventListener('pointerup', up);
-    localStorage.setItem('aipass.sideW', document.documentElement.style.getPropertyValue('--side-w'));
-  };
-  window.addEventListener('pointermove', move);
-  window.addEventListener('pointerup', up);
-};
-
-// Inside the Tauri shell the UI owns the window chrome: minimize, maximize and
-// close ride the global API (withGlobalTauri) — no npm dependency. In a plain
-// browser there is nothing to control, so the buttons stay hidden.
-const tauriWin = () => window.__TAURI__?.window?.getCurrentWindow?.();
-if (tauriWin()) {
-  $('win-controls').classList.remove('hidden');
-  $('win-min').onclick = () => tauriWin().minimize();
-  $('win-max').onclick = () => tauriWin().toggleMaximize();
-  $('win-close').onclick = () => tauriWin().close();
-}
-
-// Desktop keyboard conventions: Ctrl+B folds the sidebar, Ctrl+N starts a new
-// plan, Ctrl+, opens settings.
-document.addEventListener('keydown', (ev) => {
-  if (!ev.ctrlKey || ev.altKey || ev.shiftKey) return;
-  const key = ev.key.toLowerCase();
-  if (key === 'b') { ev.preventDefault(); $('side-toggle').click(); }
-  else if (key === ',') { ev.preventDefault(); openSettings(); }
-  else if (key === 'n') { ev.preventDefault(); $('new-session').click(); }
-});
-
-// The greeting is the empty-session view: it shows until the first message
-// lands in the log, and comes back when the log empties.
-new MutationObserver(() => {
-  $('chat').classList.toggle('has-messages', log.children.length > 0);
-}).observe(log, { childList: true });
-
-// Suggestion chips drop an opening line into the composer instead of sending
-// it blind — the task usually needs the user's own words appended.
-for (const chip of document.querySelectorAll('.chip')) {
-  chip.onclick = () => {
-    $('task').value = chip.dataset.prompt ?? '';
-    growTask();
-    $('task').focus();
-  };
-}
-
-// Theme and the greeting name ride the settings object; the backend emits a
-// `settings` event on every settings.set, so modal edits apply live.
-function applySettings(s) {
-  if (!s) return;
-  document.documentElement.dataset.theme = s.theme === 'dark' ? 'dark' : 'light';
-  const name = (s.displayName ?? '').trim();
-  $('greeting-title').textContent = name ? `สวัสดีครับ ${name}` : 'สวัสดีครับ 👋';
-  $('profile-name').textContent = name || 'aipass desktop';
-  $('profile-sub').textContent = name ? 'aipass desktop' : 'ตั้งชื่อได้ใน settings';
-  $('profile-avatar').textContent = (name[0] ?? 'A').toUpperCase();
-  if (document.activeElement !== $('mode')) $('mode').value = s.mode ?? 'ask';
-}
-stream.addEventListener('settings', (e) => applySettings(JSON.parse(e.data)));
-$('profile').onclick = () => openSettings();
-$('card-open-folder').onclick = () => $('add-project').click();
-
-// The composer textarea grows with its content, like the upstream pill.
-function growTask() {
-  const t = $('task');
-  t.style.height = 'auto';
-  t.style.height = Math.min(t.scrollHeight, 200) + 'px';
-}
-$('task').addEventListener('input', growTask);
-
-/* ------------------------------------------------------- command palette */
-function commandPaletteOpen() {
-  var elPalette = $('command-palette');
-  if (!elPalette) return;
-  elPalette.classList.remove('hidden');
-  var input = $('palette-query');
-  input.value = '';
-  state.paletteIndex = 0;
-  renderCommandPalette('');
-  input.focus();
-}
-function commandPaletteClose() {
-  var elPalette = $('command-palette');
-  if (elPalette) elPalette.classList.add('hidden');
-}
-function commandEntries() {
-  var sessions = state.sessions || [];
-  var files = state.files || [];
-  var projects = state.projects || [];
-  var sessionEntries = sessions.map(function(s) {
-    return {
-      id: 'session:' + s.id,
-      title: s.title || '(untitled)',
-      subtitle: 'session · open',
-      run: async function() {
-        var entries = await rpc('session.open', { id: s.id });
-        state.sessionId = s.id;
-        log.textContent = '';
-        for (var i = 0; i < entries.length; i++) {
-          var entry = entries[i];
-          if (entry.type === 'task') addTask(entry.text);
-          else if (entry.type === 'assistant') assistantText(entry.text ?? '');
-          else if (entry.type === 'tool') addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '' });
-          else if (entry.type === 'note') addNote(entry.text);
-        }
-        endTurn();
-        await refreshSessions();
-      },
-    };
-  });
-  var fileEntries = files.map(function(f) {
-    return {
-      id: 'file:' + f.name,
-      title: f.name,
-      subtitle: 'file · inspect' + (f.dir ? ' (dir)' : ''),
-      run: async function() {
-        if (!f.dir) {
-          var found = await rpc('fs.read', { file: f.name }).catch(function(err){ return { error: err.message }; });
-          $('modal-title').textContent = f.name;
-          var body = $('modal-body'); body.textContent = '';
-          if (found.error) body.append(el('p', null, found.error));
-          else body.append(el('pre', null, String(found.text).slice(0, 20000)));
-          var actions = $('modal-actions'); actions.textContent = '';
-          var close = el('button', 'primary', 'ปิด'); close.onclick = hideModal; actions.append(close);
-          $('modal').classList.remove('hidden');
-        } else {
-          addNote('Folder: ' + f.name);
-        }
-      },
-    };
-  });
-  var projectEntries = projects.map(function(p) {
-    return {
-      id: 'project:' + p.path,
-      title: p.name ?? p.path,
-      subtitle: 'project · switch',
-      run: async function() {
-        var result = await rpc('projects.switch', { path: p.path }).catch(function(err){ return { error: err.message }; });
-        if (result.error) { addNote('could not switch project: ' + result.error); return; }
-        log.textContent = '';
-        state.sessionId = null;
-        renderPending([]);
-        addNote('project: ' + p.path);
-        await Promise.all([refreshSessions(), refreshFiles(), refreshSkills(), refreshPanels()]);
-      },
-    };
-  });
-  return [
-    { id: 'action:new', title: '(new) start a new plan', subtitle: 'session · create', run: async function(){ log.textContent=''; await rpc('session.new'); await refreshSessions(); } },
-    { id: 'action:settings', title: '(settings) open preferences', subtitle: 'app · preferences', run: openSettings },
-    { id: 'action:sidebar', title: '(ui) toggle sidebar', subtitle: 'app · layout', run: function(){ $('side-toggle').click(); } },
-    { id: 'action:pending', title: '(pending) refresh diff queue', subtitle: 'files · approval', run: async function(){ await refreshPending(); } },
-    { id: 'action:theme', title: '(theme) toggle dark / light', subtitle: 'app · theme', run: function(){ document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; } },
-  ].concat(sessionEntries, fileEntries, projectEntries);
-}
-function paletteScore(text, query) {
-  var t = (text ?? '').toLowerCase();
-  var q = (query ?? '').toLowerCase().trim();
-  if (!q) return 1;
-  if (t.includes(q)) return 100 - (t.indexOf(q));
-  var i = 0, score = 0;
-  for (var ci = 0; ci < q.length; ci++) {
-    var ch = q[ci];
-    var pos = t.indexOf(ch, i);
-    if (pos >= 0) { score += 5; i = pos + 1; } else return 0;
-  }
-  return score;
-}
-function renderCommandPalette(query) {
-  var ul = $('palette-results');
-  if (!ul) return;
-  ul.textContent = '';
-  var items = commandEntries().map(function(item) {
-    return { item: item, score: paletteScore(item.title + ' ' + item.subtitle, query) };
-  }).filter(function(x){ return x.score; }).sort(function(a,b){ return b.score-a.score; }).slice(0, 30).map(function(x){ return x.item; });
-  state.paletteList = items;
-  if (!items.length) ul.append(el('div','palette-empty','No matches - try another keyword'));
-  if (typeof state.paletteIndex !== 'number') state.paletteIndex = 0;
-  if (state.paletteIndex >= items.length) state.paletteIndex = Math.max(0, items.length - 1);
-  for (var i = 0; i < items.length; i++) {
-    var item = items[i];
-    var li = el('div', 'palette-row' + (i === state.paletteIndex ? ' active' : ''));
-    li.setAttribute('data-palette-index', String(i));
-    li.append(el('div','palette-title', item.title), el('div','palette-sub', item.subtitle));
-    li.onclick = (function(item) { return async function() { commandPaletteClose(); await item.run().catch(function(err){ addNote('command failed: '+err.message); }); }; })(item);
-    ul.append(li);
-  }
-}
-function setupCommandPalette() {
-  var input = $('palette-query');
-  var list = $('palette-results');
-  if (!input || !list) return;
-  state.paletteIndex = 0;
-  input.addEventListener('input', function() { state.paletteIndex = 0; renderCommandPalette(input.value); });
-  input.addEventListener('keydown', async function(ev) {
-    var rows = list.querySelectorAll('.palette-row');
-    if (ev.key === 'ArrowDown') { ev.preventDefault(); state.paletteIndex = Math.min(state.paletteIndex + 1, rows.length - 1); renderCommandPalette(input.value); }
-    else if (ev.key === 'ArrowUp') { ev.preventDefault(); state.paletteIndex = Math.max(state.paletteIndex - 1, 0); renderCommandPalette(input.value); }
-    else if (ev.key === 'Enter') { ev.preventDefault(); var row = rows[state.paletteIndex]; if (row) row.click(); }
-  });
-  var palette = $('command-palette');
-  if (palette) palette.addEventListener('click', function(ev) { if (ev.target === palette) commandPaletteClose(); });
-}
-
-
-function renderRunStats() {
-  const node = $('run-stats');
-  if (!node || !state.runMetrics) { if (node) node.classList.add('hidden'); return; }
-  const m = state.runMetrics;
-  const secs = Math.max(1, Math.round((Date.now() - m.startedAt) / 1000));
-  node.textContent = `⚡ ${m.step}/${m.maxSteps || '?'} · tools ${m.tools}${m.errors ? ' · errors ' + m.errors : ''} · ${secs}s`;
-  node.classList.remove('hidden');
-}
-
 /* ------------------------------------------------------------------ boot */
 
-(async function boot() {
-  applySettings(await rpc('settings.get').catch(() => null));
+/**
+ * What the window says when there is nothing to show yet.
+ *
+ * An empty main area reads as "broken" — the first thing on screen has to say
+ * what this is, whether it can run right now, and what to type. It disappears
+ * the moment a task starts, and comes back when a session is empty again.
+ */
+function showWelcome(readiness) {
+  hideWelcome();
+  const card = el('div', 'welcome');
+  card.id = 'welcome';
+
+  card.append(el('h2', null, 'aipass desktop'));
+  card.append(el('p', null, 'คุยกับโมเดลของ de.aipass.net จากหน้านี้ แล้วสั่งให้แก้ไฟล์ในโปรเจกต์ของคุณ'));
+
+  const list = el('ul');
+  const items = [
+    ['คุย', 'พิมพ์คำถามแล้วกด Enter — ตอบสตรีมตรง ๆ ไม่ต้องเปิดบราวเซอร์'],
+    ['สั่งแก้ไฟล์', 'บอกอย่าง "สรุป README ให้สั้นลง" มันอ่านแล้วแก้ให้ โดยอนุมัติทุกไฟล์ก่อนเขียน'],
+    ['แนบไฟล์', 'ลากรุป เอกสาร หรือวิดีโอมาวางบนหน้านี้ แล้วถามเกี่ยวมันได้เลย'],
+  ];
+  for (const [head, body] of items) {
+    const li = el('li');
+    li.append(el('strong', null, head), el('span', null, ' — ' + body));
+    list.append(li);
+  }
+  card.append(list);
+
+  const ready = el('div', 'ready');
+  const rows = [
+    ['bridge', 'ตัวกลาง local', readiness.bridge],
+    ['extension', 'ส่วนขยายใน Chrome', readiness.extensions > 0],
+    ['tab', 'หน้า de.aipass.net ที่ล็อกอินอยู่', readiness.tab],
+  ];
+  for (const [key, label, ok] of rows) {
+    const row = el('div', 'ready-row ' + (ok ? 'ok' : 'no'));
+    row.append(el('span', 'dot ' + (ok ? 'ok' : 'no')));
+    row.append(el('span', null, `${ok ? 'พร้อม — ' : 'ยังไม่ได้ — '}${label}`));
+    row.append(el('span', 'grow'));
+    if (!ok && key === 'tab') {
+      const fix = el('button', 'mini', 'เปิดให้');
+      fix.onclick = () => rpc('browser.open', { url: appSettingsUrl() }).catch(() => {});
+      row.append(fix);
+    }
+    if (!ok && key === 'extension') row.append(el('span', 'dim', 'โหลดจากโฟลเดอร์ aipass-bridge/extension'));
+    if (!ok && key === 'bridge') row.append(el('span', 'dim', 'รัน aipass dev'));
+    ready.append(row);
+  }
+  card.append(ready);
+
+  card.append(el('p', 'dim', 'เริ่มจากพิมพ์ข้อความข้างล่างได้เลย · กด ? เพื่อดูวิธีใช้ทั้งหมด'));
+  log.append(card);
+}
+
+function hideWelcome() { $('welcome')?.remove(); }
+
+const appSettingsUrl = () => state.settings?.chatUrl ?? 'https://de.aipass.net/chat';
+
+async function refreshReadiness() {
+  const st = await rpc('status').catch(() => null);
+  if (!st) { showWelcome({ bridge: false, extensions: 0, tab: false }); return; }
+  showWelcome({
+    bridge: st.bridge,
+    extensions: st.extensions ?? 0,
+    // A run can only tell us "no tab" by failing, so the strip stays neutral
+    // until that happens; the banner flips it and offers the fix.
+    tab: !state.needsTab,
+  });
+}
+
+/* ------------------------------------------------------------------ slash */
+
+/* Every command the app has, reachable by typing "/". The header carries three
+ * controls and the rest live here — nothing important is hidden behind a menu
+ * you have to guess at, and the list itself explains what the app does. */
+const COMMANDS = [
+  { cmd: 'help', desc: 'วิธีใช้ทั้งหมด', run: openHelp },
+  { cmd: 'model', desc: 'เปลี่ยนโมเดล — /model หรือ /model <id>', args: true, run: (arg) => (arg ? setModel(arg) : pickModel()) },
+  { cmd: 'models', desc: 'ดูรายการโมเดลที่ใช้คุยได้', run: listModels },
+  { cmd: 'mode', desc: 'สิทธิ์แก้ไฟล์ — /mode ask|auto|yolo', args: true, run: (arg) => (arg ? setMode(arg) : pickMode()) },
+  { cmd: 'status', desc: 'สถานะ bridge / extension / tab / credits', run: showStatus },
+  { cmd: 'conversations', desc: 'เลือกบทสนทนาของ bridge (ความจำของโมเดล)', run: pickConversation },
+  { cmd: 'fresh', desc: 'เริ่มบทสนทนาบน bridge ใหม่ (ความจำ wiped)', run: freshConversation },
+  { cmd: 'compact', desc: 'บีบบริบททันที (สรุปงานเก่าแล้วเริ่ม conversation ใหม่)', run: compactNow },
+  { cmd: 'new', desc: 'เริ่มบทสนทนาใหม่ในหน้าต่าง', run: startNewSession },
+  { cmd: 'resume', desc: 'เปิดบทสนทนาเดิม', run: resumeSession },
+  { cmd: 'fork', desc: 'แยกบทสนทนาจุดนี้ไปแก้ต่อแยก', run: forkSession },
+  { cmd: 'plan', desc: 'เปิด/ปิด plan mode (ร่างแผนให้อนุมัติก่อนทำ)', run: togglePlan },
+  { cmd: 'attach', desc: 'แนบรูป เอกสาร หรือวิดีโอ', run: () => $('file-picker').click() },
+  { cmd: 'clip', desc: 'แนบจากคลิปบอร์ด (เช่น screenshot ที่ Ctrl+V)', run: clipPaste },
+  { cmd: 'file', desc: 'แนบไฟล์จาก path — /file <path>', args: true, run: (arg) => attachPath(arg, 'file') },
+  { cmd: 'image', desc: 'แนบรูปจาก path — /image <path>', args: true, run: (arg) => attachPath(arg, 'image') },
+  { cmd: 'open', desc: 'เปิดดูไฟล์ — /open <path>', args: true, run: (arg) => (arg ? openFile(arg) : pickFile()) },
+  { cmd: 'skills', desc: 'คู่มือ (playbook) ที่มี', run: showSkills },
+  { cmd: 'diff', desc: 'ดูการเปลี่ยนแปลงที่รอเขียน', run: showPendingDiff },
+  { cmd: 'apply', desc: 'เขียนไฟล์ที่อนุมัติลงดิสก์', run: applyChecked },
+  { cmd: 'discard', desc: 'ทิ้งไฟล์ที่รออยู่ทั้งหมด', run: discardAll },
+  { cmd: 'project', desc: 'เลือกโฟลเดอร์โปรเจกต์', run: pickProject },
+  { cmd: 'settings', desc: 'ตั้งค่าทั้งหมด', run: openSettings },
+  { cmd: 'stop', desc: 'ยกเลิกรันที่กำลังทำ', run: () => rpc('cancel').then(() => addCommandOut('ยกเลิกแล้ว')) },
+];
+
+const slash = { open: false, items: [], index: 0 };
+
+const slashMatches = (value) => {
+  const typed = value.slice(1).split(/\s+/)[0].toLowerCase();
+  return COMMANDS.filter((c) => c.cmd.startsWith(typed));
+};
+
+// "/" opens the palette while the first word is still being typed; a space
+// means an argument is being written and the palette has done its job.
+const slashTyping = (value) => value.startsWith('/') && !/\s/.test(value.slice(1));
+
+function renderSlash(value, keepSelection = false) {
+  slash.items = slashMatches(value);
+  // A typed word that is already a whole command selects it: "/mode" has to mean
+  // /mode, not /model, even though "mode" is a prefix of "model".
+  const typed = value.slice(1).split(/\s+/)[0].toLowerCase();
+  const exact = slash.items.findIndex((c) => c.cmd === typed);
+  slash.index = keepSelection || exact < 0 ? slash.index : exact;
+  if (slash.index >= slash.items.length) slash.index = 0;
+  const list = $('slash-list');
+  list.textContent = '';
+  slash.items.forEach((item, i) => {
+    const li = el('li');
+    li.setAttribute('aria-selected', i === slash.index ? 'true' : 'false');
+    li.append(el('span', 'cmd', '/' + item.cmd), el('span', 'desc', item.desc));
+    li.onmousedown = (ev) => { ev.preventDefault(); pickSlash(i); };
+    list.append(li);
+  });
+  // Nothing matches: say so instead of vanishing. A palette that silently
+  // disappears looks like the "/" did nothing at all.
+  if (!slash.items.length) {
+    const li = el('li', 'empty');
+    li.setAttribute('aria-selected', 'false');
+    li.append(el('span', 'desc', `ไม่พบคำสั่งที่ขึ้นต้นด้วย "/${typed}" — ลอง /help`));
+    list.append(li);
+  }
+  $('slash').classList.remove('hidden');
+}
+
+function openSlash(value) {
+  slash.open = true;
+  renderSlash(value);
+}
+
+function closeSlash() {
+  slash.open = false;
+  $('slash').classList.add('hidden');
+}
+
+function moveSlash(delta) {
+  if (!slash.items.length) return;
+  slash.index = (slash.index + delta + slash.items.length) % slash.items.length;
+  renderSlash($('task').value, true); // arrows override the exact-match preference
+}
+
+/** Run the highlighted command. One with arguments leaves "/cmd " in the box so
+ *  the argument can be typed instead of silently guessing. */
+function pickSlash(index) {
+  const item = slash.items[index];
+  if (!item) return;
+  closeSlash();
+  const arg = $('task').value.slice(1).split(/\s+/).slice(1).join(' ').trim();
+  $('task').value = '';
+  if (item.args && !arg) {
+    $('task').value = `/${item.cmd} `;
+    $('task').focus();
+    return;
+  }
+  void runCommand(item, arg);
+}
+
+function runCommand(item, arg) {
+  addCommandOut(`/${item.cmd}${arg ? ` ${arg}` : ''}`);
+  return Promise.resolve()
+    .then(() => item.run(arg))
+    .catch((err) => addNote(`คำสั่งไม่สำเร็จ: ${err.message}`));
+}
+
+/* ------------------------------------------------------- command handlers */
+
+async function setModel(id) {
+  await rpc('config.set', { model: id });
+  state.settings = await rpc('settings.get').catch(() => null);
   await refreshHeader();
+  addCommandOut(`โมเดล: ${id}`);
+}
+
+function pickModel() {
+  rpc('models').then((res) => {
+    const list = res?.data ?? res?.models ?? [];
+    $('modal-title').textContent = 'เลือกโมเดล';
+    const body = $('modal-body');
+    body.textContent = '';
+    if (!list.length) body.append(el('p', 'dim', 'bridge ยังไม่ส่งรายการโมเดลมา'));
+    for (const m of list) {
+      const row = el('button', (m.id ?? m) === $('model').value ? 'primary' : null, `${m.id ?? m}${m.name && m.name !== m.id ? ` — ${m.name}` : ''}`);
+      row.style.display = 'block';
+      row.style.width = '100%';
+      row.style.textAlign = 'left';
+      row.style.marginBottom = '6px';
+      row.onclick = () => { hideModal(); void setModel(m.id ?? m); };
+      body.append(row);
+    }
+    $('modal-actions').textContent = '';
+    const close = el('button', 'primary', 'ปิด');
+    close.onclick = hideModal;
+    $('modal-actions').append(close);
+    $('modal').classList.remove('hidden');
+  }).catch((err) => addNote(err.message));
+}
+
+async function setMode(mode) {
+  if (!['ask', 'auto', 'yolo'].includes(mode)) { addNote('mode ที่ใช้ได้: ask | auto | yolo'); return; }
+  $('mode').value = mode;
+  await rpc('settings.set', { mode });
+  addCommandOut(`สิทธิ์: ${$('mode').selectedOptions[0].textContent}`);
+}
+
+function pickMode() {
+  $('modal-title').textContent = 'สิทธิ์ในการแก้ไฟล์';
+  const body = $('modal-body');
+  body.textContent = '';
+  const rows = [
+    ['ask', 'ถามก่อนเขียนทุกไฟล์ — เห็น diff แล้วติ๊กก่อนลงดิสก์'],
+    ['auto', 'เขียนเลย — ไฟล์ที่แก้ลงดิสก์ทันที (ยังรัน shell ไม่ได้)'],
+    ['yolo', 'เขียน + รันคำสั่ง shell ได้ด้วย'],
+  ];
+  for (const [value, text] of rows) {
+    const row = el('button', value === $('mode').value ? 'primary' : null, `${value} — ${text}`);
+    row.style.display = 'block';
+    row.style.width = '100%';
+    row.style.textAlign = 'left';
+    row.style.marginBottom = '6px';
+    row.onclick = () => { hideModal(); void setMode(value); };
+    body.append(row);
+  }
+  $('modal-actions').textContent = '';
+  const close = el('button', 'primary', 'ปิด');
+  close.onclick = hideModal;
+  $('modal-actions').append(close);
+  $('modal').classList.remove('hidden');
+}
+
+/** Rotate the context now: the model summarises what it has done, that summary
+ *  is recorded in the session, and the next run starts from it. */
+async function compactNow() {
+  const before = await rpc('status').then((s) => s.context).catch(() => null);
+  addCommandOut(`บีบบริบท… ใช้ ${before?.used?.toLocaleString?.() ?? '?'} / ${before?.budget?.toLocaleString?.() ?? '?'} token — สรุปงานเก่าก่อน`);
+  const done = await rpc('compact').catch((err) => ({ error: err.message }));
+  if (done.error) { addNote(`บีบไม่ได้: ${done.error}`); return; }
+  refreshMeter();
+  if (done.summary) {
+    const box = el('div', 'compaction-card');
+    box.append(el('h4', null, 'สิ่งที่ยังจำอยู่หลังบีบ'));
+    box.append(el('div', 'summary', done.summary));
+    log.append(box);
+    scrollDown();
+  }
+}
+
+/**
+ * The context meter. The upstream cannot trim its own history, so the only
+ * control a user has over "it's losing the thread" is seeing the budget fill and
+ * being able to rotate it. A percentage on its own would be noise next to the
+ * model name; it earns its place by being the one number that explains a run
+ * suddenly forgetting the beginning of the conversation.
+ */
+function refreshMeter() {
+  rpc('status').then((st) => {
+    const use = st?.context;
+    const slot = $('context');
+    if (!slot) return;
+    if (!use || !use.budget) { slot.classList.add('hidden'); return; }
+    slot.classList.remove('hidden');
+    const pct = use.percent;
+    slot.textContent = `context ${pct}%`;
+    slot.className = `context ${pct >= 85 ? 'full' : pct >= 60 ? 'warm' : ''}`;
+    slot.title = `ใช้ไป ~${use.used.toLocaleString()} จากงว ${use.budget.toLocaleString()} token (สำรอง ${use.reserved.toLocaleString()} สำหรับคำตอบ)\n`
+      + `${use.entries} รายการในบทสนทนา — ครบงบแล้วมันจะสรุปเก่าไว้แล้วเริ่มบทใหม่ให้เอง (/compact บีบได้เอง)`;
+    if (use.needsCompaction && !state.needsCompaction) {
+      state.needsCompaction = true;
+      addNote('บริบทใกล้เต็ม — run ถัดไปจะสรุปงานเก่าไว้และเริ่มบทสนทนาใหม่ให้เอง (หรือกด /compact ตอนนี้)');
+    }
+    if (!use.needsCompaction) state.needsCompaction = false;
+  }).catch(() => {});
+}
+
+async function showStatus() {
+  const st = await rpc('status').catch(() => null);
+  if (!st) { addNote('bridge ไม่ตอบ'); return; }
+  const credits = await rpc('credits').catch(() => null);
+  const lines = [
+    `bridge: ${st.bridge ? 'พร้อม' : 'ไม่พร้อม'} · extension: ${st.extensions ?? 0} · โปรเจกต์: ${st.root}`,
+    `โมเดล: ${st.model ?? '-'} · mode: ${st.mode} · plan: ${st.plan ? 'เปิด' : 'ปิด'} · รันอยู่: ${st.running ? 'ใช่' : 'ไม่'}`,
+    `ไฟล์รอเขียน: ${st.pending?.length ?? 0}`,
+  ];
+  if (credits) lines.push(`credits: ${credits.available?.toLocaleString?.() ?? credits.available} / ${credits.limit?.toLocaleString?.() ?? credits.limit}`);
+  if (state.needsTab) lines.push('⚠ ยังไม่มี tab de.aipass.net ที่ล็อกอิน — กดปุ่มเปิดได้จาก welcome card');
+  for (const line of lines) addCommandOut(line);
+}
+
+async function listModels() {
+  const models = await rpc('models').catch(() => null);
+  const list = (models?.data ?? models?.models ?? []).filter((m) => !m.kind || m.kind === 'chat');
+  if (!list.length) { addCommandOut('bridge ยังไม่ส่งรายการโมเดลมา'); return; }
+  const current = $('model').value;
+  addCommandOut(`โมเดลที่คุยได้ ${list.length} ตัว (ตัวที่ใช้อยู่มี >):`);
+  for (const m of list) {
+    addCommandOut(`${(m.id ?? m) === current ? '>' : ' '} ${m.name ?? m.id ?? m}  ${m.free_credit ? '[ฟรี]' : ''}`);
+  }
+}
+
+function pickConversation() {
+  void rpc('conversations.list').catch(() => null).then((res) => {
+    const list = res?.conversations ?? [];
+    const currentId = res?.current ?? null;
+    $('modal-title').textContent = 'บทสนทนาของ bridge';
+    const body = $('modal-body');
+    body.textContent = '';
+    body.append(el('p', 'dim', 'ความจำของโมเดลอยู่ฝั่ง bridge — สลับที่นี่ = เปลี่ยนสิ่งที่มันจำได้ ไม่กระทบไฟล์สครินช็อตในเครื่อง'));
+    const pick = (id, label, primary = false) => {
+      const row = el('button', primary ? 'primary' : null, label);
+      row.style.display = 'block';
+      row.style.width = '100%';
+      row.style.textAlign = 'left';
+      row.style.marginBottom = '6px';
+      row.onclick = async () => { hideModal(); await rpc('conversation.pin', { id }); addCommandOut(`สลับบทสนทนาแล้ว: ${label}`); };
+      body.append(row);
+    };
+    for (const c of list) pick(c.id, `${c.title ?? c.id}  (${c.id})`, c.id === currentId);
+    if (!list.length) body.append(el('p', 'dim', 'ยังไม่มีบทสนทนาเก่า'));
+    $('modal-actions').textContent = '';
+    const close = el('button', 'primary', 'ปิด');
+    close.onclick = hideModal;
+    $('modal-actions').append(close);
+    $('modal').classList.remove('hidden');
+  });
+}
+
+async function freshConversation() {
+  const made = await rpc('conversation.new').catch((err) => ({ error: err.message }));
+  if (made.error) { addNote(`เริ่มใหม่ไม่ได้: ${made.error}`); return; }
+  addCommandOut(`เริ่มบทสนทนาบน bridge ใหม่แล้ว (${made.id ?? '?'}) — ความจำเก่าถูกตัด`);
+}
+
+/** Attach a file by typed path, the way the CLI's /file and /image do. A desktop
+ *  user often has the path from the file manager rather than a picker. */
+async function attachPath(path, kind) {
+  if (!path) { addNote(`${kind === 'image' ? '/image' : '/file'} ต้องมี path ต่อท้าย`); return; }
+  const item = await rpc('attachment.stage', { path }).catch((err) => ({ error: err.message }));
+  if (item.error) { addNote(`แนบไม่ได้: ${item.error}`); return; }
+  state.attachments.set(item.id, item);
+  renderAttachments();
+  addCommandOut(`แนบแล้ว: ${item.name}`);
+}
+
+/** Paste an image straight from the clipboard. A desktop app that cannot take a
+ *  screenshot with Ctrl+V is missing the obvious gesture. */
+async function clipPaste() {
+  try {
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      const type = item.types.find((t) => t.startsWith('image/'));
+      if (!type) continue;
+      const blob = await item.getType(type);
+      await stageFiles([new File([blob], 'clipboard.png', { type })]);
+      return;
+    }
+    addCommandOut('คลิปบอร์ดไม่มีรูป — กด Ctrl+V ตอนมี screenshot ค้างอยู่ได้เลย');
+  } catch {
+    addCommandOut('อ่านคลิปบอร์ดไม่ได้ — ลากไฟล์มาวาง หรือกด Ctrl+V ในหน้านี้');
+  }
+}
+
+async function startNewSession() {
+  log.textContent = '';
+  await rpc('session.new');
+  await refreshSessions();
+  await refreshReadiness();
+}
+
+function resumeSession() {
+  void rpc('session.list').catch(() => []).then((list) => {
+    $('modal-title').textContent = 'เปิดบทสนทนาเดิม';
+    const body = $('modal-body');
+    body.textContent = '';
+    if (!list.length) body.append(el('p', 'dim', 'ยังไม่มีบทสนทนาเก่า'));
+    for (const s of list.slice(0, 40)) {
+      const row = el('div', 'session-row');
+      const open = el('button', null, s.title || '(ไม่มีชื่อ)');
+      open.onclick = () => { hideModal(); void openSession(s.id); };
+      row.append(open);
+      // Rename and delete: the sidebar has no room for them, so they live here.
+      // Without them a session list only grows, and old runs are unfindable.
+      const rename = el('button', 'mini', 'เปลี่ยนชื่อ');
+      rename.onclick = async () => {
+        const next = window.prompt('ชื่อใหม่:', s.title ?? '');
+        if (!next) return;
+        await rpc('session.rename', { id: s.id, title: next }).catch((err) => addNote(err.message));
+        await refreshSessions();
+        resumeSession();
+      };
+      const del = el('button', 'mini', 'ลบ');
+      del.onclick = async () => {
+        if (!window.confirm(`ลบบทสนทนา "${s.title ?? s.id}"?`)) return;
+        await rpc('session.delete', { id: s.id }).catch((err) => addNote(err.message));
+        if (state.sessionId === s.id) { state.sessionId = null; log.textContent = ''; }
+        await refreshSessions();
+        resumeSession();
+      };
+      row.append(rename, del);
+      body.append(row);
+    }
+    $('modal-actions').textContent = '';
+    const close = el('button', 'primary', 'ปิด');
+    close.onclick = hideModal;
+    $('modal-actions').append(close);
+    $('modal').classList.remove('hidden');
+  });
+}
+
+async function openSession(id) {
+  const entries = await rpc('session.open', { id });
+  state.sessionId = id;
+  log.textContent = '';
+  for (const entry of entries) {
+    if (entry.type === 'task') addTask(entry.text);
+    else if (entry.type === 'assistant') assistantText(entry.text ?? '');
+    else if (entry.type === 'tool') addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '' });
+    else if (entry.type === 'note') addNote(entry.text);
+  }
+  endTurn();
+  await refreshSessions();
+}
+
+async function forkSession() {
+  const forked = await rpc('session.fork').catch((err) => ({ error: err.message }));
+  if (forked.error) { addNote(`แยกไม่ได้: ${forked.error}`); return; }
+  await refreshSessions();
+  addCommandOut(`แยกเป็นบทสนทนาใหม่แล้ว: ${forked.id}`);
+}
+
+async function togglePlan() {
+  const settings = await rpc('settings.get').catch(() => null);
+  const next = !(settings?.plan ?? false);
+  await rpc('settings.set', { plan: next });
+  state.settings = { ...(state.settings ?? {}), plan: next };
+  addCommandOut(`plan mode: ${next ? 'เปิด — มันจะร่างแผนมาก่อนทำ' : 'ปิด'}`);
+}
+
+async function openFile(file) {
+  const found = await rpc('fs.read', { file }).catch((err) => ({ error: err.message }));
+  $('modal-title').textContent = file;
+  const body = $('modal-body');
+  body.textContent = '';
+  if (found.error) body.append(el('p', null, found.error));
+  else body.append(el('pre', null, found.text.slice(0, 20000)));
+  $('modal-actions').textContent = '';
+  const close = el('button', 'primary', 'ปิด');
+  close.onclick = hideModal;
+  $('modal-actions').append(close);
+  $('modal').classList.remove('hidden');
+}
+
+async function pickFile() {
+  const entries = await rpc('fs.list', { dir: '.' }).catch(() => []);
+  $('modal-title').textContent = 'ไฟล์ในโปรเจกต์';
+  const body = $('modal-body');
+  body.textContent = '';
+  for (const e of entries.slice(0, 200).filter((x) => !x.dir)) {
+    const row = el('button', null, e.name);
+    row.style.display = 'block';
+    row.style.width = '100%';
+    row.style.textAlign = 'left';
+    row.style.marginBottom = '4px';
+    row.onclick = () => { hideModal(); void openFile(e.name); };
+    body.append(row);
+  }
+  $('modal-actions').textContent = '';
+  const close = el('button', 'primary', 'ปิด');
+  close.onclick = hideModal;
+  $('modal-actions').append(close);
+  $('modal').classList.remove('hidden');
+}
+
+function showSkills() {
+  void rpc('skills.list').catch(() => []).then((skills) => {
+    $('modal-title').textContent = 'คู่มือ (playbook)';
+    const body = $('modal-body');
+    body.textContent = '';
+    if (!skills.length) body.append(el('p', 'dim', 'ยังไม่มีคู่มือ — วางไฟล์ .md ใน skillsDirs'));
+    for (const s of skills) {
+      const row = el('div');
+      row.append(el('strong', null, s.name), el('div', 'dim', s.file ?? ''));
+      const view = el('button', 'mini', 'ดู');
+      view.onclick = () => {
+        rpc('skills.load', { name: s.name }).then((found) => {
+          $('modal-title').textContent = `คู่มือ — ${s.name}`;
+          const b = $('modal-body');
+          b.textContent = '';
+          b.append(el('pre', null, found.text));
+        }).catch((err) => addNote(err.message));
+      };
+      row.append(view);
+      row.style.marginBottom = '10px';
+      body.append(row);
+    }
+    $('modal-actions').textContent = '';
+    const close = el('button', 'primary', 'ปิด');
+    close.onclick = hideModal;
+    $('modal-actions').append(close);
+    $('modal').classList.remove('hidden');
+  });
+}
+
+async function showPendingDiff() {
+  const pending = await rpc('pending').catch(() => []);
+  if (!pending.length) { addNote('ไม่มีไฟล์รอเขียน'); return; }
+  await showDiff(pending[0].file);
+}
+
+async function applyChecked() {
+  const files = [...state.pending.entries()].filter(([, info]) => info.checked).map(([file]) => file);
+  if (!files.length) { addNote('ยังไม่มีไฟล์ที่ติ๊ก'); return; }
+  await rpc('apply', { files });
+  await refreshPending();
+}
+
+async function discardAll() {
+  await rpc('discard');
+  await refreshPending();
+}
+
+function pickProject() {
+  void rpc('projects.list').catch(() => []).then((projects) => {
+    $('modal-title').textContent = 'เลือกโปรเจกต์';
+    const body = $('modal-body');
+    body.textContent = '';
+    for (const p of projects) {
+      const row = el('div', 'session-row');
+      const open = el('button', p.current ? 'primary' : null, `${p.name ?? p.path} — ${p.path}`);
+      open.onclick = () => { $('project').value = p.path; hideModal(); $('project').onchange(); };
+      row.append(open);
+      if (!p.current) {
+        const remove = el('button', 'mini', 'เอาออก');
+        remove.onclick = async () => {
+          await rpc('projects.remove', { path: p.path }).catch((err) => addNote(err.message));
+          await refreshProjects(await rpc('projects.list').catch(() => []));
+          pickProject();
+        };
+        row.append(remove);
+      }
+      body.append(row);
+    }
+    $('modal-actions').textContent = '';
+    const close = el('button', 'primary', 'ปิด');
+    close.onclick = hideModal;
+    $('modal-actions').append(close);
+    $('modal').classList.remove('hidden');
+  });
+}
+
+/* --------------------------------------------------------------- boot */
+
+/**
+ * Apply the theme for real. `theme` sat in the settings file doing nothing at
+ * all — a setting that changes nothing is worse than no setting, because it
+ * looks like a feature and behaves like a lie.
+ */
+function applyTheme(theme) {
+  const picked = theme === 'auto'
+    ? (window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+    : (theme === 'light' ? 'light' : 'dark');
+  document.documentElement.dataset.theme = picked;
+}
+
+(async function boot() {
+  await refreshHeader();
+  state.settings = await rpc('settings.get').catch(() => null);
+  // A reloaded window has to look like the saved theme, not like the default.
+  applyTheme(state.settings?.theme ?? 'dark');
+  await refreshReadiness();
   await refreshProjects((await rpc('status').catch(() => null))?.projects);
   await refreshSessions();
-  await refreshSkills();
   await refreshFiles();
+  await refreshSkills();
   await refreshPanels();
   await refreshPending();
-  try { setupCommandPalette(); } catch { /* optional */ }
-  try { $('palette-close').onclick = commandPaletteClose; } catch { /* optional */ }
-  try { $('session-search')?.addEventListener('input', refreshSessions); } catch { /* optional */ }
   $('task').focus();
 })();

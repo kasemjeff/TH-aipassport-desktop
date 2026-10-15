@@ -2,7 +2,8 @@
 // npm run stats — what the runs actually did, from the session files.
 //
 // Every run appends one `run_stats` line to its session JSONL: which tools ran
-// and how many refused, nudges, firewall notes, per-step timings, credits.
+// and how many refused, nudges, stagnation corrections, firewall notes,
+// per-step timings, credits.
 // This reader aggregates those lines — the last N runs plus lifetime totals.
 // Refusal-rate and firewall trends are how protocol drift gets caught instead
 // of guessed at (HARNESS_DESIGN.md, P2-D).
@@ -42,6 +43,7 @@ export function collectRuns(session) {
       refusals,
       refusalRate: calls ? refusals / calls : 0,
       nudges: e.nudges ?? 0,
+      stagnations: e.stagnations ?? 0,
       firewallNotes: e.firewallNotes ?? 0,
       stepMs: Array.isArray(e.stepMs) ? e.stepMs : [],
       spent: e.spent ?? null,
@@ -58,6 +60,7 @@ export function summarize(rows) {
     calls: 0,
     refusals: 0,
     nudges: 0,
+    stagnations: 0,
     firewallNotes: 0,
     spent: 0,
     byTool: {},
@@ -69,6 +72,7 @@ export function summarize(rows) {
     totals.calls += r.calls;
     totals.refusals += r.refusals;
     totals.nudges += r.nudges;
+    totals.stagnations += r.stagnations;
     totals.firewallNotes += r.firewallNotes;
     totals.spent += r.spent ?? 0;
     totals.byStop[r.stopReason] = (totals.byStop[r.stopReason] ?? 0) + 1;
@@ -109,7 +113,7 @@ function main() {
   }
 
   const totals = summarize(rows);
-  console.log(`lifetime  ${totals.runs} run(s) · ${totals.calls} tool call(s) · refusals ${pct(totals.calls ? totals.refusals / totals.calls : 0)} · nudges ${totals.nudges} · firewall ${totals.firewallNotes} · ${credits(totals.spent)} credits`);
+  console.log(`lifetime  ${totals.runs} run(s) · ${totals.calls} tool call(s) · refusals ${pct(totals.calls ? totals.refusals / totals.calls : 0)} · nudges ${totals.nudges} · stagnation ${totals.stagnations} · firewall ${totals.firewallNotes} · ${credits(totals.spent)} credits`);
   const avgStep = totals.stepMsCount ? Math.round(totals.stepMsTotal / totals.stepMsCount / 100) / 10 : null;
   const stops = Object.entries(totals.byStop).map(([k, n]) => `${k}×${n}`).join(', ');
   if (avgStep !== null) console.log(`          avg step ${avgStep}s · ends: ${stops}`);
@@ -120,12 +124,13 @@ function main() {
   if (toolLine) console.log(`          tools: ${toolLine}`);
 
   console.log(`\nlast ${Math.min(last, rows.length)} of ${rows.length}:`);
-  console.log('  when           stop      calls  ✗rate  nudge  fw  credits');
+  console.log('  when           stop      calls  ✗rate  nudge stag  fw  credits');
   for (const r of rows.slice(0, last)) {
     const title = r.title.length > 34 ? `${r.title.slice(0, 33)}…` : r.title;
     console.log(
       `  ${when(r.ts)}  ${String(r.stopReason ?? '?').padEnd(9)} ${String(r.calls).padStart(5)}  `
-      + `${pct(r.refusalRate).padStart(5)}  ${String(r.nudges).padStart(5)}  ${String(r.firewallNotes).padStart(2)}  `
+      + `${pct(r.refusalRate).padStart(5)}  ${String(r.nudges).padStart(5)}  ${String(r.stagnations).padStart(4)}  `
+      + `${String(r.firewallNotes).padStart(2)}  `
       + `${credits(r.spent).padStart(7)}  ${title}`,
     );
   }
