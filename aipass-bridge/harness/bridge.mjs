@@ -63,6 +63,48 @@ export function redact(text) {
   return { out, dropped };
 }
 
+// A send can be refused for a reason that lasts seconds, not a run: the
+// extension cycles its connection to the bridge every four minutes
+// (extension/background.js CYCLE_MS — "reconnect before Chrome's long-request
+// ceiling") and for the few seconds around each cycle the bridge has no tab to
+// dispatch to, so it answers "no extension connected" instantly. The CLI
+// already waits that gap out (chat.mjs's grace period before it gives up);
+// retrying here gives every BridgeClient caller the same endurance — a run
+// that would otherwise die for a three-second blip just pauses, while a tab
+// that is really gone still surfaces once the attempts run out.
+//
+// Deliberately not retried: a fetch that fails outright ("fetch failed" — the
+// bridge process itself is down). That is not a gap, nothing heals it in
+// seconds, and a run must fail on the way in, not spend five seconds
+// pretending it might start.
+export const TRANSIENT_SEND = /no extension connected/i;
+export const SEND_ATTEMPTS = 6; // ≈5s of patience at SEND_RETRY_MS — longer than a cycle gap
+export const SEND_RETRY_MS = 1000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Run `what` again while it fails in a way that heals by itself and nothing
+ * was delivered yet. `streamed` reports whether any delta has left this
+ * attempt family — a refusal after that must surface, never resend, or the
+ * answer would enter the conversation twice. An abort is never retried.
+ */
+async function retrySend(what, { streamed = () => false, signal = null } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await what();
+    } catch (err) {
+      const again = attempt < SEND_ATTEMPTS
+        && !streamed()
+        && !signal?.aborted
+        && err?.name !== 'AbortError'
+        && TRANSIENT_SEND.test(String(err?.message ?? err));
+      if (!again) throw err;
+      await sleep(SEND_RETRY_MS);
+    }
+  }
+}
+
 export class BridgeClient {
   constructor(base = DEFAULT_BRIDGE_URL, { model = null } = {}) {
     this.base = String(base).replace(/\/+$/, '');
@@ -77,8 +119,19 @@ export class BridgeClient {
    * conversation is told so on every turn, as the upstream requires.
    * `thinkingLevel` asks the model to reason at that level for this turn; the
    * bridge checks it against the model and strips what the model does not offer.
+   *
+   * A refusal that heals by itself (see TRANSIENT_SEND) is retried: the
+   * extension's four-minute connection cycle leaves a gap no tab covers, and
+   * a run must not die for it. The retry only happens before any delta
+   * streamed back — after that a resend would deliver the answer twice.
    */
-  async chat({ message, parts = null, model = null, conversation = null, temporary = null, thinkingLevel = null, onText = () => {}, onReasoning = () => {}, signal = null } = {}) {
+  async chat(args = {}) {
+    let streamed = false;
+    return retrySend(() => this.#sendOnce(args, () => { streamed = true; }), { streamed: () => streamed, signal: args.signal ?? null });
+  }
+
+  /** One wire attempt of chat(); `markStreamed` flips the retry gate above. */
+  async #sendOnce({ message, parts = null, model = null, conversation = null, temporary = null, thinkingLevel = null, onText = () => {}, onReasoning = () => {}, signal = null } = {}, markStreamed) {
     const content = Array.isArray(parts) && parts.length
       ? [{ type: 'text', text: message }, ...parts]
       : message;
@@ -114,8 +167,8 @@ export class BridgeClient {
         try { evt = JSON.parse(data); } catch { continue; }
         if (evt.error) throw new Error(evt.error.message);
         const delta = evt.choices?.[0]?.delta ?? {};
-        if (delta.reasoning_content) { reasoning += delta.reasoning_content; onReasoning(delta.reasoning_content); }
-        if (delta.content) { out += delta.content; onText(delta.content); }
+        if (delta.reasoning_content) { markStreamed(); reasoning += delta.reasoning_content; onReasoning(delta.reasoning_content); }
+        if (delta.content) { markStreamed(); out += delta.content; onText(delta.content); }
       }
     }
     return { text: out, reasoning };
@@ -124,20 +177,28 @@ export class BridgeClient {
   /**
    * Mint a conversation. `adopt: false` leaves the bridge's current-conversation
    * pointer alone — the caller holds the id and passes it per chat.
+   *
+   * A bridge that could not carry the create (its 503 shape is
+   * `{ok: false, error}`) throws: that is what lets the four-minute gap be
+   * retried here, and a create that reached nobody must not be read as a
+   * conversation without an id.
    */
   async createConversation({ model = null, assistant = null, temporary = true, message, adopt = true } = {}) {
-    const r = await fetch(`${this.base}/conversations/new`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        ...(model ? { model } : {}),
-        ...(assistant ? { assistant } : {}),
-        temporary,
-        adopt,
-        message: message ?? 'Starting a new working session.',
-      }),
+    const body = JSON.stringify({
+      ...(model ? { model } : {}),
+      ...(assistant ? { assistant } : {}),
+      temporary,
+      adopt,
+      message: message ?? 'Starting a new working session.',
     });
-    return r.json();
+    return retrySend(async () => {
+      const r = await fetch(`${this.base}/conversations/new`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body,
+      });
+      const made = await r.json().catch(() => null);
+      if (!r.ok || made?.ok === false) throw new Error(made?.error ?? `bridge returned ${r.status}`);
+      return made;
+    });
   }
 
   async config(patch) {

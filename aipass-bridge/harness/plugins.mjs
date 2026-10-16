@@ -77,14 +77,20 @@ export class PluginManager {
         const mod = await import(`${pathToFileURL(file).href}?t=${Date.now()}`);
         const plugin = mod.default ?? mod;
         if (typeof plugin?.setup !== 'function') throw new Error('no default export with a setup(ctx) function');
-        const ctx = this.#context(plugin);
-        await plugin.setup(ctx);
-        if (!this.#wanted(plugin.name ?? path.basename(file))) {
-          this.log(`plugin ${plugin.name} is disabled in settings — not registering it`);
+        const name = plugin.name ?? path.basename(file);
+        // The filter is read before setup runs. Setup is what registers
+        // everything: a disabled plugin that was set up first and filtered
+        // afterwards would keep its tools, methods and panels live while the
+        // listing said the plugin was off — "disabled in settings" has to mean
+        // nothing of it is loaded, not that the window forgot to mention it.
+        if (!this.#wanted(name)) {
+          this.log(`plugin ${name} is disabled in settings — not registering it`);
           continue;
         }
+        const ctx = this.#context(plugin);
+        await plugin.setup(ctx);
         this.loaded.push({
-          name: plugin.name ?? path.basename(file),
+          name,
           version: plugin.version ?? '0.0.0',
           description: plugin.description ?? '',
           file,

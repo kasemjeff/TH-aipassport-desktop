@@ -417,10 +417,17 @@ const openBrowser = async (url) => {
     // no way in, which is why a "new session" kept answering from yesterday.
     async 'conversations.list'() { return current.bridge.conversations(); },
     async 'conversation.new'(params = {}) {
+      // No tab reachable answers {id: null} like it always did — the window
+      // offers to open one instead of reading a stack trace. The create retry
+      // inside BridgeClient has already waited out a reconnect gap; anything
+      // else (the bridge being down) throws for the window to show.
       const made = await current.bridge.createConversation({
         model: params.model ?? current.bridge.model ?? undefined,
         temporary: true,
         message: params.message ?? 'Starting a new working session.',
+      }).catch((err) => {
+        if (/no extension connected/i.test(err.message)) return null;
+        throw err;
       });
       await current.bridge.config({ conversation: made?.id ?? null });
       current.conversation = made?.id ?? null;

@@ -619,3 +619,42 @@ surface as a visible transcript line, and `settings.defaultModel` that has
 vanished from the catalog should fail the run with that sentence instead of
 swapping models silently. (The user's own setting was reset to `auto` the
 same day — the site's own default, free, and always in the catalog.)
+
+## The four-minute blip (Oct 2026): a run must not die of a reconnect
+
+The extension holds its SSE connection to the bridge for four minutes at a
+time, then cycles it — deliberately, because Chrome does not promise a longer
+one (`extension/background.js`, `CYCLE_MS`). The reconnect takes about three
+seconds, and in those three seconds the bridge has no tab to dispatch to, so a
+send that lands in the gap is refused instantly with `no extension connected`.
+Recorded on this machine: the user's runs of Oct 16, 10:57 local, died with
+`stopReason: "error"` mid-task, and the backend log shows the fatal dispatch
+sitting between `extension disconnected` and `extension connected` — a run
+lost to a three-second blip. Fixes:
+
+1. **`BridgeClient` retries the refusal.** `chat()` and `createConversation()`
+   make six attempts a second apart while the failure is exactly the dispatch
+   refusal and nothing has streamed back yet — after the first delta a resend
+   would deliver the text twice, so that case still surfaces. The CLI one-shot
+   already waited this gap out (chat.mjs's own grace period); this gives every
+   caller, the desktop included, the same endurance. `fetch failed` is
+   deliberately not retried: the bridge process itself being down is not a
+   gap, and a run must fail on the way in, not spend five seconds pretending
+   it might start.
+2. **The gap refusal feeds the same `needs_tab` flow.** The loop recognized
+   only the tab's own wording ("no de.aipass.net tab is open"); the dispatch
+   refusal ("no extension connected — open a de.aipass.net tab") now matches
+   too, so a tab that does not come back within the retry window gets the
+   one-click offer instead of a bare error.
+3. **A stop is not an error.** The window's stop button aborts the send, and
+   the loop used to label that run `error` — a system failure for something
+   the user did on purpose. It now ends as `cancelled`.
+
+Pinned by `test/run-resilience.test.mjs` (the gap is retried; a mid-stream
+refusal is not; a create survives the same gap).
+
+**Plugins, same day:** a plugin filtered out by `settings.plugins` had still
+run its `setup()`, so its tools, RPC methods and panels stayed live while
+every listing said it was off. The filter is now read before setup runs, and
+`test/plugins.test.mjs` pins both directions — only the named plugins load,
+and a reload honours a changed list.

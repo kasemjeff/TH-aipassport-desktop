@@ -150,11 +150,19 @@ export class Harness {
       // creating one here would defeat the point of reusing.
       return;
     }
+    // A tab that cannot be reached is the loop's story to tell (needs_tab,
+    // one click to fix), so that refusal falls back to null here — the create
+    // retry inside BridgeClient already absorbed a reconnect gap first. Any
+    // other failure (the bridge itself being down) must reject the run on the
+    // way in, not start one that cannot send.
     const made = await this.bridge.createConversation({
       model: this.bridge.model ?? undefined,
       assistant: this.options.assistant ?? undefined,
       temporary: !this.options.permanent,
       message: 'Starting a new working session.',
+    }).catch((err) => {
+      if (/no extension connected/i.test(err.message)) return null;
+      throw err;
     });
     this.conversation = made?.id ?? null;
     this.events.emit('conversation', { id: this.conversation, temporary: !this.options.permanent });

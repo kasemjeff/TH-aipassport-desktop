@@ -202,13 +202,18 @@ export async function runTask(taskText, ctx = {}) {
     let reply;
     try { reply = await saySafe(next, partsForSend()); sends++; }
     catch (err) {
+      // The user pressed stop: the signal ends the in-flight fetch with an
+      // AbortError, which is an ending, not a failure — the transcript should
+      // not read "error" for something the user did on purpose.
+      if (err?.name === 'AbortError') { stopReason = 'cancelled'; break; }
       events?.emit('error', { message: err.message });
       // The one failure with an obvious cause and an obvious fix: the bridge is
       // up and the extension is connected, but no logged-in chat tab is open, so
       // there is nowhere for the request to run. Say so on its own event, and
       // whoever is watching gets to fix it in one click instead of reading a
-      // stack trace.
-      if (/no de\.aipass\.net tab is open/i.test(err.message)) {
+      // stack trace. Both spellings: the dispatch refusal ("no extension
+      // connected — open a de.aipass.net tab") and the tab's own report.
+      if (/no extension connected|no de\.aipass\.net tab is open/i.test(err.message)) {
         events?.emit('needs_tab', { url: options.chatUrl ?? 'https://de.aipass.net/chat', reason: err.message });
       }
       stopReason = 'error';
