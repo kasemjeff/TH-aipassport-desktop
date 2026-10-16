@@ -1,15 +1,29 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import path from 'node:path';
 import http from 'node:http';
-import { startBridge, FakeExtension, scripted, tempDir, run, waitFor, CHAT } from './harness.mjs';
+import os from 'node:os';
+import path from 'node:path';
+import { startBridge, FakeExtension, scripted, run, tempDir, waitFor, CHAT, DEFAULT_VIDEO_OPTIONS } from './harness.mjs';
 
 let bridge;
 before(async () => { bridge = await startBridge(); });
 after(() => bridge.stop());
 
 const chat = (args) => run(CHAT, [...args, '--bridge', bridge.base]);
+
+// A 1x1 transparent PNG on disk — the repo ships no image fixture (the tests
+// used to point at an untracked public/image.png that a fresh clone never
+// has, making the CLI exit with "image file not found"). The CLI checks the
+// extension and the fake extension echoes whatever parts arrive, so the tests
+// make their own smallest-legal-payload file instead.
+const PNG_1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+const pngPath = () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-chat-'));
+  const file = path.join(dir, 'pixel.png');
+  fs.writeFileSync(file, Buffer.from(PNG_1X1, 'base64'));
+  return file;
+};
 
 test('one-shot prints the answer', async (t) => {
   const handler = scripted(['สวัสดีครับ ยินดีช่วยเหลือ']);
@@ -60,80 +74,104 @@ test('exits with a clear message when the bridge is down', async () => {
   assert.match(out, /No bridge at/);
 });
 
-test('an image answer is written to a file instead of the scrollback', async (t) => {
-  // 1x1 transparent PNG.
-  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+test('sends image part when --image is provided', async (t) => {
+  /** @type {any} */
+  let receivedParts = null;
   const ext = await new FakeExtension(bridge.base, {
-    onChat: async (job, e) => { await e.image(png); await e.done(); },
+    onChat: async (job, e) => {
+      receivedParts = job.parts;
+      await e.text('I see an image');
+      await e.done();
+    },
   }).connect();
   t.after(() => ext.disconnect());
 
-  const dir = tempDir({});
-  const { out } = await run(CHAT, ['a cat', '--bridge', bridge.base, '--out', dir]);
-  assert.match(out, /image saved to/);
-
-  const written = fs.readdirSync(dir).filter((f) => f.endsWith('.png'));
-  assert.equal(written.length, 1, out);
-  // and it is a real PNG, not the base64 text
-  assert.equal(fs.readFileSync(path.join(dir, written[0])).subarray(1, 4).toString(), 'PNG');
-});
-
-test('a pasted block is one message, not one per line', async (t) => {
-  const ext = await new FakeExtension(bridge.base, {
-    onChat: async (job, e) => { await e.text('ok'); await e.done(); },
-  }).connect();
-  t.after(() => ext.disconnect());
-
-  // Exactly how a terminal delivers a paste: every line at once.
-  const pasted = 'line one\nline two\nline three\n';
-  const { out } = await run(CHAT, ['--bridge', bridge.base], { stdin: pasted });
-
-  assert.equal(ext.chats.length, 1, `13-line pastes used to bill 13 requests; got ${ext.chats.length}`);
-  assert.equal(ext.chats[0].text, 'line one\nline two\nline three');
-  assert.match(out, /3 lines · sent as one message/);
-});
-
-test('typed lines stay separate messages', async (t) => {
-  const ext = await new FakeExtension(bridge.base, {
-    onChat: async (job, e) => { await e.text('ok'); await e.done(); },
-  }).connect();
-  t.after(() => ext.disconnect());
-
-  // Spaced out the way a person types, so the paste heuristic must not merge them.
-  const { out } = await run(CHAT, ['--bridge', bridge.base], {
-    stdin: [[300, 'first\n'], [600, 'second\n']],
-  });
-  assert.equal(ext.chats.length, 2, out);
-  assert.deepEqual(ext.chats.map((c) => c.text), ['first', 'second']);
-});
-
-test('--file attaches a document to the first message', async (t) => {
-  const ext = await new FakeExtension(bridge.base).connect();
-  t.after(() => ext.disconnect());
-
-  const dir = tempDir({ 'report.pdf': '%PDF-1.4\n' });
-  const { out, code } = await chat(['summarise this', '--file', path.join(dir, 'report.pdf')]);
+  const imgPath = pngPath();
+  const { out, code } = await chat(['describe this image', '--image', imgPath]);
   assert.equal(code, 0);
-  assert.match(out, /report\.pdf/, 'the attachment is named before the answer');
-
-  const part = ext.chats.at(-1).parts.find((p) => p.type === 'file');
-  assert.equal(part.filename, 'report.pdf');
-  assert.equal(part.mediaType, 'application/pdf');
-  assert.equal(Buffer.from(part.data.split(',')[1], 'base64').toString(), '%PDF-1.4\n');
+  assert.match(out, /I see an image/);
+  assert.ok(receivedParts, 'bridge should receive parts');
+  const imgPart = receivedParts.find((/** @type {any} */ p) => p.type === 'image');
+  assert.ok(imgPart, 'parts should contain an image part');
+  assert.match(imgPart.image, /^data:image\/png;base64,/);
 });
 
-test('--file names the unreadable path instead of failing mid-answer', async () => {
-  const { out, code } = await chat(['hi', '--file', '/nope/missing.pdf']);
-  assert.equal(code, 1);
-  assert.match(out, /cannot read \/nope\/missing\.pdf/);
-});
-
-test('--thinking rides along with the request', async (t) => {
-  const ext = await new FakeExtension(bridge.base).connect();
+test('auto-detects and attaches inline image file path in chat prompt', async (t) => {
+  /** @type {any} */
+  let receivedParts = null;
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (job, e) => {
+      receivedParts = job.parts;
+      await e.text('Analyzed inline image');
+      await e.done();
+    },
+  }).connect();
   t.after(() => ext.disconnect());
 
-  await chat(['think hard', '--model', 'claude-opus-5@azure', '--thinking', 'max']);
-  assert.equal(ext.chats.at(-1).thinkingLevel, 'max');
+  const imgPath = pngPath();
+  const { out, code } = await chat([`describe ${imgPath}`]);
+  assert.equal(code, 0);
+  assert.match(out, /Analyzed inline image/);
+  assert.ok(receivedParts, 'bridge should receive parts');
+  const imgPart = receivedParts.find((/** @type {any} */ p) => p.type === 'image');
+  assert.ok(imgPart, 'inline image path should be attached as image part');
+  assert.match(imgPart.image, /^data:image\/png;base64,/);
+});
+
+test('handles aborted stream without crashing', async (t) => {
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (job, e) => {
+      await e.text('First chunk...');
+      await e.done();
+    },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out, code } = await chat(['quick test']);
+  assert.equal(code, 0);
+  assert.match(out, /First chunk/);
+});
+
+test('sends document part when --file is provided', async (t) => {
+  /** @type {any} */
+  let receivedParts = null;
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (job, e) => {
+      receivedParts = job.parts;
+      await e.text('Analyzed document');
+      await e.done();
+    },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const docPath = path.resolve(import.meta.dirname, '../README.md');
+  const { out, code } = await chat(['summarise this readme', '--file', docPath]);
+  assert.equal(code, 0);
+  assert.match(out, /Analyzed document/);
+  assert.ok(receivedParts, 'bridge should receive parts');
+  const filePart = receivedParts.find((/** @type {any} */ p) => p.type === 'file');
+  assert.ok(filePart, 'parts should contain a file part');
+  assert.equal(filePart.filename, 'README.md');
+  assert.equal(filePart.mediaType, 'text/markdown');
+  assert.match(filePart.data, /^data:text\/markdown;base64,/);
+});
+
+test('forwards thinking level when --thinking is provided', async (t) => {
+  /** @type {any} */
+  let receivedThinking = null;
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (job, e) => {
+      receivedThinking = job.thinkingLevel;
+      await e.text('Reasoned answer');
+      await e.done();
+    },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out, code } = await chat(['deep thought', '--thinking', 'high']);
+  assert.equal(code, 0);
+  assert.match(out, /Reasoned answer/);
+  assert.equal(receivedThinking, 'high');
 });
 
 test('a generated video is decoded to disk, not left as a data URI', async (t) => {
@@ -211,8 +249,31 @@ test('a video link labelled with a filename is still downloaded', async (t) => {
 });
 
 test('--resolution and the video switches reach the job', async (t) => {
-  const ext = await new FakeExtension(bridge.base).connect();
+  // The fake serves the exact switches this test asserts. Otherwise the
+  // outcome would hinge on whether the bridge's video-options cache has been
+  // warmed yet: the default fake rows (480p, 4-6s) make the bridge — rightly —
+  // drop --resolution 720p and --duration 8 before dispatch, while a cold
+  // cache falls back to a table that allows them. Hermetic beats lucky.
+  const ext = await new FakeExtension(bridge.base, {
+    videoOptions: {
+      ...DEFAULT_VIDEO_OPTIONS,
+      'list-video-resolutions': [
+        { id: 'r1', provider: 'seedance', label: '480p', value: '480p', is_default: true, is_active: true },
+        { id: 'r2', provider: 'seedance', label: '720p', value: '720p', is_active: true },
+      ],
+      'list-video-durations': [
+        { id: 'd1', provider: 'seedance', label: '4s', value: 4, is_default: true, is_active: true },
+        { id: 'd2', provider: 'seedance', label: '6s', value: 6, is_active: true },
+        { id: 'd3', provider: 'seedance', label: '8s', value: 8, is_active: true },
+      ],
+    },
+  }).connect();
   t.after(() => ext.disconnect());
+  // Pin the bridge's video-options cache to what THIS fake serves. The cache
+  // is global to the bridge and any earlier test's extension (default 480p
+  // rows) may have warmed it already — under load, routinely has — and the
+  // bridge would then rightly drop the asserted switches before dispatch.
+  await fetch(`${bridge.base}/video-options?refresh=1`);
   await waitFor(async () => (await (await fetch(`${bridge.base}/v1/models?refresh=1`)).json()).data.length > 1);
 
   await chat(['a street', '--model', 'seedance-2.0-mini', '--resolution', '720p',

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { startBridge, FakeExtension, scripted, tempDir, run, AGENT } from './harness.mjs';
+import { outbound, inbound } from '../harness/waf.mjs';
 
 let bridge;
 before(async () => { bridge = await startBridge(); });
@@ -24,6 +25,34 @@ test('reads files and reports a summary, touching nothing on disk', async (t) =>
   assert.match(out, /✓ read README\.md/);
   assert.match(out, /✓ It is a starter project\./);
   assert.equal(fs.readFileSync(path.join(dir, 'README.md'), 'utf8'), 'a starter project\n');
+});
+
+test('a bare NEED still acts — the shape a weak model reaches for', async (t) => {
+  const dir = tempDir({ 'notes/todo.md': 'buy milk\n' });
+  const handler = scripted([
+    'NEED notes/todo.md', // no `file` keyword — the shape gemini-class models write
+    'DONE read the note',
+  ]);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir);
+  assert.match(out, /✓ read notes\/todo\.md/, 'the bare form ran the read');
+  assert.match(handler.sent[1], /buy milk/, 'the file content reached the model');
+  assert.match(out, /✓ read the note/);
+});
+
+test('NEED on a folder answers with the listing and names the exact marker', async (t) => {
+  const dir = tempDir({ 'desktop/README.md': 'read me\n', 'desktop/app.js': 'x\n' });
+  const handler = scripted(['NEED desktop/', 'DONE saw the folder']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir);
+  assert.match(out, /✓ read desktop\//, 'the folder request ran as a read');
+  assert.match(handler.sent[1], /README\.md/, 'the listing reached the model');
+  assert.match(handler.sent[1], /NEED dir lists a folder/, 'and the result teaches the canonical shapes');
+  assert.match(out, /✓ saw the folder/);
 });
 
 test('the first message carries the instructions and a real directory listing', async (t) => {
@@ -141,7 +170,7 @@ test('refuses to touch anything outside the project root', async (t) => {
   t.after(() => ext.disconnect());
 
   const { out } = await agent(dir, ['--apply']);
-  assert.match(out, /escapes root/);
+  assert.match(out, /outside project root/);
   assert.ok(!fs.existsSync(path.join(dir, '..', 'escaped.txt')));
 });
 
@@ -194,6 +223,44 @@ test('loopback addresses are substituted outbound and restored on disk', async (
   assert.doesNotMatch(sentAll, /127\.0\.0\.1/, 'loopback ip must never leave this machine');
   assert.match(sentAll, /LCLHST/);
   assert.equal(fs.readFileSync(path.join(dir, 'cfg.md'), 'utf8'), 'see http://localhost:4000 and 127.0.0.1:9090\n');
+});
+
+test('the substitution table round-trips byte for byte', () => {
+  const src = 'console.log("x");\nConsole.Warn(y);\nprocess.stdout.write(z);\nsys.stderr.write(w);\nisolate.log(k);\nif (a !== b) { c(); }\nif (a === b) { d(); }\nif (a == b) { e(); }\nif (a != b) { f(); }\n';
+  const enc = outbound(src);
+  assert.doesNotMatch(enc, /console\.(log|warn)/i, 'console calls are encoded');
+  assert.doesNotMatch(enc, /(stdout|stderr)\.write/i, 'stdout/stderr writes are encoded');
+  assert.doesNotMatch(enc, /==/, 'no equality operator travels raw');
+  assert.match(enc, /OP-NOT-EQ/);
+  assert.match(enc, /OP-STRICT-EQ/);
+  assert.match(enc, /OP-EQ/);
+  assert.match(enc, /isolate\.log/, 'an unrelated .log call is not touched');
+  assert.match(enc, /if \(a != b\)/, 'single-bang != is untouched');
+  assert.equal(
+    inbound(enc),
+    'console.log("x");\nconsole.warn(y);\nprocess.stdout.write(z);\nsys.stderr.write(w);\nisolate.log(k);\nif (a !== b) { c(); }\nif (a === b) { d(); }\nif (a == b) { e(); }\nif (a != b) { f(); }\n',
+  );
+});
+
+test('logging calls and comparisons are substituted outbound and restored on disk', async (t) => {
+  // The upstream edge 403s any message carrying console.log & friends — in any
+  // language and at any size — and blocks `==`/`===`/`!==` inside an if. Reads
+  // of a normal test file died on both.
+  const dir = tempDir({ 'app.mjs': 'console.log("hello");\nif (add(1, 2) !== 3) { console.warn("careful"); }\n' });
+  const handler = scripted([
+    'NEED file app.mjs',
+    'EDIT app.mjs\nFIND\nCONSOLE-LOG("hello");\nif (add(1, 2) OP-NOT-EQ 3) { CONSOLE-WARN("careful"); }\nNEW\nCONSOLE-LOG("hello again");\nif (add(1, 2) OP-NOT-EQ 3) { CONSOLE-WARN("careful"); }\nEND',
+    'DONE greeting changed',
+  ]);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  await agent(dir, ['--apply']);
+  const sentAll = handler.sent.join('\n');
+  assert.doesNotMatch(sentAll, /console\.(log|warn)/, 'logging calls must never travel in the clear');
+  assert.doesNotMatch(sentAll, /==/, 'equality operators must never travel in the clear');
+  assert.match(sentAll, /CONSOLE-LOG/, 'the encoded form is what leaves this machine');
+  assert.equal(fs.readFileSync(path.join(dir, 'app.mjs'), 'utf8'), 'console.log("hello again");\nif (add(1, 2) !== 3) { console.warn("careful"); }\n');
 });
 
 test('splits and resends a turn the upstream rejects', async (t) => {
@@ -373,8 +440,7 @@ test('--assistant binds the created conversation and implies slim', async (t) =>
   const ext = await new FakeExtension(bridge.base, { onChat: scripted(['DONE nothing to do']) }).connect();
   t.after(() => ext.disconnect());
 
-  const { out: _out } = await agent(dir, ['--assistant', 'asst_abc123']);
-  void _out;
+  const { out } = await agent(dir, ['--assistant', 'asst_abc123']);
   assert.equal(ext.created.length, 1);
   assert.equal(ext.created[0].assistant, 'asst_abc123', 'the create job carries the assistant id');
   assert.equal(ext.created[0].assistantField, 'aiAssistantId', 'and the configured field name');
@@ -590,4 +656,53 @@ test('a --watch follow-up re-states the frame and the current listing', async (t
   assert.match(followUp, /New task: second task/);
   assert.match(followUp, /still open in front of me/, 'the frame is restated');
   assert.match(followUp, /a\.txt/, 'with ground truth to correct a drifted belief against');
+});
+
+test('thinking is on by default and rides every send as thinking_level', async (t) => {
+  // The model's reasoning is a channel of its own: asked for on every message
+  // at the configured level, streamed back as reasoning_content, rendered
+  // apart from the steps — never mixed into the tools or the answer.
+  const dir = tempDir({ 'README.md': 'a starter project\n' });
+  const handler = scripted([
+    'Let me look.\n\nNEED file README.md',
+    'It is a starter project.\n\nDONE It is a starter project.',
+  ]);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir);
+  assert.ok(ext.chats.length >= 2, 'the run sent more than one message');
+  for (const job of ext.chats) assert.equal(job.thinkingLevel, 'low', 'every send carries the default level');
+  assert.match(out, /think low/, 'the header names the level');
+});
+
+test('--thinking off asks for nothing and a bad level stops the start', async (t) => {
+  const dir = tempDir({ 'README.md': 'x\n' });
+  const handler = scripted(['DONE nothing to do']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  await agent(dir, ['--thinking', 'off']);
+  assert.equal(ext.chats.at(-1).thinkingLevel, undefined, 'off means the request never asks');
+
+  const bad = await agent(dir, ['--thinking', 'banana']);
+  assert.equal(bad.code, 1, 'a typo is refused before any message is sent');
+  assert.match(bad.out, /bad --thinking/);
+});
+
+test('reasoning streams as its own dim line, apart from the step', async (t) => {
+  const dir = tempDir({ 'README.md': 'a starter project\n' });
+  const onChat = async (job, e) => {
+    await e.reasoning('Weighing the options\n');
+    await e.reasoning('the README looks like a starter\n');
+    await e.text('DONE It is a starter project.');
+    await e.done();
+  };
+  const ext = await new FakeExtension(bridge.base, { onChat }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir);
+  assert.match(out, /⟡ Weighing the options/, 'thinking keeps its own gutter');
+  assert.match(out, /⟡ the README looks like a starter/);
+  assert.match(out, /✓ It is a starter project/, 'and the answer still reads as the answer');
 });

@@ -192,7 +192,17 @@
       buffer = [];
     };
     const ticker = setInterval(flush, 40);
-    const push = (kind, text, filename) => { if (text) buffer.push({ kind, text, ...(filename ? { filename } : {}) }); };
+    // Anything that is part of the answer, as opposed to a status line. Counted
+    // because a stream can only be safely reattached before the first one: a
+    // resume replays from the start, which would duplicate whatever was already
+    // sent on.
+    let emitted = 0;
+    const CONTENT = new Set(['text', 'reasoning', 'image', 'video', 'audio', 'file']);
+    const push = (kind, text, filename) => {
+      if (!text) return;
+      if (CONTENT.has(kind)) emitted++;
+      buffer.push({ kind, text, ...(filename ? { filename } : {}) });
+    };
 
     try {
       // Process parts: upload any image blobs and get their storageKey
@@ -255,6 +265,11 @@
         // The levels a model advertises in thinkingConfig.supportedLevels —
         // low | medium | high, and max on Claude Opus. The bridge validates.
         ...(job.thinkingLevel ? { thinkingLevel: job.thinkingLevel } : {}),
+        // A style preset for an image model, by id; tone and format apply to any
+        // model and travel as the codes the output-styles loader publishes.
+        ...(job.imageStyleId ? { imageStyleId: job.imageStyleId } : {}),
+        ...(job.outputTone ? { outputTone: job.outputTone } : {}),
+        ...(job.outputFormat ? { outputFormat: job.outputFormat } : {}),
         messages: [{
           id: crypto.randomUUID(),
           role: 'user',
@@ -286,16 +301,45 @@
         );
       }
 
-      const reader = res.body.getReader();
+      let reader = res.body.getReader();
       const decoder = new TextDecoder();
       let pending = '';
       let finishReason = 'stop';
       const toolNames = new Map();
       const sources = [];
       const seenUnknown = new Set();
+      // The generation runs on the server, so losing the socket does not stop
+      // it — the answer is produced and nobody is listening. The app exposes the
+      // same reattach the Vercel AI SDK calls reconnectToStream, and this uses
+      // it: a broken read resumes rather than failing a job already being paid
+      // for. Deliberately narrow — see resume() for why it only fires before any
+      // content has been sent on.
+      let resumes = 0;
+      const resume = async () => {
+        // Only before the first content frame. After that a replay would arrive
+        // as a second copy of the answer, which is worse than the failure.
+        if (emitted > 0 || resumes >= 2) return false;
+        resumes++;
+        try {
+          const again = await fetch(`/actions/resume-stream/${encodeURIComponent(job.conversationId)}`, {
+            credentials: 'include', headers: { accept: '*/*' }, signal: controller.signal,
+          });
+          if (!again.ok || !again.body) return false;
+          reader = again.body.getReader();
+          push('status', `[stream] reattached after losing the connection (${resumes})`);
+          return true;
+        } catch { return false; }
+      };
 
       for (;;) {
-        const { value, done } = await reader.read();
+        let value, done;
+        try {
+          ({ value, done } = await reader.read());
+        } catch (err) {
+          if (controller.signal.aborted) throw err;
+          if (await resume()) continue;
+          throw err;
+        }
         if (done) break;
         pending += decoder.decode(value, { stream: true });
 
@@ -389,6 +433,20 @@
             case 'source-url':
               if (evt.url && !sources.some((x) => x.url === evt.url)) sources.push({ url: evt.url, title: evt.title });
               break;
+            // The search itself reports its results on one frame carrying every
+            // link at once. Without this the frame fell through to the unknown
+            // handler, which printed its whole JSON body into the answer — and
+            // sonar, which sends only this frame and no source-url, listed its
+            // sources with blank titles.
+            case 'data-web_search_results': {
+              for (const link of evt.data?.links ?? evt.links ?? []) {
+                if (!link?.url) continue;
+                const found = sources.find((x) => x.url === link.url);
+                if (found) found.title ??= link.title;
+                else sources.push({ url: link.url, title: link.title, domain: link.domain });
+              }
+              break;
+            }
             case 'error':
               throw new Error(evt.errorText ?? evt.message ?? 'stream error');
             case 'finish':
@@ -408,7 +466,10 @@
       }
 
       if (sources.length) {
-        push('status', `sources:\n${sources.map((x) => `  - ${x.title ?? ''} ${x.url}`).join('\n')}`);
+        push('status', `sources:\n${sources.map((x) => {
+          const label = x.title || x.domain || new URL(x.url, location.origin).hostname;
+          return `  - ${label} ${x.url}`;
+        }).join('\n')}`);
       }
       flush();
       reply({ jobId: job.jobId, kind: 'done', finishReason });
@@ -529,7 +590,11 @@
   // intents are fixed here rather than taken from the job — the bridge can ask
   // for an assistant, it cannot ask this page to post anywhere it likes.
   const ASSISTANT_ACTION = '/actions/ai-assistant-actions';
-  const ASSISTANT_INTENTS = new Set(['createDraft', 'patchAssistant', 'confirmAssistant']);
+  const ASSISTANT_START_CHAT = '/actions/ai-assistant-start-chat';
+  // `delete` is here so a mistake can be cleaned up from the CLI that made it.
+  // pin, unpin, track-usage and deleteFile exist upstream and are deliberately
+  // left out until something needs them.
+  const ASSISTANT_INTENTS = new Set(['createDraft', 'patchAssistant', 'confirmAssistant', 'delete']);
 
   async function postAssistant(fields, signal) {
     if (!ASSISTANT_INTENTS.has(fields.intent)) throw new Error(`refusing intent: ${fields.intent}`);
@@ -551,10 +616,35 @@
     return data ?? {};
   }
 
+  // Starting a bound chat is its own route and takes one field. It is what
+  // removes copying a conversation id out of the address bar.
+  async function startAssistantChat(assistantId, signal) {
+    const form = new FormData();
+    form.append('aiAssistantId', assistantId);
+    const res = await fetch(ASSISTANT_START_CHAT, { method: 'POST', credentials: 'include', body: form, signal });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`start-chat returned ${res.status}: ${text.slice(0, 300)}`);
+    let data = null;
+    try { data = JSON.parse(text); } catch { /* may answer with a redirect body */ }
+    // The id can arrive under several names, or only inside a redirect target.
+    const id = data?.conversationId ?? data?.id ?? data?.conversation?.id
+      ?? (text.match(/\/chat\/([A-Za-z0-9]{8,})/) ?? [])[1];
+    if (!id) throw new Error(`start-chat returned no conversation: ${text.slice(0, 300)}`);
+    return id;
+  }
+
   async function runAssistant(job) {
     const controller = new AbortController();
     inflight.set(job.jobId, controller);
     try {
+      if (job.op === 'start-chat') {
+        const conversationId = await startAssistantChat(job.assistantId, controller.signal);
+        return void reply({ jobId: job.jobId, kind: 'assistant', assistantId: job.assistantId, conversationId });
+      }
+      if (job.op === 'delete') {
+        await postAssistant({ intent: 'delete', assistantId: job.assistantId }, controller.signal);
+        return void reply({ jobId: job.jobId, kind: 'assistant', assistantId: job.assistantId, deleted: true });
+      }
       const draft = await postAssistant({ intent: 'createDraft' }, controller.signal);
       const assistantId = draft.assistantId ?? draft.id ?? draft.data?.assistantId;
       if (!assistantId) throw new Error(`createDraft returned no assistantId: ${JSON.stringify(draft).slice(0, 300)}`);

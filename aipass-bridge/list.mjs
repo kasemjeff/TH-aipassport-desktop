@@ -3,6 +3,7 @@
 // liners in package.json, which is a code-execution shape that upstream
 // filters reject when the agent reads its own package.json back.
 import fs from 'node:fs';
+
 const BRIDGE = (process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787').replace(/\/+$/, '');
 const argv = process.argv.slice(2);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -19,14 +20,18 @@ if (argv.some((a) => ['--help', '-h', 'help'].includes(a))) {
 
   models [kind]  list models by category; kind narrows it (chat, research,
                  image, video, music)
+  styles         video style presets, and what each provider will accept
   conversations  list conversations, marking the one in use
   credits        how much of the credit pool is left
+  --version      print version and exit
 
   AIPASS_BRIDGE  bridge base URL (default: http://127.0.0.1:8787)
 
 Each is a thin wrapper over: node aipass-bridge/list.mjs <what>`);
   process.exit(0);
 }
+
+const dim = (t) => `\x1b[2m${t}\x1b[0m`;
 
 const get = async (p) => {
   const res = await fetch(`${BRIDGE}${p}`);
@@ -35,7 +40,40 @@ const get = async (p) => {
 };
 
 try {
-  if (what === 'models') {
+  if (what === 'styles') {
+    // The presets a video model accepts, plus what each provider is served —
+    // all of it read from the app's own loaders rather than hardcoded here.
+    const { styles, byProvider } = await get('/video-options?refresh=1');
+    if (!styles.length) {
+      console.log('no styles returned — is a de.aipass.net tab open?');
+    } else {
+      console.log('\nวิดีโอสไตล์ · video styles\n');
+      for (const v of styles) {
+        console.log(`  ${v.name.padEnd(22)} ${v.nameTh ?? ''}`);
+        console.log(`  ${' '.repeat(22)} ${dim(v.preprompt.slice(0, 84))}${v.preprompt.length > 84 ? '…' : ''}`);
+      }
+      console.log(`\nUse the name: npm run chat -- --style ${JSON.stringify(styles[0].name)}\n`);
+    }
+    const st = await get('/style-options?refresh=1');
+    if (st.imageStyles.length) {
+      console.log('\nรูปภาพสไตล์ · image styles');
+      console.log('  ' + st.imageStyles.map((v) => v.name).join(' · '));
+    }
+    if (st.tones.length) {
+      console.log('\nโทนคำตอบ · tone      ' + st.tones.map((v) => v.code).join(' · '));
+      console.log('รูปแบบคำตอบ · format  ' + st.formats.map((v) => v.code).join(' · '));
+    }
+    console.log('\nวิดีโอ · what each video provider accepts\n');
+    for (const [provider, o] of Object.entries(byProvider)) {
+      const parts = [
+        o.resolutions.length ? `resolution ${o.resolutions.join('/')}` : '',
+        o.durations.length ? `duration ${o.durations.join('/')}s` : '',
+        o.aspectRatios.length ? `ratio ${o.aspectRatios.join(' ')}` : '',
+      ].filter(Boolean);
+      if (parts.length) console.log(`  ${provider.padEnd(10)} ${parts.join('  ·  ')}`);
+    }
+    console.log();
+  } else if (what === 'models') {
     // The web UI groups these into tabs; the loader sends no category, so the
     // bridge derives one and this prints in the same order the tabs run.
     const want = argv[1] && !argv[1].startsWith('-') ? argv[1] : '';
@@ -74,9 +112,12 @@ try {
     if (q.video) console.log(`video ${q.video.remaining} of ${q.video.limit} left this ${q.video.period}`);
   } else {
     console.error(`unknown: ${what}`);
-    process.exit(1);
+    // exitCode, not exit(): process.exit() right after a fetch can trip the
+    // Windows libuv assertion about a half-closed handle, turning a success
+    // into a crash exit code for whoever called this.
+    process.exitCode = 1;
   }
 } catch (err) {
   console.error(`${err.message} — is the bridge running? npm run dev`);
-  process.exit(1);
+  process.exitCode = 1;
 }

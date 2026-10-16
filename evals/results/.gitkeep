@@ -1,0 +1,2 @@
+# One JSONL per eval run lands here (scripts/evals.mjs). Run output is not a
+# baseline: the design keeps results as evidence, not as a checked-in matrix.

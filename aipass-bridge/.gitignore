@@ -11,3 +11,7 @@ Singleton*
 
 # Dependencies
 node_modules/
+
+# Generated media outputs
+outputs/
+aipass-*.*

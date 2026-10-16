@@ -163,7 +163,9 @@ if (argv.includes('--json')) {
   console.log(JSON.stringify({ failed, warned, ok: failed === 0 }));
 }
 
-// Flush handle cleanup before exiting (see chat.mjs); Node 24 / Windows otherwise
-// aborts with 0xC0000409 while a pooled fetch handle is still closing.
-await new Promise((resolve) => setTimeout(resolve, process.platform === 'win32' ? 1000 : 0));
-process.exit(failed ? 1 : 0);
+// Exit by drain, not process.exit(): on Windows, process.exit() immediately
+// after network I/O races Node's teardown and trips libuv's assert in
+// win/async.c:94 (0xC0000409) — the process aborts after printing a perfect
+// bill of health. Setting exitCode and letting the loop run out produces the
+// same code cleanly (nodejs/node#56645).
+process.exitCode = failed ? 1 : 0;

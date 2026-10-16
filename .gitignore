@@ -1,63 +1,36 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# Build artifacts: Rust's target dir lives outside the repo (see the README),
+# and the Node sidecar is a ~93 MB copy of the local node binary that belongs on
+# nobody's disk - on every platform, not just the .exe one. This checkout sits
+# in its build workspace, so the workspace's own target dir is ignored here too.
+/target/
+/desktop/src-tauri/target/
+/desktop/src-tauri/gen/
+/desktop/sidecar/*.exe
+/desktop/sidecar/*.dll
+/desktop/sidecar/node
+/desktop/sidecar/node-*
 
-# dependencies
-/node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
+# Local state - sessions, staged uploads, spilled tool output and logs are
+# machine-local by design.
+/.aipass/
+.mimosa/
 
-# testing
-/coverage
+# Evals run artifacts: one JSONL per run, machine-local like sessions. The
+# directory itself ships (its .gitkeep) so `npm run evals` has somewhere to
+# write; a run worth keeping can be added deliberately with git add -f.
+/evals/results/*.jsonl
 
-# next.js
-/.next/
-/out/
+node_modules/
+*.log
 
-# production
-/build
-
-# misc
-.DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files (can opt-in for committing if needed)
+# Env files at the root stay out of git; the .env.example templates are tracked.
 .env*
 !.env.example
 
-# browser profile data & session locks
-chrome-data/
-*.log
-Singleton*
-
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-
-# local API captures (contain live session cookies)
+# Local API captures — they contain live session cookies. See CLAUDE.md.
 apipass*.md
 aipass*.md
 *.har
 
-# media npm run chat saves into the cwd by default (any model output, by type)
-/aipass-*.png
-/aipass-*.jpg
-/aipass-*.jpeg
-/aipass-*.webp
-/aipass-*.mp4
-/aipass-*.webm
-/aipass-*.mp3
-/aipass-*.wav
-
+# macOS
+.DS_Store
