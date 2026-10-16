@@ -204,6 +204,35 @@
       buffer.push({ kind, text, ...(filename ? { filename } : {}) });
     };
 
+    // The edge in front of de.aipass.net answers 429 when the account is
+    // moving too fast — Cloudflare, not the app, and nothing about the request
+    // is wrong: the same body goes through in a moment. The page is the only
+    // layer that can wait it out, because by the time a failed job reaches the
+    // bridge the run is already over. retry-after is honoured when the edge
+    // sends one; otherwise 5s → 15s → 45s, and then the failure is real and
+    // surfaces with its forensics.
+    const RETRY_WAITS_MS = [5000, 15000, 45000];
+    const aborted = () => { const err = new Error('aborted'); err.name = 'AbortError'; return err; };
+    const sleep = (ms, signal) => new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(aborted()); return; }
+      const onAbort = () => { clearTimeout(timer); reject(aborted()); };
+      const timer = setTimeout(() => { signal?.removeEventListener?.('abort', onAbort); resolve(); }, ms);
+      signal?.addEventListener?.('abort', onAbort, { once: true });
+    });
+    const sendWithRetry = async (url, init, signal) => {
+      for (let attempt = 0; ; attempt++) {
+        const res = await fetch(url, init);
+        if (res.ok || (res.status !== 429 && res.status !== 503)) return res;
+        if (attempt >= RETRY_WAITS_MS.length) return res;
+        const after = Number.parseFloat(res.headers.get('retry-after'));
+        const wait = Number.isFinite(after) && after >= 0
+          ? Math.min(after * 1000, 60_000)
+          : RETRY_WAITS_MS[attempt];
+        push('status', `[${res.status}] rate limited by the edge — waiting ${Math.round(wait / 1000)}s, then retrying (${attempt + 2}/${RETRY_WAITS_MS.length + 1})`);
+        await sleep(wait, signal);
+      }
+    };
+
     try {
       // Process parts: upload any image blobs and get their storageKey
       const processedParts = [];
@@ -278,13 +307,13 @@
         }],
       });
 
-      const res = await fetch(`/actions/send-message/${encodeURIComponent(job.conversationId)}`, {
+      const res = await sendWithRetry(`/actions/send-message/${encodeURIComponent(job.conversationId)}`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'content-type': 'application/json', accept: '*/*' },
         body,
         signal: controller.signal,
-      });
+      }, controller.signal);
 
       if (!res.ok) {
         const detail = (await res.text().catch(() => '')).slice(0, 500);
@@ -297,6 +326,7 @@
           .join(' ');
         throw new Error(
           `aipass returned ${res.status} ${res.statusText} [${body.length} bytes]` +
+          `${res.status === 429 ? ` — rate-limited through ${RETRY_WAITS_MS.length} retries` : ''}` +
           `${forensics ? ` {${forensics}}` : ''}${detail ? ` — ${detail}` : ''}`
         );
       }
