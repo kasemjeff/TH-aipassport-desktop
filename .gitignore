@@ -22,3 +22,15 @@
 
 node_modules/
 *.log
+
+# Env files at the root stay out of git; the .env.example templates are tracked.
+.env*
+!.env.example
+
+# Local API captures — they contain live session cookies. See CLAUDE.md.
+apipass*.md
+aipass*.md
+*.har
+
+# macOS
+.DS_Store

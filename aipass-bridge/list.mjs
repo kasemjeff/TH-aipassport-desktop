@@ -2,8 +2,15 @@
 // Small printers for the npm scripts. These used to be `node -e "…"` one
 // liners in package.json, which is a code-execution shape that upstream
 // filters reject when the agent reads its own package.json back.
+import fs from 'node:fs';
+
 const BRIDGE = (process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787').replace(/\/+$/, '');
 const argv = process.argv.slice(2);
+const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+if (argv.includes('--version') || argv.includes('-v')) {
+  console.log(`aipass-list ${VERSION}`);
+  process.exit(0);
+}
 const what = argv[0] ?? 'models';
 
 // `npm run models -- --help` lands the flag after the subcommand, so look
@@ -16,6 +23,7 @@ if (argv.some((a) => ['--help', '-h', 'help'].includes(a))) {
   styles         video style presets, and what each provider will accept
   conversations  list conversations, marking the one in use
   credits        how much of the credit pool is left
+  --version      print version and exit
 
   AIPASS_BRIDGE  bridge base URL (default: http://127.0.0.1:8787)
 

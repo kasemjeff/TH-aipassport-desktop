@@ -3,9 +3,9 @@
 > Use [de.aipass.net](https://de.aipass.net/chat) from your terminal with live streaming, autonomous file editing agent, and an OpenAI-compatible API bridge.
 
 <p align="left">
-  <img src="https://img.shields.io/badge/node-%E2%89%A518-blue?logo=node.js&style=flat-square" alt="Node >= 18" />
+  <img src="https://img.shields.io/badge/node-%E2%89%A520-blue?logo=node.js&style=flat-square" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/dependencies-zero-success?style=flat-square" alt="Zero Dependencies" />
-  <img src="https://img.shields.io/badge/tests-211%20passing-brightgreen?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-369%20passing-brightgreen?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgray?style=flat-square" alt="Platforms" />
 </p>
 
@@ -81,7 +81,7 @@ terminal / CLI ──HTTP──▶ bridge (node, zero dependencies)
 
 ---
 
-## 🚀 Quick Start (Node ≥ 18)
+## 🚀 Quick Start (Node ≥ 20)
 
 Everything in `aipass-bridge/` uses Node.js standard libraries (`node:*`). There are **no build steps** and **no dependencies to install** for the CLI and bridge.
 
@@ -274,6 +274,8 @@ window that wraps both:
 | `AIPASS_TOOL_VISIBILITY` | `reasoning` | How tool activities stream: `reasoning`, `text`, or `off` |
 | `AIPASS_IDLE_TIMEOUT_MS` | `180000` | Inactivity timeout in ms before resetting stuck streams |
 | `AIPASS_CONVERSATION_ID` | *(unset)* | Pin all chat requests to a specific conversation ID |
+
+Every variable in one place, ready to copy: [`aipass-bridge/.env.example`](./aipass-bridge/.env.example).
 
 ---
 

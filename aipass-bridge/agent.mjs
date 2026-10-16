@@ -22,6 +22,11 @@ import { Harness } from './harness/harness.mjs';
 import { SkillLibrary } from './harness/skills.mjs';
 
 const argv = process.argv.slice(2);
+const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+if (argv.includes('--version') || argv.includes('-v')) {
+  console.log(`aipass-agent ${VERSION}`);
+  process.exit(0);
+}
 const flag = (name, fallback = null) => {
   const i = argv.indexOf(`--${name}`);
   return i === -1 ? fallback : argv[i + 1];
@@ -130,6 +135,7 @@ if (!task || HELP) {
   --subagent      tell the model about SUBAGENT and let it hand off work
   --rule R        add a permission rule "pattern=decision" (repeatable, e.g. "src/**=allow")
   --no-session    do not save a session log
+  --version       print version and exit
 
 The model receives a tool protocol on turn 1 and drives file edits directly.
 A dry run prints a unified diff; reply 'y' or pass --apply to write it to disk.`);

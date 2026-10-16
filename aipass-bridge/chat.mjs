@@ -44,6 +44,11 @@ import { execSync, spawnSync } from 'node:child_process';
  */
 
 const argv = process.argv.slice(2);
+const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+if (argv.includes('--version') || argv.includes('-v')) {
+  console.log(`aipass ${VERSION}`);
+  process.exit(0);
+}
 
 /**
  * @param {string} name
@@ -85,6 +90,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
                                             (default: outputs/)
   --paste-idle MS     how long to wait before treating pasted lines as one
                       message                          (default: 60)
+  --version           print version and exit
 
 With a question, it answers and exits. Without one it stays interactive, where
 /models lists what is available, /model <id> switches, and Ctrl+C quits.`);

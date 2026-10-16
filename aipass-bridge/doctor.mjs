@@ -6,7 +6,13 @@
 // below tests exactly one link and, when it fails, prints the one thing to do
 // about it — so a broken setup costs a line of output rather than a session of
 // guessing.
+import fs from 'node:fs';
 const argv = process.argv.slice(2);
+const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+if (argv.includes('--version') || argv.includes('-v')) {
+  console.log(`aipass-doctor ${VERSION}`);
+  process.exit(0);
+}
 const flag = (name, fallback = null) => {
   const i = argv.indexOf(`--${name}`);
   return i === -1 ? fallback : argv[i + 1];
@@ -18,6 +24,8 @@ if (argv.includes('--help') || argv.includes('-h')) {
   --bridge URL   bridge base URL     (default: http://127.0.0.1:8787)
   --chat         send a test message even when no free model is available
   --no-chat      skip the round trip entirely
+  --json         print a machine-readable summary as the last line
+  --version      print version and exit
 
 Exits 0 when every check passes, 1 otherwise.`);
   process.exit(0);
@@ -150,6 +158,10 @@ console.log();
 if (failed) console.log(red(`${failed} check${failed > 1 ? 's' : ''} failed.`) + dim(' Fix the first one — the rest usually follow.\n'));
 else if (warned) console.log(yellow(`all clear, ${warned} warning${warned > 1 ? 's' : ''}.\n`));
 else console.log(green('all good.\n'));
+
+if (argv.includes('--json')) {
+  console.log(JSON.stringify({ failed, warned, ok: failed === 0 }));
+}
 
 // Exit by drain, not process.exit(): on Windows, process.exit() immediately
 // after network I/O races Node's teardown and trips libuv's assert in

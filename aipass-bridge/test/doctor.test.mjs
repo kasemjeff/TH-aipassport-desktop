@@ -58,6 +58,19 @@ test('--no-chat skips the round trip', async (t) => {
   assert.match(out, /– round trip\s+skipped \(--no-chat\)/);
 });
 
+test('doctor --json emits a machine-readable summary', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  const { code, out } = await doctor(bridge.base, ['--no-chat', '--json']);
+  assert.equal(code, 0, out);
+  const lines = out.trim().split(/\r?\n/);
+  const last = JSON.parse(lines.at(-1));
+  assert.equal(last.failed, 0);
+  assert.equal(last.warned, 0);
+  assert.equal(last.ok, true);
+});
+
 // Asking for help is not an error, and `npm run models -- --help` puts the flag
 // after the subcommand — both of which were wrong when --help was first added.
 test('every CLI answers --help and exits 0', async () => {

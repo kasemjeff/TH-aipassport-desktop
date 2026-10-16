@@ -3,9 +3,15 @@
 // filling in a web form and pasting a thousand characters by hand.
 //
 //   npm run setup-assistant
+import fs from 'node:fs';
 import { ASSISTANT_CHARACTER } from './assistant-prompt.mjs';
 
 const argv = process.argv.slice(2);
+const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+if (argv.includes('--version') || argv.includes('-v')) {
+  console.log(`aipass-setup-assistant ${VERSION}`);
+  process.exit(0);
+}
 const flag = (name, fallback = null) => {
   const i = argv.indexOf(`--${name}`);
   return i === -1 ? fallback : argv[i + 1];
@@ -19,6 +25,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
   --start-chat    open a conversation bound to it and point the bridge at it
   --delete ID     remove an assistant, then stop
   --bridge URL    bridge base URL       (default: http://127.0.0.1:8787)
+  --version       print version and exit
 
 Creates the assistant that carries the agent's tool protocol, so runs do not
 resend it. Prints the id to put in AIPASS_ASSISTANT_ID.`);

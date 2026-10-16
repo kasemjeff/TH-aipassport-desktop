@@ -25,5 +25,11 @@ services:
       - AIPASS_PORT=8787
       - AIPASS_HOST=0.0.0.0
       - AIPASS_MODEL=gemini-3.1-flash-lite
+      # The container-management routes (/restart, /logs, /browser/restart,
+      # /ext/reload, /tab/reload) exist only here, not in a local run.
+      - AIPASS_ADMIN=1
+      # Reaching the bridge through a hostname other than localhost (a reverse
+      # proxy, say) needs that name listed here — it is refused otherwise.
+      - AIPASS_ALLOWED_HOSTS=${AIPASS_ALLOWED_HOSTS:-}
       - noVNC_PASSWORD=${noVNC_PASSWORD:-}
     shm_size: '2gb'
