@@ -61,17 +61,20 @@ verify itself cheaply) and not on `ignore_done` (`loop.mjs:293`); only DONE is
 a claim. Give both sites one shared finish path: a fail must not fall through
 to the second site and break there.
 
-**Gate**, mirroring R4's condition so the two stages disagree about nothing:
-`overlay.size > 0 && codeTouched && !verifiedSinceChange && !checkRan` — plus
-`options.subagent && options.allowRun`. A check is an execution; a child must
-not escalate a privilege the run refused. `codeTouched` reuses `CODE_FILE`
-(`loop.mjs:28`); docs-only runs skip, as they skip R4. The intended everyday
-configuration is the desktop's defaults (`subagent: true`, `settings.mjs:33`)
-with RUN enabled.
+**Gate**: `overlay.size > 0 && codeTouched` — plus `options.subagent &&
+options.allowRun`. A check is an execution; a child must not escalate a
+privilege the run refused. `codeTouched` reuses `CODE_FILE` (`loop.mjs:28`);
+docs-only runs skip, as they skip R4. The gate deliberately drops R4's
+`!verifiedSinceChange`: a self-run or a read-back is the model grading its own
+paper, and the child exists to be a verdict the run cannot write for itself.
+The intended everyday configuration is the desktop's defaults (`subagent:
+true`, `settings.mjs:33`) with RUN enabled.
 
-**Latch.** `checkRan` goes up before the first await — one check per run. A
-fail verdict earns exactly one continuation; the next DONE is accepted, record
-and all.
+**Bound.** `CHECK_ROUNDS_MAX = 2` verdicts a run. The first DONE over staged
+code gets the check; a fail earns exactly one continuation, and the re-check
+runs only if the tree moved since the verdict (`mutations` vs
+`mutationsAtLastCheck`) — a DONE over the tree the check already judged earns
+no second conversation. A second fail is accepted with the verdict recorded.
 
 **On fail.** Do not finish. The report rides the next message the way the R4
 nudge does, appended after `next = results…` (`loop.mjs:294`) so compaction and
@@ -155,9 +158,10 @@ asserted separately; `Emitter` for events.
 5. **Writes are refused** — checker replies `CREATE helper.mjs …`: result
    matches `/^err: the checker is read-only/`, parent `pendingChanges()`
    unchanged.
-6. **One check per run** — no `check_start` before DONE, and after fail +
-   second DONE no second checker conversation (`createConversation` count /
-   `check_start` count stays 1).
+6. **An always-run exit check, bounded at two verdicts** — no `check_start`
+   before DONE; a self-run in the reply does not stand it down; after fail +
+   fix + DONE the re-check runs; a second fail is accepted with `checks: 2`
+   (`createConversation` count follows the verdicts).
 7. **No RUN, no check** — `allowRun: false` with staged code: no checker
    conversation, `checks: 0`, run ends `done`.
 8. **Checker conversation unavailable** — `createConversation` answers null:
@@ -170,9 +174,12 @@ asserted separately; `Emitter` for events.
    ask for exactly this mid-run? The generic SUBAGENT cannot be told "verify",
    which is the gap this design is built around.
 2. **One continuation, or a hard gate?** The spine's stronger reading is "done
-   means a runnable check passed". v1 accepts the second DONE and records the
-   verdict; a `done-unverified` bucket in `byStop` is a decision for after
-   `checks`/`checkVerdict` have data.
+   means a runnable check passed". As shipped, a fail earns one continuation
+   and a fix earns one re-check (two verdicts a run, max); a DONE over the
+   tree the check already judged is accepted with the verdict recorded.
+   Whether the first verdict can block `done` outright — a `done-unverified`
+   bucket in `byStop` — is a decision for after `checks`/`checkVerdict` have
+   data.
 3. **Where does "the project's check" come from?** Answered 2026-10-16 with the
    declared check below: `.aipass/check.txt` names the command when the project
    wants verdicts to be comparable; without it the checker keeps inferring from

@@ -158,18 +158,29 @@ ${transcript}`;
    * The first message of a rotated conversation: the summary, the task, and
    * the instruction frame that keeps the model inside the marker protocol.
    * A mid-run rotation pastes the step's tool results on top, so nothing the
-   * model asked for is lost to the rotation itself.
+   * model asked for is lost to the rotation itself. Two harder-won things
+   * ride along when the caller has them: the staged file list (edits the
+   * summary may compress away) and the last failing check, pinned verbatim so
+   * the fresh conversation does not repeat either by accident.
    */
-  seed({ summary, task, listing, preambleText, results = null }) {
+  seed({ summary, task, listing, preambleText, results = null, staged = null, lastCheck = null }) {
     const tail = results
       ? `Here are the results of the step just finished:\n${results}\n\nContinue the task from there.`
       : 'What should I open first?';
+    const carried = [
+      staged?.length
+        ? `\nStaged but not on disk yet (Apply has not happened):\n${staged.map((s) => `- ${s}`).join('\n')}`
+        : '',
+      lastCheck
+        ? `\nThe last check of the staged tree did not pass (${lastCheck.verdict}):\n${String(lastCheck.text ?? '').slice(0, 600)}`
+        : '',
+    ].join('');
     return `${preambleText}
 
 Earlier work, already done — do not repeat it, build on it:
 ${summary || '(nothing recorded yet)'}
 
-Task: ${task}
+Task: ${task}${carried}
 
 ${tail}`;
   }

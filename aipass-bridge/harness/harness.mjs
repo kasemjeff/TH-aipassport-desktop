@@ -235,6 +235,13 @@ export class Harness {
     this.session.append('compaction', { summary, firstKeptEntryId: this.session.entries.at(-1)?.id ?? null });
     await this.#rotate(summary, task);
     this.events.emit('compacted', { summary });
+    // The staged list rides along (deletes marked): a rotation is where a
+    // pending edit gets forgotten, and the fresh conversation must know the
+    // tree is not what the disk says yet.
+    const staged = this.overlay.keys().map((abs) => {
+      const rel = path.relative(this.root, abs).split(path.sep).join('/');
+      return this.overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
+    }).slice(0, 20);
     const seedText = this.compactor.seed({
       summary,
       task,
@@ -245,6 +252,7 @@ export class Harness {
         subagent: Boolean(this.options.subagent),
         lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
+      staged,
     });
     return { summary, seedText };
   }

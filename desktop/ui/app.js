@@ -244,6 +244,18 @@ function renderPending(changes) {
     list.append(li);
   }
   wrap.classList.toggle('hidden', state.pending.size === 0);
+
+  // The verdict badge: what Apply is about to write was checked by something
+  // other than the run itself, or it was not. A turn in flight is skipped —
+  // its verdict arrives with 'finished'.
+  const badge = $('pending-check');
+  const verdict = state.lastCheck?.verdict ?? null;
+  const show = state.pending.size > 0 && !state.running;
+  badge.textContent = !show ? ''
+    : verdict === 'pass' ? '✓ ตรวจผ่าน'
+      : verdict === 'fail' ? '✗ ตรวจไม่ผ่าน'
+        : '⚠ ยังไม่ผ่านการตรวจ';
+  badge.className = `check-badge ${verdict === 'pass' ? 'pass' : verdict === 'fail' ? 'fail' : 'none'}${show ? '' : ' hidden'}`;
 }
 
 async function showDiff(file) {
@@ -495,7 +507,10 @@ stream.addEventListener('plugin_call', (e) => {
   addNote(`plugin ${marker} ${arg}`.trim());
 });
 stream.addEventListener('finished', async (e) => {
-  const { summary, stopReason, spent, credits } = JSON.parse(e.data);
+  const { summary, stopReason, spent, credits, check } = JSON.parse(e.data);
+  // The run's verdict rides the pending panel: the badge under the change
+  // list says whether Apply is about to write something a check passed.
+  state.lastCheck = check ?? null;
   endTurn();
   state.running = false;
   $('send').textContent = 'ส่ง';
@@ -575,6 +590,7 @@ async function sendTask(seed = null) {
   $('task').value = '';
   closeSlash();
   state.running = true;
+  state.lastCheck = null; // a fresh run's verdict is not the old run's
   $('send').textContent = 'หยุด';
   $('hint').textContent = 'ทำงานอยู่…';
   try {

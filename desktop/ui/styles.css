@@ -604,6 +604,10 @@ details.think pre { color: var(--dim); font: 12px/1.45 var(--mono); white-space:
   overflow: auto;
 }
 .pending-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; font-size: 12.5px; }
+.check-badge { font-size: 11.5px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); }
+.check-badge.pass { color: var(--ok); border-color: var(--ok); }
+.check-badge.fail { color: var(--bad); border-color: var(--bad); }
+.check-badge.none { color: var(--warn); border-color: var(--warn); }
 #pending-list { list-style: none; margin: 0; padding: 0; font-size: 13px; }
 #pending-list li { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
 #pending-list .counts { font-family: var(--mono); font-size: 12px; }
