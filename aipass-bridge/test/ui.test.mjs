@@ -611,6 +611,54 @@ test('a plan-mode run sends a real permission mode, not the view name', async ()
   assert.equal(run.params.task, 'จัดบ้านให้หน่อย');
 });
 
+test('a plan gate opens the approve modal, and both answers reach the backend', async () => {
+  // The backend stops the run and emits plan_request; the window is the only
+  // thing that can answer it. The modal used to exist without a test — the
+  // run then waited for an answer nobody could give.
+  const { node, sent, tick } = await bootApp(BACKEND);
+  await tick();
+
+  globalThis.__stream.emit('plan_request', {});
+  await tick();
+  assert.equal(node('modal-title').textContent, 'start this plan?');
+  assert.equal(node('modal').classList.contains('hidden'), false, 'the gate is on screen');
+
+  node('modal-actions').children[1].dispatch('click'); // approve
+  await tick();
+  assert.deepEqual(sent.at(-1), { method: 'plan.answer', params: { ok: true } }, 'approve goes to the backend');
+  assert.equal(node('modal').classList.contains('hidden'), true, 'and the gate closes');
+
+  globalThis.__stream.emit('plan_request', {});
+  await tick();
+  node('modal-actions').children[0].dispatch('click'); // decline
+  await tick();
+  assert.deepEqual(sent.at(-1), { method: 'plan.answer', params: { ok: false } }, 'decline goes too');
+});
+
+test('/plan turns plan mode on together with the approval gate', async () => {
+  // One concept, two flags: a plan that drafts but never waits was the state
+  // /plan used to leave behind. The header view has to agree, too.
+  let saved = { ...BACKEND['settings.get']() };
+  const { node, sent, tick } = await bootApp({
+    ...BACKEND,
+    'settings.get': () => saved,
+    'settings.set': (params) => { saved = { ...saved, ...params }; return saved; },
+  });
+  const task = node('task');
+
+  task.value = '/plan';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.deepEqual(sent.at(-1), { method: 'settings.set', params: { plan: true, requirePlanApproval: true } }, 'both flags move together');
+  assert.equal(node('mode').value, 'plan', 'and the header shows the plan view');
+
+  task.value = '/plan';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.deepEqual(sent.at(-1).params, { plan: false, requirePlanApproval: false }, 'off moves both back');
+  assert.equal(node('mode').value, 'ask', 'and the header leaves the plan view');
+});
+
 test('the context meter reports a budget and a trigger', async () => {
   const { node } = await bootApp(BACKEND);
   const ctx = node('context');

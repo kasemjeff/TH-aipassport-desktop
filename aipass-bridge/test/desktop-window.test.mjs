@@ -179,6 +179,32 @@ test('plan mode parses PLAN and TODO, and stops the run until the plan is approv
   assert.equal(result.stopReason, 'done');
 });
 
+test('the approval gate follows the saved setting, not just the run call', async (t) => {
+  // The window flips plan mode through settings.set (the mode view, the sheet
+  // and /plan all do); the run it sends after never carries
+  // requirePlanApproval. A run call that reset the flag to false ran plans
+  // ungated — the saved yes has to reach the loop by itself.
+  const env = await startRpc({
+    files: { 'a.txt': 'hello' },
+    replies: [
+      'PLAN\nread the file\nEND\nTODO\n- read the file\nEND\nNEED file a.txt',
+      'DONE never reached',
+    ],
+  });
+  t.after(() => env.stop());
+
+  await env.call('settings.set', { plan: true, requirePlanApproval: true });
+  const run = env.call('run', { task: 'do the thing', mode: 'auto' });
+
+  const ask = await waitForEvent(env, 'plan_request');
+  assert.ok(ask, 'the saved setting reached the loop');
+  await env.call('plan.answer', { ok: false });
+
+  const result = await run;
+  assert.equal(result.stopReason, 'plan-rejected', 'declining stops the run');
+  assert.equal(result.pending.length, 0, 'and nothing was staged');
+});
+
 test('context pressure rotates the conversation and records a compaction entry', async (t) => {
   const env = await startRpc({
     files: { 'a.txt': 'x' },
