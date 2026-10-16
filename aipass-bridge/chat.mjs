@@ -893,6 +893,8 @@ DONE one sentence about what you found or changed
 
 Only write DONE at the very end, when nothing more is needed. Never put DONE in the same reply as a NEED — ask for what you want, wait for me to paste it, and read it first.
 
+If a choice is genuinely mine to make, stop and ask instead — a line of the form ASK your question. I answer it in my next message; use it rarely.
+
 The markers are only formatting for my editor. Nothing runs on your side — I do all of it and paste every result straight back to you, so keep going until you have what you need.
 
 CRITICAL: You are an AI assistant collaborating with me in this chat. You do NOT access my local filesystem directly — I am a human running this terminal on my own computer, and I personally read the files you name and paste their contents back to you. Therefore, NEVER state that you cannot access files, and NEVER refuse to use these markers — asking for a file with NEED file <path> is simply requesting me to paste it for you. Even if my prompt or question is in Thai or another language, accept it and request the files you need using the exact markers above.
@@ -1685,7 +1687,8 @@ async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApp
     const proseText = agentProse(reply);
     const calls = agentParse(reply);
     const done  = calls.find((c) => c.kind === 'done');
-    const work  = calls.filter((c) => c.kind !== 'done');
+    const ask   = calls.find((c) => c.kind === 'ask');
+    const work  = calls.filter((c) => c.kind !== 'done' && c.kind !== 'ask');
     if (proseText) {
       const firstLine = proseText.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#')) || proseText.split('\n')[0].trim();
       if (firstLine) {
@@ -1696,6 +1699,17 @@ async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApp
     }
 
     if (!work.length) {
+      // ASK pauses the chat here: the question is the run's closing line and
+      // the user's next input is the answer.
+      if (ask) {
+        out(`  ${gray('└── ')}${bold('?')} ${bold('[ask]')}   ${(ask.arg || 'the agent needs your answer').trim()}`);
+        if (proseText) {
+          out('');
+          const md = makeRenderer();
+          for (const l of proseText.split('\n')) md(l);
+        }
+        break;
+      }
       const effectiveDone = done || (toolsRun > 0 && proseText ? { kind: 'done', arg: 'task complete' } : null);
       if (effectiveDone) {
         const cleanArg = (effectiveDone.arg || 'task complete').replace(/^[-—–:]\s*/, '').trim();

@@ -92,12 +92,15 @@ chat tab emits `needs_tab` so the window can offer the fix in one click.
 Stops: `cancelled`, `error`.
 
 **3. Parse.** `prose()` + `parse()` scan the whole reply. Markers only count
-when they start their own line, and fenced code is skipped. `done` is pulled
-out; everything else is `work`. The first real prose line becomes `thinking` —
-the window's "what is it doing" line.
+when they start their own line, and fenced code is skipped. `done` and `ask`
+are pulled out; everything else is `work`. The first real prose line becomes
+`thinking` — the window's "what is it doing" line.
 
-**4. Nothing actionable?** Two branches:
+**4. Nothing actionable?** Three branches:
 
+- an ASK (and no reads in flight): the question is the closing message — the
+  language check applies, nothing is checked — and the run pauses for the
+  answer. Emits `done_line` + `ask`. Stops: `ask`;
 - an effective DONE (an explicit `DONE`, or prose-only after tools have run):
   the finish pipeline — `finishCheck` if code is staged and unchecked, then
   the language check, then `done_line`. Stops: `done`;
@@ -139,7 +142,8 @@ item); control markers never pass the permission gate.
 mid-step stops here — before the DONE handling, so a `DONE` riding the same
 reply cannot mask why the run stopped; whatever was staged is still staged. A
 DONE with reads still in flight is deferred (`ignore_done`) so the reads
-execute and their results go out first.
+execute and their results go out first. An ASK with reads in flight waits the
+same way — the read's result goes out, and the question lands a step later.
 
 **9. Stagnation guard.** A step signature (kind + arg + first 2000 chars of
 each result) is kept for the last six steps:
@@ -188,6 +192,7 @@ All of them correct *evidence*, never intent: a call runs as written first.
 | stopReason | meaning |
 |---|---|
 | `done` | DONE accepted (possibly after the checker or a language rewrite) |
+| `ask` | the model paused on a question (ASK) — the next message answers it |
 | `steps` | the step limit ran out — the default |
 | `stalled` | hollow replies ×3, or too many repeat refusals |
 | `stagnation` | the same step, or two trading places, with identical results |
@@ -228,7 +233,7 @@ consumer:
 
 | group | events |
 |---|---|
-| lifecycle | `task_start`, `step`, `thinking`, `done_line`, `ignore_done`, `give_up`, `step_limit`, `finished`, `run_stats` |
+| lifecycle | `task_start`, `step`, `thinking`, `done_line`, `ask`, `ignore_done`, `give_up`, `step_limit`, `finished`, `run_stats` |
 | model tokens | `assistant_delta`, `reasoning_delta` |
 | tools | `tool`, `repeat_block`, `plugin_call`, `diff_update`, `applied` |
 | gates & prompts | `plan_request` (facade), `permission_request` (permission engine), `nudge`, `stagnation`, `verify_prompt`, `lang_prompt`, `check_start`, `check_end` |
@@ -245,7 +250,8 @@ the helper keeps its original behaviour.
 | `test/run-resilience.test.mjs` | a gap in the extension: retried where safe, not retried mid-stream |
 | `test/run-overlay.test.mjs` | the staged tree projected into RUN; the disk untouched until Apply |
 | `test/gates.test.mjs` · `test/permissions.test.mjs` | the decisions the gate consumes — yolo still asks about destructive RUNs |
-| `test/checker.test.mjs` | verdicts pass/fail/none, the read-only child, one check per run |
+| `test/checker.test.mjs` | verdicts pass/fail/none, the read-only child, one check per run, the declared check |
+| `test/ask.test.mjs` | the ASK pause: closing line, no check, deferral beside a NEED |
 | `test/lang-guard.test.mjs` | path variants (invisibles, Thai digits), the Thai reply policy, the repeat guard up to `stalled` |
 | `test/harness-fixes.test.mjs` · `test/harness-research.test.mjs` | the stagnation guard's warn-then-stop |
 | `test/compact.test.mjs` | rotation mid-run; the estimate's script-aware divisor |

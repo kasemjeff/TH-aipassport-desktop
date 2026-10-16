@@ -162,6 +162,17 @@ export async function runTask(taskText, ctx = {}) {
 
   let nudges = 0;            // (stats) every "no marker" nudge the run needed
   let nudgeStreak = 0;       // consecutive ones — the third stops the run
+
+  // The ASK stop: the run pauses with the question as its closing message —
+  // no check, no nudge. The next user message in the same conversation is the
+  // answer, so the question is all this turn has to deliver.
+  const pauseForAsk = (question) => {
+    summary = String(question || '').replace(/^[-—–:]\s*/, '').trim() || 'over to you — how should I proceed?';
+    session?.append('note', { text: 'the run paused on a question (ASK) — the next message answers it' });
+    events?.emit('ask', { text: summary });
+    events?.emit('done_line', { text: summary, extra: '' });
+    stopReason = 'ask';
+  };
   let toolsRun = 0;
   let stagnationWarns = 0;   // (H7) steps corrected by the stagnation guard
   let stagnantStep = 0;      // consecutive steps with the same signature
@@ -297,7 +308,8 @@ export async function runTask(taskText, ctx = {}) {
     const proseText = prose(reply, pluginTools);
     const calls = parse(reply, { plugins: pluginTools });
     const done = calls.find((c) => c.kind === 'done');
-    const work = calls.filter((c) => c.kind !== 'done');
+    const askCall = calls.find((c) => c.kind === 'ask');
+    const work = calls.filter((c) => c.kind !== 'done' && c.kind !== 'ask');
 
     if (proseText) {
       const firstLine = proseText.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#')) || proseText.split('\n')[0].trim();
@@ -305,6 +317,14 @@ export async function runTask(taskText, ctx = {}) {
     }
 
     if (!work.length) {
+      // ASK is the one ending that wants an answer, not a verdict: the
+      // question rides the finished turn and the next message resumes.
+      if (askCall) {
+        const langMsg = replyLangMsg(proseText, askCall.arg);
+        if (langMsg && step < maxSteps) { next = `${langMsg}\n\n${REMINDER}`; continue; }
+        pauseForAsk(askCall.arg);
+        break;
+      }
       const effectiveDone = done || (toolsRun > 0 && proseText ? { kind: 'done', arg: 'done' } : null);
       if (effectiveDone) {
         const cleanArg = (effectiveDone.arg || proseText || 'done').replace(/^[-—–:]\s*/, '').trim();
@@ -496,6 +516,15 @@ export async function runTask(taskText, ctx = {}) {
     if (budgetHit) break;
 
     const stillLooking = work.some((c) => READING.has(c.kind));
+    // ASK fires in the same gate DONE does. A reply that was still gathering
+    // (a NEED beside the ASK) skips it: the preamble says the two do not mix,
+    // and running the read first beats stranding its result.
+    if (askCall && !stillLooking) {
+      const langMsg = replyLangMsg(proseText, askCall.arg);
+      if (langMsg && step < maxSteps) { next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${langMsg}`; continue; }
+      pauseForAsk(askCall.arg);
+      break;
+    }
     if (done && !stillLooking) {
       summary = (done.arg || proseText || 'done').replace(/^[-—–:]\s*/, '').trim() || 'done';
       const extra = proseText && done.arg && proseText.trim() !== done.arg.trim() ? '\n' + proseText.trim() : '';

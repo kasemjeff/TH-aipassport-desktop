@@ -64,7 +64,9 @@ test('a stage-and-DONE reply is checked, and a failing check reaches the model',
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
     parent: [
-      // The staged fix is still wrong — exactly the reply R4 never sees.
+      // Read-first: CREATE over an existing file needs the file read this
+      // run; the fix itself is still the stage-and-DONE reply R4 never sees.
+      'NEED file math.mjs\n',
       'CREATE math.mjs\nexport const add = (a, b) => a - b + 1;\nEND\nDONE staged a fix\n',
       'DONE fixed by hand\n',
     ],
@@ -87,7 +89,10 @@ test('a stage-and-DONE reply is checked, and a failing check reaches the model',
 test('a passing check costs the model nothing', async () => {
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
-    parent: ['CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE fixed add\n'],
+    parent: [
+      'NEED file math.mjs\n',
+      'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE fixed add\n',
+    ],
     'conv-2': [RUN_CHECK],
   });
   const { h, events } = makeHarness({ root, bridge });
@@ -99,7 +104,8 @@ test('a passing check costs the model nothing', async () => {
   const result = await h.run('fix add()');
 
   assert.equal(result.stopReason, 'done');
-  assert.equal(parentPrompts(bridge).length, 1, 'no extra message after DONE');
+  assert.equal(parentPrompts(bridge).length, 2, 'a read, then the fix — nothing after DONE');
+  assert.ok(!parentPrompts(bridge).some((p) => /did not pass/.test(p.message)), 'a pass costs no extra message');
   assert.equal(ends.length, 1);
   assert.equal(ends[0].verdict, 'pass');
   const own = finishes.find((p) => p.check); // the child's finished carries no check
@@ -110,7 +116,10 @@ test('a passing check costs the model nothing', async () => {
 test('the checker sees the projection, the disk does not move', async () => {
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
-    parent: ['CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE fixed add\n'],
+    parent: [
+      'NEED file math.mjs\n',
+      'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE fixed add\n',
+    ],
     'conv-2': [RUN_CHECK],
   });
   const { h } = makeHarness({ root, bridge });
@@ -171,6 +180,7 @@ test('one check per run — a second DONE does not check again', async () => {
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
     parent: [
+      'NEED file math.mjs\n',
       'CREATE math.mjs\nexport const add = (a, b) => a - b + 1;\nEND\nDONE staged a fix\n',
       'DONE fixed by hand\n',
     ],
@@ -192,7 +202,10 @@ test('one check per run — a second DONE does not check again', async () => {
 test('no RUN enabled, no check — the DONE is accepted as before', async () => {
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
-    parent: ['CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE staged the fix\n'],
+    parent: [
+      'NEED file math.mjs\n',
+      'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE staged the fix\n',
+    ],
   });
   const { h, events } = makeHarness({ root, bridge, options: { allowRun: false } });
   const starts = [];
@@ -210,7 +223,10 @@ test('no RUN enabled, no check — the DONE is accepted as before', async () => 
 test('a checker conversation that will not open is skipped, never the parent one', async () => {
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
-    parent: ['CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE staged the fix\n'],
+    parent: [
+      'NEED file math.mjs\n',
+      'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE staged the fix\n',
+    ],
   }, { failCreateAfter: 1 });
   const { h, events } = makeHarness({ root, bridge });
   const ends = [];
@@ -222,7 +238,7 @@ test('a checker conversation that will not open is skipped, never the parent one
   assert.equal(bridge.created, 2, 'the check was attempted once');
   assert.equal(ends.length, 1);
   assert.equal(ends[0].skipped, true);
-  assert.equal(parentPrompts(bridge).length, 1, 'nothing extra reached the parent conversation');
+  assert.equal(parentPrompts(bridge).length, 2, 'a read and the fix — nothing extra reached the parent conversation');
   assert.ok(h.session.entries.some((e) => e.type === 'note' && /check skipped/.test(e.text)), 'the skip says why');
   assert.equal(statsOf(h).checks, 0);
   assert.equal(statsOf(h).checkVerdict, 'none');
@@ -238,6 +254,7 @@ test('the checker and its verdict name the staged test files', async () => {
   });
   const bridge = new StubBridge({
     parent: [
+      'NEED file math.mjs\nNEED file math.test.mjs\n',
       'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\n'
       + 'CREATE math.test.mjs\nimport { add } from \'./math.mjs\';\nif (add(2, 3) !== 5) process.exit(1);\nEND\n'
       + 'DONE fixed add and its test\n',
@@ -256,4 +273,32 @@ test('the checker and its verdict name the staged test files', async () => {
   assert.equal(result.check?.verdict, 'pass');
   assert.equal(result.check?.testsTouched, 1, 'the verdict counts it');
   assert.match(result.check?.text ?? '', /modified test files/, 'and the text keeps the note');
+});
+
+test('a declared check is run verbatim, read from disk', async () => {
+  const root = tempDir({
+    'math.mjs': BROKEN,
+    'check.mjs': CHECK,
+    // First non-comment line wins; it is read from DISK, so a value staged
+    // in the run could not bend the command that judges it even if it tried.
+    '.aipass/check.txt': '# the project check\nnode check.mjs\n',
+  });
+  const bridge = new StubBridge({
+    parent: [
+      'NEED file math.mjs\n',
+      'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE fixed add\n',
+    ],
+    'conv-2': [RUN_CHECK],
+  });
+  const { h } = makeHarness({ root, bridge });
+
+  const result = await h.run('fix add()');
+
+  assert.equal(result.stopReason, 'done');
+  const checkerPrompt = bridge.prompts.find((p) => p.conversation === 'conv-2');
+  assert.ok(checkerPrompt, 'the checker was asked');
+  assert.match(checkerPrompt.message, /declares its own check command/);
+  assert.match(checkerPrompt.message, /node check\.mjs/, 'the declared command is named verbatim');
+  assert.equal(result.check?.verdict, 'pass');
+  assert.equal(result.check?.declared, 'node check.mjs');
 });

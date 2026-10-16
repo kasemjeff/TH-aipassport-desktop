@@ -81,3 +81,18 @@ test('the preamble documents the helper roles', () => {
   assert.match(text, /role: reviewer/);
   assert.match(text, /role: summariser/);
 });
+
+test('ASK parses as its own call, and the question is required', () => {
+  const reply = 'One thing is genuinely yours to decide.\nASK should the export keep the old column names?\nDONE asked';
+  const calls = parse(reply);
+  assert.deepEqual(calls.map((c) => c.kind), ['ask', 'done']);
+  assert.equal(calls[0].arg, 'should the export keep the old column names?');
+  assert.doesNotMatch(prose(reply), /should the export/, 'the question is not repeated as prose');
+  assert.deepEqual(parse('ASK\nDONE only done').map((c) => c.kind), ['done'], 'a bare ASK is not a call');
+});
+
+test('the preamble documents the ASK pause', () => {
+  const text = preamble({});
+  assert.match(text, /ASK should the export keep the old column names\?/);
+  assert.match(text, /Never put ASK in the same reply as a NEED/);
+});

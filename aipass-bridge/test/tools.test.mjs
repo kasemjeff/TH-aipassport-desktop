@@ -57,6 +57,7 @@ test('FETCH truncates at the byte cap instead of riding a giant body upstream', 
     const tools = toolsIn(mkTracked({}));
     const out = await tools.fetch('http://example.com/big');
     assert.match(out, /truncated at the byte cap/);
+    assert.match(out, /untrusted input/, 'web content arrives marked as untrusted');
     assert.ok(out.length < 2_000, 'the result is bounded, not the whole body');
   } finally {
     globalThis.fetch = realFetch;
@@ -187,4 +188,28 @@ test('a write answers with a read-back of what it staged', () => {
   assert.match(out, /^wrote notes\.txt, 3 lines/);
   assert.match(out, /read-back: 1: first line/);
   assert.match(out, / \| 3: last line/, 'and the last line, so a body cut short shows');
+});
+
+test('CREATE over an existing file requires a read first', () => {
+  const dir = mkTracked({ 'notes.txt': 'original text\n' });
+  const tools = toolsIn(dir);
+  const refused = tools.write('notes.txt', 'replacement\n');
+  assert.match(refused, /^err: notes\.txt already exists on disk and has not been read/);
+  assert.match(refused, /NEED file notes\.txt/, 'the way out is named');
+  assert.equal(fs.readFileSync(`${dir}/notes.txt`, 'utf8'), 'original text\n', 'the disk was never touched');
+  assert.match(tools.read('notes.txt'), /original text/, 'reading clears the gate');
+  assert.match(tools.write('notes.txt', 'replacement\n'), /^wrote notes\.txt/);
+  // A file the run staged itself can be rewritten — it is the run's own work.
+  assert.match(tools.write('fresh.txt', 'one\n'), /^wrote fresh\.txt/);
+  assert.match(tools.write('fresh.txt', 'two\n'), /^wrote fresh\.txt/);
+});
+
+test('a missed FIND answers with the closest line, a repeated one with its places', () => {
+  const dir = mkTracked({ 'a.txt': 'const total = price * qty;\nconst label = "Total";\n' });
+  const tools = toolsIn(dir);
+  const missed = tools.replace('a.txt', ['const total = price * quantity;', 'x']);
+  assert.match(missed, /^err: the text to change was not found/);
+  assert.match(missed, /closest line in the file: 1: "const total = price \* qty;"/);
+  const twice = tools.replace('a.txt', ['const ', 'let ']);
+  assert.match(twice, /appears 2 times in a\.txt \(lines 1, 2\)/);
 });
