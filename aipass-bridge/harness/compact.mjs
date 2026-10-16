@@ -145,7 +145,7 @@ export class Compactor {
     const transcript = sent.map((m) => m.text.slice(0, 1200)).join('\n---\n');
     const prompt = `Summarise the work carried out so far in this session, so it can continue in a fresh conversation.
 
-Capture, in under 400 words: what was asked, what was found, what files were read, what was changed (path + what changed), what was decided, and what is still outstanding. Current task: ${task || '(none given)'}.
+Capture, in under 400 words: what was asked, what was found, what files were read, what was changed (path + what changed), what was decided, and what is still outstanding. Keep every proper noun, name, number, date, filename and quoted string exactly as written — never translate, shorten or paraphrase them; Thai text stays Thai. Current task: ${task || '(none given)'}.
 
 Conversation so far, oldest first:
 ${transcript}`;

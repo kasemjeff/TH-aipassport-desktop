@@ -221,3 +221,25 @@ text left open, as built:
   count (CRLF normalised, BOM tolerated); the digest rides the fixture's
   `fingerprint` block and every row, and a mismatch marks rows `stale` —
   never scored.
+
+### Thai pack additions (2026-10-16)
+
+- **`evals/thai/` — the Thai/English pair set**: 27 pairs, 54 tasks, each
+  `<id>` (Thai) paired with `<id>-en` (English) carrying the same work and its
+  own check. `task.json` gained two optional keys — `lang` (`th`|`en`) and
+  `pair` — which the runner reads into the row but never validates. Every
+  folder is synthetic; no public set was imported (BabelArena, PolyWorkBench,
+  SEATauBench and Typhoon-S are named references whose licenses still need
+  review before any import). Provenance and the privacy rule live in
+  `evals/thai/README.md`.
+- **`--thai`** lists the set (`--all --thai` includes it), and `resolveTask`
+  finds Thai ids with no flag, so `--task fix-year` works like any other id.
+- **New metrics** on the summary's `metrics:` line: success rate and
+  tool-call error rate over scored rows, turns, repeat-blocks and language
+  nudges, the pooled share of assistant prose that was Thai (`replyThai`),
+  and tokens-per-solved-task from the compactor's own estimate
+  (`tokensEst`). The per-row fields are best-effort — `null`, never zero,
+  when the session file is gone.
+- **The preamble changed with the Thai pack**, so the replay fingerprint was
+  recomputed: `evals/fixtures/math-fix-replay.json` now records
+  `preambleBytes: 4275`, digest `6c09ebfd7abff693`.

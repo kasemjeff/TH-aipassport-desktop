@@ -177,3 +177,19 @@ asserted separately; `Emitter` for events.
    (package.json scripts, test files) — fine for a first pass, noisy for
    stats. A declared check command (settings, or `.aipass/check.txt`) would
    make verdicts comparable across runs.
+
+## As shipped (2026-10-16)
+
+Two changes from the Thai pack round:
+
+1. **The stalled exit gets the check's one attempt.** A run whose no-marker
+   nudges are exhausted no longer stops straight to `stalled`: `finishCheck()`
+   runs once — a fail rides a step the model can act on, and a pass ends the
+   run as `done` with the summary "check passed after a stalled step". A
+   staged, verified tree is a finished run even when the words never came.
+   Pinned in `test/lang-guard.test.mjs`.
+2. **The verdict names staged test files.** When the staged set includes
+   files matching the test patterns (`test/`, `__tests__/`, `*.test.*`,
+   `*.spec.*`), both the checker prompt and the verdict text list them
+   (`testsTouched`), so a passing check that also edited its tests is not
+   read as proof of the code. Pinned in `test/checker.test.mjs`.

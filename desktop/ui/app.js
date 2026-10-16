@@ -1033,6 +1033,12 @@ const SETTINGS_SECTIONS = [
       { key: 'plan', label: 'plan mode', type: 'checkbox', note: 'โมเดลร่างแผนก่อนลงมือ' },
       { key: 'requirePlanApproval', label: 'รอให้อนุมัติแผนก่อนทำ', type: 'checkbox', note: 'ใช้ได้ก็ต่อเมื่อ plan mode เปิด' },
       { key: 'subagent', label: 'ให้เรียก helper ย่อย', type: 'checkbox', note: 'งานยาวถูกแบ่งให้ตัวช่วย แล้วรีพอร์ตกลับ' },
+      { key: 'replyLanguage', label: 'ภาษาที่ตอบผู้ใช้', type: 'select', options: [['th', 'ไทย — ค่าเริ่มต้น'], ['en', 'English']], note: 'โค้ด คำสั่ง และพาธเป็นอังกฤษเสมอ ไม่ว่าตัวนี้จะตั้งไว้อย่างไร' },
+      { key: 'langCheck', label: 'เตือนเมื่อลืมตอบไทย', type: 'checkbox', note: 'ตรวจสัดส่วนอักษรไทยของข้อความปิดงานก่อนรับ DONE — เตือนหนึ่งครั้ง' },
+      { key: 'minThaiRatio', label: 'สัดส่วนอักษรไทยขั้นต่ำ', type: 'number', note: '0-1 (ค่าเริ่มต้น 0.25) — ไม่นับบล็อกโค้ด/ลิงก์' },
+      { key: 'repeatGuard', label: 'กันเรียกซ้ำซาก', type: 'checkbox', note: 'เรียก tool เดิม + อาร์กิวเมนต์เดิมครั้งที่สามโดยไม่มีอะไรเปลี่ยน = ถูกบล็อกพร้อมคำแนะนำ' },
+      { key: 'repeatGuardMax', label: 'เพดานการบล็อกซ้ำต่อรอบ', type: 'number', note: 'เกินแล้วหยุดรอบเป็น stalled (ค่าเริ่มต้น 4)' },
+      { key: 'attempts', label: 'รอบลองสูงสุดต่อคำสั่ง', type: 'number', note: 'ลองซ้ำเมื่อ checker ไม่ผ่าน (1 = ไม่ลอง; ทุกรอบคิดเครดิตเต็ม)' },
     ],
   },
   { id: 'context', icon: '📊', title: 'บริบท (context)', sub: 'งบ token และจังหวะการบีบเอ็น', custom: 'context' },
@@ -1357,6 +1363,23 @@ async function openSettings() {
     if (!Number.isFinite(maxToolCalls) || maxToolCalls < 1) problems.push('สูงสุดกี่ tool call ต้องเป็นตัวเลขอย่างน้อย 1');
     const maxWallClockMin = Number(draft.maxWallClockMin);
     if (!Number.isFinite(maxWallClockMin) || maxWallClockMin < 1) problems.push('เวลาสูงสุดต่อคำสั่ง ต้องเป็นตัวเลขอย่างน้อย 1 นาที');
+    // The language keys are checked only when the payload carries them: a
+    // window talking to a backend that predates them must still save (the
+    // server's own sane() fills the defaults), and an absent key is not an
+    // invalid one.
+    if (draft.replyLanguage != null && !['th', 'en'].includes(draft.replyLanguage)) problems.push('ภาษาที่ตอบผู้ใช้ต้องเป็น th หรือ en');
+    if (draft.minThaiRatio != null) {
+      const minRatio = Number(draft.minThaiRatio);
+      if (!Number.isFinite(minRatio) || minRatio < 0 || minRatio > 1) problems.push('สัดส่วนอักษรไทยขั้นต่ำต้องอยู่ระหว่าง 0 ถึง 1');
+    }
+    if (draft.repeatGuardMax != null) {
+      const repeatMax = Number(draft.repeatGuardMax);
+      if (!Number.isFinite(repeatMax) || repeatMax < 1) problems.push('เพดานการบล็อกซ้ำต้องเป็นตัวเลขอย่างน้อย 1');
+    }
+    if (draft.attempts != null) {
+      const attemptsN = Number(draft.attempts);
+      if (!Number.isFinite(attemptsN) || attemptsN < 1 || attemptsN > 5) problems.push('รอบลองสูงสุดต่อคำสั่งต้องอยู่ระหว่าง 1 ถึง 5');
+    }
     const budget = Number(draft.compaction?.contextTokens);
     const reserve = Number(draft.compaction?.reserveTokens);
     if (!Number.isFinite(budget) || budget < 1000) problems.push('งบบริบทควร 1000 token ขึ้นไป');

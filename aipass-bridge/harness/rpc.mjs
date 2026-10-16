@@ -228,6 +228,15 @@ export function createRpc({
         attach: appSettings.get('attach'),
         webScratch: appSettings.get('webScratch'),
         parallelHelpers: appSettings.get('parallelHelpers'),
+        // (Thai pack) Reply-language policy and the loop guards the settings
+        // sheet owns: language check, repeat guard, and the window's attempt
+        // count for a failed checker.
+        replyLanguage: appSettings.get('replyLanguage'),
+        langCheck: appSettings.get('langCheck'),
+        minThaiRatio: appSettings.get('minThaiRatio'),
+        repeatGuard: appSettings.get('repeatGuard'),
+        repeatGuardMax: appSettings.get('repeatGuardMax'),
+        attempts: appSettings.get('attempts'),
         // Where the chat tab lives, so a run that needs one can name the right
         // URL on its needs_tab event.
         chatUrl: appSettings.get('chatUrl'),
@@ -467,6 +476,11 @@ const openBrowser = async (url) => {
       // The rotation share is its own setting, not part of the budget object:
       // it is the knob a person turns, the budget is the ceiling.
       if (params.compactAtPercent != null) current.compactor.compactAtPercent = params.compactAtPercent;
+      // (Thai pack) The language keys and the loop guards read their options
+      // per run, so the sheet's save has to move the live copies too.
+      for (const key of ['replyLanguage', 'langCheck', 'minThaiRatio', 'repeatGuard', 'repeatGuardMax', 'attempts']) {
+        if (params[key] != null) current.options[key] = appSettings.get(key);
+      }
       // The playbook folders and the plugin list are the two settings a module
       // of their own owns; both are rebuilt by name here so the sheet has one
       // contract instead of a footnote saying "restart for these two".
@@ -573,17 +587,35 @@ const openBrowser = async (url) => {
         attach: params.attach ?? current.options.attach,
         webScratch: params.webScratch ?? current.options.webScratch,
         parallelHelpers: params.parallelHelpers ?? current.options.parallelHelpers,
+        attempts: params.attempts ?? current.options.attempts,
         parts: partsFor(params.attachments ?? []),
         pluginTools: plugins.toolTable(),
       });
       if (params.model) current.bridge.model = params.model;
       if (!current.session) await current.startSession({ title: params.title ?? null });
-      const result = await current.run(params.task, { runPluginTool: (marker, args) => plugins.runTool(marker, args) });
+      // (Thai pack) Attempts: when the checker reports the staged tree still
+      // fails, the window may re-run the task instead of handing a known-bad
+      // tree back. Every attempt starts from a cleared overlay (the loop
+      // clears it on entry) in the same conversation, so the model sees its
+      // own failure and tries a different route; the first attempt whose
+      // check passes is the one kept. Each attempt costs a full run.
+      const attempts = Math.min(5, Math.max(1, Math.floor(Number(current.options.attempts ?? 1))));
+      let result = null;
+      let used = 0;
+      for (let i = 1; i <= attempts; i++) {
+        used = i;
+        result = await current.run(params.task, { runPluginTool: (marker, args) => plugins.runTool(marker, args) });
+        const verdict = result.check?.verdict ?? null;
+        if (used === attempts || verdict !== 'fail') break;
+        emit('note', { text: `check failed after attempt ${used} of ${attempts} — running the task again` });
+      }
       return {
         summary: result.summary,
         stopReason: result.stopReason,
         steps: result.steps,
         spent: result.spent,
+        attempts: used,
+        check: result.check?.verdict ?? null,
         pending: current.pendingChanges(),
       };
     },

@@ -47,6 +47,20 @@ export const DEFAULTS = {
   // max. It rides every send as `thinking_level`; the bridge drops a level the
   // chosen model does not advertise, so the setting never breaks a run.
   thinking: 'low',
+  // (Thai pack) The reply language and its stop hook. Tool vocabulary stays
+  // English whatever this says; the check measures the closing message's Thai
+  // share (letters only, code and URLs excluded) and asks for a rewrite once.
+  replyLanguage: 'th',
+  langCheck: true,
+  minThaiRatio: 0.25,
+  // (Thai pack) Refuse an identical tool call repeated with nothing staged in
+  // between; the third is answered with advice, and a run that collects more
+  // than repeatGuardMax refusals stops as stalled.
+  repeatGuard: true,
+  repeatGuardMax: 4,
+  // how many times the window may re-run a task whose checker reports the
+  // staged tree still failing. 1 = never retry; each attempt costs a full run.
+  attempts: 1,
   // when the context budget is close to full, summarise and rotate
   compaction: { contextTokens: 24_000, reserveTokens: 4_096, keepRecentBytes: 6_000 },
   // rotate at this share of the budget. The upstream keeps its own history and
@@ -167,6 +181,16 @@ export class Settings {
     // which reads as "thinking is on" in the form and "off" in the run. The
     // one place every surface writes keeps the two equal.
     if (!['off', 'low', 'medium', 'high', 'max'].includes(next.thinking)) next.thinking = DEFAULTS.thinking;
+    // (Thai pack) The language keys follow the thinking level's rule: a value
+    // nobody recognises becomes the default instead of reaching a run.
+    if (!['th', 'en'].includes(next.replyLanguage)) next.replyLanguage = DEFAULTS.replyLanguage;
+    const ratio = Number(next.minThaiRatio);
+    next.minThaiRatio = Number.isFinite(ratio)
+      ? Math.min(1, Math.max(0, Math.round(ratio * 100) / 100)) : DEFAULTS.minThaiRatio;
+    next.langCheck = Boolean(next.langCheck);
+    next.repeatGuard = Boolean(next.repeatGuard);
+    next.repeatGuardMax = num(next.repeatGuardMax, 1, 50, DEFAULTS.repeatGuardMax);
+    next.attempts = num(next.attempts, 1, 5, DEFAULTS.attempts);
     // Path rules are policy, and policy that a typo silently disables is worse
     // than no policy: a rule with no pattern would never match anything, and a
     // decision of "yes" would never be honoured by the engine. Both are dropped
