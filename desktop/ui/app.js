@@ -2019,9 +2019,13 @@ async function forkSession() {
 async function togglePlan() {
   const settings = await rpc('settings.get').catch(() => null);
   const next = !(settings?.plan ?? false);
-  await rpc('settings.set', { plan: next });
-  state.settings = { ...(state.settings ?? {}), plan: next };
-  addCommandOut(`plan mode: ${next ? 'เปิด — มันจะร่างแผนมาก่อนทำ' : 'ปิด'}`);
+  // Plan mode in the window is one thing — draft, then wait for the yes — the
+  // same pair the Shift+Tab 'plan' view writes. The two flags move together so
+  // the toggle and the view cannot mean two different states.
+  await rpc('settings.set', { plan: next, requirePlanApproval: next });
+  state.settings = { ...(state.settings ?? {}), plan: next, requirePlanApproval: next };
+  applyModeFromSettings();
+  addCommandOut(`plan mode: ${next ? 'เปิด — ร่างแผนแล้วรออนุมัติก่อนทำ' : 'ปิด'}`);
 }
 
 async function openFile(file) {

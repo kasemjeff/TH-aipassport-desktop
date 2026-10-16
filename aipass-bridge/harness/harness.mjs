@@ -469,6 +469,21 @@ export class Harness {
         .filter((p) => /(^|\/)(tests?|__tests__|spec)\//i.test(p) || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(p));
 
       const childSession = this.store?.create({ root: this.root, model: this.bridge.model, title: `check: ${label.slice(0, 60)}` });
+
+      // (declared check) A project can name the one command that decides
+      // correctness: the first non-comment line of `.aipass/check.txt`. Read
+      // from DISK, not the overlay — a value staged in this run must not bend
+      // the command that judges it. Absent, the checker infers the project's
+      // checks the way it always has.
+      let declared = null;
+      try {
+        const declaredFile = path.join(this.root, '.aipass', 'check.txt');
+        if (fs.existsSync(declaredFile)) {
+          const line = fs.readFileSync(declaredFile, 'utf8').split('\n')
+            .map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
+          if (line) declared = line.slice(0, 300);
+        }
+      } catch { declared = null; }
       // The parent's path rules travel, as they do to a helper. The engine is
       // permissive because the readOnly tools are the real gate: the checker
       // cannot write even where a rule would have allowed it.
@@ -480,7 +495,9 @@ export class Harness {
         touchedTests.length
           ? `Note: this pending set includes test files: ${touchedTests.slice(0, 8).join(', ')}. Treat test edits as part of the change under review, and say plainly what you ran.`
           : '',
-        `Run the project's own checks against them — the test command, a build, a typecheck, node --check on the changed files. Prefer the smallest command that would prove or disprove the change.`,
+        declared
+          ? `The project declares its own check command. Run exactly this, as one command, and let its output decide:\n${declared}`
+          : `Run the project's own checks against them — the test command, a build, a typecheck, node --check on the changed files. Prefer the smallest command that would prove or disprove the change.`,
         `You cannot edit anything, and a fix is not yours to make. Say DONE with one line on what you ran and what it showed; if nothing can be run from here, say exactly that.`,
       ].filter(Boolean).join('\n\n');
 
@@ -528,7 +545,7 @@ export class Harness {
       const noteAbout = touchedTests.length
         ? `\n\nnote: this run modified test files: ${touchedTests.slice(0, 8).join(', ')} — the check above ran against the staged copies.`
         : '';
-      return { verdict, text: (text + noteAbout).slice(0, 4400), ran: runs.length, testsTouched: touchedTests.length };
+      return { verdict, text: (text + noteAbout).slice(0, 4400), ran: runs.length, testsTouched: touchedTests.length, declared };
     };
   }
 }

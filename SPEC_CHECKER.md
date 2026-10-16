@@ -173,10 +173,10 @@ asserted separately; `Emitter` for events.
    means a runnable check passed". v1 accepts the second DONE and records the
    verdict; a `done-unverified` bucket in `byStop` is a decision for after
    `checks`/`checkVerdict` have data.
-3. **Where does "the project's check" come from?** v1 has the checker infer it
-   (package.json scripts, test files) — fine for a first pass, noisy for
-   stats. A declared check command (settings, or `.aipass/check.txt`) would
-   make verdicts comparable across runs.
+3. **Where does "the project's check" come from?** Answered 2026-10-16 with the
+   declared check below: `.aipass/check.txt` names the command when the project
+   wants verdicts to be comparable; without it the checker keeps inferring from
+   the tree (package.json scripts, test files).
 
 ## As shipped (2026-10-16)
 
@@ -193,3 +193,11 @@ Two changes from the Thai pack round:
    `*.spec.*`), both the checker prompt and the verdict text list them
    (`testsTouched`), so a passing check that also edited its tests is not
    read as proof of the code. Pinned in `test/checker.test.mjs`.
+3. **A declared check command.** The first non-comment line of
+   `.aipass/check.txt`, read from disk (the run's overlay is deliberately
+   ignored — a value staged in this run must not bend the command that judges
+   it), replaces the inferred checks in the checker prompt: run exactly this,
+   and let its output decide. The verdict machinery is unchanged — the
+   command's own exit code lands in the child's `run` entries — and the
+   declared value rides back in the result as `declared`. Absent the file,
+   nothing changes. Pinned in `test/checker.test.mjs`.

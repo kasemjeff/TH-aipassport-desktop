@@ -67,6 +67,12 @@ DONE one sentence about what you found or changed
 
 Only write DONE at the very end, when nothing more is needed. Never put DONE in the same reply as a NEED — ask for what you want, wait for me to paste it, and read it first.
 
+If a choice is genuinely mine to make and guessing would waste the work, stop and ask instead of deciding for me. Put ASK on its own line with the question after it:
+
+ASK should the export keep the old column names?
+
+I will answer it in my next message. Use it rarely — only when the answer cannot be found in the project and cannot reasonably be decided by you. Never put ASK in the same reply as a NEED: ask for what you need first, read it, and only then ask what is left.
+
 A playbook library is available too. SKILL list shows what it holds (planning, debugging, verification, code review, web frontend, web testing, PowerPoint, Excel), and SKILL name-part loads one part, e.g. SKILL pptx-01. When the task matches a playbook, load all of its parts first and follow it — they carry hard-won rules that prevent common real failures. Skip it when the task clearly does not match.`;
 
   if (plan) {
@@ -138,7 +144,7 @@ const FENCE_LINE = /^\s*(```|~~~)/;
 
 // The model usually writes its answer as prose and then a bare DONE, so fall
 // back to that prose rather than reporting an empty result.
-export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|file)\b|[^\s]+(?: [\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+)?\s*$)|SEARCH\b|GLOB\b|SKILL\b|GIT\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|(?:\*{1,3}|#{1,6}\s*)?DONE\b)/i;
+export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|file)\b|[^\s]+(?: [\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+)?\s*$)|SEARCH\b|GLOB\b|SKILL\b|GIT\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|ASK\b|(?:\*{1,3}|#{1,6}\s*)?DONE\b)/i;
 export const prose = (reply, plugins = []) => {
   const extra = plugins.length
     ? '|' + plugins.map((t) => `${t.marker}\\b`).join('|')
@@ -273,6 +279,12 @@ export function parse(reply, { plugins = [] } = {}) {
 
     m = /^\s*(?:\*{1,3}|#{1,6}\s*)?DONE\b[:\s—–-]*(.*)$/i.exec(line);
     if (m) { i++; calls.push({ kind: 'done', arg: m[1].trim() }); continue; }
+
+    // ASK pauses the run on a question only the person can answer: the
+    // question rides back as the closing message and the next user message
+    // answers it. The argument is required — a bare ASK is prose.
+    m = /^\s*ASK\b[:\s—–-]*(.+)$/i.exec(line);
+    if (m) { i++; calls.push({ kind: 'ask', arg: m[1].trim() }); continue; }
 
     // Plugin markers come last: a built-in name is never shadowed by one.
     let matchedPlugin = false;

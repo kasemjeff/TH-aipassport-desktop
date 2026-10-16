@@ -579,7 +579,11 @@ const openBrowser = async (url) => {
       Object.assign(current.options, {
         plan: params.plan ?? current.options.plan,
         subagent: params.subagent ?? current.options.subagent,
-        requirePlanApproval: Boolean(params.requirePlanApproval),
+        // Unlike maxSteps and friends this one is only ever a saved setting:
+        // the window flips plan mode through settings.set and never through
+        // the run call, so the live value is the default — an explicit run
+        // param still wins.
+        requirePlanApproval: Boolean(params.requirePlanApproval ?? current.options.requirePlanApproval),
         maxSteps: params.maxSteps ?? current.options.maxSteps,
         maxToolCalls: params.maxToolCalls ?? current.options.maxToolCalls,
         maxWallClockMs: params.maxWallClockMs ?? current.options.maxWallClockMs,

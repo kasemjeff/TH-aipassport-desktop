@@ -42,6 +42,9 @@ keeps the history**. So the preamble goes out once and becomes part of the
 server's memory, every later turn is only the results, and "context is full"
 can only be answered by rotating conversations, not trimming messages.
 
+The step-by-step anatomy of that loop — every stage, guard, stop reason and
+event — is in [`LOOP_DESIGN.md`](LOOP_DESIGN.md).
+
 ## The pieces and their contracts
 
 | module | contract | the invariant it protects |

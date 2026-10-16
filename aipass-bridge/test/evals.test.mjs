@@ -124,7 +124,7 @@ test('the check decides the outcome, and the fixture tree stays byte-identical',
 
   const solved = track(await runAttempt(task, {
     mode: 'replay',
-    bridge: replayBridge(['CREATE out.txt\n42\nEND\nDONE wrote 42']),
+    bridge: replayBridge(['NEED file out.txt\n', 'CREATE out.txt\n42\nEND\nDONE wrote 42']),
   }));
   assert.equal(solved.stopReason, 'done');
   assert.equal(solved.outcome, 'solved', `check said: ${solved.check.tail}`);
@@ -133,7 +133,7 @@ test('the check decides the outcome, and the fixture tree stays byte-identical',
 
   const unsolved = track(await runAttempt(task, {
     mode: 'replay',
-    bridge: replayBridge(['CREATE out.txt\n7\nEND\nDONE wrote 7']),
+    bridge: replayBridge(['NEED file out.txt\n', 'CREATE out.txt\n7\nEND\nDONE wrote 7']),
   }));
   assert.equal(unsolved.outcome, 'unsolved');
   assert.notEqual(unsolved.check.exit, 0);
@@ -147,8 +147,8 @@ test('two attempts append two JSONL rows and the summary names each outcome', as
   const solvedTask = makeTask({ 'out.txt': 'x\n', 'check.mjs': OUT_CHECK }, { id: 'row-solved', budget: { maxSteps: 2 } });
   const failedTask = makeTask({ 'out.txt': 'x\n', 'check.mjs': OUT_CHECK }, { id: 'row-failed', budget: { maxSteps: 2 } });
   const replies = new Map([
-    ['row-solved', ['CREATE out.txt\n42\nEND\nDONE wrote 42']],
-    ['row-failed', ['CREATE out.txt\n7\nEND\nDONE wrote 7']],
+    ['row-solved', ['NEED file out.txt\n', 'CREATE out.txt\n42\nEND\nDONE wrote 42']],
+    ['row-failed', ['NEED file out.txt\n', 'CREATE out.txt\n7\nEND\nDONE wrote 7']],
   ]);
 
   const out = await runEval({
