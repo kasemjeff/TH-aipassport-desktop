@@ -556,6 +556,23 @@ test('the header dropdowns save what you pick', async () => {
   assert.ok(calls.includes('config.set'), 'model goes to the bridge');
 });
 
+test('the effort level is picked in the composer, not buried in settings', async () => {
+  // How hard the model thinks is a per-message decision, so it lives next to
+  // the model chip instead of three clicks into the settings sheet.
+  const { node, sent, tick } = await bootApp(BACKEND);
+  assert.equal(node('thinking').value, 'low', 'the chip boots at the saved level');
+
+  node('thinking').value = 'high';
+  node('thinking').dispatch('change');
+  await tick();
+  assert.deepEqual(sent.at(-1), { method: 'settings.set', params: { thinking: 'high' } }, 'a pick is written through right away');
+
+  // And the sheet that used to ask for it no longer does.
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  assert.equal(/thinking level/.test(node('modal-body').textContent), false, 'the sheet does not ask for the effort anymore');
+});
+
 test('shift+tab cycles ask, auto and plan — and writes each through', async () => {
   // The mode is the one control worth its own key: it decides what the next
   // run may do, and "just edit it" lived in chat before.
@@ -828,6 +845,29 @@ test('a plugin marker the backend reports is hidden too', async () => {
   assert.match(html, /Echoing now\./);
   assert.match(html, /That is all\./);
   assert.equal(/ECHO hello there/.test(html), false, 'the plugin call is a row, not prose');
+});
+
+test('repainting a plugin panel replaces its body instead of stacking copies', async () => {
+  // The finished event repaints every panel after every run. The old repaint
+  // appended one more body each time — the scratchpad grew a second copy of
+  // its history in the sidebar per run.
+  let note = 'note one';
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'plugins.list': () => ({ dir: '', loaded: [], failed: [], tools: [], panels: [{ id: 'notes', title: 'scratchpad' }] }),
+    'panel.render': () => ({ html: `<ul><li>${note}</li></ul>` }),
+  });
+  const holder = node('plugin-panels');
+  const box = holder.children.find((c) => c.dataset.panel === 'notes');
+  assert.ok(box, 'the panel is in the sidebar');
+  assert.equal(box.children.length, 2, 'one title row and one rendered body');
+  assert.match(box.children[1].innerHTML, /note one/);
+
+  note = 'note two';
+  globalThis.__stream.emit('finished', { summary: '', stopReason: 'done', spent: 0, credits: null });
+  await tick(); await tick(); await tick();
+  assert.equal(box.children.length, 2, 'the repaint replaces the body, it does not add one');
+  assert.match(box.children[1].innerHTML, /note two/, 'and the body is the fresh render');
 });
 
 /* ------------------------------------------------- the chrome */
