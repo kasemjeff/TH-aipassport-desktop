@@ -49,16 +49,6 @@
   --ok-soft: rgba(143, 191, 127, .09);
   --bad-soft: rgba(226, 118, 106, .08);
 
-  /* home screen decoration */
-  --hero-glow: rgba(217, 119, 87, .08);
-  --hero-glow-2: rgba(143, 191, 127, .05);
-  --hero-top: #242220;
-  --blob-1: rgba(217, 119, 87, .08);
-  --blob-2: rgba(143, 191, 127, .06);
-  --art-a: linear-gradient(135deg, #33291f, #3a2c2a);
-  --art-b: linear-gradient(135deg, #2c2a22, #39262b);
-  --promo-bg: linear-gradient(180deg, var(--bg-3), var(--bg-2));
-
   --bar-h: 46px;
   --side-w: 264px;
   --radius-lg: 16px;
@@ -99,15 +89,6 @@
   --warn-line: rgba(138, 106, 29, .35);
   --ok-soft: rgba(76, 127, 74, .08);
   --bad-soft: rgba(180, 71, 60, .07);
-
-  --hero-glow: rgba(193, 95, 60, .09);
-  --hero-glow-2: rgba(76, 127, 74, .06);
-  --hero-top: #fffefb;
-  --blob-1: rgba(193, 95, 60, .1);
-  --blob-2: rgba(76, 127, 74, .07);
-  --art-a: linear-gradient(135deg, #f5e7dc, #f0e0e6);
-  --art-b: linear-gradient(135deg, #efe9dc, #f3e2e0);
-  --promo-bg: linear-gradient(180deg, #ffffff, #f8f6f1);
 
   color-scheme: light;
 }
@@ -436,15 +417,10 @@ summary.nav-item::after {
 
 /* ------------------------------------------------------------------- chat */
 
-/* One grid, five rows. #home and #log share the stage in row 2: the home
-   screen sits on top of the transcript and is taken out of layout, so the log
-   always owns the height and the composer never moves when the home screen
-   appears. The wrapper matters — an absolutely positioned child of the grid
-   itself would take the whole #chat as its containing block and cover the
-   composer.
-   Only #meta and the stage carry an explicit row; everything below is placed in
-   DOM order, so a panel app.js inserts before #pending (the todo/plan card)
-   lands between the transcript and the pending strip instead of under the
+/* One grid, five rows: #meta, the stage (#log), #pending, #attachments and the
+   composer. Only #meta and the stage carry an explicit row; everything below is
+   placed in DOM order, so a panel app.js inserts before #pending (the todo/plan
+   card) lands between the transcript and the pending strip instead of under the
    composer. */
 #chat {
   position: relative;
@@ -477,96 +453,6 @@ summary.nav-item::after {
   grid-template-rows: minmax(0, 1fr);
 }
 #log { grid-row: 1; grid-column: 1; overflow: auto; padding: 20px 26px 14px; min-height: 0; position: relative; z-index: 1; }
-
-/* ------------------------------------------------------- the home screen */
-
-/* The empty state: a light ground with a blue wash, two soft blobs (decoration
-   only — they never take a click), a centred greeting, two promo cards and a
-   row of pills. */
-#home {
-  position: absolute;
-  inset: 0;
-  z-index: 3;
-  overflow: auto;
-  display: grid;
-  place-items: center;
-  padding: 26px 24px;  background:
-    radial-gradient(90% 70% at 50% -10%, var(--hero-glow), transparent 70%),
-    radial-gradient(50% 55% at 88% 16%, var(--hero-glow-2), transparent 72%),
-    linear-gradient(180deg, var(--hero-top), var(--stage));
-}
-/* The handover: the moment the log holds anything but the welcome card, the
-   transcript takes the space back. Pure CSS, so it works even before app.js
-   learns about #home. */
-#chat:has(#log > *:not(.welcome)) #home { display: none; }
-
-.blob { position: absolute; border-radius: 50%; filter: blur(56px); pointer-events: none; }
-.blob-a { width: 340px; height: 340px; left: -90px; top: -70px; background: radial-gradient(circle, var(--blob-1), transparent 70%); }
-.blob-b { width: 400px; height: 400px; right: -120px; bottom: -140px; background: radial-gradient(circle, var(--blob-2), transparent 70%); }
-
-.home-inner { width: 100%; max-width: 720px; display: flex; flex-direction: column; align-items: center; gap: 20px; text-align: center; }
-.hero-title { margin: 0; font-size: 28px; font-weight: 650; letter-spacing: .2px; display: flex; align-items: center; gap: 12px; }
-.hero-dot {
-  width: 10px; height: 10px; border-radius: 50%; flex: none;
-  background: linear-gradient(135deg, #e8b18e, #d97757);
-  box-shadow: 0 0 0 4px rgba(217, 119, 87, .16);
-}
-.hero-sub { margin: 0; color: var(--dim); font-size: 14.5px; }
-
-.promo-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; width: 100%; }
-.promo-card {
-  background: var(--promo-bg);
-  border: 1px solid var(--card-line);
-  border-radius: 16px;
-  box-shadow: var(--shadow-sm);
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  text-align: left;
-}
-.promo-art {
-  height: 86px;
-  border-radius: 12px;
-  background: var(--art-a);
-  position: relative;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-}
-.promo-art.alt { background: var(--art-b); }
-.art-big { font-size: 36px; line-height: 1; filter: drop-shadow(0 4px 10px rgba(0, 0, 0, .18)); }
-.art-small { position: absolute; right: 12px; bottom: 10px; font-size: 17px; opacity: .9; }
-.promo-title { margin: 0; font-size: 14px; font-weight: 650; }
-.promo-note { margin: 0; font-size: 12px; color: var(--dim); }
-.promo-cta {
-  align-self: flex-start;
-  border: none;
-  border-radius: 999px;
-  background: var(--accent-solid);
-  color: var(--accent-on);
-  padding: 7px 16px;
-  font-size: 12.5px;
-  font-weight: 600;
-  margin-top: auto;
-}
-.promo-cta:hover { background: var(--accent-solid-hover); border-color: transparent; }
-
-.pill-row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
-.pill {
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--bg-2);
-  color: var(--fg);
-  padding: 7px 14px;
-  font-size: 12.5px;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  box-shadow: var(--shadow-sm);
-}
-.pill:hover { border-color: var(--accent); color: var(--accent); }
-.pill-ico { font-size: 13px; }
 
 /* ------------------------------------------------------------- transcript */
 
@@ -834,6 +720,11 @@ details.think pre { color: var(--dim); font: 12px/1.45 var(--mono); white-space:
   text-overflow: ellipsis;
 }
 
+/* The effort chip: the model chip's twin for the thinking level. It holds
+   off..max and writes settings.set the moment it changes, because the level a
+   turn reasons at is a per-message decision. */
+.effort-chip select { max-width: 128px; }
+
 .send-btn {
   min-width: 42px;
   height: 36px;
@@ -1065,8 +956,6 @@ details.think pre { color: var(--dim); font: 12px/1.45 var(--mono); white-space:
 
 @media (max-width: 960px) {
   :root { --side-w: 236px; }
-  .promo-row { grid-template-columns: 1fr; }
-  .hero-title { font-size: 24px; }
   #log, #composer, #pending, #attachments, #meta { padding-left: 16px; padding-right: 16px; }
   .status { gap: 7px; }
 }

@@ -132,6 +132,53 @@ test('an aborted job does not try to reattach', async () => {
   assert.equal(page.requests.length, 1, 'an abort is not a dropped connection');
 });
 
+// The edge in front of de.aipass.net answers 429 (Cloudflare) when the
+// account is moving too fast. The old path failed the run on the spot — for a
+// pause that clears in seconds. The page waits it out with retry-after when
+// the edge sends one, then backoff; only after the waits run out is the
+// failure real.
+test('a 429 is waited out and retried, not failed on the spot', async () => {
+  const page = loadPage({
+    onFetch: async (_url, _init, n) => (n === 1
+      ? new Response('<!doctype html><title>429</title>429 Too Many Requests', {
+          status: 429, headers: { 'retry-after': '0', server: 'cloudflare' },
+        })
+      : sseResponse(textFrames('สวัสดีหลังรอ'))),
+  });
+  page.run(chatJob());
+  const end = await page.settled('j1');
+  assert.equal(end.kind, 'done', 'the job survives the pause');
+  assert.equal(page.requests.length, 2, 'one retry after the 429');
+  assert.equal(page.parts('j1').filter((p) => p.kind === 'text').map((p) => p.text).join(''), 'สวัสดีหลังรอ');
+  assert.ok(page.parts('j1').some((p) => p.kind === 'status' && /429/.test(p.text)), 'and the wait is reported');
+});
+
+test('a 429 that never clears surfaces as the real failure, after the retries', async () => {
+  const page = loadPage({
+    onFetch: async () => new Response('<html>429 Too Many Requests</html>', {
+      status: 429, headers: { 'retry-after': '0' },
+    }),
+  });
+  page.run(chatJob());
+  const end = await page.settled('j1');
+  assert.equal(end.kind, 'error', 'the retries are bounded, not a hang');
+  assert.equal(page.requests.length, 4, 'the first try plus three retries');
+  assert.match(end.message, /429/);
+  assert.match(end.message, /rate-limited through 3 retries/, 'the message says it did not give up instantly');
+});
+
+test('an abort during the wait stops the retrying', async () => {
+  const page = loadPage({
+    onFetch: async () => new Response('', { status: 429, headers: { 'retry-after': '30' } }),
+  });
+  page.run(chatJob());
+  await new Promise((r) => setTimeout(r, 30));
+  page.abort('j1');
+  const end = await page.settled('j1');
+  assert.equal(end.kind, 'done', 'a cancel is still a cancel, not an error');
+  assert.equal(page.requests.length, 1, 'no second attempt after the cancel');
+});
+
 // The extension owns which paths and intents the bridge may reach. A job asking
 // for anything else has to be refused here, not upstream.
 test('the assistant job refuses an intent outside its allowlist', async () => {

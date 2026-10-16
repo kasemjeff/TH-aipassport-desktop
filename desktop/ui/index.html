@@ -15,37 +15,27 @@
 
      LAYOUT
        #bar    thin top row: project · permission · status · context · help ·
-               theme · settings. (#model moved down into the composer, where the
-               reference design puts its "Auto ⌄" selector.)
+               theme · settings.
        #side   264px sidebar: brand, "แชทใหม่", nav, chat list, files, playbooks,
                plugins, user card. Collapses via the ☰ labels (pure CSS, no JS).
-        #chat   one grid, rows stacked: #meta, then the stage (#home layered over
-                #log), then #pending, #attachments and #composer.
+        #chat   one grid, rows stacked: #meta, then the stage (#log), then
+                #pending, #attachments and #composer. The composer carries the
+                model and the effort level — both ride the next message.
 
      IDS app.js ALREADY OWNS (kept, same handlers) — do not rename:
-       bar, project, add-project, model, mode, status, context, help-btn,
-       settings-btn, side, sessions, files, files-head, plugin-panels, skills,
-       session-filter, new-session, chat, meta, log, pending, pending-count,
-       pending-list, apply, discard, composer, task, slash, slash-list,
-       attachments, attachment-list, attach-btn, slash-btn, file-picker, send,
-       hint, modal, modal-title, modal-body, modal-actions.
+       bar, project, add-project, model, thinking, mode, status, context,
+       help-btn, settings-btn, side, sessions, files, files-head, plugin-panels,
+       skills, session-filter, new-session, chat, meta, log, pending,
+       pending-count, pending-list, apply, discard, composer, task, slash,
+       slash-list, attachments, attachment-list, attach-btn, slash-btn,
+       file-picker, send, hint, modal, modal-title, modal-body, modal-actions.
 
-     NEW — added for the reference home screen, for app.js to wire:
-       #hero-title / #hero-sub   the greeting block. Static Thai placeholder text
-                                today; app.js can fill it (`สวัสดีคุณ ${name}`) by
-                                setting textContent — the elements stay put.
-       #promo-row, #promo-card-1, #promo-card-2
-       #promo-cta-1, #promo-cta-2   promo cards + their "เริ่มเรียนเลย" buttons.
-       #quick-pills, .pill[data-task="…"]
-                                five pill buttons. Each carries the prompt it
-                                should put in the composer on data-task.
-       #theme-toggle            wired: flips dark/light and writes the choice
-                                through settings.set.
-       #new-conv                the "New Conversation" line under the chat list —
-                                wired to the same startNewSession as #new-session.
-       #new-chat-quick          dashed circle next to "แชทใหม่". It is a
-                                <label for="file-picker">, so it already opens
-                                the file picker — attach, then type.
+     The reference-design extras that stayed:
+       #theme-toggle    flips dark/light and writes the choice through settings.set.
+       #new-conv        the "New Conversation" line under the chat list — the same
+                        startNewSession as #new-session.
+       #new-chat-quick  a <label for="file-picker">, so it opens the picker —
+                        attach, then type.
 
      The sidebar nav rows are real controls without a line of JS:
        ค้นหาแชท              label → #session-filter   (focuses the search box)
@@ -56,12 +46,6 @@
        ผู้ช่วยอัจฉริยะ        label → #task             (focuses the composer)
        ไฟล์เดี่ยว            label → #file-picker      (opens the file picker)
 
-     #home steps aside on its own: styles.css has
-       #chat:has(#log > *:not(.welcome)) #home { display: none }
-     so the moment app.js appends anything to #log other than the welcome card,
-     the transcript takes over and the home screen is gone (and it comes back
-     when the log is emptied and only the welcome card is left). If you would
-     rather drive it explicitly, toggle the `hidden` class on #home instead.
      ============================================================================ -->
 
 <!-- Sidebar collapse. A checkbox + two <label for="nav-toggle"> ☰ buttons; the
@@ -190,59 +174,10 @@
   <section id="chat">
     <div id="meta"></div>
 
-    <!-- The stage holds the transcript and the empty state in the same space:
-         #log always owns the height, #home sits on top of it and steps aside the
-         moment #log holds anything but the welcome card (see the :has() rule in
-         styles.css). The composer below is never covered. -->
+    <!-- The stage holds the transcript; the composer below is never covered. -->
     <div class="stage">
       <div id="log"></div>
 
-      <!-- The empty state: greeting, two promos, five pills. -->
-      <div id="home" class="home">
-        <span class="blob blob-a" aria-hidden="true"></span>
-        <span class="blob blob-b" aria-hidden="true"></span>
-        <div class="home-inner">
-          <h1 class="hero-title" id="hero-title"><span class="hero-dot" aria-hidden="true"></span>สวัสดีคุณ Kasem</h1>
-          <p class="hero-sub" id="hero-sub">วันนี้อยากให้ AI ช่วยเรื่องอะไร</p>
-
-          <div class="promo-row" id="promo-row">
-            <article class="promo-card" id="promo-card-1">
-              <div class="promo-art" aria-hidden="true">
-                <span class="art-big">🤖</span><span class="art-small">✨</span>
-              </div>
-              <h3 class="promo-title">เริ่มเรียนรู้ AI ตั้งแต่รู้จัก</h3>
-              <p class="promo-note">เครดิตฟรี 120 เครดิต · สรุปให้เข้าใจในไม่กี่นาที</p>
-              <button type="button" class="promo-cta" id="promo-cta-1">เริ่มเรียนเลย</button>
-            </article>
-            <article class="promo-card" id="promo-card-2">
-              <div class="promo-art alt" aria-hidden="true">
-                <span class="art-big">🎨</span><span class="art-small">🖌️</span>
-              </div>
-              <h3 class="promo-title">สร้างรูปภาพด้วย AI</h3>
-              <p class="promo-note">ใช้ 20 เครดิตต่อรูป · เข้าใจคำสั่งภาษาไทย</p>
-              <button type="button" class="promo-cta" id="promo-cta-2">เริ่มเรียนเลย</button>
-            </article>
-          </div>
-
-          <div class="pill-row" id="quick-pills">
-            <button type="button" class="pill" id="pill-compare" data-task="เปรียบเทียบโมเดลที่คุยได้สำหรับงานนี้ให้หน่อย">
-              <span class="pill-ico" aria-hidden="true">⚖️</span>เปรียบเทียบโมเดล
-            </button>
-            <button type="button" class="pill" id="pill-image" data-task="ช่วยเขียน prompt สร้างรูปภาพให้หน่อย">
-              <span class="pill-ico" aria-hidden="true">🎨</span>สร้างรูปภาพ
-            </button>
-            <button type="button" class="pill" id="pill-video" data-task="ช่วยเขียน prompt สร้างวิดีโอสั้นให้หน่อย">
-              <span class="pill-ico" aria-hidden="true">🎬</span>สร้างวิดีโอ
-            </button>
-            <button type="button" class="pill" id="pill-music" data-task="ช่วยเขียน prompt สร้างเพลงให้หน่อย">
-              <span class="pill-ico" aria-hidden="true">🎵</span>สร้างเพลง
-            </button>
-            <button type="button" class="pill" id="pill-character" data-task="ช่วยแนะนำไอเดียใหม่ ๆ ให้หน่อย">
-              <span class="pill-ico" aria-hidden="true">🧑</span>คนตัวเซิงิก
-            </button>
-          </div>
-        </div>
-      </div>
     </div>
 
     <div id="pending" class="hidden">
@@ -272,6 +207,15 @@
           <button type="button" id="slash-btn" class="hint-pill" title="ดูคำสั่งทั้งหมด">/ คำสั่ง</button>
           <span class="model-chip" title="โมเดลที่ใช้คุย">
             <select id="model" title="โมเดล"></select>
+          </span>
+          <span class="model-chip effort-chip" title="effort — ระดับการคิดก่อนตอบ ใช้กับโมเดลที่รองรับ">
+            <select id="thinking" title="effort — ระดับการคิดก่อนตอบ">
+              <option value="off">effort off</option>
+              <option value="low">effort low</option>
+              <option value="medium">effort medium</option>
+              <option value="high">effort high</option>
+              <option value="max">effort max</option>
+            </select>
           </span>
           <span class="grow"></span>
           <button type="submit" id="send" class="primary send-btn">ส่ง</button>

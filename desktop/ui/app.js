@@ -507,7 +507,9 @@ stream.addEventListener('finished', async (e) => {
   for (const id of state.attachments.keys()) rpc('attachment.remove', { id }).catch(() => {});
   state.attachments.clear();
   renderAttachments();
-  for (const box of document.querySelectorAll('.plugin-panel[data-panel]')) await paintPanel(box, box.dataset.panel);
+  // Repaint every panel the sidebar holds, in place — a finished run is exactly
+  // when the scratchpad's history changed.
+  for (const box of $('plugin-panels').children) if (box.dataset.panel) await paintPanel(box, box.dataset.panel);
   await refreshPending();
 });
 stream.addEventListener('applied', (e) => {
@@ -700,6 +702,21 @@ function applyModeFromSettings() {
   const value = settings.requirePlanApproval ? 'plan' : (settings.mode ?? 'ask');
   $('mode').value = MODE_VIEWS[value] ? value : 'ask';
 }
+
+/** The effort chip follows the saved thinking level, the way #mode follows the
+ *  saved mode. The settings sheet no longer carries it: how hard the model
+ *  thinks is a per-message decision, so it lives where the message is written. */
+function applyThinkingFromSettings() {
+  const level = state.settings?.thinking ?? 'low';
+  $('thinking').value = ['off', 'low', 'medium', 'high', 'max'].includes(level) ? level : 'low';
+}
+
+$('thinking').onchange = () => {
+  const level = $('thinking').value;
+  rpc('settings.set', { thinking: level })
+    .then(() => { state.settings = { ...(state.settings ?? {}), thinking: level }; })
+    .catch((err) => addNote(`เปลี่ยนระดับ effort ไม่ได้: ${err.message}`));
+};
 
 /**
  * Move through ask → auto → plan. A view that is not in the cycle (yolo) steps
@@ -1024,7 +1041,6 @@ const SETTINGS_SECTIONS = [
     sub: 'โมเดล สิทธิ์ และขีดจำกัดของแต่ละรัน',
     fields: [
       { key: 'defaultModel', label: 'โมเดลเริ่มต้น', type: 'text', note: 'id ของโมเดล — ดูรายการได้ที่ /models หรือกดที่หัวหน้าต่าง' },
-      { key: 'thinking', label: 'thinking level', type: 'select', options: [['off', 'off — ไม่คิดก่อนตอบ'], ['low', 'low — เร็ว (ค่าเริ่มต้น)'], ['medium', 'medium — สมดุล'], ['high', 'high — ลึก'], ['max', 'max — ลึกสุด']], note: 'โมเดลคิดก่อนแต่ละ step — ความคิดแยกมาแสดงเป็นกล่อง reasoning… · ใช้ได้กับโมเดลที่รองรับ เช่น gemini-3.5-flash-lite' },
       { key: 'mode', label: 'สิทธิ์แก้ไฟล์', type: 'select', options: [['ask', 'ถามก่อนเขียนทุกไฟล์'], ['auto', 'เขียนเลยไม่ถาม'], ['yolo', 'เขียน + รันคำสั่ง shell']] },
       { key: 'allowRun', label: 'อนุญาตให้รันคำสั่ง shell', type: 'checkbox', note: 'ปิด = โมเดลแก้ไฟล์ได้อย่างอื่นไม่ได้' },
       { key: 'maxSteps', label: 'สูงสุดกี่ Step ต่อคำสั่ง', type: 'number', note: 'กันเรื่องราวยาวไม่จบ — ตัวเลขสูง = เสียเครดิตรัวกว่า' },
@@ -1413,6 +1429,7 @@ async function openSettings() {
     hideModal();
     await refreshHeader();
     applyModeFromSettings();
+    applyThinkingFromSettings();
     addCommandOut('บันทึกการตั้งค่าแล้ว');
   };
 
@@ -1476,14 +1493,19 @@ async function refreshPanels() {
   for (const panel of details.panels) {
     const box = el('div', 'plugin-panel');
     box.id = `panel-${panel.id}`;
-    box.append(el('h5', null, panel.title));
     box.dataset.panel = panel.id;
+    box.dataset.title = panel.title ?? panel.id;
     holder.append(box);
     await paintPanel(box, panel.id);
   }
 }
 
+/** Paint one panel's body. A repaint replaces the whole box: the finished event
+ *  refreshes every panel after every run, and appending a fresh body each time
+ *  stacked the scratchpad's history into the sidebar a copy at a time. */
 async function paintPanel(box, id) {
+  box.textContent = '';
+  box.append(el('h5', null, box.dataset.title ?? id));
   try {
     const { html } = await rpc('panel.render', { id });
     const body = el('div', 'plugin-body');
@@ -2141,5 +2163,6 @@ function applyTheme(theme) {
   await refreshPanels();
   await refreshPending();
   applyModeFromSettings();
+  applyThinkingFromSettings();
   $('task').focus();
 })();
