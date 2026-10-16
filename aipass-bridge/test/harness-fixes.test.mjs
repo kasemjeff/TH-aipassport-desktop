@@ -450,3 +450,140 @@ test('a run row carries the command, not an empty string', async () => {
   const entry = session.entries.find((e) => e.type === 'tool' && e.kind === 'run');
   assert.equal(entry.arg, 'echo one');
 });
+
+/* Per-run budgets — the caps that stop a runaway reply or a stuck command --- */
+
+test('a run whose wall clock is spent stops like the step limit (time-limited)', async () => {
+  const dir = tempDir({ 'a.txt': 'hello\n' });
+  const overlay = new Overlay(dir);
+  const tools = createTools({ root: dir, overlay });
+  let chats = 0;
+  const result = await runTask('read the project', {
+    bridge: {
+      async chat() { chats++; await new Promise((r) => setTimeout(r, 350)); return { text: 'NEED file a.txt\n', reasoning: '' }; },
+      async quota() { return { available: 10 }; },
+    },
+    tools, overlay,
+    options: { maxSteps: 5, maxWallClockMs: 150 }, first: true,
+  });
+
+  assert.equal(result.stopReason, 'time-limited', 'the budget is the stop reason');
+  assert.equal(result.steps, 0, 'the tool call the reply asked for never ran');
+  assert.ok(chats <= 1, 'and the run never sent another step');
+});
+
+test('a reply full of markers stops at the tool-call cap (tools-limited)', async () => {
+  const dir = tempDir({ 'a.txt': 'a\n', 'b.txt': 'b\n' });
+  const overlay = new Overlay(dir);
+  const tools = createTools({ root: dir, overlay });
+  let chats = 0;
+  const result = await runTask('read both files', {
+    bridge: {
+      async chat() { chats++; return { text: 'NEED file a.txt\n\nNEED file b.txt\n', reasoning: '' }; },
+      async quota() { return { available: 10 }; },
+    },
+    tools, overlay,
+    options: { maxSteps: 5, maxToolCalls: 1 }, first: true,
+  });
+
+  assert.equal(result.stopReason, 'tools-limited');
+  assert.equal(result.steps, 1, 'exactly one call executed before the cap answered');
+  assert.equal(chats, 1, 'and the run never sent another step');
+});
+
+/* SUBAGENT roles — a named helper is read-only and knows its job ------------ */
+
+test('a role line reaches the helper, and the task text stays the task', async () => {
+  const dir = tempDir({ 'a.txt': 'hello\n' });
+  const overlay = new Overlay(dir);
+  const tools = createTools({ root: dir, overlay });
+  const calls = [];
+  let chats = 0;
+  const result = await runTask('check the thing', {
+    bridge: {
+      async chat() {
+        return { text: ++chats === 1
+          ? 'SUBAGENT\nrole: verifier\ntask: confirm a.txt says hello\nEND\n'
+          : 'DONE checked\n', reasoning: '' };
+      },
+      async quota() { return { available: 10 }; },
+    },
+    tools, overlay,
+    subagent: async (task, role) => { calls.push({ task, role }); return 'verdict: pass — a.txt says hello'; },
+    options: { maxSteps: 3, subagent: true }, first: true,
+  });
+
+  assert.equal(result.stopReason, 'done');
+  assert.deepEqual(calls, [{ task: 'confirm a.txt says hello', role: 'verifier' }],
+    'the helper got the task, not the role line');
+});
+
+test('an unknown role is refused before any helper starts', async () => {
+  const dir = tempDir({ 'a.txt': 'hello\n' });
+  const overlay = new Overlay(dir);
+  const tools = createTools({ root: dir, overlay });
+  const events = new Emitter();
+  const seen = [];
+  events.on('tool', (p) => seen.push(p));
+  let chats = 0;
+  let helpers = 0;
+  const result = await runTask('check the thing', {
+    bridge: {
+      async chat() {
+        return { text: ++chats === 1
+          ? 'SUBAGENT\nrole: wizard\ntask: do magic\nEND\n'
+          : 'DONE gave up on the wizard\n', reasoning: '' };
+      },
+      async quota() { return { available: 10 }; },
+    },
+    tools, overlay, events,
+    subagent: async () => { helpers++; return 'SHOULD NOT RUN'; },
+    options: { maxSteps: 3, subagent: true }, first: true,
+  });
+
+  assert.equal(result.stopReason, 'done');
+  assert.equal(helpers, 0, 'the helper never started');
+  const refused = seen.find((p) => p.kind === 'subagent');
+  assert.ok(refused && refused.ok === false && /no helper role/.test(refused.head),
+    `the refusal names the problem:\n${JSON.stringify(seen)}`);
+});
+
+test('a roled helper is read-only: its edit is refused and nothing is staged', async () => {
+  const root = tempDir({ 'src/app.ts': 'export const a = 1;\n' });
+
+  class StubBridge extends BridgeClient {
+    constructor(replies) {
+      super('http://127.0.0.1:1');
+      this.model = 'stub';
+      this.replies = replies;
+      this.turn = 0;
+    }
+    async chat() { return { text: this.replies[Math.min(this.turn++, this.replies.length - 1)], reasoning: '' }; }
+    async quota() { return { available: 10 }; }
+    async createConversation() { return { id: 'stub-conversation' }; }
+    async config() {}
+    async status() { return { conversation: 'stub-conversation' }; }
+  }
+  const events = new Emitter();
+  const h = new Harness({
+    root,
+    bridge: new StubBridge([
+      'SUBAGENT\nrole: verifier\ntask: check src/app.ts\nEND\n',
+      'EDIT src/app.ts\nFIND\nconst a = 1;\nNEW\nconst a = 2;\nEND\nDONE ran the check\n',
+      'DONE parent done\n',
+    ]),
+    store: new SessionStore(tempDir()),
+    events,
+    options: { mode: 'yolo', allowRun: false, subagent: true, maxSteps: 3 },
+  });
+
+  const seen = [];
+  events.on('tool', (p) => seen.push(p));
+  const result = await h.run('delegate the check');
+
+  assert.equal(result.stopReason, 'done');
+  const refused = seen.find((p) => p.kind === 'replace');
+  assert.ok(refused && refused.ok === false && /read-only/.test(refused.head),
+    `the helper's edit was refused by its role:\n${JSON.stringify(seen)}`);
+  assert.equal(h.overlay.size, 0, 'nothing was staged, in the helper or the parent');
+});

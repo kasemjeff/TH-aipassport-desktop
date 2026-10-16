@@ -527,7 +527,7 @@ const posix = (p) => p.split(path.sep).join('/');
 function agentSafe(p) {
   const abs = path.resolve(agentRoot, p);
   if (abs !== agentRoot && !abs.startsWith(agentRoot + path.sep))
-    throw new Error(`path escapes root: ${p}`);
+    throw new Error(`outside project root: ${p} — this run can only read and write inside the project; if the human named this path, tell them instead of moving it.`);
   return abs;
 }
 const AGENT_DELETED = '\x00DELETE\x00';

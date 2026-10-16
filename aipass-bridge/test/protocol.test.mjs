@@ -74,3 +74,10 @@ test('the preamble does not promise parallel helpers', () => {
   assert.match(text, /runs to completion/);
   assert.doesNotMatch(text, /keep going yourself while it runs/);
 });
+
+test('the preamble documents the helper roles', () => {
+  const text = preamble({ subagent: true });
+  assert.match(text, /role: verifier/);
+  assert.match(text, /role: reviewer/);
+  assert.match(text, /role: summariser/);
+});

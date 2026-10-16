@@ -103,10 +103,10 @@ What each pass changed, briefly:
   `conversation` per request and `createConversation` can mint one without
   adopting it, so helpers keep their own conversation — no save/restore dance
   — and `--web-scratch` runs WEB lookups in a throwaway conversation (B).
-  Helpers of one reply can run beside each other behind `--parallel-helpers`;
-  that flag stays off by default because the one thing a fake extension cannot
-  prove is that the upstream accepts concurrent generations on separate
-  conversations — turn it on only after a live run says so.
+  Helpers of one reply can run beside each other behind `--parallel-helpers`
+  (the CLI flag) / `parallelHelpers` (the window, on by default since the live
+  proof below: two helpers fanned out 3 ms apart into two temporary
+  conversations, both generations accepted and answered concurrently).
 
 ### P0 — wrong behaviour today
 
@@ -293,11 +293,20 @@ or an explicit "nothing can be run here" - once per run, never blocking.
 `run_stats` counts it (`verifyPrompts`) so the trend shows in `npm run stats`;
 its first live firing was the smoke re-run below.
 
-**Noted, not shipped:** per-run tool-call caps and wall-clock budgets (the
-"default hard caps" argument applies to runs, not only steps); an elision
-tier that replaces stale, bulky tool results with stubs before paying for
-summarisation; task-specific subagent instructions (a "verification agent"),
-which the SUBAGENT marker currently lacks.
+**Shipped since (Oct 2026):** per-run tool-call and wall-clock budgets
+(`maxToolCalls` / `maxWallClockMs` — checked between tools, at every step and
+before a helper fan-out; a spent budget stops the run like the step limit and
+records `tools-limited` / `time-limited` in `run_stats`); task-specific helper
+instructions (a `role:` line on SUBAGENT — `verifier` may RUN checks, `reviewer`
+and `summariser` only read; all three are read-only by construction, their
+write markers answer `err:` before anything is staged); spill reads return the
+asked-for range verbatim (no second gutter over the numbered copy, no spill of
+a spill); every write answers with a first/last line read-back.
+
+**Still noted, not shipped:** the elision tier that replaces stale, bulky tool
+results with stubs before paying for summarisation — the summary transcript
+already slices each message to 1200 chars, so the tier's remaining win is
+small; it waits for a case where summarisation costs more than the slices do.
 
 ## The upstream edge, measured live (Oct 2026)
 
@@ -441,9 +450,11 @@ Block by block, against the code as it stands:
   per solved task" cannot be reported literally — the upstream exposes no token
   counts — so credits spent is the observable denominator.
 - **Test-time scaling — not shipped.** The pieces exist (`SUBAGENT`; the
-  conversation pool behind `--parallel-helpers`, still off pending a live
-  concurrent-generation proof), but nothing runs a task N ways and keeps the
-  attempt that passes. It shares Verify's prerequisite.
+  conversation pool behind `--parallel-helpers`, live-proven 2026-10-16 — two
+  helpers fanned out 3 ms apart, two borrowed temporary conversations both
+  answered concurrently — and on by default in the window), but nothing runs a
+  task N ways and keeps the attempt that passes. It shares Verify's
+  prerequisite.
 - **Offline tuning — manual.** The outer loop already is the working style:
   run_stats and session logs → findings with a reproduction → patch → the suite
   as the regression gate → a live smoke against the real edge (the suite fakes

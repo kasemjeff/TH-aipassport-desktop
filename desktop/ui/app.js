@@ -1028,6 +1028,8 @@ const SETTINGS_SECTIONS = [
       { key: 'mode', label: 'สิทธิ์แก้ไฟล์', type: 'select', options: [['ask', 'ถามก่อนเขียนทุกไฟล์'], ['auto', 'เขียนเลยไม่ถาม'], ['yolo', 'เขียน + รันคำสั่ง shell']] },
       { key: 'allowRun', label: 'อนุญาตให้รันคำสั่ง shell', type: 'checkbox', note: 'ปิด = โมเดลแก้ไฟล์ได้อย่างอื่นไม่ได้' },
       { key: 'maxSteps', label: 'สูงสุดกี่ Step ต่อคำสั่ง', type: 'number', note: 'กันเรื่องราวยาวไม่จบ — ตัวเลขสูง = เสียเครดิตรัวกว่า' },
+      { key: 'maxToolCalls', label: 'สูงสุดกี่ tool call ต่อคำสั่ง', type: 'number', note: 'เพดานกันหลุด — คำตอบเดียวที่สั่งเครื่องมือร้อยครั้งจะหยุดเมื่อถึงตัวเลขนี้ (ค่าเริ่มต้น 300)' },
+      { key: 'maxWallClockMin', label: 'เวลาสูงสุดต่อคำสั่ง (นาที)', type: 'number', note: 'เพดานเวลา — งานที่ค้างจะหยุดเอง (ค่าเริ่มต้น 30)' },
       { key: 'plan', label: 'plan mode', type: 'checkbox', note: 'โมเดลร่างแผนก่อนลงมือ' },
       { key: 'requirePlanApproval', label: 'รอให้อนุมัติแผนก่อนทำ', type: 'checkbox', note: 'ใช้ได้ก็ต่อเมื่อ plan mode เปิด' },
       { key: 'subagent', label: 'ให้เรียก helper ย่อย', type: 'checkbox', note: 'งานยาวถูกแบ่งให้ตัวช่วย แล้วรีพอร์ตกลับ' },
@@ -1056,6 +1058,9 @@ async function openSettings() {
 
   const draft = structuredClone(settings);
   draft.compaction = { contextTokens: 24000, reserveTokens: 4096, keepRecentBytes: 6000, ...(settings.compaction ?? {}) };
+  // The wall-clock budget is stored in milliseconds; the sheet asks in
+  // minutes, because typing 1800000 to mean half an hour is a trap.
+  draft.maxWallClockMin = Math.max(1, Math.round(Number(settings.maxWallClockMs ?? 1_800_000) / 60_000));
 
   $('modal-title').textContent = 'การตั้งค่า';
   $('modal').classList.add('settings-sheet');
@@ -1348,6 +1353,10 @@ async function openSettings() {
     const problems = [];
     const maxSteps = Number(draft.maxSteps);
     if (!Number.isFinite(maxSteps) || maxSteps < 1) problems.push('สูงสุดกี่ step ต้องเป็นตัวเลขอย่างน้อย 1');
+    const maxToolCalls = Number(draft.maxToolCalls);
+    if (!Number.isFinite(maxToolCalls) || maxToolCalls < 1) problems.push('สูงสุดกี่ tool call ต้องเป็นตัวเลขอย่างน้อย 1');
+    const maxWallClockMin = Number(draft.maxWallClockMin);
+    if (!Number.isFinite(maxWallClockMin) || maxWallClockMin < 1) problems.push('เวลาสูงสุดต่อคำสั่ง ต้องเป็นตัวเลขอย่างน้อย 1 นาที');
     const budget = Number(draft.compaction?.contextTokens);
     const reserve = Number(draft.compaction?.reserveTokens);
     if (!Number.isFinite(budget) || budget < 1000) problems.push('งบบริบทควร 1000 token ขึ้นไป');
@@ -1371,6 +1380,9 @@ async function openSettings() {
     }
     if (problems.length) { error.textContent = problems.join(' · '); error.classList.remove('hidden'); return; }
     error.classList.add('hidden');
+    // The sheet's minutes go back to the stored milliseconds before the save.
+    draft.maxWallClockMs = Math.round(maxWallClockMin) * 60_000;
+    delete draft.maxWallClockMin;
     const next = await rpc('settings.set', draft).catch((err) => ({ error: err.message }));
     if (next.error) { error.textContent = next.error; error.classList.remove('hidden'); return; }
     state.settings = next;

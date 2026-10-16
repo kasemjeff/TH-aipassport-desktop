@@ -16,7 +16,7 @@ import { createTools } from './tools.mjs';
 import { PermissionEngine } from './permissions.mjs';
 import { SessionStore } from './session.mjs';
 import { Compactor } from './compact.mjs';
-import { runTask, applyOverlay } from './loop.mjs';
+import { runTask, applyOverlay, SUBAGENT_ROLES } from './loop.mjs';
 import { preamble as buildPreamble } from './protocol.mjs';
 import { RulesStore } from './rules.mjs';
 // One address for "where this app keeps its state", shared with the rpc layer:
@@ -48,6 +48,8 @@ export class Harness {
     this.events = opts.events ?? new Emitter();
     this.options = {
       maxSteps: 10,
+      maxToolCalls: 300,
+      maxWallClockMs: 1_800_000,
       allowRun: false,
       mode: 'ask',
       plan: false,
@@ -356,32 +358,44 @@ export class Harness {
    * parent overlay, where they wait for the same approval anything else does.
    * That is why its permission engine is permissive: everything it "writes" is
    * a proposal, never a change.
+   *
+   * A `role:` on the marker narrows it (SUBAGENT_ROLES): the role's own
+   * instructions lead the task, and the helper is read-only — its write
+   * markers answer with `err:` before anything is staged. A verifier may RUN
+   * checks; the other roles only read.
    */
   #makeHelper() {
-    return async (task) => {
+    return async (task, role = null) => {
+      const spec = role ? (SUBAGENT_ROLES[role] ?? null) : null;
+      const brief = spec ? `${spec.lead}\n\nTask: ${task}` : task;
+      // A verifier may RUN checks, but only where the run itself may: the
+      // child narrows the parent's permissions, never widens them.
+      const canRun = Boolean(spec?.run) && Boolean(this.options.allowRun);
       const child = new Overlay(this.root);
-      const childSession = this.store.create({ root: this.root, model: this.bridge.model, title: `helper: ${task.slice(0, 60)}` });
+      const childSession = this.store.create({ root: this.root, model: this.bridge.model, title: `${role ? `${role}: ` : 'helper: '}${task.slice(0, 60)}` });
       // The parent's path rules travel with the helper. They are statements
       // about the project (`.env*  deny`), not about which run is editing, so
       // a rule-free engine here would make every one of them a lie the moment
       // the model handed the work to a helper.
-      const childPermissions = new PermissionEngine({ mode: 'yolo', allowRun: false, rules: this.permissions.rules });
+      const childPermissions = new PermissionEngine({ mode: 'yolo', allowRun: canRun, rules: this.permissions.rules });
       // The helper borrows its own conversation (P2-B) instead of moving the
       // bridge's current one and restoring it afterwards — the old dance left
       // the parent pointing at the child's conversation if anything died
       // mid-helper. adopt:false never touches the pointer, so there is no
       // restore to get wrong.
-      const made = await this.bridge.createConversation({ temporary: true, message: task, adopt: false }).catch(() => null);
+      const made = await this.bridge.createConversation({ temporary: true, message: brief, adopt: false }).catch(() => null);
       const helperConversation = made?.id ?? null;
-      this.events.emit('helper_start', { task, session: childSession.id });
+      this.events.emit('helper_start', { task, role: role || null, session: childSession.id });
 
       let result;
       try {
-        result = await runTask(task, {
+        result = await runTask(brief, {
           bridge: this.bridge,
           tools: createTools({
             root: this.root, overlay: child, skills: this.skills, bridge: this.bridge,
-            model: this.bridge.model, allowRun: false, events: this.events,
+            model: this.bridge.model, allowRun: canRun, events: this.events,
+            readOnly: Boolean(spec),
+            readOnlyNote: spec ? 'this helper is read-only — report it in your summary instead.' : null,
             conversation: helperConversation, temporary: true,
           }),
           overlay: child,
@@ -390,7 +404,7 @@ export class Harness {
           events: this.events,
           conversation: helperConversation,
           conversationTemporary: helperConversation ? true : null,
-          options: { ...this.options, maxSteps: Math.min(this.options.maxSteps, 8), subagent: false, signal: this.abort.signal },
+          options: { ...this.options, maxSteps: Math.min(this.options.maxSteps, 8), subagent: false, allowRun: canRun, signal: this.abort.signal },
           first: true,
         });
       } catch (err) {
@@ -406,7 +420,7 @@ export class Harness {
         this.events.emit('diff_update', { changes: this.pendingChanges() });
         this.session?.append('note', { text: `helper prepared edits pending approval: ${prepared.join(', ')}` });
       }
-      this.events.emit('helper_end', { task, summary: result.summary ?? '', prepared });
+      this.events.emit('helper_end', { task, role: role || null, summary: result.summary ?? '', prepared });
 
       const lines = [result.summary ?? 'The helper finished without a summary.'];
       if (prepared.length) lines.push(`Files prepared and waiting for approval: ${prepared.join(', ')}`);

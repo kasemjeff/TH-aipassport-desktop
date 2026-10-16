@@ -99,7 +99,9 @@ SUBAGENT
 task: read the docs folder and summarise what each file covers
 END
 
-It reports back one summary when it finishes. Use it for reading and summarising in bulk, or for a piece of work that is separate from yours. Do not use it to ask a question you can answer yourself.`;
+It reports back one summary when it finishes. Use it for reading and summarising in bulk, or for a piece of work that is separate from yours. Do not use it to ask a question you can answer yourself.
+
+When the piece to hand over is a check rather than a task, name a role on its own line before the task line: role: verifier (reads and runs checks, edits nothing), role: reviewer (reads and reports), or role: summariser (one tight summary). A helper without a role may stage edits like you can; one with a role cannot, and says so when it tries.`;
   }
 
   if (plugins.length) {

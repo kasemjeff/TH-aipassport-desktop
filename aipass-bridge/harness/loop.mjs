@@ -58,6 +58,13 @@ export async function runTask(taskText, ctx = {}) {
     runPluginTool = null, compactor = null, rotate = null,
     conversation = null, conversationTemporary = null,
   } = ctx;  const maxSteps = Number(options.maxSteps ?? 10);
+  // Per-run budgets — the same defaults the settings file ships. A reply full
+  // of markers used to execute every one of them, and a yolo RUN can hold one
+  // step open for minutes; either budget spent stops the run the way the step
+  // limit does, with its own stop reason in run_stats.
+  const maxToolCalls = Number(options.maxToolCalls) > 0 ? Math.floor(Number(options.maxToolCalls)) : 300;
+  const maxWallClockMs = Number(options.maxWallClockMs) > 0 ? Math.floor(Number(options.maxWallClockMs)) : 1_800_000;
+  const runStart = Date.now();
   const model = options.model ?? null;
   // How hard the model thinks before each reply. 'off' (or nothing) means the
   // request never asks; the level that does go out is checked by the bridge
@@ -150,6 +157,18 @@ export async function runTask(taskText, ctx = {}) {
   let summary = null;
   let stopReason = 'steps';
 
+  // A spent budget is an ending, and it is recorded like one: the session
+  // keeps the note, the window keeps the event, run_stats keeps the reason.
+  let budgetHit = null;      // 'tools-limited' | 'time-limited'
+  const spendBudget = (reason) => {
+    budgetHit = reason;
+    const used = reason === 'tools-limited'
+      ? `${toolsRun}/${maxToolCalls} tool calls`
+      : `${Math.round((Date.now() - runStart) / 1000)}s of ${Math.round(maxWallClockMs / 1000)}s`;
+    session?.append('note', { text: `budget guard: the run has spent its ${reason === 'tools-limited' ? 'tool-call' : 'wall-clock'} budget (${used}) — stopping the run` });
+    events?.emit('budget', { reason, used });
+  };
+
   // (checker, SPEC_CHECKER.md) A DONE over staged code earns one read-only
   // check before it is accepted. The gate mirrors R4's so the two stages
   // cannot disagree — code staged, nothing verified it — plus the two
@@ -198,6 +217,9 @@ export async function runTask(taskText, ctx = {}) {
   };
 
   for (let step = 1; step <= maxSteps; step++) {
+    // The wall clock is checked before every reply too, not only between
+    // tools: waiting on a slow model is as real a spend as running a command.
+    if (Date.now() - runStart > maxWallClockMs) { spendBudget('time-limited'); break; }
     const stepStart = Date.now();
     let reply;
     try { reply = await saySafe(next, partsForSend()); sends++; }
@@ -263,16 +285,30 @@ export async function runTask(taskText, ctx = {}) {
 
     // Helpers fan out when the run opts in (P2-B): each carries its own
     // conversation, so several can work beside each other. Results are
-    // reassembled in marker order either way.
+    // reassembled in marker order either way. The fan-out happens before the
+    // serial loop, so the budgets are enforced here as well — a reply with a
+    // hundred SUBAGENT lines must trip the cap before it starts a hundred
+    // helper runs, not after.
     const execCtx = { tools, permissions, events, subagent, todoState, session, approvePlan, options, runPluginTool };
-    const helperResults = options.parallelHelpers && work.some((c) => c.kind === 'subagent')
-      ? await Promise.all(work.map((c) => c.kind === 'subagent'
+    let helperResults = null;
+    if (options.parallelHelpers && work.some((c) => c.kind === 'subagent')) {
+      const helpers = work.filter((c) => c.kind === 'subagent').length;
+      if (toolsRun + helpers > maxToolCalls) spendBudget('tools-limited');
+      else if (Date.now() - runStart > maxWallClockMs) spendBudget('time-limited');
+      else {
+        helperResults = await Promise.all(work.map((c) => c.kind === 'subagent'
           ? execute(c, execCtx).catch((err) => `err: ${err.message}`)
-          : null))
-      : null;
+          : null));
+      }
+    }
+    if (budgetHit) break;
 
     const results = [];
     for (let i = 0; i < work.length; i++) {
+      // One reply can carry a hundred markers; each one is checked against
+      // both budgets before it executes.
+      if (toolsRun >= maxToolCalls) { spendBudget('tools-limited'); break; }
+      if (Date.now() - runStart > maxWallClockMs) { spendBudget('time-limited'); break; }
       const call = work[i];
       toolsRun++;
       let result;
@@ -335,6 +371,11 @@ export async function runTask(taskText, ctx = {}) {
       const changes = overlay.changes().map(({ file, added, removed, deleted, isNew }) => ({ file, added, removed, deleted, isNew }));
       events?.emit('diff_update', { changes });
     }
+
+    // A budget spent mid-step ends the run here — before the DONE handling,
+    // so a "DONE" riding the same reply cannot mask why the run stopped. The
+    // diff event above still went out: whatever was staged is still staged.
+    if (budgetHit) break;
 
     const stillLooking = work.some((c) => READING.has(c.kind));
     if (done && !stillLooking) {
@@ -428,6 +469,9 @@ export async function runTask(taskText, ctx = {}) {
     if (step === maxSteps) events?.emit('step_limit', {});
   }
 
+  // A budget stop is the run's stop reason, recorded like every other ending.
+  if (budgetHit) stopReason = budgetHit;
+
   const creditsAfter = await bridge.quota(true).catch(() => null);
   const spent = creditsBefore && creditsAfter ? creditsBefore.available - creditsAfter.available : null;
   const changes = overlay.changes();
@@ -462,6 +506,32 @@ export async function runTask(taskText, ctx = {}) {
   return { summary, stopReason, steps: toolsRun, changes, credits: creditsAfter, spent };
 }
 
+/**
+ * The named helper shapes a `role:` line may ask for.
+ *
+ * Every role is read-only by construction: the helper's value is the report
+ * that comes back, never an edit — its write markers answer with `err:` and
+ * the child overlay stays empty, so nothing it "writes" could ever ride the
+ * parent's approval. A verifier may RUN (a test, a build, node --check) to
+ * prove or disprove the work; the other two only read. Without a role line a
+ * SUBAGENT keeps its original shape: it may stage edits, and they wait for
+ * the same approval as the parent's own.
+ */
+export const SUBAGENT_ROLES = {
+  verifier: {
+    run: true,
+    lead: 'You are a verifier. Check the work named in the task the way a careful reviewer would: read the files, run what proves or disproves it (a test, a build, node --check), and change nothing — this run is read-only, and any edit is refused. Answer with what you checked, the exact output that proves it, and a verdict: pass, fail, or not-checkable-from-here.',
+  },
+  reviewer: {
+    run: false,
+    lead: 'You are a reviewer. Read what the task names and report problems, risks and open questions — this run is read-only, and any edit is refused. Answer with concrete findings, each naming the file (and line) it comes from.',
+  },
+  summariser: {
+    run: false,
+    lead: 'You are a summariser. Read what the task names and return one tight summary: what matters, where it lives (with file paths), and what is unclear — this run is read-only, and any edit is refused.',
+  },
+};
+
 /** One marker: run it behind the permission gate, or handle it here. */
 async function execute(call, ctx) {
   const { tools, permissions, events, subagent, todoState, session, options, runPluginTool } = ctx;
@@ -481,12 +551,20 @@ async function execute(call, ctx) {
   if (call.kind === 'subagent') {
     if (!subagent) return 'err: no helper is available in this run';
     const body = String(call.body ?? '');
-    const task = (body.match(/^\s*task:\s*(.+)$/im)?.[1] ?? body).split('\n')[0].trim();
+    // The optional `role:` line narrows the helper before it starts: its own
+    // instructions and its own limits (SUBAGENT_ROLES). An unknown role is
+    // refused here, before anything starts, and the error names the set.
+    const role = (body.match(/^\s*role:\s*([A-Za-z][\w-]*)/im)?.[1] ?? '').toLowerCase();
+    if (role && !SUBAGENT_ROLES[role]) {
+      return `err: no helper role called "${role}" — use one of: ${Object.keys(SUBAGENT_ROLES).join(', ')} (or drop the role line).`;
+    }
+    const taskLine = body.match(/^\s*task:\s*(.+)$/im)?.[1];
+    const task = (taskLine ?? body.split('\n').find((l) => l.trim() && !/^\s*role:/i.test(l)) ?? '').trim();
     if (!task) return 'err: give the helper a task, on a `task:` line inside SUBAGENT';
-    events?.emit('subagent_start', { task });
-    const out = await subagent(task);
-    events?.emit('subagent_end', { task, out });
-    session?.append('note', { text: `helper: ${task}\n${String(out).slice(0, 2000)}` });
+    events?.emit('subagent_start', { task, role: role || null });
+    const out = await subagent(task, role || null);
+    events?.emit('subagent_end', { task, role: role || null, out });
+    session?.append('note', { text: `helper${role ? ` (${role})` : ''}: ${task}\n${String(out).slice(0, 2000)}` });
     return out;
   }
 

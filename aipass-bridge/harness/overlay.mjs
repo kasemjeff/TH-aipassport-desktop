@@ -96,7 +96,9 @@ export class Overlay {
 
   safe(p) {
     const abs = path.resolve(this.root, p);
-    if (abs !== this.root && !abs.startsWith(this.root + path.sep)) throw new Error(`path escapes root: ${p}`);
+    if (abs !== this.root && !abs.startsWith(this.root + path.sep)) {
+      throw new Error(`outside project root: ${p} — this run can only read and write inside the project; if the human named this path, tell them instead of moving it.`);
+    }
     return abs;
   }
 

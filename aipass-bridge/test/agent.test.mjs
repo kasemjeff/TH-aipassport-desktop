@@ -170,7 +170,7 @@ test('refuses to touch anything outside the project root', async (t) => {
   t.after(() => ext.disconnect());
 
   const { out } = await agent(dir, ['--apply']);
-  assert.match(out, /escapes root/);
+  assert.match(out, /outside project root/);
   assert.ok(!fs.existsSync(path.join(dir, '..', 'escaped.txt')));
 });
 

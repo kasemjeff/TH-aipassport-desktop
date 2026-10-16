@@ -87,3 +87,28 @@ test('MOVE refuses to land on an existing file, and a free name still works', ()
   assert.match(tools.read('b.txt'), /two/, 'the file that was there is untouched');
   assert.match(tools.move('a.txt c.txt'), /^marked: move a\.txt → c\.txt/);
 });
+
+test('a spill read hands back the verbatim range — never a spill of a spill', () => {
+  const rows = Array.from({ length: 300 }, (_, i) => `row ${i + 1} ${'y'.repeat(160)}`);
+  const dir = mkTracked({ 'big.txt': rows.join('\n') + '\n' });
+  const tools = toolsIn(dir);
+
+  const first = tools.read('big.txt');
+  const loc = first.match(/NEED file (\.aipass\/spill\/[a-f0-9]+\.txt) (\d+)-(\d+)/);
+  assert.ok(loc, `the first read spilled and handed a locator:\n${first.slice(0, 300)}`);
+  const start = Number(loc[2]);
+
+  // The whole suggested range is too big for one message: it is cut here,
+  // not spilled again — no second locator, no nested file.
+  const whole = tools.read(`${loc[1]} ${loc[2]}-${loc[3]}`);
+  assert.match(whole, /the range was cut/, 'a giant range is cut');
+  assert.doesNotMatch(whole, /more bytes,/, 'a spill read is never spilled again');
+
+  // A range that fits comes back exactly as the content sits on disk: one
+  // gutter (the original), no second layer of numbering.
+  const page = tools.read(`${loc[1]} ${start}-${start + 50}`);
+  assert.doesNotMatch(page, /more bytes,/, 'still no second spill');
+  assert.doesNotMatch(page, /^\s*\d+ \| \s*\d+ \| /m, 'no second gutter stacked on the first');
+  assert.match(page, new RegExp(`row ${start} `));
+  assert.match(page, new RegExp(`row ${start + 50} `));
+});

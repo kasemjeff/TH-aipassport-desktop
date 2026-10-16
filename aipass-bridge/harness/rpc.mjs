@@ -218,6 +218,8 @@ export function createRpc({
         mode: appSettings.get('mode'),
         allowRun: appSettings.get('allowRun'),
         maxSteps: appSettings.get('maxSteps'),
+        maxToolCalls: appSettings.get('maxToolCalls'),
+        maxWallClockMs: appSettings.get('maxWallClockMs'),
         plan: appSettings.get('plan'),
         requirePlanApproval: appSettings.get('requirePlanApproval'),
         subagent: appSettings.get('subagent'),
@@ -565,6 +567,8 @@ const openBrowser = async (url) => {
         subagent: params.subagent ?? current.options.subagent,
         requirePlanApproval: Boolean(params.requirePlanApproval),
         maxSteps: params.maxSteps ?? current.options.maxSteps,
+        maxToolCalls: params.maxToolCalls ?? current.options.maxToolCalls,
+        maxWallClockMs: params.maxWallClockMs ?? current.options.maxWallClockMs,
         searchI: params.searchI ?? current.options.searchI,
         attach: params.attach ?? current.options.attach,
         webScratch: params.webScratch ?? current.options.webScratch,
@@ -640,13 +644,13 @@ const openBrowser = async (url) => {
 
     async 'fs.list'(params = {}) {
       const dir = current.overlay.trySafe(params.dir ?? '.');
-      if (!dir) throw new Error('path escapes root');
+      if (!dir) throw new Error(`outside project root: ${params.dir ?? '.'}`);
       return fs.readdirSync(dir, { withFileTypes: true }).map((e) => ({ name: e.name, dir: e.isDirectory() }))
         .filter((e) => !['node_modules', '.git', '.next', 'dist', 'build', '.cache'].includes(e.name));
     },
     async 'fs.read'(params = {}) {
       const abs = current.overlay.trySafe(params.file);
-      if (!abs) throw new Error('path escapes root');
+      if (!abs) throw new Error(`outside project root: ${params.file}`);
       if (!current.overlay.existsAt(abs)) throw new Error('no such file');
       return { file: params.file, text: current.overlay.readAt(abs) };
     },

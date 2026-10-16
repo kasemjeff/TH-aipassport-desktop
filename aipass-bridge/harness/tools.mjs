@@ -140,6 +140,7 @@ export function createTools(ctx) {
     skills,
     allowRun = false,
     readOnly = false,
+    readOnlyNote = null,
     maxResult = 3000,
     readLines = 250,
     bridge = null,
@@ -222,14 +223,28 @@ export function createTools(ctx) {
       if (range) { start = Math.max(1, range[0]); end = Math.min(total, range[1]); }
       else if (total > readLines) end = readLines;
 
-      const width = String(end).length;
-      const numbered = lines.slice(start - 1, end)
-        .map((l, i) => `${String(start + i).padStart(width)} | ${l}`)
-        .join('\n');
+      const page = lines.slice(start - 1, end);
 
       let note = '';
       if (end < total) note = `\n… ${total - end} more line(s). To see them: NEED file ${rel} ${end + 1}-${Math.min(total, end + readLines)}`;
       else if (start > 1) note = `\n(lines ${start}-${end} of ${total})`;
+
+      // A spill file is already the long copy on disk. Numbering it again
+      // would stack a second gutter over the one its content already carries
+      // (a spilled read keeps the original line numbers), and clipping it
+      // again would spill the spill — a chain the model fell into once per
+      // level. The asked-for range comes back verbatim instead; a range too
+      // large to ride a message is cut here, never re-spilled.
+      if (/^\.aipass\/spill\//i.test(String(rel).replace(/\\/g, '/').replace(/^\.\//, ''))) {
+        const text = page.join('\n');
+        if (text.length <= 30_000) return text + note;
+        return `${text.slice(0, 30_000)}\n… the range was cut at 30000 chars — a spill read is never spilled again; ask for a smaller range, e.g. ${start}-${Math.min(end, start + 200)}.${note}`;
+      }
+
+      const width = String(end).length;
+      const numbered = page
+        .map((l, i) => `${String(start + i).padStart(width)} | ${l}`)
+        .join('\n');
       // A page of a minified file is as big as a page of a hundred short ones,
       // so the page itself is capped through clip() — which spills the whole
       // thing to disk and hands the model a locator — but the note that says
@@ -241,7 +256,17 @@ export function createTools(ctx) {
       const body = inbound(rawBody);
       overlay.set(safe(arg), body);
       const note = syntaxNote(arg, body);
-      return `wrote ${arg}, ${body.split('\n').length} lines${note ? '\n' + note : ''}`;
+      // (R4, the hard half) The write answers with what it actually staged —
+      // first and last line — so "the file was written" is never the model's
+      // own word alone, and a body the marker parser mangled shows up here
+      // instead of at apply time.
+      const wrote = body.split('\n');
+      const first = wrote[0].trim().slice(0, 120);
+      const last = wrote.length > 1 ? wrote.at(-1).trim().slice(0, 120) : '';
+      const readBack = first
+        ? `\nread-back: 1: ${first}${last && last !== first ? ` | ${wrote.length}: ${last}` : ''}`
+        : '';
+      return `wrote ${arg}, ${wrote.length} lines${note ? '\n' + note : ''}${readBack}`;
     },
     replace(arg, rawBody) {
       const abs = safe(arg);
@@ -589,8 +614,9 @@ export function createTools(ctx) {
   // change the tree answers with the reason instead, so a read-only run
   // cannot stage a proposal that lands after the run it was checking.
   if (readOnly) {
+    const refusal = readOnlyNote || 'the checker is read-only — report it in your summary instead.';
     for (const kind of ['write', 'replace', 'delete', 'move']) {
-      TOOLS[kind] = () => 'err: the checker is read-only — report it in your summary instead.';
+      TOOLS[kind] = () => `err: ${refusal}`;
     }
   }
 

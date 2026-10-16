@@ -26,11 +26,23 @@ export const DEFAULTS = {
   mode: 'ask',
   allowRun: false,
   maxSteps: 10,
+  // Per-run budgets, checked by the loop and recorded as stop reasons in
+  // run_stats: the most tool calls one run may execute, and its wall-clock
+  // ceiling in ms. Generous by design — they catch a runaway reply (a hundred
+  // markers in one message) or a stuck command, not ordinary work. A zero or
+  // nonsense value falls back to the default; there is no off switch.
+  maxToolCalls: 300,
+  maxWallClockMs: 1_800_000,
   // plan mode: the model writes a PLAN/TODO first, and (optionally) waits for
   // the human to approve before it touches anything
   plan: false,
   requirePlanApproval: false,
   subagent: true,
+  // several SUBAGENTs of one reply run beside each other, each in its own
+  // conversation. Live-proven 2026-10-16 (two helpers fanned out 3 ms apart,
+  // two borrowed temporary conversations, both generations accepted at once),
+  // so the window ships it on; the CLI keeps its explicit --parallel-helpers.
+  parallelHelpers: true,
   // how hard the model thinks before each step: off | low | medium | high |
   // max. It rides every send as `thinking_level`; the bridge drops a level the
   // chosen model does not advertise, so the setting never breaks a run.
@@ -143,6 +155,14 @@ export class Settings {
       return Math.min(max, Math.max(min, Math.round(n)));
     };
     next.maxSteps = num(next.maxSteps, 1, 200, 10);
+    // The per-run budgets follow the step limit's rule; a zero or nonsense
+    // value means "use the default" rather than "instantly stop the run".
+    const toolCalls = Number(next.maxToolCalls);
+    next.maxToolCalls = Number.isFinite(toolCalls) && toolCalls > 0
+      ? Math.min(10_000, Math.max(1, Math.round(toolCalls))) : DEFAULTS.maxToolCalls;
+    const wallClock = Number(next.maxWallClockMs);
+    next.maxWallClockMs = Number.isFinite(wallClock) && wallClock > 0
+      ? Math.min(86_400_000, Math.max(10_000, Math.round(wallClock))) : DEFAULTS.maxWallClockMs;
     // An unknown thinking level would reach the bridge and come back stripped,
     // which reads as "thinking is on" in the form and "off" in the run. The
     // one place every surface writes keeps the two equal.

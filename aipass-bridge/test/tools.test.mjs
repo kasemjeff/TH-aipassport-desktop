@@ -179,3 +179,12 @@ test('ATTACH serves a file the run wrote itself, from the overlay', () => {
   assert.equal(tools.pendingParts[0].type, 'file');
   assert.match(tools.pendingParts[0].file.file_data, /^data:text\/plain;base64,/);
 });
+
+test('a write answers with a read-back of what it staged', () => {
+  const dir = mkTracked({});
+  const tools = toolsIn(dir);
+  const out = tools.write('notes.txt', 'first line\nmiddle\nlast line');
+  assert.match(out, /^wrote notes\.txt, 3 lines/);
+  assert.match(out, /read-back: 1: first line/);
+  assert.match(out, / \| 3: last line/, 'and the last line, so a body cut short shows');
+});

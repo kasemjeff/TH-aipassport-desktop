@@ -330,7 +330,9 @@ surface read. The gear in the header opens it as a form; `settings.get` and
 What it holds: default model (+ the **thinking level** the model reasons at
 before each step — it streams into a fold labeled `✻ reasoning…` and closes when
 the turn ends, and only models that advertise thinking levels honour it), write
-permission (`ask` / `auto` / `yolo`), `allowRun`, `maxSteps`, plan mode (+
+permission (`ask` / `auto` / `yolo`), `allowRun`, `maxSteps` (plus the per-run
+caps `maxToolCalls` / `maxWallClockMs` — the sheet asks for the wall clock in
+minutes), plan mode (+
 whether a plan waits for approval), helpers on/off, the compaction budget
 (**budget**, **reserve**, and the share at which it rotates —
 `compactAtPercent`, 40 by default), playbook folders, the project list, the
@@ -347,7 +349,8 @@ you cannot test is a rule you guess at. An empty pattern or a duplicate is
 refused at Save rather than stored where it would look like protection.
 
 Every setting applies the moment Save is pressed — not just the file, the
-running process: the ones that govern a run (`maxSteps`, plan,
+running process: the ones that govern a run (`maxSteps`, the per-run caps,
+plan,
 `requirePlanApproval`, helpers, thinking, model, mode, the compaction knobs) move the
 live harness, `skillsDirs` rebuilds the playbook library, the plugin list
 reloads the plugins by name, and a new root switches project outright. The
