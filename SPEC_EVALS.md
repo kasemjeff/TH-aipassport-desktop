@@ -212,11 +212,13 @@ text left open, as built:
   `--advisory` forces 0; unknown flags and a refused live run exit 2.
 - **`wallMs`** may ride a task budget (runner-level wall kill, default
   10 minutes); a wall-killed attempt is invalid, not unsolved.
-- **Shipped fixtures budget on `gemini-3.1-flash-lite`** — the bridge's
+- **Shipped fixtures budget on `gemini-3.5-flash-lite`** — the bridge's
   free-credit default — so live runs do not burn credits; `--budget model=…`
   overrides for a production-model matrix.
 - **Extra flags**: `--results DIR` (JSONL output location); `--budget`
-  accepts maxSteps, model, thinking only.
+  accepts maxSteps, model, thinking only; `--pause MS` spaces attempts in a
+  live set — the account edge 429s a burst (the extension retries an
+  in-flight 429; the pause keeps the burst from starting).
 - **Replay fingerprint**: sha256 over task bytes + preamble bytes + reply
   count (CRLF normalised, BOM tolerated); the digest rides the fixture's
   `fingerprint` block and every row, and a mismatch marks rows `stale` —

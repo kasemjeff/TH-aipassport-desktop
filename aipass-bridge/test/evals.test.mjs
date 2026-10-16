@@ -18,6 +18,7 @@ import {
   loadTask,
   loadTranscript,
   parseBudget,
+  parseArgs,
   replayBridge,
   resolveTask,
   runAttempt,
@@ -280,4 +281,24 @@ test('thinking, maxSteps and allowRun from task.json reach the loop', async () =
   assert.equal(over.budget.thinking, 'off');
   assert.equal(over.budget.model, 'stub-model');
   assert.throws(() => parseBudget('steps=2'), /knows maxSteps, model, thinking/);
+});
+
+/* 7 — pacing: --pause spaces attempts, and the flag parses strictly -------- */
+
+test('runEval waits pauseMs between attempts, and --pause parses strictly', async () => {
+  const make = (id) => makeTask({ 'out.txt': 'x\n', 'check.mjs': OUT_CHECK }, { id, budget: { maxSteps: 2 } });
+  const out = await runEval({
+    tasks: [make('pace-a'), make('pace-b')],
+    mode: 'replay',
+    bridgeFor: () => replayBridge(['CREATE out.txt\n42\nEND\nDONE wrote 42']),
+    resultsDir: resultsDir(),
+    pauseMs: 150,
+  });
+  for (const row of out.rows) track(row);
+  assert.equal(out.rows.length, 2);
+  assert.ok(out.rows[1].ts - out.rows[0].ts >= 150, 'the second attempt started after the pause');
+
+  assert.equal(parseArgs(['--pause', '2500']).pause, 2500);
+  assert.equal(parseArgs([]).pause, 0);
+  assert.throws(() => parseArgs(['--pause', 'soon']), /--pause needs milliseconds/);
 });

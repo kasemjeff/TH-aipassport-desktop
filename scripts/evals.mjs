@@ -606,6 +606,7 @@ export async function runEval({
   bridgeFor = null,
   resultsDir = null,
   checkTimeoutMs = DEFAULT_CHECK_TIMEOUT_MS,
+  pauseMs = 0,
   log = null,
 } = {}) {
   const list = tasks.map((t) => (typeof t === 'string' ? resolveTask(t) : t));
@@ -637,6 +638,10 @@ export async function runEval({
     fs.appendFileSync(resultsFile, JSON.stringify(row) + '\n');
     const checkText = row.check.exit == null ? '×' : row.check.exit;
     log?.(`  ${task.kind}/${task.id}: ${row.outcome} (stop ${row.stopReason ?? '-'}, check ${checkText})`);
+    // The account's edge rate-limits bursts (Cloudflare 429): attempts fired
+    // back to back can outrun it and a live set dies mid-run. The extension
+    // retries an in-flight 429; the pause keeps the burst from starting.
+    if (pauseMs && i < list.length - 1) await new Promise((resolve) => setTimeout(resolve, pauseMs));
   }
   return { runId, resultsFile, rows };
 }
@@ -730,6 +735,8 @@ selection
 
 options
   --budget a=b,c=d     global budget override — maxSteps, model, thinking
+  --pause MS           wait MS between attempts — a live burst trips the
+                       account edge's 429; the extension's retry covers the rest
   --results DIR        where this run's JSONL lands (default evals/results/)
   --advisory           exit 0 even when checks fail (watching, not gating)
   --help               this text
@@ -742,7 +749,7 @@ exit codes: 0 only when every scored check passed; 1 when one did not;
 export function parseArgs(argv) {
   const opts = {
     tasks: [], all: false, holdout: false, thai: false, replay: null, live: false,
-    advisory: false, help: false, results: null, budget: null,
+    advisory: false, help: false, results: null, budget: null, pause: 0,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -765,6 +772,11 @@ export function parseArgs(argv) {
     else if (name === '--advisory') opts.advisory = true;
     else if (name === '--results') opts.results = next();
     else if (name === '--budget') opts.budget = next();
+    else if (name === '--pause') {
+      const ms = Number(next());
+      if (!Number.isFinite(ms) || ms < 0) throw new EvalError('--pause needs milliseconds, e.g. --pause 10000');
+      opts.pause = ms;
+    }
     else throw new EvalError(`unknown flag ${JSON.stringify(arg)} — --help lists what exists`);
   }
   return opts;
@@ -825,6 +837,7 @@ async function main() {
     transcript,
     budget,
     resultsDir,
+    pauseMs: opts.pause,
     log: (line) => console.log(line),
   });
   console.log(formatSummary(rows));
