@@ -45,6 +45,10 @@ export function collectRuns(session) {
       nudges: e.nudges ?? 0,
       stagnations: e.stagnations ?? 0,
       verifyPrompts: e.verifyPrompts ?? 0,
+      repeatBlocks: e.repeatBlocks ?? 0,
+      langPrompts: e.langPrompts ?? 0,
+      novelResults: e.novelResults ?? 0,
+      repeatedResults: e.repeatedResults ?? 0,
       checks: e.checks ?? 0,
       checkVerdict: e.checkVerdict ?? null,
       firewallNotes: e.firewallNotes ?? 0,
@@ -65,6 +69,9 @@ export function summarize(rows) {
     nudges: 0,
     stagnations: 0,
     verifyPrompts: 0,
+    repeatBlocks: 0,
+    langPrompts: 0,
+    repeatedResults: 0,
     checks: 0,
     checkFails: 0,
     firewallNotes: 0,
@@ -80,6 +87,9 @@ export function summarize(rows) {
     totals.nudges += r.nudges;
     totals.stagnations += r.stagnations;
     totals.verifyPrompts += r.verifyPrompts;
+    totals.repeatBlocks += r.repeatBlocks ?? 0;
+    totals.langPrompts += r.langPrompts ?? 0;
+    totals.repeatedResults += r.repeatedResults ?? 0;
     totals.checks += r.checks;
     if (r.checkVerdict === 'fail') totals.checkFails += 1;
     totals.firewallNotes += r.firewallNotes;
@@ -122,7 +132,7 @@ function main() {
   }
 
   const totals = summarize(rows);
-  console.log(`lifetime  ${totals.runs} run(s) · ${totals.calls} tool call(s) · refusals ${pct(totals.calls ? totals.refusals / totals.calls : 0)} · nudges ${totals.nudges} · stagnation ${totals.stagnations} · verify ${totals.verifyPrompts} · checks ${totals.checks}${totals.checkFails ? ` (${totals.checkFails}✗)` : ''} · firewall ${totals.firewallNotes} · ${credits(totals.spent)} credits`);
+  console.log(`lifetime  ${totals.runs} run(s) · ${totals.calls} tool call(s) · refusals ${pct(totals.calls ? totals.refusals / totals.calls : 0)} · nudges ${totals.nudges} · stagnation ${totals.stagnations} · verify ${totals.verifyPrompts} · repeat ${totals.repeatBlocks} · lang ${totals.langPrompts} · checks ${totals.checks}${totals.checkFails ? ` (${totals.checkFails}✗)` : ''} · firewall ${totals.firewallNotes} · ${credits(totals.spent)} credits`);
   const avgStep = totals.stepMsCount ? Math.round(totals.stepMsTotal / totals.stepMsCount / 100) / 10 : null;
   const stops = Object.entries(totals.byStop).map(([k, n]) => `${k}×${n}`).join(', ');
   if (avgStep !== null) console.log(`          avg step ${avgStep}s · ends: ${stops}`);

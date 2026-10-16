@@ -243,6 +243,7 @@ export class Harness {
         allowRun: Boolean(this.options.allowRun),
         plan: Boolean(this.options.plan),
         subagent: Boolean(this.options.subagent),
+        lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
     });
     return { summary, seedText };
@@ -459,6 +460,13 @@ export class Harness {
       // its overlay on entry, so these have to be two objects.
       const staged = new Overlay(this.root);
       for (const [abs, value] of this.overlay.map) staged.map.set(abs, value);
+      // (SPEC_CHECKER) The staged set may include the project's own tests. The
+      // checker runs what the checked-out project would run, so tests the run
+      // edited are visible to it — name them, so a passing check that also
+      // edited its tests is not read as proof of the code.
+      const touchedTests = [...staged.map.keys()]
+        .map((abs) => path.relative(this.root, abs).split(path.sep).join('/'))
+        .filter((p) => /(^|\/)(tests?|__tests__|spec)\//i.test(p) || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(p));
 
       const childSession = this.store?.create({ root: this.root, model: this.bridge.model, title: `check: ${label.slice(0, 60)}` });
       // The parent's path rules travel, as they do to a helper. The engine is
@@ -469,6 +477,9 @@ export class Harness {
         `You are the checker: a read-only pass over work that is already staged for this project.`,
         taskText ? `The run was working on: ${String(taskText).slice(0, 500)}` : '',
         `These pending edits are already applied in the tree you are looking at: ${label}.`,
+        touchedTests.length
+          ? `Note: this pending set includes test files: ${touchedTests.slice(0, 8).join(', ')}. Treat test edits as part of the change under review, and say plainly what you ran.`
+          : '',
         `Run the project's own checks against them — the test command, a build, a typecheck, node --check on the changed files. Prefer the smallest command that would prove or disprove the change.`,
         `You cannot edit anything, and a fix is not yours to make. Say DONE with one line on what you ran and what it showed; if nothing can be run from here, say exactly that.`,
       ].filter(Boolean).join('\n\n');
@@ -514,7 +525,10 @@ export class Harness {
       const verdict = failed.length ? 'fail' : runs.length ? 'pass' : 'none';
       const evidence = failed.slice(0, 3).map((e) => String(e.out ?? '').trim()).filter(Boolean).join('\n\n');
       const text = [result.summary, evidence].filter(Boolean).join('\n\n').slice(0, 4000) || 'the check produced no output';
-      return { verdict, text, ran: runs.length };
+      const noteAbout = touchedTests.length
+        ? `\n\nnote: this run modified test files: ${touchedTests.slice(0, 8).join(', ')} — the check above ran against the staged copies.`
+        : '';
+      return { verdict, text: (text + noteAbout).slice(0, 4400), ran: runs.length, testsTouched: touchedTests.length };
     };
   }
 }

@@ -21,6 +21,8 @@ import {
 import { resilientSay, decode } from './bridge.mjs';
 import { classify } from './permissions.mjs';
 import { posix } from './overlay.mjs';
+import { thaiRatio } from './lang.mjs';
+import { PATHY, pathVariants, beYearNote } from './argguard.mjs';
 
 // (R1/R4) The research round's two sets: which call kinds change the overlay,
 // and which files count as code for the verification nudge.
@@ -74,6 +76,21 @@ export async function runTask(taskText, ctx = {}) {
   const useSlim = Boolean(options.slim);
   const seedText = options.seedText ?? null;
   const pluginTools = options.pluginTools ?? [];
+  // (Thai pack) Language policy. `replyLanguage` is what the preamble tells
+  // the model; `langCheck` is the stop hook that measures it — the closing
+  // message's share of Thai letters (code and URLs excluded) must reach
+  // `minThaiRatio`, or the run rewrites it once. Tool vocabulary stays
+  // English regardless; that separation is the whole point.
+  const replyLanguage = options.replyLanguage === 'en' ? 'en' : 'th';
+  const langCheck = Boolean(options.langCheck);
+  const minThaiRatio = Number.isFinite(Number(options.minThaiRatio))
+    ? Math.min(1, Math.max(0, Number(options.minThaiRatio))) : 0.25;
+  // (Thai pack) The pre-tool guard. repeatGuard refuses an identical call
+  // (same kind, argument and body) already made twice with nothing staged in
+  // between — a loop, not a step; repeatGuardMax is how many such refusals
+  // one run may collect before it is stopped as stalled.
+  const repeatGuard = Boolean(options.repeatGuard);
+  const repeatGuardMax = Number(options.repeatGuardMax) > 0 ? Math.floor(Number(options.repeatGuardMax)) : 4;
 
   overlay.clear();
   const todoState = [];
@@ -130,6 +147,7 @@ export async function runTask(taskText, ctx = {}) {
     searchI: Boolean(options.searchI),
     attach: Boolean(options.attach),
     plugins: pluginTools,
+    lang: replyLanguage,
   });
 
   let next = useSlim
@@ -156,6 +174,19 @@ export async function runTask(taskText, ctx = {}) {
   let verifiedSinceChange = false;
   let summary = null;
   let stopReason = 'steps';
+
+  // (Thai pack) Counters for the guard and the language hook, plus the
+  // evidence-novelty pair: run_stats is where a loop shows up as numbers
+  // before anyone reads the transcript.
+  let repeatBlocks = 0;      // identical calls the repeat guard refused
+  let repeatTrip = false;    // the refusal ceiling was hit — stop after this step
+  const repeatSeen = new Map(); // call signature → { count, mark }
+  let mutations = 0;         // staged changes this run — the guard's clock
+  let langPrompts = 0;       // reply-language nudges sent (at most one per run)
+  let langSent = false;
+  let novelResults = 0;      // tool results that said something new
+  let repeatedResults = 0;   // …and ones whose text was already seen
+  const resultSeen = new Set();
 
   // A spent budget is an ending, and it is recorded like one: the session
   // keeps the note, the window keeps the event, run_stats keeps the reason.
@@ -202,6 +233,22 @@ export async function runTask(taskText, ctx = {}) {
     return checkResult.verdict === 'fail'
       ? `Before DONE, a check of the staged tree ran and did not pass:\n${String(checkResult.text ?? '').slice(0, 4000)}\n\nFix the staged files, or explain why the failure is not yours to fix.`
       : null;
+  };
+
+  // (Thai pack) The reply-language stop hook. When a finished run's closing
+  // message is mostly not Thai while the person reads Thai, ask for a rewrite
+  // — once. A short closing never triggers it (a dozen letters is a glance,
+  // not a message), and code, commands and URLs do not count toward the
+  // ratio. `closing` is the line the window will keep as the run's summary.
+  const replyLangMsg = (proseText, closing) => {
+    if (!langCheck || langSent) return null;
+    const { ratio, letters } = thaiRatio(`${proseText ?? ''}\n${closing ?? ''}`);
+    if (letters < 12 || ratio >= minThaiRatio) return null;
+    langSent = true;
+    langPrompts += 1;
+    session?.append('note', { text: `language check: the closing message was ${Math.round(ratio * 100)}% Thai — asking for a Thai rewrite` });
+    events?.emit('lang_prompt', { ratio: Number(ratio.toFixed(3)), min: minThaiRatio });
+    return `Language check: I read Thai. Of the letters in that closing message ${Math.round(ratio * 100)}% were Thai, under the ${Math.round(minThaiRatio * 100)}% I ask for. Rewrite the closing message in Thai — keep code, commands, file paths and tool arguments exactly as they are.`;
   };
 
   // Attachments ride the first message only: the server keeps the history, so
@@ -271,12 +318,36 @@ export async function runTask(taskText, ctx = {}) {
           next = `${checkMsg}\n\n${REMINDER}`;
           continue;
         }
+        const langMsg = replyLangMsg(proseText, cleanArg);
+        if (langMsg && step < maxSteps) {
+          next = `${langMsg}\n\n${REMINDER}`;
+          continue;
+        }
         events?.emit('done_line', { text: cleanArg || 'done', extra });
         stopReason = 'done';
         break;
       }
       nudges += 1;
-      if (++nudgeStreak > 2) { events?.emit('give_up', {}); stopReason = 'stalled'; break; }
+      if (++nudgeStreak > 2) {
+        // (checker) A run that keeps answering nothing still gets what a DONE
+        // gets: if it staged code nothing checked, run the check now. A fail
+        // is a step the model can act on; a pass ends the run as done — the
+        // staged tree is the evidence, and a run that produced a verified
+        // tree is finished whether or not it found the words for it.
+        const checkMsg = await finishCheck();
+        if (checkMsg && step < maxSteps) {
+          nudgeStreak = 0;
+          next = `${checkMsg}\n\n${REMINDER}`;
+          continue;
+        }
+        if (checkTried && checkResult?.verdict === 'pass') {
+          summary = summary ?? 'check passed after a stalled step';
+          events?.emit('done_line', { text: summary, extra: '' });
+          stopReason = 'done';
+          break;
+        }
+        events?.emit('give_up', {}); stopReason = 'stalled'; break;
+      }
       events?.emit('nudge', { n: nudgeStreak });
       next = `That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it. I will paste back exactly what you ask for. ${REMINDER}`;
       continue;
@@ -303,6 +374,49 @@ export async function runTask(taskText, ctx = {}) {
     }
     if (budgetHit) break;
 
+    // (Thai pack) The pre-tool guard. The call always runs as written first;
+    // the guard corrects evidence, never intent:
+    //   - an identical call (kind + argument + body) already made twice with
+    //     nothing staged in between is a loop — refused with advice, and a run
+    //     that collects more refusals than repeatGuardMax stops as stalled;
+    //   - a path call refused for a missing file gets one retry with invisible
+    //     characters stripped and Thai digits swapped, and the result says so;
+    //   - a machine-facing year in the 2400s gets an advisory CE note.
+    const guarded = async (call) => {
+      const sig = `${call.kind}\u0000${String(call.arg ?? '')}\u0000${call.kind === 'run' ? String(call.body ?? '') : ''}`;
+      if (repeatGuard && !['plan', 'todo', 'subagent', 'done'].includes(call.kind)) {
+        const seen = repeatSeen.get(sig) ?? { count: 0, mark: -1 };
+        seen.count += 1;
+        if (seen.count >= 3 && seen.mark === mutations) {
+          repeatBlocks += 1;
+          if (repeatBlocks > repeatGuardMax) repeatTrip = true;
+          session?.append('note', { text: `repeat guard: refused an identical ${call.kind} call (time ${seen.count}, nothing staged changed in between)` });
+          events?.emit('repeat_block', { kind: call.kind, count: seen.count });
+          return `err: this exact ${call.kind} call was already made ${seen.count - 1} time(s) and nothing staged has changed since — repeating it cannot produce a different result. Change something first (another file, another range, a different edit) or say DONE and name what is still missing.`;
+        }
+        seen.mark = mutations;
+        repeatSeen.set(sig, seen);
+      }
+      let out;
+      try { out = String(await execute(call, execCtx)); } catch (err) { out = `err: ${err.message}`; }
+      if (/^err:/i.test(out.trimStart()) && PATHY.has(call.kind) && call.arg != null) {
+        for (const alt of pathVariants(call.arg)) {
+          let again = null;
+          try { again = String(await execute({ ...call, arg: alt }, execCtx)); } catch { again = null; }
+          if (again !== null && !/^err:/i.test(again.trimStart())) {
+            session?.append('note', { text: `arg guard: ${call.kind} matched after normalizing invisible characters or non-ASCII digits in the path` });
+            out = `${again}\n\nnote: the path in the call contained invisible characters or non-ASCII digits; it resolved once they were normalized. Copy paths from a listing next time.`;
+            break;
+          }
+        }
+      }
+      if (call.kind === 'run' || call.kind === 'git') {
+        const note = beYearNote(`${call.arg ?? ''}\n${call.body ?? ''}`);
+        if (note) out = `${out}\n\n${note}`;
+      }
+      return out;
+    };
+
     const results = [];
     for (let i = 0; i < work.length; i++) {
       // One reply can carry a hundred markers; each one is checked against
@@ -311,25 +425,16 @@ export async function runTask(taskText, ctx = {}) {
       if (Date.now() - runStart > maxWallClockMs) { spendBudget('time-limited'); break; }
       const call = work[i];
       toolsRun++;
-      let result;
-      let blocked = false;
-      if (helperResults && call.kind === 'subagent') {
-        result = helperResults[i];
-      } else {
-        try {
-          result = await execute(call, execCtx);
-        } catch (err) {
-          result = `err: ${err.message}`;
-          blocked = true;
-        }
-      }
+      const result = helperResults && call.kind === 'subagent'
+        ? helperResults[i]
+        : await guarded(call);
       const text = String(result);
       const [head, ...rest] = text.split('\n');
       // Tools answer with an `err: …` prefix when they failed (the tool
       // contract, rule 2). The loop reads that one word instead of guessing
       // failure phrases — every new failure message used to miss the old
       // regexes silently.
-      const refused = blocked || /^err:/i.test(text.trimStart());
+      const refused = /^err:/i.test(text.trimStart());
       // (R4) What counts as touching code, and what counts as having checked
       // it: a shell command run in the same step, or a read-back of a file
       // the overlay holds. A refused call changed nothing.
@@ -339,9 +444,11 @@ export async function runTask(taskText, ctx = {}) {
       } else if (!refused && call.kind === 'run') {
         verifiedSinceChange = true;
       } else if (!refused && call.kind === 'read') {
-        const target = overlay.trySafe(String(call.arg ?? '').replace(/\s+\d+-\d+$/, ''));
+        const target = overlay.trySafe(String(call.arg ?? '').replace(/\s+[\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+$/, ''));
         if (target && overlay.has(target)) verifiedSinceChange = true;
       }
+      // The repeat guard's clock: only staged changes move it.
+      if (!refused && (MUTATING.has(call.kind) || call.kind === 'run')) mutations += 1;
       const stat = toolStats.get(call.kind) ?? { n: 0, fail: 0 };
       stat.n += 1;
       if (refused) stat.fail += 1;
@@ -355,7 +462,18 @@ export async function runTask(taskText, ctx = {}) {
       const label = call.kind === 'run' && !call.arg ? String(call.body ?? '').split('\n')[0].trim() : call.arg;
       events?.emit('tool', { kind: call.kind, arg: label, ok: !refused, head: head.slice(0, 70), lines: refused ? rest : [], isLast });
       session?.append('tool', { kind: call.kind, arg: label, out: text.slice(0, 20_000), ok: !refused });
+      // (Thai pack) Evidence novelty: a result already seen this run is what a
+      // loop smells like in the stats, before anyone reads the transcript.
+      const seenKey = text.slice(0, 600);
+      if (resultSeen.has(seenKey)) repeatedResults += 1; else { resultSeen.add(seenKey); novelResults += 1; }
       results.push(`Result of ${call.kind} ${label}:\n${outbound(result)}`);
+    }
+
+    if (repeatTrip) {
+      session?.append('note', { text: `repeat guard: the run hit its ceiling of ${repeatGuardMax} refused repeats — stopping` });
+      events?.emit('give_up', {});
+      stopReason = 'stalled';
+      break;
     }
 
     // A plan the human has not signed off on stops the run here: the point of
@@ -386,8 +504,11 @@ export async function runTask(taskText, ctx = {}) {
       // through the stagnation guard and the compaction estimate like any
       // other step, so the correction is a step the run actually took.
       const checkMsg = await finishCheck();
+      const langMsg = checkMsg && step < maxSteps ? null : replyLangMsg(proseText, summary);
       if (checkMsg && step < maxSteps) {
         next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${checkMsg}`;
+      } else if (langMsg && step < maxSteps) {
+        next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${langMsg}`;
       } else {
         events?.emit('done_line', { text: summary, extra });
         stopReason = 'done';
@@ -490,6 +611,10 @@ export async function runTask(taskText, ctx = {}) {
     firewallNotes,
     checks,
     checkVerdict: checkResult?.verdict ?? null,
+    repeatBlocks,
+    langPrompts,
+    novelResults,
+    repeatedResults,
     stepMs,
     spent,
   };
@@ -503,7 +628,7 @@ export async function runTask(taskText, ctx = {}) {
     changes: changes.map((c) => ({ file: c.file, added: c.added, removed: c.removed, deleted: c.deleted, isNew: c.isNew })),
   });
 
-  return { summary, stopReason, steps: toolsRun, changes, credits: creditsAfter, spent };
+  return { summary, stopReason, steps: toolsRun, changes, credits: creditsAfter, spent, check: checkResult };
 }
 
 /**

@@ -227,3 +227,33 @@ test('a checker conversation that will not open is skipped, never the parent one
   assert.equal(statsOf(h).checks, 0);
   assert.equal(statsOf(h).checkVerdict, 'none');
 });
+
+test('the checker and its verdict name the staged test files', async () => {
+  // A check that also edited the tests is weaker evidence than one that did
+  // not; both the prompt and the verdict text now say which files those were.
+  const root = tempDir({
+    'math.mjs': BROKEN,
+    'check.mjs': CHECK,
+    'math.test.mjs': "import { add } from './math.mjs';\nif (add(2, 3) !== 5) process.exit(1);\n",
+  });
+  const bridge = new StubBridge({
+    parent: [
+      'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\n'
+      + 'CREATE math.test.mjs\nimport { add } from \'./math.mjs\';\nif (add(2, 3) !== 5) process.exit(1);\nEND\n'
+      + 'DONE fixed add and its test\n',
+    ],
+    'conv-2': [RUN_CHECK],
+  });
+  const { h } = makeHarness({ root, bridge });
+
+  const result = await h.run('fix add()');
+
+  assert.equal(result.stopReason, 'done');
+  const checkerPrompt = bridge.prompts.find((p) => p.conversation === 'conv-2');
+  assert.ok(checkerPrompt, 'the checker was asked');
+  assert.match(checkerPrompt.message, /math\.test\.mjs/, 'the prompt names the staged test file');
+  assert.match(checkerPrompt.message, /test files/, 'and says why it matters');
+  assert.equal(result.check?.verdict, 'pass');
+  assert.equal(result.check?.testsTouched, 1, 'the verdict counts it');
+  assert.match(result.check?.text ?? '', /modified test files/, 'and the text keeps the note');
+});

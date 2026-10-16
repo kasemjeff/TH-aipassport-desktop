@@ -669,3 +669,53 @@ run its `setup()`, so its tools, RPC methods and panels stayed live while
 every listing said it was off. The filter is now read before setup runs, and
 `test/plugins.test.mjs` pins both directions — only the named plugins load,
 and a reload honours a changed list.
+
+## The Thai pack (Oct 2026): language policy, guards, and the stop hook
+
+The round that made Thai a first-class working language without letting it
+leak into anything a machine parses. The pure helpers live in `lang.mjs` and
+are pinned by `test/lang.test.mjs`; the loop wiring is pinned by
+`test/lang-guard.test.mjs`; the checker additions by `test/checker.test.mjs`.
+
+1. **Language policy, spelled out in the preamble.** `replyLanguage` (default
+   `th`) selects the sentence the preamble ships: talk to me in Thai (or
+   English), while code, commands, file paths and marker arguments stay
+   English. The same paragraph carries the no-pivot rule — Thai content is
+   read and worked on as written, never translated first. The CLI's chat
+   preamble (`chat.mjs`) carries the same sentence, fixed to Thai.
+2. **The reply-language stop hook.** `langCheck` (default on) measures the
+   closing message's share of Thai letters — code fences, URLs and commands
+   excluded (`thaiRatio`) — and asks for one Thai rewrite when the share
+   misses `minThaiRatio` (default 0.25; closings under 12 letters are never
+   measured). One rewrite per run; `run_stats.langPrompts` and the
+   `lang_prompt` event record it.
+3. **The repeat guard.** An identical call (kind + argument + body) made a
+   third time with nothing staged in between is refused with an `err:` that
+   says why and what to change first; `run_stats.repeatBlocks` counts it.
+   More refusals than `repeatGuardMax` (default 4) and the run stops as
+   `stalled`. `plan`/`todo`/`subagent`/`done` are exempt — repeating a plan
+   question is not a loop.
+4. **The argument guard** (`argguard.mjs`). A path call refused for a missing
+   file gets one retry with invisible characters stripped and Thai digits
+   swapped for Arabics; the retry's result says the normalization happened,
+   because the fix belongs in the model's copy step. A `run`/`git` value
+   carrying a 24xx–25xx year gets an advisory CE note; file content is never
+   rewritten, and a file legitimately named with Thai digits resolves on the
+   first try. `tools.replace` retries a FIND block with invisibles stripped
+   the same way, only when the exact block matched nothing.
+5. **The checker at the stalled exit, and the test-file note.** A run that
+   exhausts its no-marker nudges gets `finishCheck()` once before `stalled`:
+   a fail becomes the step it deserved, a pass ends the run as `done`
+   ("check passed after a stalled step"). The checker's prompt and verdict
+   now name staged test files (`testsTouched`), so a passing check that also
+   edited its tests is not read as proof of the code.
+6. **Attempts.** `settings.attempts` (1..5) lets `rpc.run` re-run a task while
+   the checker verdict stays `fail`; the response carries `attempts` and
+   `check`. Each attempt starts from a cleared overlay, in the same
+   conversation, so the model sees its own failure.
+7. **Counters, the summary, and compaction.** `run_stats` gained
+   `repeatBlocks`, `langPrompts`, `novelResults` and `repeatedResults` (a
+   result already seen this run is what a loop smells like); `stats.mjs`
+   rolls them up, and the compaction prompt now demands that proper nouns,
+   names, numbers, dates, filenames and quoted strings stay byte-identical —
+   Thai stays Thai.

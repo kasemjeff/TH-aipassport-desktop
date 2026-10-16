@@ -3,9 +3,9 @@
   "note": "Recorded replies in order, taken from a session's assistant entries — raw enough to replay: the loop decodes exactly these bytes. Two replies: read both files, then stage the one-line fix and DONE. If this replay is used against a changed task.md or preamble, the runner marks the row stale instead of scoring it (SPEC_EVALS.md §5).",
   "fingerprint": {
     "taskBytes": 156,
-    "preambleBytes": 4027,
+    "preambleBytes": 4275,
     "replies": 2,
-    "digest": "df5dff664d0fb505"
+    "digest": "6c09ebfd7abff693"
   },
   "replies": [
     "Let me look at the file and its check first.\n\nNEED file math.mjs\nNEED file check.mjs\n",

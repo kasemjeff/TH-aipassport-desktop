@@ -182,7 +182,10 @@ test('plan mode parses PLAN and TODO, and stops the run until the plan is approv
 test('context pressure rotates the conversation and records a compaction entry', async (t) => {
   const env = await startRpc({
     files: { 'a.txt': 'x' },
-    replies: ['DONE first thing done', 'SUMMARY: read a.txt and learned its one line.', 'DONE second thing done'],
+    // Thai closings: with the reply-language hook on by default, an English
+    // DONE summary would earn a Thai-rewrite request and eat the summary reply
+    // this test pins.
+    replies: ['DONE งานแรกเสร็จแล้ว', 'SUMMARY: read a.txt and learned its one line.', 'DONE งานที่สองเสร็จแล้ว'],
     // tiny budget, so the second run has to compact before it starts
     rpcOptions: { compaction: { contextTokens: 60, reserveTokens: 0, keepRecentBytes: 0 } },
   });

@@ -1,0 +1,3 @@
+coffee 120.00 usd
+snack 45.50 usd
+water 80.00 usd

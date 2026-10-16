@@ -6,6 +6,8 @@
 //   evals/tasks/<id>/     task.md (the only thing the agent sees), task.json
 //                         (check + budget + allowRun), tree/ (the fixture)
 //   evals/holdout/<id>/   same shape; reported separately, never used to iterate
+//   evals/thai/<id>/      same shape, plus `lang` (th|en) and `pair` keys —
+//                         the Thai/English pair set the Thai round added
 //   evals/results/        one JSONL per run — one row per attempt
 //
 // One attempt is: copy tree/ into a throwaway dir, drive the Harness facade
@@ -34,6 +36,7 @@ import { BridgeClient } from '../aipass-bridge/harness/bridge.mjs';
 import { SessionStore } from '../aipass-bridge/harness/session.mjs';
 import { Emitter } from '../aipass-bridge/harness/events.mjs';
 import { preamble } from '../aipass-bridge/harness/protocol.mjs';
+import { thaiRatio } from '../aipass-bridge/harness/lang.mjs';
 
 export const EVALS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'evals');
 export const DEFAULT_CHECK_TIMEOUT_MS = 60_000;
@@ -135,6 +138,11 @@ function readTask(dir, id, kind) {
     taskText,
     check: spec.check.trim(),
     allowRun: spec.allowRun === true,
+    // Extra keys are the suite's business, not the runner's: the Thai set
+    // ships `lang` (th|en) and `pair` (the pair id) and the runner passes
+    // them to the row for the report, without ever validating them.
+    lang: typeof spec.lang === 'string' ? spec.lang : null,
+    pair: typeof spec.pair === 'string' ? spec.pair : null,
     budget: readBudget(spec.budget, id),
   };
 }
@@ -174,15 +182,15 @@ export function listTasks({ evalsDir = EVALS_DIR, kind = 'tasks' } = {}) {
   return out;
 }
 
-/** One id from either set: `tasks/` first, then `holdout/`. */
+/** One id from any set: `tasks/` first, then `holdout/`, then `thai/`. */
 export function resolveTask(ref, { evalsDir = EVALS_DIR } = {}) {
   if (path.isAbsolute(ref) || /[\\/]/.test(ref)) return loadTask(ref, { evalsDir });
-  for (const kind of ['tasks', 'holdout']) {
+  for (const kind of ['tasks', 'holdout', 'thai']) {
     if (fs.existsSync(path.join(evalsDir, kind, ref, 'task.json'))) {
       return readTask(path.join(evalsDir, kind, ref), ref, kind);
     }
   }
-  throw new EvalTaskError(`no task named "${ref}" under ${evalsDir}/tasks or ${evalsDir}/holdout`);
+  throw new EvalTaskError(`no task named "${ref}" under ${evalsDir}/tasks, /holdout or /thai`);
 }
 
 /* ------------------------------------------------------------ transcripts */
@@ -451,12 +459,29 @@ export async function runAttempt(task, {
   let sessionId = null;
   let stats = null;
   let compactions = 0;
+  let replyThai = null;   // (Thai pack) Thai-letter share of assistant prose
+  let tokensEst = null;   // (Thai pack) rough tokens for the whole conversation
   if (sessionFile && fs.existsSync(sessionFile)) {
     const stored = new SessionStore(path.join(homeDir, 'sessions')).load(sessionFile);
     if (stored) {
       sessionId = stored.id;
       compactions = stored.entries.filter((e) => e.type === 'compaction').length;
       stats = [...stored.entries].reverse().find((e) => e.type === 'run_stats') ?? null;
+      // The Thai share pools every assistant entry's letters (code fences and
+      // URLs excluded by thaiRatio), so long replies weigh more than one-liners.
+      let thai = 0;
+      let letters = 0;
+      for (const e of stored.entries) {
+        if (e.type !== 'assistant') continue;
+        const r = thaiRatio(String(e.text ?? ''));
+        thai += r.thai;
+        letters += r.letters;
+      }
+      replyThai = letters ? thai / letters : null;
+      // The compactor's own estimate — the closest thing to a token count the
+      // pipeline offers without a model. The report builds tokens-per-solved
+      // from this.
+      try { tokensEst = harness?.compactor?.estimate(harness.session) ?? null; } catch { tokensEst = null; }
     }
   }
   const stopReason = stats?.stopReason ?? runResult?.stopReason ?? null;
@@ -536,6 +561,14 @@ export async function runAttempt(task, {
     nudges: stats?.nudges ?? 0,
     stagnations: stats?.stagnations ?? 0,
     verifyPrompts: stats?.verifyPrompts ?? 0,
+    repeatBlocks: stats?.repeatBlocks ?? 0,
+    langPrompts: stats?.langPrompts ?? 0,
+    novelResults: stats?.novelResults ?? 0,
+    repeatedResults: stats?.repeatedResults ?? 0,
+    replyThai,
+    tokensEst,
+    lang: task.lang ?? null,
+    pair: task.pair ?? null,
     firewallNotes: stats?.firewallNotes ?? 0,
     checks: stats?.checks ?? 0,
     checkVerdict: stats?.checkVerdict ?? null,
@@ -644,6 +677,27 @@ export function formatSummary(rows = []) {
   lines.push(`totals: ${rows.length} attempt(s) — ${count('solved')} solved · ${count('unsolved')} unsolved · `
     + `${count('invalid')} invalid · ${count('stale')} stale · calls ${calls}${refusals ? ` (${refusals} refused)` : ''} · `
     + `credits ${credits} · wall ${(wallMs / 1000).toFixed(1)}s`);
+  // (Thai pack) The numbers the round asked the suite to measure: success rate,
+  // tool-call error rate, loop count, tokens per solved task, and how much of
+  // the replies came back Thai. Over scored rows only — an invalid run is the
+  // network's fault, not the model's.
+  const scoredRows = rows.filter((r) => r.scored);
+  const solvedRows = scoredRows.filter((r) => r.outcome === 'solved');
+  const rate = (n, d) => (d ? `${Math.round((n / d) * 100)}%` : '—');
+  const repeatBlocks = rows.reduce((a, r) => a + (r.repeatBlocks ?? 0), 0);
+  const turns = rows.reduce((a, r) => a + (r.turns ?? 0), 0);
+  const nudged = rows.filter((r) => (r.langPrompts ?? 0) > 0).length;
+  const withThai = rows.filter((r) => r.replyThai != null);
+  const thaiShare = withThai.length
+    ? withThai.reduce((a, r) => a + r.replyThai, 0) / withThai.length : null;
+  const solvedTokens = solvedRows.filter((r) => r.tokensEst != null);
+  lines.push(`metrics: success ${rate(solvedRows.length, scoredRows.length)} (${solvedRows.length}/${scoredRows.length} scored)`
+    + ` · tool errors ${rate(refusals, calls)}`
+    + ` · turns ${turns} · repeat-blocks ${repeatBlocks} · lang-nudges ${nudged}`
+    + (thaiShare == null ? '' : ` · replies in Thai ${Math.round(thaiShare * 100)}%`)
+    + (solvedTokens.length
+      ? ` · tokens/solved ≈ ${Math.round(solvedTokens.reduce((a, r) => a + r.tokensEst, 0) / solvedTokens.length).toLocaleString('en-US')}`
+      : ''));
   if (rows.some((r) => r.kind === 'holdout')) {
     lines.push('* holdout — reported separately, never the reason a commit lands');
   }
@@ -672,6 +726,7 @@ selection
                        evals/tasks/ then evals/holdout/
   --all                every task under evals/tasks/ (the smoke set)
   --holdout            every task under evals/holdout/ (reported separately)
+  --thai               every task under evals/thai/ (the Thai/English pair set)
 
 options
   --budget a=b,c=d     global budget override — maxSteps, model, thinking
@@ -686,7 +741,7 @@ exit codes: 0 only when every scored check passed; 1 when one did not;
  *  that quietly do nothing. */
 export function parseArgs(argv) {
   const opts = {
-    tasks: [], all: false, holdout: false, replay: null, live: false,
+    tasks: [], all: false, holdout: false, thai: false, replay: null, live: false,
     advisory: false, help: false, results: null, budget: null,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -704,6 +759,7 @@ export function parseArgs(argv) {
     else if (name === '--task') opts.tasks.push(next());
     else if (name === '--all') opts.all = true;
     else if (name === '--holdout') opts.holdout = true;
+    else if (name === '--thai') opts.thai = true;
     else if (name === '--replay') opts.replay = next();
     else if (name === '--live') opts.live = true;
     else if (name === '--advisory') opts.advisory = true;
@@ -741,6 +797,7 @@ async function main() {
   for (const id of opts.tasks) tasks.push(resolveTask(id));
   if (opts.all) tasks.push(...listTasks({ kind: 'tasks' }));
   if (opts.holdout) tasks.push(...listTasks({ kind: 'holdout' }));
+  if (opts.thai) tasks.push(...listTasks({ kind: 'thai' }));
   if (!tasks.length && transcript) {
     if (!transcript.taskId) {
       throw new EvalError(`--replay ${opts.replay} names no taskId and no --task was given`);
@@ -748,7 +805,7 @@ async function main() {
     tasks.push(resolveTask(transcript.taskId));
   }
   if (!tasks.length) {
-    console.error('nothing selected — pass --task ID, --all or --holdout (--help for details)');
+    console.error('nothing selected — pass --task ID, --all, --holdout or --thai (--help for details)');
     return 2;
   }
   if (mode === 'live' && !opts.live) {

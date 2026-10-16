@@ -20,6 +20,7 @@ import { createSandbox, materializeTree, restorePaths } from './sandbox.mjs';
 import { outbound, inbound } from './waf.mjs';
 import { isPrivateHost } from '../bridge/private-hosts.mjs';
 import { loadGitignore } from './gitignore.mjs';
+import { stripInvisibles } from './lang.mjs';
 import { MAX_ATTACHMENT_BYTES, mimeOf, isAllowedAttachment } from '../bridge/attachment-types.mjs';
 
 const execP = promisify(exec);
@@ -277,7 +278,22 @@ export function createTools(ctx) {
       if (!before) return `err: the text to change was empty. Copy the exact lines to find under FIND.`;
 
       const count = text.split(before).length - 1;
-      if (count === 0) return `err: the text to change was not found in ${arg}. Read it again with NEED file ${arg} and copy the lines exactly.`;
+      if (count === 0) {
+        // (Thai pack) The classic invisible-character miss: the FIND block
+        // was copied from somewhere that carried zero-width characters or an
+        // NBSP the file does not have, so two identical-looking strings do
+        // not compare equal. Before refusing, retry once with those
+        // normalized away — and say so, because the fix belongs in the
+        // model's copy step, not in this tool.
+        const normalized = stripInvisibles(before);
+        if (normalized !== before && text.split(normalized).length - 1 === 1) {
+          const matched = text.replace(normalized, after);
+          overlay.set(abs, matched);
+          const note = syntaxNote(arg, matched);
+          return `updated ${arg} (1 change; the FIND text carried invisible characters — they were dropped to make the match)${note ? '\n' + note : ''}`;
+        }
+        return `err: the text to change was not found in ${arg}. Read it again with NEED file ${arg} and copy the lines exactly.`;
+      }
       if (count > 1) return `err: that text appears ${count} times in ${arg}. Include a few more surrounding lines under FIND so it matches exactly one place.`;
 
       const updated = text.replace(before, after);
