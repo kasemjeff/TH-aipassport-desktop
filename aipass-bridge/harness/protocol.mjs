@@ -136,7 +136,7 @@ const FENCE_LINE = /^\s*(```|~~~)/;
 
 // The model usually writes its answer as prose and then a bare DONE, so fall
 // back to that prose rather than reporting an empty result.
-export const MARKER_LINE = /^\s*(NEED\s+(dir|file)\b|SEARCH\b|GLOB\b|SKILL\b|GIT\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|(?:\*{1,3}|#{1,6}\s*)?DONE\b)/i;
+export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|file)\b|[^\s]+(?: \d+-\d+)?\s*$)|SEARCH\b|GLOB\b|SKILL\b|GIT\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|(?:\*{1,3}|#{1,6}\s*)?DONE\b)/i;
 export const prose = (reply, plugins = []) => {
   const extra = plugins.length
     ? '|' + plugins.map((t) => `${t.marker}\\b`).join('|')
@@ -176,6 +176,14 @@ export function parse(reply, { plugins = [] } = {}) {
 
     let m = /^\s*NEED\s+(dir|file)\s+(.+?)\s*$/i.exec(line);
     if (m) { i++; calls.push({ kind: m[1].toLowerCase() === 'dir' ? 'list' : 'read', arg: m[2].trim() }); continue; }
+
+    // The bare shape — `NEED events.mjs` — is what weaker models reach for
+    // when the keyword slips. It can only mean the file form, so read it the
+    // same way (the read tool answers a directory with its listing). Kept
+    // single-token plus an optional page range, so English prose that starts
+    // with "NEED" ("NEED to check the logs") stays prose.
+    m = /^\s*NEED\s+([^\s]+(?: \d+-\d+)?)\s*$/i.exec(line);
+    if (m) { i++; calls.push({ kind: 'read', arg: m[1].trim() }); continue; }
 
     m = /^\s*SEARCH\s+(.+?)\s*$/i.exec(line);
     if (m) { i++; calls.push({ kind: 'search', arg: m[1].trim() }); continue; }

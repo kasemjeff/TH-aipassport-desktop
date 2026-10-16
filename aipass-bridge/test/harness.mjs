@@ -13,6 +13,15 @@ export const AGENT = path.join(HERE, '..', 'agent.mjs');
 export const CHAT = path.join(HERE, '..', 'chat.mjs');
 export const DOCTOR = path.join(HERE, '..', 'doctor.mjs');
 
+// Spawned CLIs keep their state under AIPASS_HOME; without one they write to
+// the developer's real ~/.aipass — which is how thousands of one-file session
+// directories named after temp roots once piled up in the real store. Test
+// files that want their own home still set AIPASS_HOME before importing this
+// module; this default is the floor, not the ceiling.
+if (!process.env.AIPASS_HOME?.trim()) {
+  process.env.AIPASS_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-harness-'));
+}
+
 export function freePort() {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();

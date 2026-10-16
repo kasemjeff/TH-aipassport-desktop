@@ -27,6 +27,34 @@ test('reads files and reports a summary, touching nothing on disk', async (t) =>
   assert.equal(fs.readFileSync(path.join(dir, 'README.md'), 'utf8'), 'a starter project\n');
 });
 
+test('a bare NEED still acts — the shape a weak model reaches for', async (t) => {
+  const dir = tempDir({ 'notes/todo.md': 'buy milk\n' });
+  const handler = scripted([
+    'NEED notes/todo.md', // no `file` keyword — the shape gemini-class models write
+    'DONE read the note',
+  ]);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir);
+  assert.match(out, /✓ read notes\/todo\.md/, 'the bare form ran the read');
+  assert.match(handler.sent[1], /buy milk/, 'the file content reached the model');
+  assert.match(out, /✓ read the note/);
+});
+
+test('NEED on a folder answers with the listing and names the exact marker', async (t) => {
+  const dir = tempDir({ 'desktop/README.md': 'read me\n', 'desktop/app.js': 'x\n' });
+  const handler = scripted(['NEED desktop/', 'DONE saw the folder']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir);
+  assert.match(out, /✓ read desktop\//, 'the folder request ran as a read');
+  assert.match(handler.sent[1], /README\.md/, 'the listing reached the model');
+  assert.match(handler.sent[1], /NEED dir lists a folder/, 'and the result teaches the canonical shapes');
+  assert.match(out, /✓ saw the folder/);
+});
+
 test('the first message carries the instructions and a real directory listing', async (t) => {
   const dir = tempDir({ 'only.txt': 'x' });
   const handler = scripted(['DONE nothing to do']);

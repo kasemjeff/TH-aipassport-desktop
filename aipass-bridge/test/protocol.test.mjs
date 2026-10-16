@@ -49,6 +49,26 @@ test('prose keeps fenced lines and strips only real markers', () => {
   assert.doesNotMatch(p, /DONE fin/);
 });
 
+test('a bare NEED is the file form — the shape weak models reach for', () => {
+  const calls = parse('NEED events.mjs\nNEED desktop/\nNEED src/app.js 10-20\nDONE read them');
+  assert.deepEqual(calls.map((c) => [c.kind, c.arg]), [
+    ['read', 'events.mjs'],
+    ['read', 'desktop/'],
+    ['read', 'src/app.js 10-20'],
+    ['done', 'read them'],
+  ]);
+});
+
+test('English prose that starts with NEED stays prose', () => {
+  const reply = 'NEED to see the logs before deciding.\nDONE decided';
+  assert.deepEqual(parse(reply).map((c) => c.kind), ['done'], 'a sentence is not a call');
+  assert.match(prose(reply), /NEED to see the logs/, 'and it survives the prose filter');
+});
+
+test('a bare NEED is stripped from prose like any marker', () => {
+  assert.equal(prose('Let me look.\nNEED events.mjs\nAnything else?'), 'Let me look.\nAnything else?');
+});
+
 test('the preamble does not promise parallel helpers', () => {
   const text = preamble({ subagent: true });
   assert.match(text, /runs to completion/);

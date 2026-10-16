@@ -46,6 +46,17 @@ const backendUp = () => fetch(`http://127.0.0.1:${PORT}/rpc`, {
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Open the window in the default browser, unless told not to. */
+const openWindow = async (url) => {
+  if (process.env.AIPASS_DESKTOP_NO_OPEN) return;
+  try {
+    const { default: opener } = await import('node:child_process');
+    if (process.platform === 'win32') opener(`cmd /c start "" "${url}"`);
+    else if (process.platform === 'darwin') opener(`open ${url}`);
+    else opener(`xdg-open ${url}`);
+  } catch { /* a headless start is fine too */ }
+};
+
 // `--detach` starts the backend and exits. That is what `tauri dev` needs: it
 // waits for the dev URL to answer before it launches the window, and the window
 // (in dev) adopts the backend this leaves running instead of starting a second.
@@ -71,7 +82,11 @@ async function ensureBridge({ detached = false, log = null } = {}) {
   return child;
 }
 
-if (DETACH) {
+if (DETACH && (await backendUp())) {
+  // `tauri dev` runs this before every launch; a backend that already answers
+  // is the job done. Spawning another would only land EADDRINUSE in the log.
+  process.stdout.write(`aipass backend already running on http://127.0.0.1:${PORT} — leaving it alone\n`);
+} else if (DETACH) {
   // `--detach` starts the bridge and the backend as their own processes and
   // exits. That is what `tauri dev` needs: it waits for the dev URL to answer
   // before it launches the window, and the window then adopts what is already
@@ -98,8 +113,24 @@ if (DETACH) {
   }
   bridge?.unref();
   // let the loop drain; an exit() here trips a libuv assertion on Windows
+} else if (await backendUp()) {
+  // The foreground path holds the same invariant: one backend per port. The
+  // user is asking for the window, not for a second server — and a second
+  // server dies on EADDRINUSE, which reads as "the app will not open". Adopt
+  // the one that answers and hand over the window.
+  process.stdout.write(`aipass desktop — a backend is already on http://127.0.0.1:${PORT}; opening the window against it\n`);
+  await openWindow(`http://127.0.0.1:${PORT}`);
 } else {
   const rpc = createRpc({ port: PORT, root: ROOT, bridgeURL: BRIDGE_URL });
+  // The probe can still miss a server that appeared in between. If the port
+  // is busy after all, name the port instead of dying with a raw stack.
+  rpc.server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      process.stderr.write(`port ${PORT} is busy — close what holds it, or run with AIPASS_DESKTOP_PORT=<other>\n`);
+      process.exit(1);
+    }
+    throw err;
+  });
 
   const bridge = await ensureBridge();
   process.stdout.write(`aipass desktop\n`);
@@ -108,18 +139,7 @@ if (DETACH) {
   process.stdout.write(`  app     ${rpc.url}\n`);
   process.stdout.write(`\nOpen ${rpc.url} in Chrome — or later, the packaged window.\n`);
 
-  if (!process.env.AIPASS_DESKTOP_NO_OPEN) {
-    const url = rpc.url;
-    const open = async () => {
-      try {
-        const { default: opener } = await import('node:child_process');
-        if (process.platform === 'win32') opener(`cmd /c start "" "${url}"`);
-        else if (process.platform === 'darwin') opener(`open ${url}`);
-        else opener(`xdg-open ${url}`);
-      } catch { /* a headless start is fine too */ }
-    };
-    await open();
-  }
+  await openWindow(rpc.url);
 
   const shutdown = () => {
     rpc.server.close();

@@ -517,14 +517,17 @@ const openBrowser = async (url) => {
       const h = switchProject(params.path);
       return {
         root: h.root,
-        sessions: h.store.list().slice(0, 50),
+        sessions: h.store.list(h.root).slice(0, 50),
         settings: appSettings.values,
       };
     },
 
     /* ------------------------------------------------------------ sessions */
 
-    async 'session.list'() { return current.store.list(); },
+    // Scoped to the project the window is on: the store keeps one directory
+    // per root, and an unscoped list mixes in every other project — on this
+    // machine that was thousands of test leftovers, not conversations.
+    async 'session.list'() { return current.store.list(current.root); },
     async 'session.new'(params = {}) {
       const s = await current.startSession({ title: params.title ?? null });
       return s ? s.meta() : null;
@@ -726,7 +729,10 @@ const openBrowser = async (url) => {
       : target.endsWith('.css') ? 'text/css; charset=utf-8'
         : target.endsWith('.js') ? 'text/javascript; charset=utf-8'
           : 'application/octet-stream';
-    res.writeHead(200, { 'content-type': type });
+    // No headers the browser can revalidate with, so a cached copy would be
+    // served blind — and this UI is edited live. no-cache forces the request
+    // back to this server every reload; the file is on local disk anyway.
+    res.writeHead(200, { 'content-type': type, 'cache-control': 'no-cache' });
     fs.createReadStream(target).pipe(res);
   });
 

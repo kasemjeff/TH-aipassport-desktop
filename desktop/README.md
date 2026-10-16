@@ -276,6 +276,12 @@ node desktop/main.mjs --detach                   # start the backend, then exit
 answer before it opens the window, so the backend has to already be running by
 then. It writes to `~/.aipass/logs/desktop-backend.log`.
 
+When a backend already answers on the port, both paths adopt it instead of
+starting a second one: `--detach` prints and exits, and the foreground
+`npm run desktop` opens the window against what is already running. A busy
+port that is *not* this backend names itself and exits — it used to die with
+a raw `EADDRINUSE` stack, which read as "the app does not open".
+
 ## The Tauri shell
 
 `desktop/src-tauri` wraps this exact `ui/` folder in a WebView2 window. The

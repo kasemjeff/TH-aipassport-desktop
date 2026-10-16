@@ -251,7 +251,7 @@ export async function runTask(taskText, ctx = {}) {
       nudges += 1;
       if (++nudgeStreak > 2) { events?.emit('give_up', {}); stopReason = 'stalled'; break; }
       events?.emit('nudge', { n: nudgeStreak });
-      next = `That reply had no marker I could act on — a marker only counts when it starts its own line. If you are done, write DONE on its own line with one sentence after it; if you need something, name it with one marker per line (NEED file path, SEARCH text, …) and I will paste the result straight back. ${REMINDER}`;
+      next = `That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it. I will paste back exactly what you ask for. ${REMINDER}`;
       continue;
     }
     nudgeStreak = 0;

@@ -200,6 +200,14 @@ export function createTools(ctx) {
       const rel = parts.join(' ');
       const abs = safe(rel);
       if (!existsAt(abs)) return `err: no such file: ${rel}`;
+      // A folder asked for with the file shape is a weak model's reach for
+      // "show me what's inside" — so list it (a bare `NEED folder/` parses to
+      // this tool), and name the exact markers while its attention is here.
+      // The existsSync guard matters: a staged file lives in the overlay and
+      // is not on disk yet, and statSync would throw on it.
+      if (fs.existsSync(abs) && fs.statSync(abs).isDirectory()) {
+        return `${TOOLS.list(rel)}\n(${rel} is a directory, so here is its listing — NEED dir lists a folder, NEED file reads one file.)`;
+      }
       const kind = binaryKind(abs, (p) => overlay.has(p));
       if (kind) {
         return `err: ${rel} is ${kind === 'binary' ? 'a binary file' : `a ${kind} file`}, not text.\n`

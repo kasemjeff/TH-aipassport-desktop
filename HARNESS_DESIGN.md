@@ -572,3 +572,50 @@ Not taken, and why: task-shaped tool mergers (the tool count here is small and
 each name is a distinct verb), and per-tool pagination defaults (the spill
 locator already pages). Both stay candidates if the evals ever show tool
 friction.
+
+## The live stall of Oct 2026: a bare `NEED`, and a model that moved
+
+A live desktop run died at step zero, twice, and the session log told the
+whole story: the catalog's `claude-sonnet-5@default` no longer exists upstream
+(the list now carries `claude-sonnet-5@azure`), so the site switched the
+conversation mid-reply to `gemini-3.5-flash-lite` with a `data-model_switched`
+frame, and the substitute model wrote `NEED desktop/`, `NEED CLAUDE.md` — the
+marker without the keyword — three times. `parse()` recognized none of them,
+the no-marker nudge fired three times, `stopReason: stalled`, `steps: 0`. Two
+fixes shipped:
+
+1. **A bare `NEED <path>` is the file form.** The parser takes it (single
+   token plus an optional page range, so English prose that starts with
+   "NEED" stays prose), `read` answers a directory with its listing instead of
+   an EISDIR error, and the no-marker nudge spells the shapes out with
+   bracket-free examples — `NEED file notes.md` reads that file, `NEED dir
+   src` lists that folder, `SEARCH someText` finds it — instead of the old
+   ambiguous `(NEED file path, …)`. (Angle brackets would themselves be WAF
+   wire spellings in transit; the examples avoid them, as the preamble
+   always has.) The window's `markers.js` mirrors the new branch, parity
+   corpus included. The preamble still teaches the canonical forms; the
+   parser merely stops punishing the shape a weak model reaches for.
+2. **The desktop launcher adopts, never fights.** `main.mjs` probes the port
+   before starting: a backend that already answers is adopted (open the
+   window and step aside; `--detach` prints and exits), and a busy port that
+   is *not* a backend now names itself instead of dying with a raw EADDRINUSE
+   stack — that crash was the "the app does not open" report. Static UI files
+   carry `cache-control: no-cache` now, so a reload always shows the current
+   edit.
+
+3. **The session sidebar is scoped to its project.** `session.list` (and
+   `projects.switch`) pass the current root through to the store — unscoped,
+   the picker mixed every project the store had ever seen, and on this
+   machine that was 6,900-odd leftover directories from tests that ran
+   against the real `~/.aipass`. The test harness now defaults `AIPASS_HOME`
+   to a temp directory whenever a test did not name one, so a spawned CLI
+   stops writing its sessions into the developer's real home. The leftovers
+   were removed the same day; the sidebar went from a stalled 7,270-entry
+   read to one project's five conversations.
+
+**Queued, not guessed:** the extension reports `data-model_switched` as an
+unhandled-frame note that dies in the assistant's reasoning; it should
+surface as a visible transcript line, and `settings.defaultModel` that has
+vanished from the catalog should fail the run with that sentence instead of
+swapping models silently. (The user's own setting was reset to `auto` the
+same day — the site's own default, free, and always in the catalog.)
