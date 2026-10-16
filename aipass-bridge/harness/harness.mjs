@@ -67,7 +67,12 @@ export class Harness {
     };
     this.bridge = opts.bridge instanceof BridgeClient
       ? opts.bridge
-      : new BridgeClient(opts.bridgeURL ?? DEFAULT_BRIDGE_URL, { model: opts.model ?? this.options.model ?? null });
+      : new BridgeClient(opts.bridgeURL ?? DEFAULT_BRIDGE_URL, {
+          model: opts.model ?? this.options.model ?? null,
+          // A 429 wait must read as a pause, not a stuck run: the client's
+          // note rides the same dim-note channel as the firewall notes.
+          onNote: (text) => this.events.emit('firewall_note', { text }),
+        });
     this.skills = opts.skills ?? SkillLibrary.default({ root: this.root, repoDir: REPO_SKILLS });
     this.store = opts.store === 'off' ? null : (opts.store ?? new SessionStore(path.join(home(), 'sessions')));
     this.overlay = new Overlay(this.root);

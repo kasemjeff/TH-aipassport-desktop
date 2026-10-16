@@ -350,7 +350,11 @@ greeting is refused. The block is time-boxed rather than sticky: the last
 blocked probe drew a 403 at 20:26, and the same probe passed in full about
 twenty minutes later. Its smaller sibling is quicker to draw: a three-probe
 check followed immediately by one live run — ten messages in four minutes —
-collected a **429 Too Many Requests** mid-run. The suspected third rule is
+collected a **429 Too Many Requests** mid-run — and the cure is layered now:
+the page waits the request out in place (5s/15s/45s, retry-after honoured —
+`extension/page.js`), and `BridgeClient` retries the message itself at
+20s/60s (`RATE_WAITS_MS`, `harness/bridge.mjs`), each only before any delta
+streamed, so a busy edge pauses a run instead of ending it. The suspected third rule is
 closed too: a bare relative path (`./math.mjs`) was never a rule, it only
 403'd while the block was up. With the edge quiet, `h1` carrying
 `import … from './math.mjs';` was accepted, and every read result in the

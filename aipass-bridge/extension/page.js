@@ -206,11 +206,12 @@
 
     // The edge in front of de.aipass.net answers 429 when the account is
     // moving too fast — Cloudflare, not the app, and nothing about the request
-    // is wrong: the same body goes through in a moment. The page is the only
-    // layer that can wait it out, because by the time a failed job reaches the
-    // bridge the run is already over. retry-after is honoured when the edge
-    // sends one; otherwise 5s → 15s → 45s, and then the failure is real and
-    // surfaces with its forensics.
+    // is wrong: the same body goes through in a moment. This is the first of
+    // two layers — waiting here, inside the request, is the cheapest; the
+    // client above adds a second one (harness/bridge.mjs RATE_WAITS_MS)
+    // before a run gives up. retry-after is honoured when the edge sends one;
+    // otherwise 5s → 15s → 45s, and then the failure is real and surfaces
+    // with its forensics.
     const RETRY_WAITS_MS = [5000, 15000, 45000];
     const aborted = () => { const err = new Error('aborted'); err.name = 'AbortError'; return err; };
     const sleep = (ms, signal) => new Promise((resolve, reject) => {

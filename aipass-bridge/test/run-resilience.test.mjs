@@ -10,6 +10,13 @@
 // connected". These tests pin the client-side cure: the gap is retried, a
 // refusal after the answer started streaming is not (a resend would deliver
 // the text twice), and a conversation create survives the same gap.
+//
+// Its sibling, recorded the same afternoon: the edge answers 429 when the
+// account moves too fast (ten messages in four minutes drew one), the page
+// waits the request out inside the tab (extension/page.js RETRY_WAITS_MS —
+// 5s/15s/45s, retry-after honoured), and the tests below pin the layer above
+// it — a rate window longer than the page's budget is waited out here too,
+// under the same "never after a delta streamed" rule.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { startBridge, FakeExtension, scripted, waitFor } from './harness.mjs';
@@ -63,4 +70,52 @@ test('a conversation create survives the same gap', async (t) => {
   const made = await pending;
   assert.ok(made?.id, 'the create answered with an id after the retry');
   assert.equal(ext.created.length, 1, 'one create reached the extension');
+});
+
+/* The 429 layer — a rate window longer than the page's own budget ---------- */
+
+test('a 429 refused send is waited out and retried, not lost', async (t) => {
+  let refused = 0;
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_job, e) => {
+      if (refused++ === 0) {
+        return void e.error('aipass returned 429  [2046 bytes] {server=cloudflare via=1.1 google} — <!doctype html><title>429</title>');
+      }
+      await e.text('ผ่านแล้วครับ');
+      await e.done();
+    },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const notes = [];
+  const client = new BridgeClient(bridge.base, { rateWaits: [20, 20], onNote: (text) => notes.push(text) });
+  const res = await client.chat({ message: 'hi' });
+  assert.match(res.text, /ผ่านแล้วครับ/, 'the retried send reached the extension');
+  assert.equal(ext.chats.length, 2, 'refused once, accepted on the second attempt');
+  assert.match(notes.join('\n'), /429/, 'and the wait was reported, not silent');
+});
+
+test('a 429 that never clears surfaces after the waits, not before them', async (t) => {
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_job, e) => void e.error('aipass returned 429  [2046 bytes] {server=cloudflare}'),
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const client = new BridgeClient(bridge.base, { rateWaits: [10, 10] });
+  await assert.rejects(() => client.chat({ message: 'hi' }), /429/);
+  assert.equal(ext.chats.length, 3, 'the first send plus two waits — then the failure is real');
+});
+
+test('a 429 after the answer started streaming is not retried', async (t) => {
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_job, e) => {
+      await e.text('ครึ่งแรก');
+      await e.error('aipass returned 429  [2046 bytes] — pretend the limiter cut the tail');
+    },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const client = new BridgeClient(bridge.base, { rateWaits: [10, 10] });
+  await assert.rejects(() => client.chat({ message: 'hi' }), /429/);
+  assert.equal(ext.chats.length, 1, 'a half-delivered answer is never resent');
 });
