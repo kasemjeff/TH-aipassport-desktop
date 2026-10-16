@@ -443,7 +443,7 @@ export class Harness {
   }
 
   /**
-   * The checker (SPEC_CHECKER.md): one read-only child run over the staged
+   * The checker (docs/SPEC_CHECKER.md): one read-only child run over the staged
    * tree — the piece that puts a verdict behind a DONE. Its tools read a
    * snapshot of the parent's staged files, so `read` and `run` see the tree
    * Apply would produce, and every `run` goes through the projection for the

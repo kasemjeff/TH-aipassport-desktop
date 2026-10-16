@@ -246,7 +246,7 @@ export async function runTask(taskText, ctx = {}) {
     events?.emit('budget', { reason, used });
   };
 
-  // (checker, SPEC_CHECKER.md) A DONE over staged code earns a read-only
+  // (checker, docs/SPEC_CHECKER.md) A DONE over staged code earns a read-only
   // check before it is accepted — always, even when the run "verified" itself
   // with a run or a read-back: a temporary assertion is not a verdict, and
   // only the child's own runs decide. It is an execution, so it runs only

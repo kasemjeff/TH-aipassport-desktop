@@ -10,7 +10,7 @@ events instead of printing.
 For the whole harness — the review, the findings, the open designs — see
 [`HARNESS_DESIGN.md`](HARNESS_DESIGN.md). For the architecture around it,
 [`TECH_STACK.md`](TECH_STACK.md) and
-[`aipass-bridge/docs/DOCS.md`](aipass-bridge/docs/DOCS.md). Written against
+[`aipass-bridge/docs/DOCS.md`](../aipass-bridge/docs/DOCS.md). Written against
 v0.2 (2026-10).
 
 ## The constraints that shaped it

@@ -1,4 +1,4 @@
-// The checker (SPEC_CHECKER.md): one read-only child over the staged tree,
+// The checker (docs/SPEC_CHECKER.md): one read-only child over the staged tree,
 // asked for a verdict before a DONE is accepted. A stub bridge with a reply
 // queue per conversation keeps the parent's exchanges and the checker's
 // apart — the parent's sends carry no conversation id (they use the bridge

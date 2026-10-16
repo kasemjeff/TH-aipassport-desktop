@@ -5,7 +5,7 @@ change next — findings first, then designs. It is a review of
 `aipass-bridge/harness/` as it stands (v0.2), written to be handed to
 whoever picks up the work. For the architecture around it, see
 [`TECH_STACK.md`](TECH_STACK.md); for what the app does, the
-[README](README.md).
+[README](../README.md).
 
 ## How one run works
 

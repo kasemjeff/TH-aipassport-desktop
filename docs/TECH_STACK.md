@@ -2,9 +2,9 @@
 
 Why aipass desktop is built the way it is — the layer, the choice, and the
 alternatives that were rejected. For what the app does, see the
-[README](README.md); for how each piece works, see
-[`desktop/README.md`](desktop/README.md) and
-[`aipass-bridge/README.md`](aipass-bridge/README.md).
+[README](../README.md); for how each piece works, see
+[`desktop/README.md`](../desktop/README.md) and
+[`aipass-bridge/README.md`](../aipass-bridge/README.md).
 
 ```
 ┌──────────────┐   localhost:8790    ┌──────────────┐   localhost:8787   ┌───────────────┐
