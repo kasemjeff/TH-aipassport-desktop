@@ -467,7 +467,7 @@ stream.addEventListener('step', (e) => {
   // rows trail prose that was written after them.
   foldThinking();
   state.assistant = null;
-  addNote(`step ${step}/${maxSteps} · ${elapsed}s`);
+  addNote(maxSteps > 0 ? `step ${step}/${maxSteps} · ${elapsed}s` : `step ${step} · ${elapsed}s`);
 });
 stream.addEventListener('thinking', (e) => {
   const { text } = JSON.parse(e.data);
@@ -495,12 +495,11 @@ stream.addEventListener('check_end', (e) => {
         : 'ตรวจแล้ว ไม่มีคำสั่งให้รัน';
   addNote(what);
 });
-stream.addEventListener('step_limit', () => {
-  addNote('reached the step limit');
-  // A run that stops for want of steps is a dead end unless the next move is
-  // offered: "carry on" is one click instead of retyping what to do next.
+/** A stopped run is a dead end unless the next move is offered: "carry on" is
+ *  one click instead of retyping what to do next. */
+function offerCarryOn(what) {
   const row = el('div', 'note continue-row');
-  row.append(el('span', null, 'หยุดเพราะใช้ครบ step — '));
+  row.append(el('span', null, what));
   const on = el('button', 'mini', 'ให้ทำต่อ');
   on.onclick = () => {
     row.remove();
@@ -509,6 +508,17 @@ stream.addEventListener('step_limit', () => {
   row.append(on);
   log.append(row);
   scrollDown();
+}
+stream.addEventListener('step_limit', () => {
+  addNote('reached the step limit');
+  offerCarryOn('หยุดเพราะใช้ครบ step — ');
+});
+// With no step cap set, a spent budget is what ends a long run — the same dead
+// end the step limit used to be, so it gets the same way out.
+stream.addEventListener('budget', (e) => {
+  const { used } = JSON.parse(e.data);
+  addNote(`budget spent (${used}) — stopping`);
+  offerCarryOn(`หยุดเพราะครบ budget (${used}) — `);
 });
 stream.addEventListener('error', (e) => addNote(`error: ${JSON.parse(e.data).message}`));
 stream.addEventListener('todo', (e) => renderTodo(JSON.parse(e.data).items));
@@ -1098,7 +1108,7 @@ const SETTINGS_SECTIONS = [
       { key: 'defaultModel', label: 'โมเดลเริ่มต้น', type: 'text', note: 'id ของโมเดล — ดูรายการได้ที่ /models หรือกดที่หัวหน้าต่าง' },
       { key: 'mode', label: 'สิทธิ์แก้ไฟล์', type: 'select', options: [['ask', 'ถามก่อนเขียนทุกไฟล์'], ['auto', 'เขียนเลยไม่ถาม'], ['yolo', 'เขียน + รันคำสั่ง shell']] },
       { key: 'allowRun', label: 'อนุญาตให้รันคำสั่ง shell', type: 'checkbox', note: 'ปิด = โมเดลแก้ไฟล์ได้อย่างอื่นไม่ได้' },
-      { key: 'maxSteps', label: 'สูงสุดกี่ Step ต่อคำสั่ง', type: 'number', note: 'กันเรื่องราวยาวไม่จบ — ตัวเลขสูง = เสียเครดิตรัวกว่า' },
+      { key: 'maxSteps', label: 'สูงสุดกี่ Step ต่อคำสั่ง', type: 'number', note: '0 = ไม่จำกัด — งานยาวไปจนจบ; เบรกจริงคือ budget ด้านล่าง (tool calls / เวลา)' },
       { key: 'maxToolCalls', label: 'สูงสุดกี่ tool call ต่อคำสั่ง', type: 'number', note: 'เพดานกันหลุด — คำตอบเดียวที่สั่งเครื่องมือร้อยครั้งจะหยุดเมื่อถึงตัวเลขนี้ (ค่าเริ่มต้น 300)' },
       { key: 'maxWallClockMin', label: 'เวลาสูงสุดต่อคำสั่ง (นาที)', type: 'number', note: 'เพดานเวลา — งานที่ค้างจะหยุดเอง (ค่าเริ่มต้น 30)' },
       { key: 'plan', label: 'plan mode', type: 'checkbox', note: 'โมเดลร่างแผนก่อนลงมือ' },
@@ -1424,12 +1434,12 @@ async function openSettings() {
 
   const save = el('button', 'primary', 'บันทึก');
   save.onclick = async () => {
-    // Check before writing: a budget under its reserve, or a step limit of
-    // zero, is a mistake the person should hear about — not a setting that
-    // quietly misbehaves on the next run.
+    // Check before writing: a budget under its reserve is a mistake the person
+    // should hear about — not a setting that quietly misbehaves on the next
+    // run. Zero steps is no mistake: it is the deliberate "no cap".
     const problems = [];
     const maxSteps = Number(draft.maxSteps);
-    if (!Number.isFinite(maxSteps) || maxSteps < 1) problems.push('สูงสุดกี่ step ต้องเป็นตัวเลขอย่างน้อย 1');
+    if (!Number.isFinite(maxSteps) || maxSteps < 0) problems.push('สูงสุดกี่ step ต้องเป็น 0 ขึ้นไป (0 = ไม่จำกัด)');
     const maxToolCalls = Number(draft.maxToolCalls);
     if (!Number.isFinite(maxToolCalls) || maxToolCalls < 1) problems.push('สูงสุดกี่ tool call ต้องเป็นตัวเลขอย่างน้อย 1');
     const maxWallClockMin = Number(draft.maxWallClockMin);

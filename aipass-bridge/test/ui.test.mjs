@@ -413,6 +413,23 @@ test('a run that stops for want of steps offers the next move', async () => {
   assert.equal(node('log').children.some((c) => /continue-row/.test(c.className)), false, 'and the row is gone');
 });
 
+test('a spent budget offers the same carry-on button as the step limit', async () => {
+  // With no step cap set, a budget stop is what ends a long run — the dead end
+  // the step limit used to be. It gets the same one-click way out.
+  const { node, calls, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('budget', { reason: 'time-limited', used: '1800s of 1800s' });
+  await tick();
+  const note = node('log').children.find((c) => /budget spent/.test(c.textContent));
+  assert.ok(note, 'the stop is named');
+  const row = node('log').children.find((c) => /continue-row/.test(c.className));
+  assert.ok(row, 'and the row carries a way out');
+  const on = row.children.find((c) => c.tagName === 'BUTTON');
+  on.dispatch('click');
+  await tick();
+  assert.ok(calls.includes('run'), 'clicking it starts a run');
+  assert.equal(node('log').children.some((c) => /continue-row/.test(c.className)), false, 'and the row is gone');
+});
+
 test('a compaction shows what the model carried over', async () => {
   const { node, tick } = await bootApp(BACKEND);
   globalThis.__stream.emit('compacted', { summary: 'read the bridge, changed nothing, still to do: tests' });
@@ -816,7 +833,8 @@ test('the settings sheet shows its categories and saves once', async () => {
   await tick(); await tick();
   assert.equal(calls.filter((c) => c === 'settings.set').length, 1, 'one write for one save');
 
-  // A step limit of zero is refused, with the reason on screen and no write.
+  // A negative step limit is refused, with the reason on screen and no write.
+  // (Zero is a real value now: "no cap".)
   node('settings-btn').dispatch('click');
   await tick(); await tick();
   // The control is on whichever page owns it, however deep that page nests
@@ -827,10 +845,10 @@ test('the settings sheet shows its categories and saves once', async () => {
     for (const c of n.children ?? []) walk(c);
   };
   walk(node('modal-body'));
-  const zeros = inputs.filter((n) => n.type === 'number' && String(n.value) === '10');
-  assert.ok(zeros.length, 'the step limit control is found by its value');
-  zeros[0].value = '0';
-  zeros[0].onchange({ target: zeros[0] });
+  const stepField = inputs.filter((n) => n.type === 'number' && String(n.value) === '10');
+  assert.ok(stepField.length, 'the step limit control is found by its value');
+  stepField[0].value = '-1';
+  stepField[0].onchange({ target: stepField[0] });
   const saveAgain = node('modal-actions').children.find((b) => /save|บันทึก/.test(b.textContent));
   saveAgain.dispatch('click');
   await tick(); await tick();

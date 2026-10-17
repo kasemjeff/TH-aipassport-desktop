@@ -193,11 +193,13 @@ message and answers nothing. Both entry points now find each other by looking fo
 `aipass-bridge/` next to themselves (installed layout) or one level up (repo
 layout), rather than assuming either.
 
-The numbers that govern a run are clamped where they are written:
-`maxSteps: 0` makes the loop exit before its first step, which reads as "it
-ignores me" with no error anywhere, so it is clamped to 1 rather than stored. The
-same goes for the compaction budget, the reserve, the rotation share, and the
-chat URL's scheme. A hand-edited `settings.json` is clamped as it is read.
+The numbers that govern a run are clamped where they are written. `maxSteps` is
+the one with a deliberate zero: 0 means no cap — the run goes until DONE, a
+guard stops it, or a per-run budget is spent — and it is stored as written. A
+nonsense count (negative, unparsable) falls back to that default instead of
+reaching the loop and stopping a run before its first step. The same clamping
+covers the compaction budget, the reserve, the rotation share, and the chat
+URL's scheme. A hand-edited `settings.json` is clamped as it is read.
 
 ## API
 
@@ -336,9 +338,9 @@ before each step — edited from the composer's effort chip in the window, or
 `/thinking` in the terminal; it streams into a fold labeled `✻ reasoning…` and
 closes when the turn ends, and only models that advertise thinking levels
 honour it), write
-permission (`ask` / `auto` / `yolo`), `allowRun`, `maxSteps` (plus the per-run
-caps `maxToolCalls` / `maxWallClockMs` — the sheet asks for the wall clock in
-minutes), plan mode (+
+permission (`ask` / `auto` / `yolo`), `allowRun`, `maxSteps` (0 = no cap, the
+shipped default), the per-run caps `maxToolCalls` / `maxWallClockMs` (the sheet
+asks for the wall clock in minutes), plan mode (+
 whether a plan waits for approval), helpers on/off, the compaction budget
 (**budget**, **reserve**, and the share at which it rotates —
 `compactAtPercent`, 40 by default), playbook folders, the project list, the
