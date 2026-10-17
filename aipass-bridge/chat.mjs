@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execSync, spawnSync } from 'node:child_process';
-import { edgeWaits, waitLabel } from './harness/bridge.mjs';
+import { edgeWaits, rateWaits, waitLabel, RATE_REFUSED } from './harness/bridge.mjs';
 
 /**
  * @typedef {object} BridgeStatus
@@ -1404,6 +1404,10 @@ async function sayAgent(text, images = [], files = []) {
 
   startSpin();
   let collected = '';
+  // Anything already rendered (reasoning included) must not be resent by the
+  // layers above: a refusal that lands after this mark surfaces instead
+  // (sayResilient reads `streamed` before it decides anything).
+  let streamedAny = false;
   const reader  = /** @type {ReadableStream<Uint8Array>} */ (res.body).getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -1429,14 +1433,20 @@ async function sayAgent(text, images = [], files = []) {
       if (!data || data === '[DONE]') continue;
       let evt;
       try { evt = JSON.parse(data); } catch { continue; }
-      if (evt.error) { stopSpin(); throw new Error(evt.error.message); }
+      if (evt.error) {
+        stopSpin();
+        const ref = /** @type {Error & { streamed?: boolean }} */ (new Error(evt.error.message));
+        if (streamedAny) ref.streamed = true;
+        throw ref;
+      }
       const delta = evt.choices?.[0]?.delta ?? {};
       if (delta.reasoning_content) {
         stopSpin();
+        streamedAny = true;
         renderTool(delta.reasoning_content);
         startSpin();
       }
-      if (delta.content) collected += delta.content;
+      if (delta.content) { collected += delta.content; streamedAny = true; }
     }
   }
   stopSpin();
@@ -1476,6 +1486,30 @@ async function sayResilient(text, depth = 0, images = [], files = []) {
   if (depth === 0) text = agentOutbound(text);
   try { return await sayAgent(text, depth === 0 ? images : [], depth === 0 ? files : []); }
   catch (err) {
+    // A refusal that arrived after something already rendered must surface —
+    // resending would print that part a second time (sayAgent marks these).
+    if (/** @type {any} */ (err)?.streamed) throw err;
+
+    // Rate refusals are pace, never content: the same message waits and goes
+    // again, and nothing below (redact → split) is ever reached for a 429/503
+    // — the rewrite chain doubles the messages the edge is refusing and every
+    // probe counts against the window. The sibling contract is spelled out in
+    // harness/bridge.mjs (resilientSay).
+    if (RATE_REFUSED.test(/** @type {Error} */ (err).message)) {
+      let waited = 0;
+      for (const wait of rateWaits()) {
+        out('  ' + dim(`  rate limited by the edge — waiting ${waitLabel(wait)}, then sending the same message again`));
+        await new Promise((r) => setTimeout(r, wait));
+        waited += wait;
+        try { return await sayAgent(text); } catch (err2) {
+          if (!RATE_REFUSED.test(/** @type {Error} */ (err2).message)) throw err2;
+          err = err2;
+        }
+      }
+      /** @type {Error} */ (err).message += ` — rate limited for ~${Math.round(waited / 1000)}s; the account is moving too fast. Pause a moment, then continue`;
+      throw err;
+    }
+
     const blocked = /\b40[39]\b/.test(/** @type {Error} */ (err).message);
     if (!blocked) throw err;
 

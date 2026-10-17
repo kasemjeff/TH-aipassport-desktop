@@ -89,9 +89,11 @@ waiting on a slow model is as real a spend as running a command. Stops:
 
 **2. The send.** `saySafe` → `resilientSay`: a message the edge rejects is
 retried once in a halved/rewritten form (`firewall_note` goes out). A 429 is
-not rewritten — it is waited out, first in the page (5s/15s/45s) and then by
-the client (20s/60s, `RATE_WAITS_MS`), so a busy edge pauses a run instead of
-ending it. The user
+not rewritten — it is waited out, first in the page (10s/45s/120s, on a clock
+the whole tab shares) and then by the client and the message layer
+(`RATE_WAITS_MS` — 60s/180s — twice over), so a busy edge pauses a run
+instead of ending it; the rewrite chain never sees a rate refusal, and a
+refusal that arrives after deltas streamed is never resent at all. The user
 pressing stop surfaces as `AbortError` — an ending, not a failure — and the
 transcript must not read "error" for it: `cancelled`. An error naming a missing
 chat tab emits `needs_tab` so the window can offer the fix in one click.

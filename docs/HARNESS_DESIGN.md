@@ -354,11 +354,11 @@ greeting is refused. The block is time-boxed rather than sticky: the last
 blocked probe drew a 403 at 20:26, and the same probe passed in full about
 twenty minutes later. Its smaller sibling is quicker to draw: a three-probe
 check followed immediately by one live run — ten messages in four minutes —
-collected a **429 Too Many Requests** mid-run — and the cure is layered now:
-the page waits the request out in place (5s/15s/45s, retry-after honoured —
-`extension/page.js`), and `BridgeClient` retries the message itself at
-20s/60s (`RATE_WAITS_MS`, `harness/bridge.mjs`), each only before any delta
-streamed, so a busy edge pauses a run instead of ending it. The suspected third rule is
+collected a **429 Too Many Requests** mid-run — and the cure is layered (its
+waits were lengthened in the second follow-up below): the page waits the
+request out in place (`extension/page.js`), and `BridgeClient` retries the
+message itself (`RATE_WAITS_MS`, `harness/bridge.mjs`), each only before any
+delta streamed, so a busy edge pauses a run instead of ending it. The suspected third rule is
 closed too: a bare relative path (`./math.mjs`) was never a rule, it only
 403'd while the block was up. With the edge quiet, `h1` carrying
 `import … from './math.mjs';` was accepted, and every read result in the
@@ -397,6 +397,40 @@ prefix stacked on the outer one). The wait is the right medicine for pace and
 the wrong one for content, and the reverse holds for the split: splitting a
 pace refusal doubles the messages the edge is refusing, which is exactly what
 the day's cascades were made of.
+
+**Follow-up, Oct 17 — the split ran while the edge was still pacing.** The
+report that opened this round: `rejected — splitting into 2 parts and
+resending` immediately followed by a fatal
+`aipass returned 429 … {server=cloudflare …}`. The chain's own reading of the
+sequence: a pace-shaped 403 outlived the waits above (page 5s/15s + client
+10s/30s), the split the 403 contract allows then doubled the messages at the
+worst moment, the part sends drew 429s, and the top of the chain had no rate
+branch at all — the raw 429 ended the run. Three changes close it, each aimed
+at the same physics: every probe is itself a request and counts against the
+window it is waiting for, so a retry storm keeps its own limiter hot.
+
+1. The waits grow instead of tightening — 10s/45s/120s in the page
+   (`RETRY_WAITS_MS`, retry-after capped at 120s) and 60s/180s above it
+   (`RATE_WAITS_MS`, `AIPASS_RATE_WAITS_MS` overrides), and `EDGE_WAITS_MS`
+   gained a third rung (10s/30s/60s) so the split is only reached after two
+   minutes of identical resends were all refused.
+2. The page's rate clock is tab-wide and outlives the request: a 429 sets
+   `rateQuietUntil` and every later send in any job waits on it, so parallel
+   senders stack behind one pause instead of storming; for five minutes after
+   any refusal (`RATE_MEMORY_MS`) sends are also paced 3s apart
+   (`RATE_PACE_GAP_MS`), so the burst that drew the 429 cannot immediately
+   draw another.
+3. `resilientSay` (and the styled console's `sayResilient`) grew the branch it
+   was missing: a 429/503 is waited again at the message layer — the same
+   message, never a rewrite or a split — and only then surfaces, with its
+   forensics plus the advice ("the account is moving too fast. Pause a moment,
+   then continue"). And the rewrite chain now honours `err.streamed`
+   (retrySend marks a refusal that arrives after deltas reached the client):
+   no redact, no split, no resend over a delivered answer.
+
+`run-resilience.test.mjs` pins the layer (a 429 waited again, never split; the
+advice on the final surface; the `streamed` mark) and `page.test.mjs` pins the
+tab-wide clock and the post-incident pacing.
 
 ## The re-run that passed, and the gap it stepped on (Oct 2026)
 

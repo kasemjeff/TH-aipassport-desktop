@@ -123,7 +123,11 @@ test('a 429 after the answer started streaming is not retried', async (t) => {
   t.after(() => ext.disconnect());
 
   const client = new BridgeClient(bridge.base, { rateWaits: [10, 10] });
-  await assert.rejects(() => client.chat({ message: 'hi' }), /429/);
+  await assert.rejects(() => client.chat({ message: 'hi' }), (err) => {
+    assert.match(err.message, /429/);
+    assert.equal(err.streamed, true, 'the mark that keeps the rewrite chain off a delivered answer');
+    return true;
+  });
   assert.equal(ext.chats.length, 1, 'a half-delivered answer is never resent');
 });
 
@@ -247,4 +251,80 @@ test('a nested split never stacks a second part prefix', async () => {
     if (saved === undefined) delete process.env.AIPASS_EDGE_WAITS_MS;
     else process.env.AIPASS_EDGE_WAITS_MS = saved;
   }
+});
+
+/* The rate refusal at the message layer — waited again, never rewritten ----- */
+
+// Recorded live, Oct 17 2026 (later the same day): the layered waits above
+// were still not enough once a split had doubled the traffic. The part sends
+// drew 429s, and the top layer had no rate branch at all — the run died with
+// the raw 429 right after `rejected — splitting into 2 parts and resending`,
+// the exact pair the report quoted. The message layer now waits rate refusals
+// too (RATE_WAITS_MS again, above the client's own waits) and never lets one
+// reach the rewrite chain: doubling the messages the edge is refusing is what
+// keeps its limiter hot.
+test('a 429 is waited again at the message layer, and never split', async () => {
+  const saved = process.env.AIPASS_RATE_WAITS_MS;
+  process.env.AIPASS_RATE_WAITS_MS = '5,5';
+  try {
+    const sent = [];
+    const notes = [];
+    let calls = 0;
+    const say = async (t) => {
+      sent.push(t);
+      if (++calls <= 2) throw new Error('aipass returned 429  [2046 bytes] {server=cloudflare}');
+      return 'ok';
+    };
+    const text = 'an ordinary tool result that drew a rate refusal\n'.repeat(8);
+    await resilientSay(say, text, (_lvl, t) => notes.push(t));
+
+    assert.equal(sent.length, 3, 'refused twice, accepted on the third attempt');
+    assert.equal(sent[1], sent[0], 'every resend was the very same message');
+    assert.equal(sent[2], sent[0]);
+    assert.ok(notes.some((t) => /rate limited by the edge — waiting/.test(t)), 'the pause is reported as a note');
+    assert.ok(!notes.some((t) => /splitting/.test(t)), 'a rate refusal never reaches the split');
+    assert.ok(!notes.some((t) => /omitting/.test(t)), 'and nothing was dropped for it');
+  } finally {
+    if (saved === undefined) delete process.env.AIPASS_RATE_WAITS_MS;
+    else process.env.AIPASS_RATE_WAITS_MS = saved;
+  }
+});
+
+test('a 429 that never clears surfaces with advice, not as a rewrite', async () => {
+  const saved = process.env.AIPASS_RATE_WAITS_MS;
+  process.env.AIPASS_RATE_WAITS_MS = '0,0';
+  try {
+    const notes = [];
+    let calls = 0;
+    const say = async () => { calls++; throw new Error('aipass returned 429  [2046 bytes] {server=cloudflare}'); };
+    await assert.rejects(
+      () => resilientSay(say, 'anything at all', (_lvl, t) => notes.push(t)),
+      (err) => {
+        assert.match(err.message, /429/, 'the forensics survive');
+        assert.match(err.message, /account is moving too fast/, 'and the advice is attached');
+        return true;
+      },
+    );
+    assert.equal(calls, 3, 'the first send plus both waits — then the failure is real');
+    assert.ok(!notes.some((t) => /splitting|omitting/.test(t)), 'no rewrite was attempted for a rate refusal');
+  } finally {
+    if (saved === undefined) delete process.env.AIPASS_RATE_WAITS_MS;
+    else process.env.AIPASS_RATE_WAITS_MS = saved;
+  }
+});
+
+// The half-delivered refusal, at the message layer this time: retrySend marks
+// `err.streamed` when it refuses to resend over a delivered answer, and the
+// rewrite chain right above must honour the same mark — a redact or split
+// there would send the message again and the answer would arrive twice.
+test('a refusal marked streamed is not resent by the message layer', async () => {
+  let calls = 0;
+  const say = async () => {
+    calls++;
+    const err = new Error('aipass returned 403 Forbidden — after a half answer');
+    err.streamed = true;
+    throw err;
+  };
+  await assert.rejects(() => resilientSay(say, 'x'.repeat(500), () => {}), /403/);
+  assert.equal(calls, 1, 'the refusal surfaced instead of a resend over the delivered half');
 });

@@ -79,7 +79,7 @@ export function loadPage({ onFetch, origin = 'https://de.aipass.net', fastTimers
   };
 
   const src = fs.readFileSync(PAGE, 'utf8');
-  // The edge waits (5s/15s/45s) are real seconds in the browser and would be
+  // The edge waits (10s/45s/120s) are real seconds in the browser and would be
   // real seconds here too; a capped timer shortens every page sleep for tests
   // that care about the order of attempts rather than the clock. setInterval
   // is untouched, so the 40ms flush ticker keeps its cadence.
