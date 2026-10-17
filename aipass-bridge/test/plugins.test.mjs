@@ -45,6 +45,40 @@ test('only the plugins named in settings are loaded — a disabled one registers
   assert.deepEqual(details.panels.map((p) => p.id), ['alpha'], 'and no panel');
 });
 
+test('a plugin that throws mid-setup leaves nothing behind — failed means nothing is live', async () => {
+  // The disabled-plugin rule ("nothing of it is loaded") applies to a plugin
+  // that dies halfway through setup just the same: the window lists it as
+  // failed, so its tools, methods, panels and settings must not answer.
+  const dir = tempDir({
+    'settings.json': JSON.stringify({ plugins: [] }),
+    'plugins/aa-half.mjs': `
+export default {
+  name: 'aa-half',
+  version: '1.0.0',
+  setup(ctx) {
+    ctx.tools.register('HALF_TOOL', () => 'should not run');
+    ctx.rpc.method('half.ping', () => 'pong');
+    ctx.panel({ id: 'half', title: 'half panel', render: () => '' });
+    ctx.settings.define({ key: 'half.setting' });
+    throw new Error('boom mid-setup');
+  },
+};
+`,
+    'plugins/zz-good.mjs': pluginFile('zz-good', 'GOOD_TOOL'),
+  });
+  const manager = new PluginManager({ dir: path.join(dir, 'plugins'), settings: new Settings(dir), log: () => {} });
+
+  const details = await manager.load();
+
+  assert.deepEqual(details.failed.map((f) => path.basename(f.file)), ['aa-half.mjs']);
+  assert.deepEqual(details.loaded.map((p) => p.name), ['zz-good']);
+  assert.deepEqual(details.tools, ['GOOD_TOOL'], 'the failed plugin registered no tool');
+  assert.equal(manager.hasMethod('half.ping'), false, 'and no rpc method');
+  assert.deepEqual(details.panels.map((p) => p.id), ['zz-good'], 'and no panel');
+  assert.deepEqual(details.settings, [], 'and no setting definition');
+  assert.match(await manager.runTool('HALF_TOOL'), /no such plugin tool/);
+});
+
 test('an empty list means everything found, and a reload honours a changed filter', async () => {
   const dir = home(JSON.stringify({ plugins: [] }));
   const settings = new Settings(dir);

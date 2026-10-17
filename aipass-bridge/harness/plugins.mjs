@@ -58,6 +58,24 @@ export class PluginManager {
     return !Array.isArray(list) || list.length === 0 || list.includes(name);
   }
 
+  /** The four registration tables, copied for a rollback. */
+  #snapshot() {
+    return {
+      methods: new Map(this._methods),
+      tools: new Map(this._tools),
+      panels: [...this._panels],
+      settingDefs: [...this._settingDefs],
+    };
+  }
+
+  /** Put the tables back exactly as the snapshot found them. */
+  #rollback(tables) {
+    this._methods = tables.methods;
+    this._tools = tables.tools;
+    this._panels = tables.panels;
+    this._settingDefs = tables.settingDefs;
+  }
+
   async load() {
     this.loaded = [];
     this.failed = [];
@@ -67,6 +85,12 @@ export class PluginManager {
     this._settingDefs = [];
 
     for (const file of this.discover()) {
+      // Registrations are live the moment setup() makes them, so a failure
+      // anywhere in this iteration must put the four tables back: the window
+      // lists the plugin as failed, and "failed" may not leave half a plugin
+      // answering the next run. Rollback also restores a marker an earlier
+      // plugin owned and this one overwrote before it died.
+      const tables = this.#snapshot();
       try {
         // Provenance, not security: a plugin is code the user installed, and
         // the record of what was actually loaded — content hash, size, mtime —
@@ -99,6 +123,7 @@ export class PluginManager {
           modified: Math.round(stat.mtimeMs),
         });
       } catch (err) {
+        this.#rollback(tables);
         this.failed.push({ file, error: String(err.message ?? err) });
         this.log(`plugin ${path.basename(file)} failed to load: ${err.message}`);
       }
