@@ -18,11 +18,14 @@ import {
   REMINDER, prose, parse, parseTodo, mergeTodo, READING, attemptedMarker,
   preamble as buildPreamble,
 } from './protocol.mjs';
-import { resilientSay, decode } from './bridge.mjs';
+import { resilientSay, decode, recoverWaits, sendRecoverable, waitLabel } from './bridge.mjs';
 import { classify } from './permissions.mjs';
 import { posix } from './overlay.mjs';
 import { thaiRatio } from './lang.mjs';
 import { PATHY, pathVariants, beYearNote } from './argguard.mjs';
+
+/** A pause the loop itself takes — the recovery waits between send attempts. */
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // (R1/R4) The research round's two sets: which call kinds change the overlay,
 // and which files count as code for the verification nudge.
@@ -153,6 +156,7 @@ export async function runTask(taskText, ctx = {}) {
   // the run records credits; these counters are what turns that into rates.
   const toolStats = new Map(); // kind → { n, fail }
   let firewallNotes = 0;
+  let sendRecoveries = 0;  // (stats) refused sends the loop paused and tried again
   const stepMs = [];
 
   const say = async (text, withParts = null) => {
@@ -379,29 +383,50 @@ export async function runTask(taskText, ctx = {}) {
     if (maxCredits && (await creditSpent()) >= maxCredits) { spendBudget('credit-limited'); break; }
     const stepStart = Date.now();
     let reply;
-    try { reply = await saySafe(next, partsForSend()); sends++; }
-    catch (err) {
-      // The user pressed stop: the signal ends the in-flight fetch with an
-      // AbortError, which is an ending, not a failure — the transcript should
-      // not read "error" for something the user did on purpose.
-      if (err?.name === 'AbortError') { stopReason = 'cancelled'; break; }
-      events?.emit('error', { message: err.message });
-      // Keep the reason a run died: the UI event is ephemeral, and 40% of runs
-      // end this way — without a note the session keeps no trace of why.
-      session?.append('note', { text: `the send failed: ${err.message}` });
-      sendError = String(err.message ?? err);
-      // The one failure with an obvious cause and an obvious fix: the bridge is
-      // up and the extension is connected, but no logged-in chat tab is open, so
-      // there is nowhere for the request to run. Say so on its own event, and
-      // whoever is watching gets to fix it in one click instead of reading a
-      // stack trace. Both spellings: the dispatch refusal ("no extension
-      // connected — open a de.aipass.net tab") and the tab's own report.
-      if (/no extension connected|no de\.aipass\.net tab is open/i.test(err.message)) {
-        events?.emit('needs_tab', { url: options.chatUrl ?? 'https://de.aipass.net/chat', reason: err.message });
+    let sendGivenUp = false;
+    const recover = recoverWaits();
+    for (let attempt = 0; ; attempt++) {
+      try { reply = await saySafe(next, partsForSend()); sends++; break; }
+      catch (err) {
+        // The user pressed stop: the signal ends the in-flight fetch with an
+        // AbortError, which is an ending, not a failure — the transcript should
+        // not read "error" for something the user did on purpose.
+        if (err?.name === 'AbortError') { stopReason = 'cancelled'; sendGivenUp = true; break; }
+        // A send that delivered nothing and heals by waiting — the extension's
+        // cycle, a tab mid-reload, a rate window, a 403 the rewrite chain could
+        // not clear — is paused and given the same message again before it is
+        // allowed to end the run (sendRecoverable says which shapes; the waits
+        // are bounded). The ending below is what stays when they are spent.
+        if (attempt < recover.length && sendRecoverable(err)) {
+          const wait = recover[attempt];
+          sendRecoveries++;
+          const line = `the send was refused — waiting ${waitLabel(wait)}, then sending it again (recovery ${attempt + 1}/${recover.length})`;
+          session?.append('note', { text: line });
+          events?.emit('firewall_note', { text: line });
+          await sleep(wait);
+          continue;
+        }
+        events?.emit('error', { message: err.message });
+        // Keep the reason a run died: the UI event is ephemeral, and 40% of
+        // runs ended this way before the recovery above — without a note the
+        // session keeps no trace of why.
+        session?.append('note', { text: `the send failed: ${err.message}` });
+        sendError = String(err.message ?? err);
+        // The one failure with an obvious cause and an obvious fix: the bridge is
+        // up and the extension is connected, but no logged-in chat tab is open, so
+        // there is nowhere for the request to run. Say so on its own event, and
+        // whoever is watching gets to fix it in one click instead of reading a
+        // stack trace. Both spellings: the dispatch refusal ("no extension
+        // connected — open a de.aipass.net tab") and the tab's own report.
+        if (/no extension connected|no de\.aipass\.net tab is open/i.test(err.message)) {
+          events?.emit('needs_tab', { url: options.chatUrl ?? 'https://de.aipass.net/chat', reason: err.message });
+        }
+        stopReason = 'error';
+        sendGivenUp = true;
+        break;
       }
-      stopReason = 'error';
-      break;
     }
+    if (sendGivenUp) break;
     reply = decode(reply);
 
     const elapsed = ((Date.now() - stepStart) / 1000).toFixed(1);
@@ -807,6 +832,7 @@ export async function runTask(taskText, ctx = {}) {
     stagnations: stagnationWarns,
     verifyPrompts,
     firewallNotes,
+    sendRecoveries,
     checks,
     checkVerdict: checkResult?.verdict ?? null,
     repeatBlocks,

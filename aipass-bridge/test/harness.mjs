@@ -370,8 +370,10 @@ export class FakeExtension {
 // Replies the scripted list in order, and records the text of every turn.
 // `sent` holds what the upstream actually accepted; a rejected attempt goes to
 // `rejected` instead, so a test can assert that blocked content never got
-// through without tripping over the attempt that was refused.
-export function scripted(replies, { reject } = {}) {
+// through without tripping over the attempt that was refused. `gap` models a
+// transient failure instead of a reply when it returns one, before any text
+// is sent — the connection-cycle shapes the retry layers wait out.
+export function scripted(replies, { reject, gap } = {}) {
   let turn = 0;
   const sent = [];
   const rejected = [];
@@ -379,6 +381,10 @@ export function scripted(replies, { reject } = {}) {
     if (reject && reject(job.text)) {
       rejected.push(job.text);
       return void e.error('aipass returned 403 — 403 Forbidden');
+    }
+    if (gap) {
+      const message = gap(job.text);
+      if (message) return void e.error(message);
     }
     sent.push(job.text);
     await e.text(replies[Math.min(turn++, replies.length - 1)]);

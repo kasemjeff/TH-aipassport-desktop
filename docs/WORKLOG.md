@@ -6,6 +6,30 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-17 — opencode — the refused send pauses instead of ending the run
+
+- **Files**: `aipass-bridge/harness/bridge.mjs` (`TRANSIENT_SEND` now covers a
+  content script mid-reinjection; new `RECOVER_WAITS_MS` / `recoverWaits()` /
+  `sendRecoverable()`; `AIPASS_SEND_RETRY_MS` shrinks the transport wait for
+  tests), `aipass-bridge/harness/loop.mjs` (the send is a bounded retry loop:
+  a recoverable failure pauses and the same message goes again; each recovery
+  is a `firewall_note` and `run_stats.sendRecoveries` counts it),
+  `aipass-bridge/test/harness.mjs` (`scripted(..., { gap })` models the
+  connection-cycle shapes), `aipass-bridge/test/agent.test.mjs` (four tests:
+  chain exhaustion → rescue, never-clears → bounded stop, loading tab →
+  recovered, mid-reinjection → retried inside the send), plus `CHANGELOG.md`,
+  `docs/LOOP_DESIGN.md`, `docs/RELIABILITY.md`.
+- **Tests**: `npm test` green on this machine (520 tests, 0 fail, 1 skip);
+  the pushed CI run is the judge.
+- **Deferred**: the conversation churn ("created temporary conversation" every
+  ~30s in the morning's failing runs) — diagnosed as a lead, not reproduced
+  here; the other session's `aipass-loopbug` worktree owns that repro.
+- **Risks**: a hard rate window now stalls longer before dying (bounded:
+  ~8min in resilientSay + 90s of recovery); "bridge returned 5xx" counts as
+  recoverable, so a sick bridge is retried twice before the old ending.
+- **Cleanup**: none needed — no processes started, edits confined to the
+  `aipass-fix` worktree.
+
 ## 2026-10-17 — opencode — CI revived: the runners' git phrasing, then the sessions' batch
 
 - **Files**: `aipass-bridge/test/gates.test.mjs` + `aipass-bridge/harness/tools.mjs`

@@ -71,6 +71,14 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **A refused send no longer ends the run at the first exhaustion.** Past the
+  redact/wait/split/omit chain the loop pauses and sends the same message
+  again (`RECOVER_WAITS_MS` — 30s then 60s, bounded): the connection-cycle
+  shapes, a tab still loading, rate windows, and 403s that were never about
+  the content. Each recovery is a `firewall_note` and counts in
+  `run_stats.sendRecoveries`; the transport also waits out a content script
+  mid-reinjection (`TRANSIENT_SEND`), and a run that still dies keeps its
+  recorded cause (`test/agent.test.mjs`).
 - **GLOB speaks shell globs again.** Brace alternation (`*.{js,css,html}`)
   and `?` are expanded and matched the way the shells do; the braces were
   escaped before, so a tree full of matching files answered "no files matched"
