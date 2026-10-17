@@ -5,6 +5,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { Compactor } from '../harness/compact.mjs';
+import { Harness } from '../harness/harness.mjs';
 import { startBridge, FakeExtension, scripted, tempDir, run, AGENT } from './harness.mjs';
 
 let bridge;
@@ -147,4 +148,30 @@ test('a long run rotates mid-run: summarise, fresh conversation, results still d
   assert.match(handler.sent[2], /Result of read big\.txt:/, 'the step results survive the rotation');
   assert.match(handler.sent[2], /\.aipass\/spill\/[a-f0-9]+\.txt/, 'and the spilled tail is reachable from it');
   assert.equal(ext.created.length, 2, 'the starting conversation plus the rotation');
+});
+
+// A manual compaction must re-seed the conversation with every marker the run
+// has - the loop's own rotation passes them all, and a manual rotation that
+// dropped SEARCH -i, ATTACH or a plugin's markers was a different run.
+test('a manual compaction re-seeds with every marker the run has', async (t) => {
+  const dir = tempDir({ 'a.txt': 'x\n' });
+  const handler = scripted(['a tight summary of the work so far']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const h = new Harness({
+    root: dir,
+    bridgeURL: bridge.base,
+    options: {
+      mode: 'ask', searchI: true, attach: true,
+      pluginTools: [{ marker: 'ECHO', takesBody: false, description: 'echo it back' }],
+    },
+  });
+  await h.startSession({ title: 'compact markers' });
+  const { seedText } = await h.compactNow('keep the markers');
+
+  assert.match(seedText, /NEED dir \./, 'the seed still carries the base preamble');
+  assert.match(seedText, /-i first/, 'the SEARCH -i hint survives a manual compaction');
+  assert.match(seedText, /ATTACH/, 'the ATTACH marker survives a manual compaction');
+  assert.match(seedText, /ECHO/, "a plugin's marker survives a manual compaction");
 });

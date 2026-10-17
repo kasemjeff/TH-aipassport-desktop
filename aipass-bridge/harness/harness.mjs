@@ -255,10 +255,17 @@ export class Harness {
       summary,
       task,
       listing: '',
+      // The same preamble the run would send, flags and all: a rotation that
+      // silently dropped SEARCH -i, ATTACH or a plugin's markers was a
+      // different run wearing the same name (the loop's own rotation passes
+      // every one of them).
       preambleText: buildPreamble({
         allowRun: Boolean(this.options.allowRun),
         plan: Boolean(this.options.plan),
         subagent: Boolean(this.options.subagent),
+        searchI: Boolean(this.options.searchI),
+        attach: Boolean(this.options.attach),
+        plugins: this.options.pluginTools ?? [],
         lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
       staged,
@@ -558,7 +565,13 @@ export class Harness {
       }
 
       // The verdict is computed, not read: from what the child actually ran.
-      const runs = (childSession?.entries ?? []).filter((e) => e.type === 'tool' && e.kind === 'run');
+      // A run the chain guard skipped never executed — the entry only exists
+      // to say why — so it is evidence of nothing, least of all a failure.
+      // Counting it turned a refused edit in the checker's own reply into a
+      // reported fail the parent had to answer.
+      const runs = (childSession?.entries ?? []).filter((e) => (
+        e.type === 'tool' && e.kind === 'run' && !/^skipped\b/.test(String(e.out ?? ''))
+      ));
       const failed = runs.filter((e) => !e.ok);
       const verdict = failed.length ? 'fail' : runs.length ? 'pass' : 'none';
       const evidence = failed.slice(0, 3).map((e) => String(e.out ?? '').trim()).filter(Boolean).join('\n\n');
