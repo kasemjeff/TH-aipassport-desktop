@@ -1,3 +1,4 @@
+// @ts-check
 // One line per event: for humans by default, for machines when asked.
 //
 // The real trace of a run is the session JSONL (ids, steps, every tool call)

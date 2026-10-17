@@ -43,10 +43,13 @@ if (!files.length) {
 }
 
 const extra = process.argv.slice(2); // e.g. --test-name-pattern=…
+const coverage = extra.includes('--coverage');
+const passThrough = extra.filter((a) => a !== '--coverage');
 // Ten minutes is a stuck-run ceiling, not a budget — the suite runs in ~30 s.
 // A leaked handle makes the runner wait forever (the Node 24 CI runners did,
 // for hours); a timeout fails the step instead of stalling it.
-const result = spawnSync(process.execPath, ['--test', ...extra, ...files], {
+const nodeArgs = ['--test', ...(coverage ? ['--experimental-test-coverage'] : []), ...passThrough, ...files];
+const result = spawnSync(process.execPath, nodeArgs, {
   stdio: 'inherit',
   timeout: 10 * 60 * 1000,
 });

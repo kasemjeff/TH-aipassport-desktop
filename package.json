@@ -11,6 +11,8 @@
     "dev": "node aipass-bridge/bridge/server.mjs",
     "test": "node scripts/test.mjs",
     "agents:lint": "node scripts/agents-lint.mjs",
+    "typecheck": "tsc -p aipass-bridge/jsconfig.json",
+    "coverage": "node scripts/test.mjs --coverage",
     "verify": "node scripts/verify.mjs",
     "smoke:e2e": "node scripts/smoke-e2e.mjs",
     "qa": "node scripts/qa-loop.mjs",
@@ -36,6 +38,10 @@
     "tauri:build:linux": "tauri build --config desktop/src-tauri/tauri.conf.json --bundles deb,appimage"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "@types/node": "^22.0.0"
   }
 }
