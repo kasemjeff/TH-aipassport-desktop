@@ -391,7 +391,7 @@ list` was refused whole and then accepted with no rewrite; a read was refused
 whole while both of its halves passed on their own. So the chain now
 distinguishes before it acts. Known offenders are still dropped at once (the
 deterministic families above), then the identical message is sent again after
-a short wait — 5s/15s in the page (`EDGE_WAITS_403_MS`), 10s/30s above it
+a short wait — 5s/15s in the page (`EDGE_WAITS_403_MS`), 10s/30s/60s above it
 (`EDGE_WAITS_MS`, `AIPASS_EDGE_WAITS_MS` overrides) — and only a refusal that
 survives every wait is treated as content and split, with the part protocol
 announced by the outermost split alone (a chunk split again used to carry its
@@ -416,12 +416,12 @@ window it is waiting for, so a retry storm keeps its own limiter hot.
    (`RATE_WAITS_MS`, `AIPASS_RATE_WAITS_MS` overrides), and `EDGE_WAITS_MS`
    gained a third rung (10s/30s/60s) so the split is only reached after two
    minutes of identical resends were all refused.
-2. The page's rate clock is tab-wide and outlives the request: a 429 sets
-   `rateQuietUntil` and every later send in any job waits on it, so parallel
-   senders stack behind one pause instead of storming; for five minutes after
-   any refusal (`RATE_MEMORY_MS`) sends are also paced 3s apart
-   (`RATE_PACE_GAP_MS`), so the burst that drew the 429 cannot immediately
-   draw another.
+2. The page's rate clock is tab-wide and outlives the request: a 429 — and a
+   pace-score 403, since the follow-up below — sets `rateQuietUntil`, and
+   every later send in any job waits on it, so parallel senders stack behind
+   one pause instead of storming; for five minutes after any refusal
+   (`RATE_MEMORY_MS`) sends are also paced 3s apart (`RATE_PACE_GAP_MS`), so
+   the burst that drew the refusal cannot immediately draw another.
 3. `resilientSay` (and the styled console's `sayResilient`) grew the branch it
    was missing: a 429/503 is waited again at the message layer — the same
    message, never a rewrite or a split — and only then surfaces, with its
@@ -433,6 +433,14 @@ window it is waiting for, so a retry storm keeps its own limiter hot.
 `run-resilience.test.mjs` pins the layer (a 429 waited again, never split; the
 advice on the final surface; the `streamed` mark) and `page.test.mjs` pins the
 tab-wide clock and the post-incident pacing.
+
+**Follow-up, Oct 17 — the 403 cooled only the job it refused.** A pace-score
+403 is the same limiter family as the 429s above, but it armed only the
+refused job's own clock; every send queued behind it — the next step's tool
+result, a parallel helper — left at full pace into the window that had just
+said no. A 403 now arms the tab-wide clocks exactly as a 429 does: the sends
+behind it wait out one shared pause and are then paced 3s apart while the
+window cools (`page.test.mjs` pins the tab-wide wait for a 403).
 
 ## The re-run that passed, and the gap it stepped on (Oct 2026)
 

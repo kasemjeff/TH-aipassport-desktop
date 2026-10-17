@@ -294,6 +294,31 @@ test('after a rate refusal the tab paces its sends apart', async () => {
   );
 });
 
+// A pace-score 403 is the same limiter family as the 429 above, and it used
+// to arm only the refused job's own clock: the next job left at full pace
+// into the window that had just said no, which is how one pace refusal became
+// an episode. The 403 now cools the tab exactly as a 429 does.
+test('a 403 refusal pauses the whole tab, not just the refused job', async () => {
+  const page = loadPage({
+    fastTimers: true,
+    onFetch: async (_url, _init, n) => (n === 1
+      ? new Response('', { status: 403, statusText: 'Forbidden', headers: { server: 'cloudflare' } })
+      : sseResponse(textFrames('ok'))),
+  });
+  page.run(chatJob());
+  const first = await page.settled('j1');
+  assert.equal(first.kind, 'done');
+
+  page.run(chatJob({ jobId: 'j2' }));
+  const second = await page.settled('j2');
+  assert.equal(second.kind, 'done', 'the second job waited the first job\'s clock out, not its own');
+  assert.equal(page.requests.length, 3, 'the refusal, its identical resend, and the next job');
+  assert.ok(
+    page.parts('j2').some((p) => p.kind === 'note' && /pacing sends — waiting [45]s/.test(p.text)),
+    'the tab-wide wait is reported for the job that did not draw the 403',
+  );
+});
+
 // The extension owns which paths and intents the bridge may reach. A job asking
 // for anything else has to be refused here, not upstream.
 test('the assistant job refuses an intent outside its allowlist', async () => {
