@@ -17,6 +17,13 @@
 // 5s/15s/45s, retry-after honoured), and the tests below pin the layer above
 // it — a rate window longer than the page's budget is waited out here too,
 // under the same "never after a delta streamed" rule.
+//
+// Recorded again Oct 17, live, and the refuser was the cure's own line: the
+// page's waiting line used to ride tool status — a reasoning delta — and the
+// client read any reasoning as "the answer started", closing the very gate
+// the wait needed open. The waiting line is a note now (extension/page.js),
+// and one test below plays that exact sequence: note first, 429 second,
+// retry expected.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { startBridge, FakeExtension, scripted, waitFor } from './harness.mjs';
@@ -142,4 +149,38 @@ test('a note part mid-stream surfaces as a note, never in the answer', async (t)
   // The reasoning echo is deliberate: a chat console that never learned the
   // note field still sees the line where it always saw it.
   assert.match(res.reasoning, /switched/);
+});
+
+test('a 429 is waited out even when the page\'s waiting note streamed first', async (t) => {
+  let refused = 0;
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_job, e) => {
+      if (refused++ > 0) {
+        await e.text('ผ่านแล้วครับ');
+        await e.done();
+        return;
+      }
+      // The live shape, verbatim: the page writes its waiting line while the
+      // edge refuses (a note — not the answer), the in-place retries run out,
+      // and only then does the 429 surface. That note must not read as an
+      // answer delta, or the gate above is shut and the refusal is fatal.
+      await e.note('[429] rate limited by the edge — waiting 5s, then retrying (2/4)');
+      await e.error('aipass returned 429  [2046 bytes] {server=cloudflare via=1.1 google} — <!doctype html><title>429</title>');
+    },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const notes = [];
+  const streamNotes = [];
+  const client = new BridgeClient(bridge.base, {
+    rateWaits: [20, 20],
+    onNote: (text) => notes.push(text),
+    onStreamNote: (text) => streamNotes.push(text),
+  });
+  const res = await client.chat({ message: 'hi' });
+  assert.match(res.text, /ผ่านแล้วครับ/, 'the retried send reached the extension');
+  assert.equal(ext.chats.length, 2, 'the note did not close the gate — the refused send was retried');
+  assert.match(notes.join('\n'), /429/, 'and the client wait was reported, not silent');
+  assert.match(streamNotes.join('\n'), /waiting 5s/, 'the page\'s waiting line arrived as a stream note');
+  assert.doesNotMatch(res.text, /rate limited/, 'the note never leaked into the answer');
 });

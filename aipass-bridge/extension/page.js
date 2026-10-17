@@ -211,7 +211,10 @@
     // client above adds a second one (harness/bridge.mjs RATE_WAITS_MS)
     // before a run gives up. retry-after is honoured when the edge sends one;
     // otherwise 5s → 15s → 45s, and then the failure is real and surfaces
-    // with its forensics.
+    // with its forensics. The waiting line below rides the note kind, not
+    // tool status: it is written while the send was refused, and as a note it
+    // explains the pause without counting as the answer the client must never
+    // resend past (harness/bridge.mjs reads the note field, not the echo).
     const RETRY_WAITS_MS = [5000, 15000, 45000];
     const aborted = () => { const err = new Error('aborted'); err.name = 'AbortError'; return err; };
     const sleep = (ms, signal) => new Promise((resolve, reject) => {
@@ -229,7 +232,7 @@
         const wait = Number.isFinite(after) && after >= 0
           ? Math.min(after * 1000, 60_000)
           : RETRY_WAITS_MS[attempt];
-        push('status', `[${res.status}] rate limited by the edge — waiting ${Math.round(wait / 1000)}s, then retrying (${attempt + 2}/${RETRY_WAITS_MS.length + 1})`);
+        push('note', `[${res.status}] rate limited by the edge — waiting ${Math.round(wait / 1000)}s, then retrying (${attempt + 2}/${RETRY_WAITS_MS.length + 1})`);
         await sleep(wait, signal);
       }
     };

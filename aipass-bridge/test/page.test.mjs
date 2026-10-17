@@ -169,7 +169,7 @@ test('a 429 is waited out and retried, not failed on the spot', async () => {
   assert.equal(end.kind, 'done', 'the job survives the pause');
   assert.equal(page.requests.length, 2, 'one retry after the 429');
   assert.equal(page.parts('j1').filter((p) => p.kind === 'text').map((p) => p.text).join(''), 'สวัสดีหลังรอ');
-  assert.ok(page.parts('j1').some((p) => p.kind === 'status' && /429/.test(p.text)), 'and the wait is reported');
+  assert.ok(page.parts('j1').some((p) => p.kind === 'note' && /429/.test(p.text)), 'and the wait is reported as a note, not tool status');
 });
 
 test('a 429 that never clears surfaces as the real failure, after the retries', async () => {

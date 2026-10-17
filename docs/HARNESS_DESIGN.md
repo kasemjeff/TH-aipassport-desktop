@@ -360,6 +360,19 @@ closed too: a bare relative path (`./math.mjs`) was never a rule, it only
 `import … from './math.mjs';` was accepted, and every read result in the
 re-run below carried `./` unencoded with zero rejects, so it stays as it is.
 
+**Follow-up, Oct 17 — the cure had a gate of its own.** A live run died of a
+429 exactly like the one above, during a firewall rejection's recovery: the
+page's waiting line (`[429] rate limited by the edge — waiting 5s…`) rode tool
+status — a `reasoning_content` delta — and `BridgeClient` counts any reasoning
+delta as "the answer started": the one condition its resend gate refuses to
+cross. The note arrived first, the gate closed before the refusal did, and
+neither wait above ever engaged. The waiting line now rides the `note` kind
+(`extension/page.js`); the note field is the client's signal that a delta is
+not the answer — its reasoning echo still shows in consoles that never learned
+the field — so the refusal behind it is waited out, not fatal.
+`run-resilience.test.mjs` plays the sequence — note, then 429 — and pins the
+retry.
+
 ## The re-run that passed, and the gap it stepped on (Oct 2026)
 
 The smoke task ran once more after the block lifted — same task, same project,

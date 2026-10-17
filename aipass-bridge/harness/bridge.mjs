@@ -202,10 +202,21 @@ export class BridgeClient {
         try { evt = JSON.parse(data); } catch { continue; }
         if (evt.error) throw new Error(evt.error.message);
         const delta = evt.choices?.[0]?.delta ?? {};
-        // A note is not the answer and never flips the resend gate by
-        // itself: a retry repeating a note is harmless, a retry repeating
-        // the answer is not.
-        if (typeof delta.note === 'string' && delta.note) this.onStreamNote?.(delta.note);
+        // A note is not the answer and never flips the resend gate: a retry
+        // repeating a note is harmless, a retry repeating an answer is not.
+        // This matters most exactly when the edge is refusing — the page's
+        // own waiting line arrives this way — so reading the note as "the
+        // answer started" would close the gate and turn a wait the layers
+        // below are handling into a fatal error.
+        if (typeof delta.note === 'string' && delta.note) {
+          this.onStreamNote?.(delta.note);
+          // The reasoning echo rides the same delta for clients that never
+          // learned the field (the chat console reads reasoning): it shows
+          // and records here too, it just does not count as answer content.
+          if (delta.reasoning_content) { reasoning += delta.reasoning_content; onReasoning(delta.reasoning_content); }
+          if (delta.content) onText(delta.content);
+          continue;
+        }
         if (delta.reasoning_content) { markStreamed(); reasoning += delta.reasoning_content; onReasoning(delta.reasoning_content); }
         if (delta.content) { markStreamed(); out += delta.content; onText(delta.content); }
       }
