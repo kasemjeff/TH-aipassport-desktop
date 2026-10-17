@@ -5,6 +5,7 @@
 //   npm run setup-assistant
 import fs from 'node:fs';
 import { ASSISTANT_CHARACTER } from './assistant-prompt.mjs';
+import { authHeaders } from './harness/authtoken.mjs';
 
 const argv = process.argv.slice(2);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -33,6 +34,13 @@ resend it. Prints the id to put in AIPASS_ASSISTANT_ID.`);
 }
 
 const BRIDGE = (flag('bridge', process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787')).replace(/\/+$/, '');
+// Bridge-bound requests carry the loopback bearer token (see authtoken.mjs);
+// /status stays open, so the probe below needs no header.
+const bridgeFetch = (url, opts = {}) => (
+  String(url).startsWith(BRIDGE)
+    ? fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers ?? {}) } })
+    : fetch(url, opts)
+);
 const NAME = flag('name', 'Local File Coder');
 const MODEL = flag('model', 'claude-sonnet-5@default');
 const FORCE = argv.includes('--force');
@@ -55,7 +63,7 @@ if (!status.extensions) {
 }
 
 if (DELETE) {
-  const gone = await fetch(`${BRIDGE}/assistants/${encodeURIComponent(DELETE)}`, { method: 'DELETE' })
+  const gone = await bridgeFetch(`${BRIDGE}/assistants/${encodeURIComponent(DELETE)}`, { method: 'DELETE' })
     .then((r) => r.json()).catch((err) => ({ error: { message: String(err.message) } }));
   if (gone?.error) {
     console.error(red(`could not delete it: ${gone.error.message}`));
@@ -68,7 +76,7 @@ if (DELETE) {
 // Binding a conversation is the step that used to mean opening the web UI and
 // copying an id out of the address bar.
 const bind = async (assistantId) => {
-  const bound = await fetch(`${BRIDGE}/assistants/${encodeURIComponent(assistantId)}/chat`, { method: 'POST' })
+  const bound = await bridgeFetch(`${BRIDGE}/assistants/${encodeURIComponent(assistantId)}/chat`, { method: 'POST' })
     .then((r) => r.json()).catch((err) => ({ error: { message: String(err.message) } }));
   if (bound?.error) {
     console.error(red(`\ncould not start a bound chat: ${bound.error.message}`));
@@ -80,7 +88,7 @@ const bind = async (assistantId) => {
 // Making a second assistant by the same name is easy to do by accident and
 // leaves the account cluttered, so an existing one is reported rather than
 // duplicated.
-const existing = await fetch(`${BRIDGE}/assistants`).then((r) => r.json()).catch(() => null);
+const existing = await bridgeFetch(`${BRIDGE}/assistants`).then((r) => r.json()).catch(() => null);
 const match = existing?.assistants?.find((a) => a.name === NAME);
 if (match && !FORCE) {
   console.log(`${bold('already there')}  ${match.name}  ${match.id}`);
@@ -95,7 +103,7 @@ if (match && !FORCE) {
 
 console.log(`${bold('creating')}  ${NAME}  ${dim(`on ${MODEL}, ${ASSISTANT_CHARACTER.length} characters of protocol`)}`);
 
-const made = await fetch(`${BRIDGE}/assistants`, {
+const made = await bridgeFetch(`${BRIDGE}/assistants`, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({

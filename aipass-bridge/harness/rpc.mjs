@@ -27,6 +27,7 @@ import { Emitter } from './events.mjs';
 // and with desktop/main.mjs's probe: an explicit bridgeURL wins, otherwise
 // AIPASS_BRIDGE decides, otherwise the loopback default.
 import { resolveBridgeURL } from './bridge.mjs';
+import { loadOrMintToken, authorized, authorizedQuery } from './authtoken.mjs';
 
 // Re-exported for desktop/main.mjs, whose ensureBridge probe must resolve the
 // bridge exactly the way the harness's own client does.
@@ -99,6 +100,48 @@ const isLocalRequest = (req) => {
   return true;
 };
 
+/**
+ * Same-origin browser page, proven by the headers only a browser sends.
+ * Headerless tools (curl, node) fail this on purpose — they can read the token
+ * file directly, so the bootstrap endpoint below refuses them and stays a
+ * window-only path a CORS-enabled page from another origin cannot use.
+ */
+const isBrowserSameOrigin = (req) => {
+  if (process.env.AIPASS_ALLOW_REMOTE === '1') return false;
+  if (!loopbackHost(req.headers.host)) return false;
+  if (req.headers['sec-fetch-site'] === 'same-origin') return true;
+  const origin = req.headers['origin'];
+  if (origin) {
+    try { return loopbackHost(new URL(origin).host); } catch { return false; }
+  }
+  return false;
+};
+
+/**
+ * Open a URL in the platform browser. No shell, no interpolation: the URL is
+ * allowlisted, then passed as argv — this method is reachable from loopback
+ * without auth, so a string-built `cmd /c start "" "${url}"` would be RCE.
+ */
+export async function openBrowser(url) {
+  const target = String(url ?? '').trim();
+  if (!/^https?:\/\/[^\s"'<>\\^|&;`$]+$/i.test(target)) return false;
+  const { execFile } = await import('node:child_process');
+  const run = (cmd, args) => new Promise((resolve) => {
+    const child = execFile(cmd, args, { windowsHide: true }, () => resolve());
+    child.on('error', () => resolve());
+  });
+  try {
+    // '' becomes a bare "" on the command line — cmd's canonical empty title
+    // for `start`.
+    if (process.platform === 'win32') await run('cmd', ['/c', 'start', '', target]);
+    else if (process.platform === 'darwin') await run('open', [target]);
+    else await run('xdg-open', [target]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function createRpc({
   port = 8790,
   root = process.cwd(),
@@ -136,7 +179,11 @@ export function createRpc({
     replay.push({ event: type, seq: body.seq, body });
     if (replay.length > REPLAY_LIMIT) replay.shift();
     const frame = `event: ${type}\nid: ${seq}\ndata: ${JSON.stringify(body)}\n\n`;
-    for (const res of listeners) res.write(frame);
+    // A listener whose socket died between frames must be dropped, not written
+    // to — one dead window must not take down the backend for the live ones.
+    for (const res of [...listeners]) {
+      try { res.write(frame); } catch { listeners.delete(res); }
+    }
   };
 
   const appSettings = settings ?? new Settings();
@@ -289,19 +336,6 @@ export function createRpc({
 
   /* --------------------------------------------------------------- attachments */
 
-const openBrowser = async (url) => {
-  const cmd = process.platform === 'win32' ? `cmd /c start "" "${url}"`
-    : process.platform === 'darwin' ? `open ${url}`
-      : `xdg-open ${url}`;
-  try {
-    const { exec } = await import('node:child_process');
-    await new Promise((resolve) => exec(cmd, () => resolve()));
-    return true;
-  } catch {
-    return false;
-  }
-};
-
   const staged = new Map(); // id → {id, name, path, bytes, mime, at}
 
   /**
@@ -324,13 +358,20 @@ const openBrowser = async (url) => {
           ? path.resolve(typed)
           : path.resolve(root, typed);
       if (!fs.existsSync(abs)) throw new Error(`no such file: ${fromPath}`);
+      // The data-URL branch below enforces MAX_ATTACHMENT_BYTES; a path needs
+      // the same cap BEFORE the read, or staging a multi-GB file OOMs the
+      // backend (and base64-inflates it again per send in partsFor).
+      const size = fs.statSync(abs).size;
+      if (size > MAX_ATTACHMENT_BYTES) throw new Error(`attachment too large: ${Math.round(size / 1024 / 1024)} MB (cap ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB)`);
       bytes = fs.readFileSync(abs);
       base = path.basename(abs);
       const sameDir = path.dirname(abs) === dir;
       const target = path.join(dir, `${id}-${base}`);
       if (!sameDir) fs.copyFileSync(abs, target);
       // Keep the original readable path so the model can be told where it is.
-      staged.set(id, { id, name: base, path: sameDir ? abs : target, source: abs, bytes: bytes.length, mime: mimeOf(base), at: Date.now() });
+      // `owned` marks copies the backend may delete; the user's original is
+      // never unlinked by dropAttachment.
+      staged.set(id, { id, name: base, path: sameDir ? abs : target, source: abs, owned: !sameDir, bytes: bytes.length, mime: mimeOf(base), at: Date.now() });
       return staged.get(id);
     }
     base = path.basename(name ?? 'attachment');
@@ -340,7 +381,7 @@ const openBrowser = async (url) => {
     if (bytes.length > MAX_ATTACHMENT_BYTES) throw new Error(`attachment too large: ${Math.round(bytes.length / 1024 / 1024)} MB (cap ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB)`);
     const file = path.join(dir, `${id}-${base}`);
     fs.writeFileSync(file, bytes);
-    staged.set(id, { id, name: base, path: file, bytes: bytes.length, mime, at: Date.now() });
+    staged.set(id, { id, name: base, path: file, owned: true, bytes: bytes.length, mime, at: Date.now() });
     return staged.get(id);
   };
 
@@ -354,7 +395,9 @@ const openBrowser = async (url) => {
 
   const dropAttachment = (id) => {
     const item = staged.get(id);
-    if (item) fs.rmSync(item.path, { force: true });
+    // Only copies owned by the backend are unlinked; a sameDir stage points
+    // at the user's original file, and deleting it would eat their data.
+    if (item?.owned) fs.rmSync(item.path, { force: true });
     staged.delete(id);
   };
 
@@ -703,7 +746,23 @@ const openBrowser = async (url) => {
       return json(res, 403, { ok: false, error: 'local requests only — this port serves the machine it runs on' });
     }
 
+    // Window bootstrap: the desktop window loads over plain navigation, so it
+    // cannot present a bearer header until it holds the token. Same-origin
+    // browser pages fetch it here; headerless tools read the file instead
+    // (and a cross-origin page never passes isBrowserSameOrigin).
+    if (url.pathname === '/token' && req.method === 'GET') {
+      if (!isBrowserSameOrigin(req)) {
+        return json(res, 403, { ok: false, error: 'the token bootstrap is for same-origin browser pages; tools read the token file' });
+      }
+      return json(res, 200, { ok: true, token: loadOrMintToken() });
+    }
+
     if (url.pathname === '/events' && req.method === 'GET') {
+      // EventSource cannot set headers, so the window rides `?token=` (minted
+      // at boot via /token). Header bearers are accepted too.
+      if (!authorized(req) && !authorizedQuery(url)) {
+        return json(res, 401, { ok: false, error: 'unauthorized: missing or wrong loopback bearer token' });
+      }
       res.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
         'cache-control': 'no-cache, no-transform',
@@ -726,12 +785,15 @@ const openBrowser = async (url) => {
       }
       res.write(`event: hello\ndata: ${JSON.stringify({ seq })}\n\n`);
       listeners.add(res);
-      const ping = setInterval(() => res.write(': keepalive\n\n'), 15_000);
+      const ping = setInterval(() => { try { res.write(': keepalive\n\n'); } catch { /* closed */ } }, 15_000);
       req.on('close', () => { clearInterval(ping); listeners.delete(res); });
       return;
     }
 
     if (url.pathname === '/rpc' && req.method === 'POST') {
+      if (!authorized(req)) {
+        return json(res, 401, { ok: false, error: 'unauthorized: missing or wrong loopback bearer token' });
+      }
       let body = '';
       req.on('data', (c) => { body += c; if (body.length > 32_000_000) req.destroy(); });
       req.on('end', async () => {

@@ -13,7 +13,7 @@
 //
 // On top of that: path rules (`docs/** → allow`, `.env* → deny`) that outrank
 // the mode, and "always" answers so one confirmation covers a whole run.
-import { SAFETY_RULES } from './settings.mjs';
+import { SAFETY_RULES, SECRET_RULES } from './settings.mjs';
 export const WRITE_KINDS = new Set(['write', 'replace', 'delete', 'move']);
 export const SHELL_KINDS = new Set(['run']);
 
@@ -177,6 +177,24 @@ export class PermissionEngine {
       if (rule.kinds && !rule.kinds.includes(kind)) continue;
       if (file && globMatch(rule.pattern, file)) {
         return { decision: rule.decision, risk, reason: `rule ${rule.pattern}` };
+      }
+    }
+
+    // The secret floor (settings.mjs SECRET_RULES) sits under the user's own
+    // rules and over everything else: a secret file is denied in every mode,
+    // yolo included, for reads AND writes. An explicit user `allow` above
+    // still wins (operator override), and a user rule that names the file but
+    // narrows `kinds` away from this kind also wins for this kind (H9: kinds
+    // narrowing stays meaningful). Only silence — no user rule naming the
+    // file at all — falls through to the floor.
+    const secrets = [...new Set(arg.trim().split(/\s+/).filter(Boolean))];
+    if (file && !secrets.includes(file)) secrets.unshift(file);
+    const userScopedOut = (f) => this.rules.some((r) =>
+      Array.isArray(r.kinds) && !r.kinds.includes(kind) && globMatch(r.pattern, f));
+    for (const rule of SECRET_RULES) {
+      if (rule.kinds && !rule.kinds.includes(kind)) continue;
+      if (secrets.some((f) => !userScopedOut(f) && globMatch(rule.pattern, f))) {
+        return { decision: rule.decision, risk, reason: `secret ${rule.pattern}` };
       }
     }
 

@@ -3,8 +3,15 @@
 // liners in package.json, which is a code-execution shape that upstream
 // filters reject when the agent reads its own package.json back.
 import fs from 'node:fs';
+import { authHeaders } from './harness/authtoken.mjs';
 
 const BRIDGE = (process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787').replace(/\/+$/, '');
+// Bridge-bound requests carry the loopback bearer token (see authtoken.mjs).
+const bridgeFetch = (url, opts = {}) => (
+  String(url).startsWith(BRIDGE)
+    ? fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers ?? {}) } })
+    : fetch(url, opts)
+);
 const argv = process.argv.slice(2);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 if (argv.includes('--version') || argv.includes('-v')) {
@@ -34,7 +41,7 @@ Each is a thin wrapper over: node aipass-bridge/list.mjs <what>`);
 const dim = (t) => `\x1b[2m${t}\x1b[0m`;
 
 const get = async (p) => {
-  const res = await fetch(`${BRIDGE}${p}`);
+  const res = await bridgeFetch(`${BRIDGE}${p}`);
   if (!res.ok) throw new Error(`bridge returned ${res.status}`);
   return res.json();
 };

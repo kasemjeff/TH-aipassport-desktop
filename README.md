@@ -59,7 +59,8 @@ any /v1 client ─┘                    │  SSE: jobs out, POST: deltas back
 
 No credentials are stored anywhere. Every request runs as ordinary page
 JavaScript inside your own logged-in tab, so the site's session cookie rides
-along by itself — the bridge never sees a password or a token.
+along by itself — the bridge never sees your aipass password. (It has a
+loopback token of its own; see *The bridge*, below.)
 
 ## Quick start
 
@@ -72,7 +73,11 @@ tests run on node builtins alone.
    and pick `aipass-bridge/extension`.
 2. Open https://de.aipass.net/chat and log in. Keep the tab around while you
    work — it is what does the talking.
-3. Recommended: Chrome **Settings → Performance → Always keep these sites
+3. The bridge mints a loopback token at `~/.aipass/.token` and prints the path
+   when it starts. Open the extension popup → **Advanced**, paste the file's
+   contents into **Loopback token**, save. One time per browser; without it
+   the popup says the bridge needs a token.
+4. Recommended: Chrome **Settings → Performance → Always keep these sites
    active → add `de.aipass.net`**, so a long run is never frozen mid-stream.
 
 ### 2. A client
@@ -169,8 +174,12 @@ AIPASS account through your browser session:
 - `POST /v1/chat/completions` — streaming and not
 - `GET /v1/models` — what the account can talk to
 
-It binds `127.0.0.1:8787` by default and has no auth of its own — keep it on
-localhost.
+It binds `127.0.0.1:8787` by default. Every route except the health probes
+(`/status`, `/health`) requires the loopback token minted once at
+`~/.aipass/.token` — the bridge prints the path at boot, and the extension
+popup (**Advanced**) takes the token once. The CLI and the desktop backend
+read the file themselves. `AIPASS_TOKEN` sets an explicit value;
+`AIPASS_REQUIRE_AUTH=0` goes back to tokenless, loopback-only operation.
 
 ## Configuration
 
@@ -186,6 +195,8 @@ localhost.
 | `AIPASS_TOOL_VISIBILITY` | `reasoning` | `reasoning` · `text` · `off` |
 | `AIPASS_IDLE_TIMEOUT_MS` | `180000` | when a quiet run counts as idle |
 | `AIPASS_MEDIA_TIMEOUT_MS` | `900000` | how long a generation may take |
+| `AIPASS_TOKEN` / `AIPASS_REQUIRE_AUTH` | `~/.aipass/.token` / on | loopback bearer token (see *The bridge*) |
+| `AIPASS_CORS_ORIGIN` | — | allow one browser origin (off by default) |
 
 The window and the CLI keep their state in `~/.aipass/` (settings, sessions,
 plugins, uploads, logs).

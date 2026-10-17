@@ -60,11 +60,24 @@ const bridgeUrl = async () => {
   }
 };
 
+const bridgeToken = async () => {
+  try {
+    const res = await chrome.storage.local.get('bridgeToken');
+    return res?.bridgeToken || '';
+  } catch {
+    return '';
+  }
+};
+
 async function post(path, body) {
   try {
+    const token = await bridgeToken();
     const res = await fetch(`${await bridgeUrl()}${path}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
       body: JSON.stringify(body),
     });
     // Retrying would duplicate deltas, so a refused post is surfaced, not
@@ -163,10 +176,18 @@ async function connect() {
   ensureOffscreenDocument();
 
   try {
+    const token = await bridgeToken();
     const res = await fetch(`${await bridgeUrl()}/ext/events`, {
-      headers: { accept: 'text/event-stream' },
+      headers: {
+        accept: 'text/event-stream',
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
       signal,
     });
+    if (res.status === 401) {
+      lastError = 'bridge needs the loopback token — paste it in the popup settings once';
+      console.warn('[aipass-bg] bridge requires a token; set it in the popup');
+    }
     if (!res.ok || !res.body) throw new Error(`bridge responded ${res.status}`);
 
     connected = true;

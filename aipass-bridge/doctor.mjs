@@ -7,6 +7,7 @@
 // about it — so a broken setup costs a line of output rather than a session of
 // guessing.
 import fs from 'node:fs';
+import { authHeaders } from './harness/authtoken.mjs';
 const argv = process.argv.slice(2);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 if (argv.includes('--version') || argv.includes('-v')) {
@@ -32,6 +33,12 @@ Exits 0 when every check passes, 1 otherwise.`);
 }
 
 const BRIDGE = (flag('bridge', process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787')).replace(/\/+$/, '');
+// Bridge-bound requests carry the loopback bearer token (see authtoken.mjs).
+const bridgeFetch = (url, opts = {}) => (
+  String(url).startsWith(BRIDGE)
+    ? fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers ?? {}) } })
+    : fetch(url, opts)
+);
 const FORCE_CHAT = argv.includes('--chat');
 const NO_CHAT = argv.includes('--no-chat');
 
@@ -41,7 +48,7 @@ const green = (s) => `\x1b[32m${s}\x1b[0m`;
 const red = (s) => `\x1b[31m${s}\x1b[0m`;
 const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
 
-const get = (p) => fetch(`${BRIDGE}${p}`).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json().catch(() => null) }));
+const get = (p) => bridgeFetch(`${BRIDGE}${p}`).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json().catch(() => null) }));
 
 let failed = 0;
 let warned = 0;
@@ -140,7 +147,7 @@ if (NO_CHAT || !status?.extensions) {
   const model = free?.id ?? status.defaultModel;
   const started = Date.now();
   try {
-    const res = await fetch(`${BRIDGE}/v1/chat/completions`, {
+    const res = await bridgeFetch(`${BRIDGE}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Reply with the single word: ok' }] }),

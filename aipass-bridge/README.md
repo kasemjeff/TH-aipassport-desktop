@@ -67,6 +67,11 @@ or the `npm run …` scripts from the repo directory.
 Log in at `https://de.aipass.net/chat` and leave the tab open. The extension
 popup should read **connected**.
 
+If the popup instead says the bridge needs a token, copy the contents of
+`~/.aipass/.token` (the bridge prints the path when it starts) into popup →
+**Advanced** → **Loopback token**, once per browser. The bridge requires it
+for everything except the health probes; `AIPASS_REQUIRE_AUTH=0` disables it.
+
 > **Running on a server?** There's an optional headless Docker deployment in
 > [`deploy/`](deploy/README.md) — the same bridge and extension in a container
 > with a noVNC desktop, so it stays up 24/7 without your laptop. The core here
@@ -484,6 +489,9 @@ most recent.
 | env | default | |
 |---|---|---|
 | `AIPASS_PORT` | `8787` | |
+| `AIPASS_HOST` | `127.0.0.1` | any other bind exits unless `AIPASS_ALLOW_REMOTE=1` |
+| `AIPASS_TOKEN` | `~/.aipass/.token` | loopback bearer; `AIPASS_REQUIRE_AUTH=0` disables |
+| `AIPASS_CORS_ORIGIN` | *(unset)* | allow one browser origin; off by default |
 | `AIPASS_MODEL` | `gemini-3.1-flash-lite` | used when no model is given |
 | `AIPASS_MODELS` | two known ids | fallback list when no extension is attached |
 | `AIPASS_MODEL_FILTER` | `chat` | `all` keeps image/video/audio models |

@@ -9,6 +9,9 @@
 //   4. settings apply on save   — the sheet claims live; the process has to
 //      agree for every key that reaches a module of its own
 //   5. snapshot                 — one call that rebuilds a window's view
+//   6. the desktop shell        — CSP declared (not null), and no test suite
+//      riding along in the installer
+//   7. the extension            — host access is the aipass origin + loopback
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -264,4 +267,45 @@ test('snapshot rebuilds the window view in one call', async (t) => {
   assert.ok(Array.isArray(snap.skills));
   assert.equal(snap.status.running, false);
   assert.equal(snap.status.root, env.rpc.current.root);
+});
+
+/* 6 — the desktop shell ------------------------------------------------------- */
+
+// The window is a WebView: without a CSP it would trust whatever ends up in
+// the document. The config also used to cart the whole test suite into the
+// installer — developer files the packaged app never reads.
+test('the desktop config keeps its CSP and ships no test suite', (t) => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const confPath = path.join(here, '..', '..', 'desktop', 'src-tauri', 'tauri.conf.json');
+  if (!fs.existsSync(confPath)) return t.skip('desktop/ is not part of this checkout');
+  const conf = JSON.parse(fs.readFileSync(confPath, 'utf8'));
+
+  const csp = conf?.app?.security?.csp;
+  assert.ok(csp && typeof csp === 'object', 'app.security.csp must be declared, not null');
+  assert.equal(csp['script-src'], "'self'", 'scripts come from the app itself — no inline, no eval');
+  assert.equal(csp['object-src'], "'none'");
+  assert.equal(csp['base-uri'], "'self'");
+  assert.match(String(csp['connect-src']), /http:\/\/127\.0\.0\.1/, 'the window must still reach the loopback backend');
+
+  const resources = conf?.bundle?.resources ?? {};
+  const shipped = Object.values(resources).join(' ');
+  assert.ok(!shipped.includes('aipass-bridge/test'), 'the test suite must not ride along in the installer');
+});
+
+/* 7 — the extension ----------------------------------------------------------- */
+
+// Least privilege: host access is the aipass origin and the loopback bridge,
+// nothing else. storage.googleapis.com rode along once and no extension-context
+// code ever called it — page.js fetches media as the page, not as the worker.
+test('the extension requests only the hosts it uses', (t) => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const confPath = path.join(here, '..', 'extension', 'manifest.json');
+  if (!fs.existsSync(confPath)) return t.skip('extension/ is not part of this checkout');
+  const m = JSON.parse(fs.readFileSync(confPath, 'utf8'));
+  assert.deepEqual(new Set(m.host_permissions ?? []), new Set([
+    'https://*.aipass.net/*', 'https://aipass.net/*', 'http://127.0.0.1/*', 'http://localhost/*',
+  ]), 'host access is the aipass origin plus the loopback bridge');
+  for (const cs of m.content_scripts ?? []) {
+    assert.ok(cs.matches.every((p) => p.includes('aipass.net')), 'content scripts stay on the aipass origin');
+  }
 });

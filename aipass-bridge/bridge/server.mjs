@@ -13,6 +13,17 @@ import { DOCUMENT_TYPES, MAX_ATTACHMENT_BYTES, isAllowedAttachment } from './att
 
 const PORT = Number(process.env.AIPASS_PORT ?? 8787);
 const HOST = process.env.AIPASS_HOST ?? '127.0.0.1';
+// Fail closed if someone points the bridge at a LAN/wildcard address without
+// opting in: this port spends the account, and binding it off-loopback with no
+// auth repeats the pre-Sep-2026 exposure class (SECURITY.md). Opt out with
+// AIPASS_ALLOW_REMOTE=1 behind your own proxy/auth.
+{
+  const loopback = HOST === '127.0.0.1' || HOST === 'localhost' || HOST === '::1' || HOST === '::ffff:127.0.0.1';
+  if (!loopback && process.env.AIPASS_ALLOW_REMOTE !== '1') {
+    console.error(`refusing to bind ${HOST} without AIPASS_ALLOW_REMOTE=1 (bridge has no auth; keep it on 127.0.0.1)`);
+    process.exit(1);
+  }
+}
 const MODELS_FALLBACK = (process.env.AIPASS_MODELS ?? 'gemini-3.1-flash-lite,claude-sonnet-5@default')
   .split(',').map((s) => s.trim()).filter(Boolean);
 // Where upstream tool activity (web_search progress, sources) goes:
@@ -73,7 +84,11 @@ const corsHeaders = () => (CORS_ORIGIN
   ? { 'access-control-allow-origin': CORS_ORIGIN, 'access-control-allow-private-network': 'true' }
   : {});
 
-const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
+// The scrub patterns live in their own module so tests pin the same list the
+// logger uses (OWASP Logging Cheat Sheet: never log secrets).
+import { scrubSecrets } from './log-scrub.mjs';
+
+const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a.map(scrubSecrets));
 
 /* ------------------------------------------------- react-router turbo-stream */
 
@@ -320,8 +335,14 @@ const pickClient = () => {
   return list.length ? list[rr++ % list.length] : null;
 };
 
-const sendToClient = (client, event, data) =>
-  client.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+const sendToClient = (client, event, data) => {
+  try {
+    client.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    return true;
+  } catch {
+    return false; // socket died mid-dispatch — the caller fails the job, not the process
+  }
+};
 
 class Job {
   constructor({ kind = 'chat', modelId, text, parts, conversationId, aspectRatio: ratio, url, message, requestId, assistant, assistantField, temporary, thinkingLevel, video, spec, imageStyleId, outputTone, outputFormat, timeoutMs, onDelta, onDone, onError }) {
@@ -360,7 +381,8 @@ class Job {
     const client = pickClient();
     if (!client) return this.fail('no extension connected — open a de.aipass.net tab and check the popup');
     this.client = client;
-    sendToClient(client, 'job', this.kind === 'loader'
+    try {
+      const ok = sendToClient(client, 'job', this.kind === 'loader'
       ? { jobId: this.id, kind: 'loader', url: this.url }
       : this.kind === 'create'
       ? { jobId: this.id, kind: 'create', modelId: this.modelId, message: this.message, requestId: this.requestId, assistant: this.assistant, assistantField: this.assistantField, temporary: this.temporary }
@@ -369,6 +391,12 @@ class Job {
       : this.kind === 'video'
       ? { jobId: this.id, kind: 'video', conversationId: this.conversationId, modelId: this.modelId, text: this.text, ...this.video }
       : { jobId: this.id, kind: 'chat', conversationId: this.conversationId, modelId: this.modelId, text: this.text, parts: this.parts, aspectRatio: this.aspectRatio, temporary: this.temporary, thinkingLevel: this.thinkingLevel, imageStyleId: this.imageStyleId, outputTone: this.outputTone, outputFormat: this.outputFormat });
+      // A dead socket must fail this job now — not leak it until the idle
+      // timeout fires minutes later with jobs.size inflated.
+      if (!ok) return this.fail('extension disconnected mid-dispatch — reconnect the tab and retry');
+    } catch (err) {
+      return this.fail(`could not dispatch to the extension: ${err.message}`);
+    }
   }
   delta(part) { if (!this.settled) { this.touch(); this.onDelta(part); } }
   done(value) { if (this.settled) return; this.cleanup(); this.onDone(value ?? 'stop'); }
@@ -629,7 +657,8 @@ function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, vi
 
 // The private-network classifier lives in its own module so the harness's
 // FETCH tool guards with exactly the same rules as the attachment path here.
-import { isPrivateHost } from './private-hosts.mjs';
+import { isPrivateHost, hostResolvesPrivate } from './private-hosts.mjs';
+import { authorized, tokenPath, loadOrMintToken } from '../harness/authtoken.mjs';
 
 // What may be attached to a message — the table is shared with the desktop's
 // staged uploads and the agent's ATTACH tool, in bridge/attachment-types.mjs,
@@ -652,6 +681,11 @@ async function fetchRemoteAsDataUri(urlStr, kind = 'image') {
     const host = current.hostname.toLowerCase();
     if (isPrivateHost(host)) {
       throw new Error(`refusing private/internal network fetch: ${host}`);
+    }
+    if (!isPrivateHost(host) && !/^(\d{1,3}\.){3}\d{1,3}$/.test(host) && !host.includes(':')) {
+      if (await hostResolvesPrivate(host)) {
+        throw new Error(`refusing fetch: ${host} resolves to a private/internal address`);
+      }
     }
 
     const res = await fetch(current, {
@@ -1086,7 +1120,7 @@ function extEvents(req, res) {
   warm(() => refreshVideoOptions(), 1300);
   warm(() => refreshStyleOptions(), 1700);
 
-  const ping = setInterval(() => res.write(': ping\n\n'), 15_000);
+  const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* closed */ } }, 15_000);
   req.on('close', () => {
     clearInterval(ping);
     extClients.delete(client);
@@ -1157,6 +1191,16 @@ const server = http.createServer(async (req, res) => {
       'access-control-max-age': '86400',
     });
     return res.end();
+  }
+
+  // Loopback bearer gate: everything except the health probes needs the token
+  // (minted once at ~/.aipass/.token, overridable with AIPASS_TOKEN).
+  // Preflight above stays open — browsers never carry auth on OPTIONS.
+  if (!(req.method === 'GET' && (path === '/status' || path === '/health'))) {
+    if (!authorized(req)) {
+      res.writeHead(401, { 'content-type': 'text/plain', ...corsHeaders() });
+      return res.end('unauthorized: missing or wrong loopback bearer token\n');
+    }
   }
 
   try {
@@ -1449,10 +1493,18 @@ server.listen(PORT, HOST, () => {
   log(`aipass bridge on http://${HOST}:${PORT}`);
   log(`  default model : ${defaultModel}`);
   log(`  conversation  : ${PINNED_CONVERSATION || 'most recent on the account'}`);
+  if (process.env.AIPASS_REQUIRE_AUTH === '0') {
+    log('  WARNING: AIPASS_REQUIRE_AUTH=0 — loopback bearer token NOT required');
+  } else {
+    // Mint before the first request, so the token file exists by the time the
+    // log line below tells the human where to copy it from.
+    loadOrMintToken();
+    log(`  auth token    : ${tokenPath()} (paste into the extension popup once)`);
+  }
   log('  waiting for the Chrome extension…');
 });
 
 // For tests: the SSRF guard's redirect behaviour cannot be driven through the
 // HTTP surface without a public host, so it is exercised directly, and the
 // imported server handle lets the test file release the port when it is done.
-export { isPrivateHost, fetchRemoteAsDataUri, server };
+export { isPrivateHost, fetchRemoteAsDataUri, hostResolvesPrivate, server };

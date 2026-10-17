@@ -441,6 +441,34 @@ test('an image or a video is staged, listed and dropped', async (t) => {
   await assert.rejects(() => env.call('attachment.stage', { name: 'x.png', dataUrl: 'data:image/png;base64,' }));
 });
 
+test('staging by path caps size, and dropping never deletes the user original', async (t) => {
+  const env = await startRpc({ files: { 'small.txt': 'hello\n' }, replies: ['DONE nothing'] });
+  t.after(() => env.stop());
+
+  // A normal path stage copies into the upload dir; dropping removes the copy.
+  const copied = await env.call('attachment.stage', { path: 'small.txt' });
+  assert.ok(fs.existsSync(copied.path), 'staged copy exists');
+  await env.call('attachment.remove', { id: copied.id });
+  assert.ok(!fs.existsSync(copied.path), 'the copy is cleaned up');
+  assert.ok(fs.existsSync(path.join(env.root, 'small.txt')), 'the project file survives');
+
+  // A file already sitting in the upload dir is referenced, not copied — and
+  // dropping the reference must NOT unlink the user's file.
+  const uploadDir = env.rpc.settings.uploadDir();
+  const mine = path.join(uploadDir, 'mine.txt');
+  fs.writeFileSync(mine, 'my own file\n');
+  const ref = await env.call('attachment.stage', { path: mine });
+  assert.equal(ref.path, mine, 'sameDir stage references the original');
+  await env.call('attachment.remove', { id: ref.id });
+  assert.ok(fs.existsSync(mine), 'dropping a sameDir reference keeps the original');
+
+  // Oversize path staging is refused BEFORE the read (no OOM on multi-GB files).
+  const big = path.join(env.root, 'big.bin');
+  fs.writeFileSync(big, Buffer.alloc(21 * 1024 * 1024));
+  await assert.rejects(() => env.call('attachment.stage', { path: 'big.bin' }), /too large/);
+  fs.rmSync(big);
+});
+
 test('a plugin adds a tool the model uses, a panel, and an RPC method', async (t) => {
   const pluginDir = tempDir();
   fs.writeFileSync(path.join(pluginDir, 'echo.mjs'), `

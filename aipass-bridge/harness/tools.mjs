@@ -18,7 +18,7 @@ import { promisify } from 'node:util';
 import { SKIP, binaryKind, posix, stripGutter } from './overlay.mjs';
 import { createSandbox, materializeTree, restorePaths } from './sandbox.mjs';
 import { outbound, inbound } from './waf.mjs';
-import { isPrivateHost } from '../bridge/private-hosts.mjs';
+import { isPrivateHost, hostResolvesPrivate } from '../bridge/private-hosts.mjs';
 import { loadGitignore } from './gitignore.mjs';
 import { stripInvisibles } from './lang.mjs';
 import { MAX_ATTACHMENT_BYTES, mimeOf, isAllowedAttachment } from '../bridge/attachment-types.mjs';
@@ -131,7 +131,10 @@ function gitAllowed(sub) {
   const args = parts.slice(1);
   if (GIT_BARE.has(cmd)) return args.length === 0;
   if (cmd === 'stash') return args.length === 1 && args[0].toLowerCase() === 'list';
-  return !args.some((a) => GIT_FLAGS.has(a));
+  // Flags carry values after `=` in one token (`--git-dir=/elsewhere`,
+  // `--output=file`); compare the flag word or the whole token never matches.
+  const flagOf = (a) => a.split('=')[0];
+  return !args.some((a) => GIT_FLAGS.has(a) || GIT_FLAGS.has(flagOf(a)));
 }
 
 export function createTools(ctx) {
@@ -225,7 +228,7 @@ export function createTools(ctx) {
       // A file the agent has written this run is readable by `read` and reported
       // by `exists`, so a listing that omits it tells the model its own write
       // failed — issue #32.
-      for (const pending of overlay.keys()) overlay.mergeIntoListing(abs, names);
+      overlay.mergeIntoListing(abs, names);
       return clip([...names].sort().join('\n') || '(empty)');
     },
     read(arg) {
@@ -519,7 +522,8 @@ export function createTools(ctx) {
       // question about the transport, and `status; echo pwned` is answered more
       // honestly by this refusal than by the allowlist's. Without it, whatever
       // reaches execP could ride a second command on the platform shell.
-      if (/[;&|`$<>]/.test(sub))
+      // Newlines/NUL ride along in tool args, so they are punctuation too.
+      if (/[;&|`$<>\r\n\0]/.test(sub))
         return `err: one read-only git subcommand, no shell punctuation. Got: ${sub}`;
       if (!gitAllowed(sub))
         return `err: only read-only git subcommands are allowed (status, diff, log, show, branch, ls-files, …). Got: ${sub}`;
@@ -549,21 +553,49 @@ export function createTools(ctx) {
       // classifier the bridge uses for attachments, so the two cannot drift.
       // AIPASS_FETCH_ALLOW_PRIVATE=1 lifts this for the legit case — checking
       // your own localhost dev server — and costs the tool its innocence.
-      const host = new URL(u).hostname;
       const allowPrivate = process.env.AIPASS_FETCH_ALLOW_PRIVATE === '1';
-      if (!allowPrivate && isPrivateHost(host)) {
-        return `err: refusing to fetch ${host} — private and internal addresses are blocked. Fetch a public URL instead.`;
+      const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+      const isLiteralIP = (h) => /^(\d{1,3}\.){3}\d{1,3}$/.test(h) || h.includes(':');
+      let current = new URL(u);
+      let res = null;
+      for (let hop = 0; ; hop++) {
+        if (current.protocol !== 'http:' && current.protocol !== 'https:') {
+          return `err: unsupported protocol: ${current.protocol}`;
+        }
+        const host = current.hostname;
+        if (!allowPrivate) {
+          if (isPrivateHost(host)) {
+            return `err: refusing to fetch ${host} — private and internal addresses are blocked. Fetch a public URL instead.`;
+          }
+          // A bare domain can rebind to a private address on any hop — the
+          // bridge attachment path checks the same way, and the redirect loop
+          // below re-checks every hop rather than trusting the first URL.
+          if (!isLiteralIP(host) && await hostResolvesPrivate(host)) {
+            return `err: refusing to fetch ${host} — it resolves to a private/internal address. Fetch a public URL instead.`;
+          }
+        }
+        try {
+          res = await globalThis.fetch(current, {
+            redirect: 'manual',
+            headers: { 'user-agent': 'aipass-agent/1.0', 'accept': 'text/plain,text/html,*/*' },
+            signal: AbortSignal.timeout(20_000),
+          });
+        } catch (err) {
+          return `err: fetch error: ${err.message}`;
+        }
+        if (!REDIRECTS.has(res.status)) break;
+        try { await res.body?.cancel(); } catch { /* already gone */ }
+        const location = res.headers.get('location');
+        if (!location) return `err: redirect carried no Location header from ${current}`;
+        if (hop >= 4) return `err: too many redirects from ${u}`;
+        current = new URL(location, current);
       }
 
       // Body reads are capped: a giant response would otherwise ride whole
       // into the next message, and the message is the only channel there is.
       const MAX_BYTES = Number(process.env.AIPASS_FETCH_MAX_BYTES ?? 2_000_000);
       try {
-        const res = await globalThis.fetch(u, {
-          headers: { 'user-agent': 'aipass-agent/1.0', 'accept': 'text/plain,text/html,*/*' },
-          signal: AbortSignal.timeout(20_000),
-        });
-        if (!res.ok) return `err: HTTP ${res.status} ${res.statusText} from ${u}`;
+        if (!res.ok) return `err: HTTP ${res.status} ${res.statusText} from ${current}`;
         let size = 0;
         const parts = [];
         if (res.body) {

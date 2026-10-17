@@ -143,14 +143,28 @@ are not stripped, which is why `chat.mjs` gates all of them behind
   inline one-liners.
 - `*.har`, `aipass*.md`, `apipass*.md` are git-ignored because API captures
   contain live session cookies. Don't commit captures.
-- The bridge sends `Access-Control-Allow-Origin: *`, so any site open in the
-  browser can POST to `localhost:8787` while `npm run dev` is running.
+- The bridge refuses cross-origin browser callers unless `AIPASS_CORS_ORIGIN`
+  names the site, and every route except `/status`/`/health` requires the
+  loopback bearer token minted at `~/.aipass/.token` (printed at boot; see
+  SECURITY.md). `AIPASS_REQUIRE_AUTH=0` drops that requirement — transition
+  only, it logs a warning at every boot.
 
-## Environment variables (all read in `bridge/server.mjs`)
+## Environment variables
 
-`AIPASS_PORT` (8787), `AIPASS_HOST` (127.0.0.1), `AIPASS_MODEL`, `AIPASS_MODELS`
-(fallback list when no extension is attached), `AIPASS_MODEL_FILTER`
-(`chat` | `all`), `AIPASS_TOOL_VISIBILITY` (`reasoning` | `text` | `off`),
-`AIPASS_CONVERSATION_ID` (pin one), `AIPASS_IDLE_TIMEOUT_MS` (180000),
-`AIPASS_ASSISTANT_ID` / `AIPASS_ASSISTANT_FIELD` (bind new conversations to a
-custom assistant).
+Bridge (`bridge/server.mjs`): `AIPASS_PORT` (8787), `AIPASS_HOST` (127.0.0.1 —
+any other bind exits unless `AIPASS_ALLOW_REMOTE=1`), `AIPASS_MODEL`,
+`AIPASS_MODELS` (fallback list when no extension is attached),
+`AIPASS_MODEL_FILTER` (`chat` | `all`), `AIPASS_TOOL_VISIBILITY` (`reasoning` |
+`text` | `off`), `AIPASS_CONVERSATION_ID` (pin one), `AIPASS_IDLE_TIMEOUT_MS`
+(180000), `AIPASS_ASSISTANT_ID` / `AIPASS_ASSISTANT_FIELD` (bind new
+conversations to a custom assistant), `AIPASS_CORS_ORIGIN` (off by default),
+`AIPASS_KEEPALIVE_MS` (15000).
+
+Loopback auth (`harness/authtoken.mjs`): `AIPASS_TOKEN` (explicit token —
+containers, tests), `AIPASS_REQUIRE_AUTH=0` (escape hatch: loopback-only, no
+token; warns at every boot).
+
+Harness and clients: `AIPASS_HOME` (state dir), `AIPASS_BRIDGE` (bridge URL),
+`AIPASS_SKILLS_DIR`, `AIPASS_FETCH_ALLOW_PRIVATE` (FETCH may reach private
+hosts) and `AIPASS_FETCH_MAX_BYTES`. Desktop: `AIPASS_DESKTOP_PORT` (8790),
+`AIPASS_DESKTOP_NO_OPEN`.

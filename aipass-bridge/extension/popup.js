@@ -2,6 +2,9 @@ const $ = (id) => document.getElementById(id);
 
 const CHAT_URL = 'https://de.aipass.net/chat';
 let bridge = 'http://127.0.0.1:8787';
+let bridgeToken = '';
+try { chrome.storage.local.get('bridgeToken').then((r) => { bridgeToken = r?.bridgeToken || ''; }); } catch { /* ignore */ }
+const authHeader = () => (bridgeToken ? { authorization: `Bearer ${bridgeToken}` } : {});
 let modelSignature = '';
 let currentAction = null;   // what the hero button does right now
 let pollTimer = null;
@@ -227,6 +230,7 @@ async function render() {
 
   // Don't clobber the field while it is being edited.
   if (document.activeElement !== $('url')) $('url').value = bridge;
+  if (document.activeElement !== $('token') && !$('token').value) $('token').value = bridgeToken;
 }
 
 /* ------------------------------------------------------------------- wiring */
@@ -238,7 +242,7 @@ $('model').addEventListener('change', async () => {
   try {
     await fetch(`${bridge}/config`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...authHeader() },
       body: JSON.stringify({ defaultModel: value }),
     });
     modelSignature = '';           // let the next poll confirm from the server
@@ -251,7 +255,9 @@ $('model').addEventListener('change', async () => {
 $('save').addEventListener('click', async () => {
   const url = $('url').value.trim().replace(/\/+$/, '');
   if (!/^https?:\/\/.+/i.test(url)) return toast('Enter a full http:// URL');
-  await chrome.storage.local.set({ bridgeUrl: url });
+  const token = $('token').value.trim();
+  await chrome.storage.local.set({ bridgeUrl: url, ...(token ? { bridgeToken: token } : {}) });
+  if (token) bridgeToken = token;
   await chrome.runtime.sendMessage({ type: 'reconnect' }).catch(() => {});
   bridge = url;
   modelSignature = '';
@@ -261,8 +267,8 @@ $('save').addEventListener('click', async () => {
 
 $('refresh').addEventListener('click', async () => {
   try {
-    await fetch(`${bridge}/v1/models?refresh=1`, { cache: 'no-store' });
-    await fetch(`${bridge}/quota?refresh=1`, { cache: 'no-store' }).catch(() => {});
+    await fetch(`${bridge}/v1/models?refresh=1`, { cache: 'no-store', headers: { ...authHeader() } });
+    await fetch(`${bridge}/quota?refresh=1`, { cache: 'no-store', headers: { ...authHeader() } }).catch(() => {});
     modelSignature = '';
     toast('Refreshed');
   } catch {

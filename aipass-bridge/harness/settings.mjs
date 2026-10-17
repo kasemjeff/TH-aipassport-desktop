@@ -116,6 +116,36 @@ export const SAFETY_RULES = [
   asks('pnpm-lock.yaml'), asks('**/pnpm-lock.yaml'),
 ];
 
+/**
+ * The secret floor: files that must never reach the model without an explicit
+ * human override, in ANY mode including yolo. Unlike SAFETY_RULES (mutation
+ * kinds only) these carry no `kinds`, so they match reads too — NEED/CREATE
+ * with a .env path is denied before the mode is consulted.
+ *
+ * Each name appears twice (top-level plus a nested `**`-prefixed spelling)
+ * because globMatch has no implicit prefix. Sources: OWASP Logging Cheat
+ * Sheet (never log secrets) + common secret-file layouts (.env, cloud creds,
+ * private keys).
+ */
+const denys = (pattern) => ({ pattern, decision: 'deny' });
+export const SECRET_RULES = [
+  denys('.env*'), denys('**/.env*'),
+  denys('*.pem'), denys('**/*.pem'),
+  denys('*.key'), denys('**/*.key'),
+  denys('*.p12'), denys('**/*.p12'),
+  denys('*.pfx'), denys('**/*.pfx'),
+  denys('id_rsa*'), denys('**/id_rsa*'),
+  denys('id_ed25519*'), denys('**/id_ed25519*'),
+  denys('*.jks'), denys('**/*.jks'),
+  denys('credentials.json'), denys('**/credentials.json'),
+  denys('secrets.json'), denys('**/secrets.json'),
+  denys('.aws/**'), denys('**/.aws/**'),
+  denys('.gnupg/**'), denys('**/.gnupg/**'),
+  denys('**/*.har'),
+  denys('apipass*.md'), denys('**/apipass*.md'),
+  denys('aipass*.md'), denys('**/aipass*.md'),
+];
+
 export class Settings {
   /** @param {string} [dir] where the file lives; defaults to `aipassHome()` */
   constructor(dir = aipassHome(), file = 'settings.json') {

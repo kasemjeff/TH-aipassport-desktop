@@ -52,13 +52,62 @@ Then restart the bridge and reload the extension.
 
 ## Running it safely
 
-- **Keep the bridge on `127.0.0.1`.** It has no authentication of its own.
+- **Keep the bridge on `127.0.0.1`.** Everything except the health probes now
+  requires the loopback bearer token (below), so a leaked port alone is no
+  longer enough — but port plus token still is.
 - **Do not expose the noVNC desktop.** In the headless deployment it is a live
   view of a browser logged into your account. Reach it over an SSH tunnel; if you
   must expose it, set a strong `noVNC_PASSWORD` first.
 - **Do not set `AIPASS_CORS_ORIGIN` to `*`.** That reopens exactly the hole above.
 - **`AIPASS_ADMIN=1` grants process control** to anything that can reach the port.
   It exists for the container.
+- **Secret files never reach the model** (hardened Oct 2026, `harness/settings.mjs`
+  `SECRET_RULES` + `harness/permissions.mjs`): `.env*`, `*.pem`/`*.key`/`*.p12`,
+  `id_rsa*`/`id_ed25519*`, `credentials.json`, `.aws/`, `.gnupg/`, `*.har` and
+  `aipass*.md` captures are denied for reads AND writes in every mode, yolo
+  included. An explicit user rule naming the same file still wins (operator
+  override), and `kinds` narrowing keeps its documented meaning (H9). The
+  WAF-encoded spelling (`DOT-ENV`) is decoded before the check, so
+  obfuscation is not a bypass.
+- **The bridge refuses to bind off-loopback** (`bridge/server.mjs`): setting
+  `AIPASS_HOST` to anything but `127.0.0.1`/`localhost`/`::1` without
+  `AIPASS_ALLOW_REMOTE=1` exits instead of listening with no auth.
+- **Bridge logs are scrubbed** (`bridge/log-scrub.mjs` `scrubSecrets`): `sk-…`,
+  `xox…`, `ghp/gho_…`, `AKIA…`, `AIza…` and `Bearer …` shapes are replaced
+  with `[redacted]` before they reach stdout/`bridge.log`. Sessions on disk
+  intentionally keep your own text verbatim — treat `~/.aipass/sessions` as
+  sensitive and delete it when you decommission a machine.
+- **The desktop window runs under a CSP** (`desktop/src-tauri/tauri.conf.json`):
+  scripts/styles/images/fonts are local-only, `connect-src` is `self` + `ipc:`
+  + the loopback backend, `object-src`/`form-action` are locked down. The
+  Tauri capability set stays minimal (window + event only — no fs/shell/http),
+  the installer no longer ships the developer test suite, and the Chrome
+  extension's host access is the aipass origin plus the loopback bridge —
+  verified by tests so it cannot quietly re-broaden.
+- **Every route needs the loopback bearer token** (Oct 2026,
+  `harness/authtoken.mjs`): a 256-bit token is minted once to `~/.aipass/.token`
+  (owner-only intent) and required on the bridge (8787) and the desktop
+  backend (8790) for everything except `/status`/`/health`. The extension popup
+  stores it once; the CLI and the desktop backend read the file themselves; the
+  window bootstraps it from a same-origin-only `/token` endpoint. `AIPASS_TOKEN`
+  overrides, `AIPASS_REQUIRE_AUTH=0` disables (with a boot warning).
+- **`browser.open` can no longer run a shell** (`harness/rpc.mjs`): the URL is
+  allowlisted to `http(s)` and passed as argv through `execFile` — quotes,
+  whitespace and shell punctuation are refused. The desktop shell's window
+  opener follows the same argv rule.
+- **The FETCH tool shares the attachment guard**
+  (`harness/tools.mjs` + `bridge/private-hosts.mjs`): literal-IP and DNS-based
+  private-address checks run on every redirect hop, in one classifier module so
+  the two paths cannot drift.
+- **Staged attachments are capped and owned** (`harness/rpc.mjs`): a path stage
+  enforces the 20 MB cap before reading the file; dropping a staged reference
+  deletes only backend-made copies, never the user's original file.
+- **A dead socket drops its client, not the process**: every SSE write and
+  keepalive (bridge and desktop backend) is guarded, and a job whose client
+  socket died fails immediately instead of leaking until its idle timeout.
+- **The WAF table has one owner** (`harness/waf.mjs`): the chat CLI's forked
+  copy — already diverged — is gone, and a run pins its own conversation id
+  (`harness/harness.mjs`), so surfaces cannot drift and runs cannot cross-talk.
 
 ## Known limits, not bugs
 
@@ -68,6 +117,11 @@ Then restart the bridge and reload the extension.
   by default for that reason.
 - Remote image URLs are fetched server-side behind a private-address guard. The
   guard understands IPv4 in every spelling the URL parser leaves (integer, hex,
-  octal and IPv4-mapped IPv6 forms) and re-checks every redirect hop. A bare
-  domain name that *resolves* to a private address is still not detected — do
-  not point it at URLs you do not trust.
+  octal and IPv4-mapped IPv6 forms) and re-checks every redirect hop. Since
+  Oct 2026 it also resolves bare domain names and refuses ones answering with
+  a private/loopback/link-local address (fail-open only when DNS itself is
+  unreachable) — still, do not point it at URLs you do not trust.
+- The loopback token file (`~/.aipass/.token`) is readable by your OS user: any
+  process already running as you can read it — and could read your sessions
+  anyway. The token stops other users, sandboxed apps and browser pages, not
+  same-user malware.

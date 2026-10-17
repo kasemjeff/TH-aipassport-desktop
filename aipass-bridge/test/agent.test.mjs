@@ -569,17 +569,20 @@ test('the task text and preamble are encoded, so process.env never leaves raw', 
   assert.match(sent, /PROCESS-ENV/, 'it is encoded, not dropped');
 });
 
-test('the model can open a file whose name was encoded (.env → DOT-ENV)', async (t) => {
+test('a secret file stays local even when asked for by its encoded spelling (DOT-ENV)', async (t) => {
   const dir = tempDir({ '.env': 'TOKEN=abc\n' });
   // The model sees the encoded name in the listing and copies it back verbatim.
-  const handler = scripted(['NEED file DOT-ENV', 'DONE read the env file']);
+  const handler = scripted(['NEED file DOT-ENV', 'DONE left it local']);
   const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
   t.after(() => ext.disconnect());
 
-  await run(AGENT, ['read the env file', '--root', dir, '--bridge', bridge.base]);
-  // the decode step turns DOT-ENV back into .env, so the real file is read
+  const { out } = await run(AGENT, ['read the env file', '--root', dir, '--bridge', bridge.base]);
+  // the decode step turns DOT-ENV back into .env before the check, so the
+  // secret floor answers ahead of any read — obfuscation is not a bypass
   const result = handler.sent[1];
-  assert.match(result, /TOKEN=abc/, 'the real .env file was read and its contents returned (encoded)');
+  assert.match(result, /denies reading DOT-ENV/, 'the denial reaches the model, in the wire spelling');
+  assert.doesNotMatch(handler.sent.join('\n'), /TOKEN=abc/, 'the secret bytes never leave the machine');
+  assert.match(out, /left it local/, 'the run still finishes with the summary');
 });
 
 test('tag-shaped content passes a tag-blocking edge and restores byte-for-byte', async (t) => {

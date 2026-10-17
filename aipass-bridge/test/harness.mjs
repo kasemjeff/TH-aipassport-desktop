@@ -21,6 +21,23 @@ export const DOCTOR = path.join(HERE, '..', 'doctor.mjs');
 if (!process.env.AIPASS_HOME?.trim()) {
   process.env.AIPASS_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-harness-'));
 }
+// The loopback bearer gate (authtoken.mjs) is ON in prod. The suite pins the
+// pre-token surface in hundreds of existing tests, so the floor here opts the
+// suite out — auth.test.mjs spawns its own bridges with the gate on and pins
+// the new behavior there instead of churning every helper.
+if (!process.env.AIPASS_REQUIRE_AUTH?.trim()) {
+  process.env.AIPASS_REQUIRE_AUTH = '0';
+}
+
+/** Loopback bearer headers for the spawned bridge/RPC, from the suite HOME. */
+export function authHeaders() {
+  const file = path.join(process.env.AIPASS_HOME, '.token');
+  try {
+    const saved = fs.readFileSync(file, 'utf8').trim();
+    if (saved) return { authorization: `Bearer ${saved}` };
+  } catch { /* gate off in-suite, or not minted yet */ }
+  return {};
+}
 
 export function freePort() {
   return new Promise((resolve, reject) => {
@@ -242,7 +259,7 @@ export class FakeExtension {
 
   post(p, body) {
     return fetch(`${this.base}${p}`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify(body),
     }).catch(() => {});
   }
 
@@ -257,7 +274,7 @@ export class FakeExtension {
   async connect() {
     const before = await this.count();
     this.controller = new AbortController();
-    const res = await fetch(`${this.base}/ext/events`, { signal: this.controller.signal });
+    const res = await fetch(`${this.base}/ext/events`, { signal: this.controller.signal, headers: { ...authHeaders() } });
     this.reading = this.#read(res.body.getReader());
     await waitFor(async () => (await this.count()) > before);
     return this;

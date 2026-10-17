@@ -138,11 +138,17 @@ export class Overlay {
   // `exists`, so a listing that omits it tells the model its own write failed.
   // It then re-creates the file, doubts the tools, and eventually concludes it
   // cannot reach the filesystem at all — issue #32.
+  //
+  // Merges every pending path under the listed directory: deleted entries are
+  // skipped (exists() reports them gone, so the listing must agree).
   mergeIntoListing(abs, names) {
-    const rel = path.relative(abs, this.root);
-    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return;
-    const [first, ...rest] = rel.split(path.sep);
-    names.add(rest.length ? `${first}/` : first);
+    for (const [key, value] of this.map) {
+      if (value === DELETED) continue;
+      const rel = path.relative(abs, key);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue;
+      const [first, ...rest] = rel.split(path.sep);
+      names.add(rest.length ? `${first}/` : first);
+    }
   }
 
   /**
