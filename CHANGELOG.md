@@ -71,6 +71,11 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **The `models:` line covers history, not just new runs.** A run that
+  predates `run_stats.model` is attributed to the model its session recorded
+  — the one a fresh run started on — so older sessions no longer blend under
+  `(unrecorded)`, which stays for sessions that recorded no model at all
+  (`test/stats.test.mjs`).
 - **A refused send no longer ends the run at the first exhaustion.** Past the
   redact/wait/split/omit chain the loop pauses and sends the same message
   again (`RECOVER_WAITS_MS` — 30s then 60s, bounded): the connection-cycle

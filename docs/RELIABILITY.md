@@ -18,7 +18,9 @@ the only honest availability is the chain: account → tab → bridge → backen
 `stats --json` carries the per-run rows — model, project root, stop reason,
 refusals, spend, `stepMs` — and the `byModel` / `byRoot` groupings, so the
 same report answers "which model drifts" and "which project drifts" instead
-of blending them. `--html FILE` renders the same page.
+of blending them. A run that predates `run_stats.model` is attributed to the
+model its session recorded; `(unrecorded)` is left for sessions that wrote no
+model at all. `--html FILE` renders the same page.
 
 ## Error budget
 

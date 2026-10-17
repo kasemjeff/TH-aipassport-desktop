@@ -135,9 +135,10 @@ test('collectRuns and summarize aggregate sessions the reader can print', () => 
   assert.equal(totals.byRoot[dir].spent, 5);
 });
 
-test('a run row without a model lands in the unrecorded group, not nowhere', () => {
-  // Runs written before `run_stats.model` existed still report — under an
-  // explicit "(unrecorded)" key, so the mix is visible instead of implied.
+test('a run whose session recorded no model either lands in the unrecorded group, not nowhere', () => {
+  // The last resort: when neither the run nor its session recorded a model,
+  // the row still reports — under an explicit "(unrecorded)" key, so the mix
+  // is visible instead of implied.
   const dir = tempDir();
   const store = new SessionStore(path.join(dir, 'sessions'));
   const s = store.create({ root: dir, title: 'old build' });
@@ -145,6 +146,25 @@ test('a run row without a model lands in the unrecorded group, not nowhere', () 
 
   const totals = summarize(collectRuns(s));
   assert.equal(totals.byModel['(unrecorded)'].runs, 1);
+});
+
+test('a run without its own model falls back to the session model it started on', () => {
+  // Older builds wrote `run_stats` before it carried `model`; the session
+  // header still names the model the run started on, so the grouping keeps
+  // the history attributable instead of blending it into "(unrecorded)".
+  const dir = tempDir();
+  const store = new SessionStore(path.join(dir, 'sessions'));
+  const s = store.create({ root: dir, model: 'session-m', title: 'old build, named model' });
+  s.append('run_stats', { stopReason: 'done', steps: 1, tools: {}, stepMs: [], spent: 0 });
+  s.append('run_stats', { stopReason: 'done', steps: 1, model: 'run-m', tools: {}, stepMs: [], spent: 0 });
+
+  const rows = collectRuns(s);
+  assert.equal(rows[0].model, 'session-m', 'no model of its own — the session names it');
+  assert.equal(rows[1].model, 'run-m', 'a model on the run itself always wins');
+  const totals = summarize(rows);
+  assert.equal(totals.byModel['session-m'].runs, 1);
+  assert.equal(totals.byModel['run-m'].runs, 1);
+  assert.equal(totals.byModel['(unrecorded)'], undefined, 'nothing needs the last-resort bucket');
 });
 
 /* The pull-based alerts and the self-contained report page. ----------------- */
