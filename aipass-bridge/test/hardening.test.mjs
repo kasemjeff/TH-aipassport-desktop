@@ -232,6 +232,9 @@ test('settings.set moves every module the sheet claims, not just the file', asyn
   const skillsDir = tempDir({ 'probe.md': '# probe' });
   await env.call('settings.set', {
     maxSteps: 7,
+    maxToolCalls: 900,
+    maxWallClockMs: 3_600_000,
+    maxCredits: 5,
     plan: true,
     requirePlanApproval: true,
     subagent: false,
@@ -240,6 +243,9 @@ test('settings.set moves every module the sheet claims, not just the file', asyn
 
   const { rpc } = env;
   assert.equal(rpc.current.options.maxSteps, 7, 'the loop reads its step limit from the harness');
+  assert.equal(rpc.current.options.maxToolCalls, 900, 'and its budgets from the same save');
+  assert.equal(rpc.current.options.maxWallClockMs, 3_600_000);
+  assert.equal(rpc.current.options.maxCredits, 5);
   assert.equal(rpc.current.options.plan, true);
   assert.equal(rpc.current.options.requirePlanApproval, true);
   assert.equal(rpc.current.options.subagent, false);
@@ -249,6 +255,8 @@ test('settings.set moves every module the sheet claims, not just the file', asyn
   const st = await env.call('status');
   assert.equal(st.maxSteps, 7);
   assert.equal(st.settings.maxSteps, 7);
+  assert.equal(st.settings.maxToolCalls, 900);
+  assert.equal(st.settings.maxWallClockMs, 3_600_000);
 });
 
 /* 5 — snapshot --------------------------------------------------------------- */

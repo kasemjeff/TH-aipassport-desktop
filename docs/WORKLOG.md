@@ -6,6 +6,28 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-17 — opencode — the `models:` line covers history, not just new runs
+
+- **Files**: `aipass-bridge/stats.mjs` (`collectRuns()` attributes a run that
+  carries no `model` of its own to the session's recorded model — the header
+  names the one a fresh run started on; a run-level `model` still wins),
+  `aipass-bridge/test/stats.test.mjs` (a new test for the fallback and its
+  precedence; the `(unrecorded)` test now covers only sessions that recorded
+  no model either), `docs/RELIABILITY.md`, `CHANGELOG.md`.
+- **Tests**: `npm test` green on this machine (526 tests, 0 fail, 1 skip);
+  the pushed CI run is the judge. Live proof on the real store: the `models:`
+  line went from `(unrecorded) 63r` to the full breakdown
+  (gemini-3.5-flash-lite 40r · DeepSeek-V3.2 16r · claude-sonnet-5@default 4r
+  · grok-4.6 3r · gemini-3.1-flash-lite 2r · gemini-3.8-flash 2r).
+- **Deferred**: none blocking. The desktop app already writes the per-run
+  model again (first keyed runs 19:44 today); the fallback is what carries
+  the 63 runs written before that.
+- **Risks**: for a pre-field session that switched models mid-history, every
+  run attributes to the session's starting model — the best record that
+  exists; runs written from `adbb31d` on carry the exact model per run.
+- **Cleanup**: none needed — no processes started, edits confined to the
+  `aipass-fix` worktree.
+
 ## 2026-10-17 — opencode — the refused send pauses instead of ending the run
 
 - **Files**: `aipass-bridge/harness/bridge.mjs` (`TRANSIENT_SEND` now covers a

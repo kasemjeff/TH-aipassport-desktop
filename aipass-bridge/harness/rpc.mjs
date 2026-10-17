@@ -536,6 +536,12 @@ export function createRpc({
       // rather than at the next start. A half-applied form is worse than no
       // form: it writes one truth and keeps the process running another.
       if (params.maxSteps != null) current.options.maxSteps = appSettings.get('maxSteps');
+      // The budgets are read once per run from `current.options`; without this
+      // a budget change was a note for the next backend start while the sheet
+      // said it was live.
+      if (params.maxToolCalls != null) current.options.maxToolCalls = appSettings.get('maxToolCalls');
+      if (params.maxWallClockMs != null) current.options.maxWallClockMs = appSettings.get('maxWallClockMs');
+      if (params.maxCredits != null) current.options.maxCredits = appSettings.get('maxCredits');
       if (params.plan != null) current.options.plan = appSettings.get('plan');
       if (params.requirePlanApproval != null) current.options.requirePlanApproval = appSettings.get('requirePlanApproval');
       if (params.subagent != null) current.options.subagent = appSettings.get('subagent');

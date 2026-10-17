@@ -71,6 +71,22 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **A pace-score 403 cools the whole tab, not just the job it refused.** The
+  edge 403s by pace as well as by content — the same limiter family as a 429 —
+  but only the refused job used to wait: every send behind it left at full
+  pace into the window that had just said no. The page now arms the tab-wide
+  `rateQuietUntil` clock and the five-minute `RATE_MEMORY_MS` pacing on a 403
+  exactly as on a 429 (`test/page.test.mjs`).
+- **The settings sheet's budgets reach the live run the moment Save lands.**
+  `maxToolCalls`, `maxWallClockMs` and `maxCredits` join the keys re-applied
+  to the running harness on save — before this a budget change only took
+  effect at the next backend start while the sheet said it was live
+  (`test/hardening.test.mjs`).
+- **The `models:` line covers history, not just new runs.** A run that
+  predates `run_stats.model` is attributed to the model its session recorded
+  — the one a fresh run started on — so older sessions no longer blend under
+  `(unrecorded)`, which stays for sessions that recorded no model at all
+  (`test/stats.test.mjs`).
 - **A refused send no longer ends the run at the first exhaustion.** Past the
   redact/wait/split/omit chain the loop pauses and sends the same message
   again (`RECOVER_WAITS_MS` — 30s then 60s, bounded): the connection-cycle

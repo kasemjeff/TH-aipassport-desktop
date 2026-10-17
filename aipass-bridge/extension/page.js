@@ -28,13 +28,14 @@
 
   // The edge's rate memory, shared by every job in this tab. A 429 (or a 503
   // from the same Cloudflare edge) is the edge saying "you are moving too
-  // fast" — and every retry probe is itself a request that counts against the
-  // window it is waiting for, which is how a retry storm keeps its own
+  // fast", and a 403 by pace score is the same signal at a different
+  // threshold — and every retry probe is itself a request that counts against
+  // the window it is waiting for, which is how a retry storm keeps its own
   // limiter hot. So the refusal is one pause for the whole tab, not one pause
   // per job: no send starts before `rateQuietUntil`, and for a while after
   // any refusal the sends are also paced apart (`RATE_PACE_GAP_MS` between
   // attempts until `RATE_MEMORY_MS` has passed), so the burst that drew the
-  // 429 cannot immediately draw another. The ladders live in sendWithRetry
+  // refusal cannot immediately draw another. The ladders live in sendWithRetry
   // below.
   let rateQuietUntil = 0;   // wall-clock time before which no send may start
   let rateMemoryUntil = 0;  // after a refusal, pace every send until this time
@@ -239,10 +240,11 @@
     // client must never resend past (harness/bridge.mjs reads the note field,
     // not the echo).
     //
-    // 403 rides the same pause-and-resend, with its own shorter budget
-    // (5s → 15s): the edge 403s by pace score as well as by content, and the
-    // identical bytes go through a moment later — recorded live, Oct 17 2026,
-    // a run's 214-byte tool result refused whole and then accepted unchanged
+    // 403 rides the same pause-and-resend, with its own shorter budget (5s →
+    // 15s) on the shared clocks: the edge 403s by pace score as well as by
+    // content, so it is the same hot window, and the identical bytes go
+    // through a moment later — recorded live, Oct 17 2026, a run's 214-byte
+    // tool result refused whole and then accepted unchanged
     // (harness/bridge.mjs EDGE_WAITS_MS has the recording). Content-shaped
     // refusals are deterministic: they survive these waits too, and the
     // rewrite chain above this layer takes over then.
@@ -298,7 +300,13 @@
         } else {
           edgeTries++;
           localUntil = Date.now() + wait;
-          announcedUntil = Math.max(announcedUntil, localUntil);
+          // A pace-score 403 comes from the same hot window as the 429s, so it
+          // cools the tab the same way: the sends queued behind this one wait
+          // out the shared clock and the RATE_MEMORY_MS pacing instead of
+          // leaving at full pace into the limiter that just said no.
+          rateQuietUntil = Math.max(rateQuietUntil, Date.now() + wait);
+          rateMemoryUntil = Date.now() + RATE_MEMORY_MS;
+          announcedUntil = Math.max(announcedUntil, localUntil, rateQuietUntil);
           push('note', `[403] refused at the edge — waiting ${Math.round(wait / 1000)}s, then sending the same message again (${edgeTries + 1}/${EDGE_WAITS_403_MS.length + 1})`);
         }
         // No sleep here: the loop top waits, so the clocks stay the one place
