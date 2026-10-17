@@ -14,6 +14,8 @@
 //     spoken while reads still run (the chain guard)
 //   - the reply-language hook asks exactly once for Thai when the closing
 //     message comes back English
+//   - a closing reply that carried calls is judged on its closing line alone,
+//     never on the file body it wrote
 //   - a stalled run still gets the checker's one shot at the staged tree
 //   - the preamble carries the language rules, and the settings clamp like
 //     the rest of the sheet
@@ -100,6 +102,7 @@ test('the language settings clamp like the rest of the sheet', () => {
   assert.equal(s.replyLanguage, 'th', 'an unknown language falls back');
   assert.equal(s.langCheck, false);
   assert.equal(s.minThaiRatio, 1, 'the ratio is clamped to 0..1');
+  assert.equal(Settings.sane({}).minThaiRatio, 0.4, 'the tuned default clears the recorded gap (English 0, Thai 0.57+)');
   assert.equal(s.repeatGuard, true);
   assert.equal(s.repeatGuardMax, 1, 'a zero cap means the floor, not no guard');
   assert.equal(s.attempts, 5, 'attempts are clamped to 1..5');
@@ -229,6 +232,22 @@ test('an English closing message earns one Thai rewrite request', async () => {
   assert.equal(result.stopReason, 'done');
   assert.match(b.bridge.received[2], /Language check: I read Thai/, 'the nudge reached the model');
   assert.equal(b.stats().langPrompts, 1, 'exactly one nudge per run');
+});
+
+test('a closing reply that wrote a file is judged on its closing line, not the body', async () => {
+  // The false trigger the recorded sessions showed: a run whose last reply
+  // carried a CREATE measured the whole English file body as its "closing
+  // message" and asked for a Thai rewrite of content. A body is not a
+  // message — the short closing is a glance, and the hook stays quiet.
+  const dir = tempDir({ 'note.txt': 'hello there\n' });
+  const b = boot(dir, [
+    'NEED file note.txt',
+    'CREATE readme.md\n# How the parser works\n\nThe parser reads each reply and turns every marker line into a call.\nA marker inside a fenced block stays prose and never runs.\nEND\nDONE done',
+  ], { langCheck: true });
+  const result = await b.call();
+
+  assert.equal(result.stopReason, 'done');
+  assert.equal(b.stats().langPrompts, 0, 'the file body was not measured as the closing message');
 });
 
 /* Test 9: the checker's one shot at a stalled run ---------------------------- */

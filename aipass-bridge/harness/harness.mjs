@@ -72,6 +72,10 @@ export class Harness {
           // A 429 wait must read as a pause, not a stuck run: the client's
           // note rides the same dim-note channel as the firewall notes.
           onNote: (text) => this.events.emit('firewall_note', { text }),
+          // A mid-reply model switch is the site talking to the person: it
+          // belongs in the transcript as a visible note line, not folded
+          // into the reasoning beside the tool churn.
+          onStreamNote: (text) => this.events.emit('note', { text }),
         });
     this.skills = opts.skills ?? SkillLibrary.default({ root: this.root, repoDir: REPO_SKILLS });
     this.store = opts.store === 'off' ? null : (opts.store ?? new SessionStore(path.join(home(), 'sessions')));

@@ -52,7 +52,7 @@ export const DEFAULTS = {
   // share (letters only, code and URLs excluded) and asks for a rewrite once.
   replyLanguage: 'th',
   langCheck: true,
-  minThaiRatio: 0.25,
+  minThaiRatio: 0.4,
   // (Thai pack) Refuse an identical tool call repeated with nothing staged in
   // between; the third is answered with advice, and a run that collects more
   // than repeatGuardMax refusals stops as stalled.

@@ -119,3 +119,27 @@ test('a 429 after the answer started streaming is not retried', async (t) => {
   await assert.rejects(() => client.chat({ message: 'hi' }), /429/);
   assert.equal(ext.chats.length, 1, 'a half-delivered answer is never resent');
 });
+
+/* The note channel — a site message that is not the answer ----------------- */
+
+test('a note part mid-stream surfaces as a note, never in the answer', async (t) => {
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_job, e) => {
+      await e.text('คำตอบ');
+      await e.note('the site switched this conversation\'s model mid-reply to "gemini-3.5-flash-lite" — replies continue on the substitute');
+      await e.done();
+    },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const notes = [];
+  const client = new BridgeClient(bridge.base, { onStreamNote: (text) => notes.push(text) });
+  const res = await client.chat({ message: 'hi' });
+  assert.match(res.text, /คำตอบ/);
+  assert.doesNotMatch(res.text, /switched/, 'a note must not leak into the answer');
+  assert.equal(notes.length, 1, 'the note arrived exactly once');
+  assert.match(notes[0], /gemini-3\.5-flash-lite/, 'and it names the substitute');
+  // The reasoning echo is deliberate: a chat console that never learned the
+  // note field still sees the line where it always saw it.
+  assert.match(res.reasoning, /switched/);
+});

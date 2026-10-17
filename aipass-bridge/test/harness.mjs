@@ -334,6 +334,9 @@ export class FakeExtension {
     const emit = {
       text: (t) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'text', text: t }] }),
       status: (t) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'status', text: t }] }),
+      // A line for the person, not the answer — the page sends a mid-reply
+      // model switch this way ('data-model_switched').
+      note: (t) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'note', text: t }] }),
       // The model's own thinking, as opposed to tool-activity status notes.
       reasoning: (t) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'reasoning', text: t }] }),
       image: (url) => this.post('/ext/chunk', { jobId: job.jobId, parts: [{ kind: 'image', text: url }] }),

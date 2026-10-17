@@ -339,6 +339,7 @@
       const toolNames = new Map();
       const sources = [];
       const seenUnknown = new Set();
+      let announcedSwitch = '';   // the last model the site said it switched to
       // The generation runs on the server, so losing the socket does not stop
       // it — the answer is produced and nobody is listening. The app exposes the
       // same reattach the Vercel AI SDK calls reconnectToStream, and this uses
@@ -476,6 +477,21 @@
                 if (found) found.title ??= link.title;
                 else sources.push({ url: link.url, title: link.title, domain: link.domain });
               }
+              break;
+            }
+            // The site replaces a model that left the catalog mid-conversation
+            // and says so on this frame. It used to fall to the unknown
+            // handler, where the text died inside the reasoning fold (the
+            // live stall of Oct 2026, docs/HARNESS_DESIGN.md). It is a
+            // message to the person: hand it to the bridge as a note — one
+            // line per distinct switch.
+            case 'data-model_switched': {
+              const to = String(evt.modelId ?? evt.model ?? evt.to ?? evt.data?.modelId ?? evt.data?.model ?? '').trim();
+              if (to === announcedSwitch) break;
+              announcedSwitch = to;
+              push('note', to
+                ? `the site switched this conversation's model mid-reply to "${to}" — replies continue on the substitute`
+                : "the site switched this conversation's model mid-reply — replies continue on the substitute");
               break;
             }
             case 'error':

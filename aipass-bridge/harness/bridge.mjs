@@ -82,8 +82,8 @@ export const SEND_ATTEMPTS = 6; // ≈5s of patience at SEND_RETRY_MS — longer
 export const SEND_RETRY_MS = 1000;
 
 // The edge in front of the site answers 429 when the account moves too fast —
-// ten messages in four minutes was enough to draw one (HARNESS_DESIGN.md has
-// the recording). Nothing about the payload is wrong: the same body goes
+// ten messages in four minutes was enough to draw one (docs/HARNESS_DESIGN.md
+// has the recording). Nothing about the payload is wrong: the same body goes
 // through a moment later, so a 429 is waited out, never rewritten or split.
 // The page waits one request out first, in place (extension/page.js
 // RETRY_WAITS_MS — 5s/15s/45s, retry-after honoured); this is the layer above
@@ -129,12 +129,15 @@ async function retrySend(what, { streamed = () => false, signal = null, rateWait
 
 export class BridgeClient {
   // `rateWaits` lets a caller shorten the 429 wait (the tests do); `onNote`
-  // is where the wait note goes, so a paused run reads as waiting, not stuck.
-  constructor(base = DEFAULT_BRIDGE_URL, { model = null, rateWaits = RATE_WAITS_MS, onNote = null } = {}) {
+  // is where the wait note goes, so a paused run reads as waiting, not stuck;
+  // `onStreamNote` receives lines the server sends as notes — events the
+  // person must see (a mid-reply model switch) that are not the answer.
+  constructor(base = DEFAULT_BRIDGE_URL, { model = null, rateWaits = RATE_WAITS_MS, onNote = null, onStreamNote = null } = {}) {
     this.base = String(base).replace(/\/+$/, '');
     this.model = model;
     this.rateWaits = rateWaits;
     this.onNote = onNote;
+    this.onStreamNote = onStreamNote;
   }
 
   /**
@@ -199,6 +202,10 @@ export class BridgeClient {
         try { evt = JSON.parse(data); } catch { continue; }
         if (evt.error) throw new Error(evt.error.message);
         const delta = evt.choices?.[0]?.delta ?? {};
+        // A note is not the answer and never flips the resend gate by
+        // itself: a retry repeating a note is harmless, a retry repeating
+        // the answer is not.
+        if (typeof delta.note === 'string' && delta.note) this.onStreamNote?.(delta.note);
         if (delta.reasoning_content) { markStreamed(); reasoning += delta.reasoning_content; onReasoning(delta.reasoning_content); }
         if (delta.content) { markStreamed(); out += delta.content; onText(delta.content); }
       }
