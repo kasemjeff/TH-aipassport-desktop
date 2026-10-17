@@ -82,8 +82,8 @@ export const SEND_ATTEMPTS = 6; // ≈5s of patience at SEND_RETRY_MS — longer
 export const SEND_RETRY_MS = 1000;
 
 // The edge in front of the site answers 429 when the account moves too fast —
-// ten messages in four minutes was enough to draw one (HARNESS_DESIGN.md has
-// the recording). Nothing about the payload is wrong: the same body goes
+// ten messages in four minutes was enough to draw one (docs/HARNESS_DESIGN.md
+// has the recording). Nothing about the payload is wrong: the same body goes
 // through a moment later, so a 429 is waited out, never rewritten or split.
 // The page waits one request out first, in place (extension/page.js
 // RETRY_WAITS_MS — 5s/15s/45s, retry-after honoured); this is the layer above
