@@ -408,7 +408,7 @@ lines, no dependencies.
 
 | line | effect |
 |---|---|
-| `NEED dir <path>` | list a directory |
+| `NEED dir <path>` (or `NEED list` / `NEED ls`) | list a directory |
 | `NEED file <path> [a-b]` | read a file with a line-number gutter; optional range |
 | `SEARCH <text>` | grep the tree → `file:line: excerpt` (max 50 hits) |
 | `EDIT <p>` / `FIND` … / `NEW` … / `END` | replace an exact snippet — refused unless `FIND` matches **one** place |

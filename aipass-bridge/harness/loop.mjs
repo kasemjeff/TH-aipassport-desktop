@@ -15,7 +15,7 @@
 import path from 'node:path';
 import { outbound } from './waf.mjs';
 import {
-  REMINDER, prose, parse, parseTodo, mergeTodo, READING,
+  REMINDER, prose, parse, parseTodo, mergeTodo, READING, attemptedMarker,
   preamble as buildPreamble,
 } from './protocol.mjs';
 import { resilientSay, decode } from './bridge.mjs';
@@ -395,7 +395,13 @@ export async function runTask(taskText, ctx = {}) {
         pauseForAsk(askCall.arg);
         break;
       }
-      const effectiveDone = done || (toolsRun > 0 && proseText ? { kind: 'done', arg: 'done' } : null);
+      // A reply with no readable call ends the run as done once real work has
+      // happened — a closing sentence is an answer. But not when the reply was
+      // trying to speak the protocol and mangled it: recorded live, a reply of
+      // `NEED list desktop` followed by prose parsed to nothing, and the run
+      // was marked done 633ms later with the nudges never sent. A marker-shaped
+      // line earns the nudge that teaches the shape instead.
+      const effectiveDone = done || (toolsRun > 0 && proseText && !attemptedMarker(reply) ? { kind: 'done', arg: 'done' } : null);
       if (effectiveDone) {
         const cleanArg = (effectiveDone.arg || proseText || 'done').replace(/^[-—–:]\s*/, '').trim();
         summary = cleanArg || 'done';
@@ -439,7 +445,7 @@ export async function runTask(taskText, ctx = {}) {
         events?.emit('give_up', {}); stopReason = 'stalled'; break;
       }
       events?.emit('nudge', { n: nudgeStreak });
-      next = `That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it. I will paste back exactly what you ask for. ${REMINDER}`;
+      next = `That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it. I will paste back exactly what you ask for. ${REMINDER}`;
       continue;
     }
     nudgeStreak = 0;

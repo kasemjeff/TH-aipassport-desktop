@@ -144,7 +144,7 @@ const FENCE_LINE = /^\s*(```|~~~)/;
 
 // The model usually writes its answer as prose and then a bare DONE, so fall
 // back to that prose rather than reporting an empty result.
-export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|file)\b|[^\s]+(?: [\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+)?\s*$)|SEARCH\b|GLOB\b|SKILL\b|GIT\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|ASK\b|(?:\*{1,3}|#{1,6}\s*)?DONE\b)/i;
+export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|list|ls|file)\b|[^\s]+(?: [\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+)?\s*$)|SEARCH\b|GLOB\b|SKILL\b|GIT\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|ASK\b|(?:\*{1,3}|#{1,6}\s*)?DONE\b)/i;
 export const prose = (reply, plugins = []) => {
   const extra = plugins.length
     ? '|' + plugins.map((t) => `${t.marker}\\b`).join('|')
@@ -156,6 +156,29 @@ export const prose = (reply, plugins = []) => {
     return inFence ? true : !re.test(l);
   }).join('\n').trim();
 };
+
+// A marker keyword in caps at the start of a line. Case is the whole point:
+// recorded replies wrote "NEED list desktop" and bare "RUN" as broken markers,
+// while prose that merely starts with the word ("Need to check the logs") must
+// never count as an attempt.
+const MARKER_ATTEMPT = /^\s*(?:\*{1,3}|#{1,6}\s*)?(?:NEED|SEARCH|GLOB|SKILL|GIT|FETCH|WEB|DELETE|MOVE|EDIT|CREATE|ATTACH|FIND|NEW|END|RUN|PLAN|TODO|SUBAGENT|TASK|ASK|DONE)\b/;
+
+/**
+ * Did the reply try to speak the protocol — even in a shape parse() cannot
+ * read? The loop uses this to tell "the model answered" apart from "the model
+ * tried and missed": a marker-shaped line that parses to nothing earns the
+ * nudge that teaches the shape, instead of being read as a silent finish.
+ * Fenced lines are quotations and do not count, same as everywhere else.
+ */
+export function attemptedMarker(reply) {
+  let inFence = false;
+  for (const line of String(reply ?? '').split('\n')) {
+    if (FENCE_LINE.test(line)) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    if (MARKER_ATTEMPT.test(line)) return true;
+  }
+  return false;
+}
 
 /** Tool kinds that mean "the model is still gathering", never a stopping point.
  *  ATTACH is here because a queued attachment only rides the NEXT message —
@@ -182,8 +205,17 @@ export function parse(reply, { plugins = [] } = {}) {
     if (FENCE_LINE.test(line)) { inFence = !inFence; i++; continue; }
     if (inFence) { i++; continue; }
 
-    let m = /^\s*NEED\s+(dir|file)\s+(.+?)\s*$/i.exec(line);
-    if (m) { i++; calls.push({ kind: m[1].toLowerCase() === 'dir' ? 'list' : 'read', arg: m[2].trim() }); continue; }
+    // `list` and `ls` are the spellings weaker models reach for when they mean
+    // "show me this folder" — recorded live, where `NEED list desktop` came
+    // back as a marker that parsed to nothing. Same call as `NEED dir`.
+    let m = /^\s*NEED\s+(dir|list|ls|file)\s+(.+?)\s*$/i.exec(line);
+    if (m) { i++; calls.push({ kind: m[1].toLowerCase() === 'file' ? 'read' : 'list', arg: m[2].trim() }); continue; }
+
+    // The bare form — `NEED list` with the path forgotten. Only the listing
+    // words qualify: `NEED file` alone still means a file literally named
+    // "file", which the bare-NEED rule below handles.
+    m = /^\s*NEED\s+(?:dir|list|ls)\s*$/i.exec(line);
+    if (m) { i++; calls.push({ kind: 'list', arg: '.' }); continue; }
 
     // The bare shape — `NEED events.mjs` — is what weaker models reach for
     // when the keyword slips. It can only mean the file form, so read it the

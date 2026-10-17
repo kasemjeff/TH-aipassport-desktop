@@ -752,3 +752,25 @@ are pinned by `test/lang.test.mjs`; the loop wiring is pinned by
    rolls them up, and the compaction prompt now demands that proper nouns,
    names, numbers, dates, filenames and quoted strings stay byte-identical —
    Thai stays Thai.
+8. **The marker-attempt guard (H10), and `NEED list`.** A recorded desktop
+   run (session `f5acb222`) carried both halves of one failure. First the
+   model asked for a folder with `NEED list desktop` — a shape `parse()` did
+   not know, so the request vanished. Then, because a reply that parses to
+   nothing after real work had happened was read as "the model answered",
+   the implicit-done path ended the run 633ms later with `nudges: 0` — the
+   nudge that teaches the shapes never got its turn. Two fixes: `NEED list
+   <path>` (also `NEED ls`, and bare `NEED list` for the project root) is now
+   the dir call everywhere `NEED dir` is; and a reply whose line starts with
+   an uppercase marker keyword (`attemptedMarker()` in `protocol.mjs`) no
+   longer counts as prose-after-work — the nudge fires and the run gets its
+   chance to ask properly. Case matters: "Need to check the logs" is prose,
+   and a fenced example is a quotation, as everywhere else in the wire.
+
+   The window grew the same split for the reader: when a run ends with an
+   answer (done, or a question), its working trail — tool rows, step notes,
+   folded reasoning, interim prose — collapses into one `✻ ระหว่างทำงาน`
+   line and the closing bubble is labelled **ผลลัพธ์**, so the answer is
+   what stands out. A run that stopped short (steps, error, stall) keeps
+   the whole trail open, and rows with live buttons (the step-limit
+   "carry on", the no-chat-tab banner) are never folded in — hiding the
+   only click that unblocks the run would be its own failure.

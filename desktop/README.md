@@ -63,7 +63,11 @@ of its own per step: marker traffic never reaches it (the protocol is wire, and
 the wire is what the tool rows are for). Every tool call is one `⏺ Verb arg`
 line carrying the first line of its result, opening for the detail; reasoning
 folds away, plan/todo renders as a checklist, and pending changes appear at the
-bottom with per-file checkboxes and a diff view. The moon in the header flips
+bottom with per-file checkboxes and a diff view. When a run ends with an
+answer, its working trail folds into one `✻ ระหว่างทำงาน` line and the closing
+bubble is labelled **ผลลัพธ์**; a run that stopped short (step limit, error,
+stall) keeps the whole trail open, and a row with a button on it — carry on,
+open the chat tab — is never folded away. The moon in the header flips
 the theme, and the choice is written through.
 
 Header: project, model, permission mode — three controls, one thin row.

@@ -51,6 +51,7 @@ const state = {
   pluginTools: [],      // {marker, takesBody} — what the transcript must hide
   needsTab: false,      // the last run could not proceed for want of a chat tab
   needsCompaction: false, // the budget is close to full and a rotation is coming
+  runCursor: null,      // where in the log the live run's rows begin
 };
 
 /* -------------------------------------------------------------- transcript */
@@ -168,6 +169,40 @@ function foldThinking() {
 function endTurn() {
   foldThinking();
   state.assistant = null;
+}
+
+/**
+ * The run is over: fold its working trail — tool rows, step notes, folded
+ * reasoning, the intermediate prose — into one collapsed line, so the closing
+ * bubble is the answer and nothing else competes with it. Two kinds of row
+ * stay in the open, because their buttons have to stay reachable when the run
+ * stopped short: a step-limit "carry on" row and a no-chat-tab banner. Only a
+ * run that ended with something to say (done or a question) folds; an error or
+ * a stall keeps the whole trail visible — what went wrong is the result then.
+ */
+function foldRun(stopReason) {
+  const start = state.runCursor;
+  state.runCursor = null;
+  if (start == null) return;
+  if (!['done', 'ask'].includes(stopReason)) return;
+  const kids = [...log.children].slice(start);
+  if (!kids.length) return;
+
+  // The closing bubble — the last assistant reply of the run — is the result.
+  let result = null;
+  for (let i = kids.length - 1; i >= 0; i--) {
+    if (/\bassistant\b/.test(kids[i].className ?? '')) { result = kids[i]; break; }
+  }
+  const foldable = kids.filter((k) => k !== result && !/continue-row|needs-tab/.test(k.className ?? ''));
+  if (!result || !foldable.length) return; // a plain Q&A turn has nothing to fold
+
+  const wrap = el('details', 'run');
+  wrap.open = false;
+  wrap.append(el('summary', null, `✻ ระหว่างทำงาน · ${foldable.length} รายการ`));
+  for (const k of foldable) wrap.append(k); // append moves the node
+  log.insertBefore(wrap, result);
+  result.classList.add('result');
+  scrollDown();
 }
 
 /**
@@ -396,6 +431,9 @@ setInterval(() => {
 stream.addEventListener('task_start', (e) => {
   addTask(JSON.parse(e.data).task);
   hideWelcome();
+  // Everything appended from here until `finished` is this run's working
+  // trail; foldRun() picks it up by this mark so an earlier turn is untouched.
+  state.runCursor = log.children.length;
   refreshMeter();
   lastEventAt = Date.now();
 });
@@ -512,6 +550,7 @@ stream.addEventListener('finished', async (e) => {
   // list says whether Apply is about to write something a check passed.
   state.lastCheck = check ?? null;
   endTurn();
+  foldRun(stopReason);
   state.running = false;
   $('send').textContent = 'ส่ง';
   $('hint').textContent = '';

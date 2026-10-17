@@ -294,7 +294,7 @@ and pastes the result back. This is the whole tool set:
 
 | Action | What it does |
 |---|---|
-| `NEED dir <path>` | list a directory (`.` for the project root) |
+| `NEED dir <path>` (also `NEED list` / `NEED ls`) | list a directory (`.` for the project root) |
 | `NEED file <path>` | read a file, with line numbers; add a range like `NEED file src/app.ts 200-320` for a slice of a long one |
 | `SEARCH <text>` | grep the whole project, returning `file:line: excerpt` matches — find a symbol without reading every file |
 | `EDIT <path>` → `FIND` … `NEW` … `END` | replace an exact snippet; the `FIND` text must match **one** place or the edit is refused |
