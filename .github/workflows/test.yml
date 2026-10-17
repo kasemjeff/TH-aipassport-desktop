@@ -33,6 +33,12 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # Trust the eval set before anyone spends a live run on it: every check
+      # must fail on its untouched tree, Thai pairs must be symmetric, and no
+      # file under evals/ may carry a CR byte.
+      - name: Lint the eval set
+        run: npm run evals:lint
+
       - name: Check every entry point parses
         shell: bash
         run: |
