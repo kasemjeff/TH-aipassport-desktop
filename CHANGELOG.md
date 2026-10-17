@@ -120,6 +120,12 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 - `RUN type .env`, `SEARCH` over `server.pem`, and `git show HEAD:.env` were
   three ways around the secret floor; all three are refused now
   (`test/secret-screen.test.mjs`).
+- **A backend crash no longer masks itself as a `ReferenceError`.** The desktop
+  backend's `fatal()` handler called `formatLogLine` without importing it, so
+  every uncaught error exited as `ReferenceError: formatLogLine is not defined`
+  and the real cause was lost — and the supervisor restarted the backend, making
+  the crash look like a restart. The import is restored, so a crash now prints
+  the error that caused it (`test/hardening.test.mjs`).
 
 ## [0.2.0]
 

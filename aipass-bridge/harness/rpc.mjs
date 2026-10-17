@@ -29,6 +29,7 @@ import { Emitter } from './events.mjs';
 import { resolveBridgeURL } from './bridge.mjs';
 import { loadOrMintToken, authorized, authorizedQuery } from './authtoken.mjs';
 import { openLogFile } from './log-file.mjs';
+import { formatLogLine } from './log-line.mjs';
 import { scrubSecrets } from '../bridge/log-scrub.mjs';
 
 // Re-exported for desktop/main.mjs, whose ensureBridge probe must resolve the
