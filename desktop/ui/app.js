@@ -69,6 +69,11 @@ const scrollDown = (force = false) => {
 };
 
 const state = {
+  // The project this window shows. rpc tags every run event with the project
+  // that emitted it, and the window drops events tagged for another one (see
+  // onRun); it also rides every run/cancel call, so the backend runs where the
+  // window is looking even if another window moved it since (rpc.mjs run).
+  root: null,
   running: false,
   assistant: null,      // { el, text, tail }
   thinking: null,       // { el, text, box, summary, since }
@@ -428,7 +433,7 @@ function hideModal() {
 
 /* ------------------------------------------------------------ permissions */
 
-function askPermission({ id, kind, arg, risk }) {
+function askPermission({ id, kind, arg, risk, project = null }) {
   $('modal-title').textContent = `${risk === 'shell' ? 'run this command' : 'change this file'}?`;
   const body = $('modal-body');
   body.textContent = '';
@@ -438,10 +443,14 @@ function askPermission({ id, kind, arg, risk }) {
     body.textContent = '';
     body.append(el('p', 'dim', 'shell command the model wants to run'), pre);
   }
+  const foreign = foreignProject(project);
+  if (foreign) body.append(el('p', 'dim', `จากโปรเจกต์อื่น (${foreign}) — คำตอบนี้ไปถึง run ของโปรเจกต์นั้น`));
 
   const actions = $('modal-actions');
   actions.textContent = '';
-  const answer = (decision) => { hideModal(); rpc('permission.answer', { id, decision }); };
+  // The answer routes by the request's project: with two windows open, this
+  // question may belong to the project that is not the backend's current one.
+  const answer = (decision) => { hideModal(); rpc('permission.answer', { id, decision, ...(project ? { project } : {}) }); };
   const deny = el('button', null, 'deny');
   deny.onclick = () => answer('deny');
   const allow = el('button', 'primary', 'allow');
@@ -452,17 +461,19 @@ function askPermission({ id, kind, arg, risk }) {
   $('modal').classList.remove('hidden');
 }
 
-function askPlan() {
+function askPlan(project = null) {
   $('modal-title').textContent = 'start this plan?';
   const body = $('modal-body');
   body.textContent = '';
   body.append(el('p', null, 'The model wrote a plan. Approve it and the work begins; decline and the run stops before any change.'));
+  const foreign = foreignProject(project);
+  if (foreign) body.append(el('p', 'dim', `จากโปรเจกต์อื่น (${foreign}) — คำตอบนี้ไปถึง run ของโปรเจกต์นั้น`));
   const actions = $('modal-actions');
   actions.textContent = '';
   const no = el('button', null, 'decline');
-  no.onclick = () => { hideModal(); rpc('plan.answer', { ok: false }); };
+  no.onclick = () => { hideModal(); rpc('plan.answer', { ok: false, ...(project ? { project } : {}) }); };
   const yes = el('button', 'primary', 'approve');
-  yes.onclick = () => { hideModal(); rpc('plan.answer', { ok: true }); };
+  yes.onclick = () => { hideModal(); rpc('plan.answer', { ok: true, ...(project ? { project } : {}) }); };
   actions.append(no, yes);
   $('modal').classList.remove('hidden');
 }
@@ -504,6 +515,11 @@ async function restoreFromSnapshot() {
   if (!snap) return;
   state.sessionId = snap.session?.id ?? null;
   if (!state.sessionId) return;
+  // A fresh window adopts the backend's project — the same one its picker
+  // shows. Only when the log is empty: on a mid-session reconnect the window
+  // keeps showing the project the human chose, even if another window has
+  // since moved the backend (rpc.mjs run binds runs to the window's root).
+  if (!log.childNodes.length && snap.status?.root) state.root = snap.status.root;
   if (log.childNodes.length) { renderPending(snap.pending); refreshMeter(); return; }
   for (const entry of snap.entries ?? []) {
     if (entry.type === 'task') addTask(entry.text);
@@ -539,8 +555,45 @@ setInterval(() => {
   }
 }, 5_000);
 
-stream.addEventListener('task_start', (e) => {
-  addTask(JSON.parse(e.data).task);
+/* Which project an event belongs to ---------------------------------------
+ *
+ * Every run event carries the project that emitted it (rpc.mjs tags harness
+ * events with the project root). A window shows one project at a time; a run
+ * left going in another project must not paint here — its `step` would fold
+ * this answer, its `done_line` would end this turn, its tool rows would trail
+ * prose they never followed. `onRun` drops everything tagged for another
+ * project; untagged events come from the backend itself (settings, project
+ * list) and always pass.
+ *
+ * Two families listen with `onAny` instead, because they are not this
+ * window's transcript: the chat-tab banner (one shared tab serves every
+ * project, and one click fixes all of them) and the permission/plan questions
+ * — a dropped question would leave that run waiting on an answer nobody can
+ * see. Those name the other project so the answer is never blind.
+ */
+const sameProject = (a, b) => String(a).replace(/\\/g, '/').toLowerCase() === String(b).replace(/\\/g, '/').toLowerCase();
+
+/** null when the event belongs to this window's project; otherwise the
+ *  project's folder name, for the answer surfaces that show anyway. */
+function foreignProject(project) {
+  if (!project || !state.root || sameProject(project, state.root)) return null;
+  return String(project).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(project);
+}
+
+function onRun(name, fn) {
+  stream.addEventListener(name, (e) => {
+    const data = JSON.parse(e.data);
+    if (data.project && state.root && !sameProject(data.project, state.root)) return;
+    fn(data, e);
+  });
+}
+
+function onAny(name, fn) {
+  stream.addEventListener(name, (e) => fn(JSON.parse(e.data), e));
+}
+
+onRun('task_start', (data) => {
+  addTask(data.task);
   hideWelcome();
   // Everything appended from here until `finished` is this run's working
   // trail; foldRun() picks it up by this mark so an earlier turn is untouched.
@@ -551,8 +604,8 @@ stream.addEventListener('task_start', (e) => {
 
 // A run that cannot proceed because no logged-in chat tab is open is the one
 // failure with a one-click fix, so it gets a banner instead of a log line.
-stream.addEventListener('needs_tab', (e) => {
-  const { url } = JSON.parse(e.data);
+onAny('needs_tab', (data) => {
+  const { url } = data;
   state.needsTab = true;
   refreshReadiness();
   const bar = el('div', 'note needs-tab');
@@ -563,15 +616,15 @@ stream.addEventListener('needs_tab', (e) => {
   log.append(bar);
   scrollDown();
 });
-stream.addEventListener('tab_opened', (e) => {
+onAny('tab_opened', (data) => {
   state.needsTab = false;
-  addNote(`เปิด ${JSON.parse(e.data).url} ในบราวเซอร์แล้ว — รอสักครู่แล้วส่งใหม่`);
+  addNote(`เปิด ${data.url} ในบราวเซอร์แล้ว — รอสักครู่แล้วส่งใหม่`);
   refreshReadiness();
 });
-stream.addEventListener('assistant_delta', (e) => assistantText(JSON.parse(e.data).text));
-stream.addEventListener('reasoning_delta', (e) => thinkingText(JSON.parse(e.data).text));
-stream.addEventListener('step', (e) => {
-  const { step, maxSteps, elapsed } = JSON.parse(e.data);
+onRun('assistant_delta', (data) => assistantText(data.text));
+onRun('reasoning_delta', (data) => thinkingText(data.text));
+onRun('step', (data) => {
+  const { step, maxSteps, elapsed } = data;
   // A step is a boundary: the reply that just streamed is finished and its
   // tools are about to land, so its bubble and reasoning fold close here.
   // Without this reset one balloon collects every step of a run and the tool
@@ -580,26 +633,26 @@ stream.addEventListener('step', (e) => {
   state.assistant = null;
   addNote(maxSteps > 0 ? `step ${step}/${maxSteps} · ${elapsed}s` : `step ${step} · ${elapsed}s`);
 });
-stream.addEventListener('thinking', (e) => {
-  const { text } = JSON.parse(e.data);
+onRun('thinking', (data) => {
+  const { text } = data;
   log.append(el('div', 'thinking', '⎿ ' + text));
   scrollDown();
 });
-stream.addEventListener('tool', (e) => addTool(JSON.parse(e.data)));
-stream.addEventListener('note', (e) => addNote(JSON.parse(e.data).text));
-stream.addEventListener('firewall_note', (e) => addNote(JSON.parse(e.data).text));
-stream.addEventListener('nudge', (e) => addNote(`no marker in that reply — nudging (${JSON.parse(e.data).n}/2)`));
-stream.addEventListener('give_up', () => addNote('no marker after three replies — stopping.'));
-stream.addEventListener('ignore_done', () => addNote('(ignoring DONE — it came before the results it asked for)'));
-stream.addEventListener('stagnation', (e) => {
-  const { action, pattern } = JSON.parse(e.data);
+onRun('tool', (data) => addTool(data));
+onRun('note', (data) => addNote(data.text));
+onRun('firewall_note', (data) => addNote(data.text));
+onRun('nudge', (data) => addNote(`no marker in that reply — nudging (${data.n}/2)`));
+onRun('give_up', () => addNote('no marker after three replies — stopping.'));
+onRun('ignore_done', () => addNote('(ignoring DONE — it came before the results it asked for)'));
+onRun('stagnation', (data) => {
+  const { action, pattern } = data;
   const what = pattern === 'oscillation' ? 'สองคำสั่งสลับกันไปมา' : 'คำสั่งเดิมซ้ำ';
   addNote(action === 'stop' ? `ลูปไม่เดินหน้า (${what}) — หยุดให้แล้ว` : `ลูปไม่เดินหน้า (${what}) — สั่งให้เปลี่ยนวิธีแล้ว`);
 });
-stream.addEventListener('verify_prompt', () => addNote('ขอให้โมเดลพิสูจน์สิ่งที่แก้ก่อนจบ — รันเช็ค หรืออ่านการแก้กลับมา'));
-stream.addEventListener('check_start', (e) => addNote(`ก่อนรับ DONE — ให้ read-only child ตรวจงานที่ค้างอยู่ (${JSON.parse(e.data).files.length} ไฟล์)`));
-stream.addEventListener('check_end', (e) => {
-  const { verdict, ran, skipped } = JSON.parse(e.data);
+onRun('verify_prompt', () => addNote('ขอให้โมเดลพิสูจน์สิ่งที่แก้ก่อนจบ — รันเช็ค หรืออ่านการแก้กลับมา'));
+onRun('check_start', (data) => addNote(`ก่อนรับ DONE — ให้ read-only child ตรวจงานที่ค้างอยู่ (${data.files.length} ไฟล์)`));
+onRun('check_end', (data) => {
+  const { verdict, ran, skipped } = data;
   const what = skipped ? 'ข้ามการตรวจ — เปิด conversation แยกไม่สำเร็จ'
     : verdict === 'pass' ? `ตรวจผ่านแล้ว (${ran} command)`
       : verdict === 'fail' ? `ตรวจไม่ผ่าน (${ran} command) — ส่งผลให้โมเดลแก้ต่อ`
@@ -620,24 +673,27 @@ function offerCarryOn(what) {
   log.append(row);
   scrollDown();
 }
-stream.addEventListener('step_limit', () => {
+onRun('step_limit', () => {
   addNote('reached the step limit');
   offerCarryOn('หยุดเพราะใช้ครบ step — ');
 });
 // With no step cap set, a spent budget is what ends a long run — the same dead
 // end the step limit used to be, so it gets the same way out.
-stream.addEventListener('budget', (e) => {
-  const { used } = JSON.parse(e.data);
+onRun('budget', (data) => {
+  const { used } = data;
   addNote(`budget spent (${used}) — stopping`);
   offerCarryOn(`หยุดเพราะครบ budget (${used}) — `);
 });
-stream.addEventListener('error', (e) => addNote(`error: ${JSON.parse(e.data).message}`));
-stream.addEventListener('todo', (e) => renderTodo(JSON.parse(e.data).items));
-stream.addEventListener('diff_update', (e) => renderPending(JSON.parse(e.data).changes));
-stream.addEventListener('permission_request', (e) => askPermission(JSON.parse(e.data)));
-stream.addEventListener('plan_request', () => askPlan());
-stream.addEventListener('compacted', (e) => {
-  const { summary } = JSON.parse(e.data);
+onRun('error', (data) => addNote(`error: ${data.message}`));
+onRun('todo', (data) => renderTodo(data.items));
+onRun('diff_update', (data) => renderPending(data.changes));
+// The questions show regardless of project: dropping one would leave that run
+// waiting on an answer nobody can see. Their body names the other project, and
+// the answer routes back by it (rpc.mjs permission.answer / plan.answer).
+onAny('permission_request', (data) => askPermission(data));
+onAny('plan_request', (data) => askPlan(data.project));
+onRun('compacted', (data) => {
+  const { summary } = data;
   addCommandOut(`context เต็ม — สรุปงานที่ผ่านมาแล้วไว้ในบทสนทนาใหม่`);
   // The summary is what survives the rotation. Showing it turns an
   // "it forgot everything" moment into "it carried this forward, and I can see
@@ -650,23 +706,23 @@ stream.addEventListener('compacted', (e) => {
   }
   scrollDown();
 });
-stream.addEventListener('helper_start', (e) => addNote(`helper started: ${JSON.parse(e.data).task}`));
-stream.addEventListener('helper_end', (e) => {
-  const { summary, prepared } = JSON.parse(e.data);
-  addNote(`helper finished${prepared?.length ? `, prepared ${prepared.length} file(s) for approval` : ''}: ${summary}`);
+onRun('helper_start', (data) => addNote(`helper started: ${data.task}`));
+onRun('helper_end', (data) => {
+  const { summary, prepared, skipped } = data;
+  addNote(`helper finished${prepared?.length ? `, prepared ${prepared.length} file(s) for approval` : ''}${skipped?.length ? `, left ${skipped.length} file(s) alone (a newer version was already staged)` : ''}: ${summary}`);
 });
-stream.addEventListener('done_line', (e) => {
-  const { text, extra } = JSON.parse(e.data);
+onRun('done_line', (data) => {
+  const { text, extra } = data;
   assistantSummary(text || 'done');
   if (extra) assistantSummary(extra);
   endTurn();
 });
-stream.addEventListener('plugin_call', (e) => {
-  const { marker, arg } = JSON.parse(e.data);
+onRun('plugin_call', (data) => {
+  const { marker, arg } = data;
   addNote(`plugin ${marker} ${arg}`.trim());
 });
-stream.addEventListener('finished', async (e) => {
-  const { summary, stopReason, spent, credits, check } = JSON.parse(e.data);
+onRun('finished', async (data) => {
+  const { summary, stopReason, spent, credits, check } = data;
   // The run's verdict rides the pending panel: the badge under the change
   // list says whether Apply is about to write something a check passed.
   state.lastCheck = check ?? null;
@@ -687,17 +743,17 @@ stream.addEventListener('finished', async (e) => {
   for (const box of $('plugin-panels').children) if (box.dataset.panel) await paintPanel(box, box.dataset.panel);
   await refreshPending();
 });
-stream.addEventListener('applied', (e) => {
-  const { written, deleted, files } = JSON.parse(e.data);
+onRun('applied', (data) => {
+  const { written, deleted, files } = data;
   addNote(`applied  ${written ?? 0} written, ${deleted ?? 0} deleted${files?.length ? ` — ${files.join(', ')}` : ''}`);
   renderPending([]);
   // The panel is a picture of the tree from a moment ago: without this, a file
   // that just landed on disk stays invisible until a reload.
   void refreshFiles();
 });
-stream.addEventListener('discarded', () => { renderPending([]); addNote('discarded.'); });
-stream.addEventListener('session', (e) => {
-  const s = JSON.parse(e.data);
+onRun('discarded', () => { renderPending([]); addNote('discarded.'); });
+onRun('session', (data) => {
+  const s = data;
   state.sessionId = s.id;
   refreshMeta(s);
 });
@@ -756,6 +812,9 @@ async function sendTask(seed = null) {
   try {
     await rpc('run', {
       task: text,
+      // The project this window shows. The backend runs where the window is
+      // looking even if another window switched it since (rpc.mjs run).
+      root: state.root ?? undefined,
       // The select's 'plan' view is not a permission mode: the approved plan is
       // the consent, so the run works under 'auto'. Everything else goes as-is.
       mode: $('mode').value === 'plan' ? 'auto' : ($('mode').value || undefined),
@@ -772,7 +831,7 @@ async function sendTask(seed = null) {
 }
 
 function cancelRun() {
-  rpc('cancel').catch(() => {});
+  rpc('cancel', { root: state.root ?? undefined }).catch(() => {});
 }
 
 $('composer').onsubmit = (ev) => {
@@ -826,7 +885,7 @@ $('send').onclick = (ev) => {
 
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && !$('modal').classList.contains('hidden')) hideModal();
-  else if (ev.key === 'Escape' && state.running) rpc('cancel');
+  else if (ev.key === 'Escape' && state.running) rpc('cancel', { root: state.root ?? undefined });
   // Shift+Tab cycles ask → auto → plan from the composer or anywhere the
   // window itself has the focus — the one shortcut that has to work without
   // someone typing first. Form controls (the select, the settings sheet) keep
@@ -1186,17 +1245,25 @@ async function refreshProjects(projects) {
   for (const p of projects ?? []) {
     const opt = document.createElement('option');
     opt.value = p.path;
-    opt.textContent = p.name ?? p.path;
+    // A project with a run still going is marked: after a switch that run's
+    // events stop painting here (onRun), and the picker is where the window
+    // says so instead of the run looking like it evaporated.
+    opt.textContent = `${p.name ?? p.path}${p.running && !p.current ? ' • กำลังทำงาน' : ''}`;
     if (p.current) opt.selected = true;
     select.append(opt);
   }
   if (!projects?.length) return;
+  // The window follows its picker: this is the project its events are filtered
+  // by and the root its runs are sent to.
+  const mine = projects.find((p) => p.current) ?? projects[0];
+  if (mine?.path) state.root = mine.path;
   if (previous !== select.value) await refreshSessions();
 }
 
 $('project').onchange = async () => {
   const result = await rpc('projects.switch', { path: $('project').value }).catch((err) => ({ error: err.message }));
   if (result.error) { addNote(`could not switch project: ${result.error}`); return; }
+  state.root = result.root ?? $('project').value;
   log.textContent = '';
   state.sessionId = null;
   renderPending([]);
@@ -1887,7 +1954,7 @@ const COMMANDS = [
   { cmd: 'discard', desc: 'ทิ้งไฟล์ที่รออยู่ทั้งหมด', run: discardAll },
   { cmd: 'project', desc: 'เลือกโฟลเดอร์โปรเจกต์', run: pickProject },
   { cmd: 'settings', desc: 'ตั้งค่าทั้งหมด', run: openSettings },
-  { cmd: 'stop', desc: 'ยกเลิกรันที่กำลังทำ', run: () => rpc('cancel').then(() => addCommandOut('ยกเลิกแล้ว')) },
+  { cmd: 'stop', desc: 'ยกเลิกรันที่กำลังทำ', run: () => rpc('cancel', { root: state.root ?? undefined }).then(() => addCommandOut('ยกเลิกแล้ว')) },
 ];
 
 const slash = { open: false, items: [], index: 0 };

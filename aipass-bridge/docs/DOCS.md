@@ -193,7 +193,9 @@ where objects address their keys and values by index, and negative numbers are
 ### Conversations
 
 - **`resolveConversation()`** — precedence: `AIPASS_CONVERSATION_ID` (pinned) →
-  `conversationCache` → newest entry of a freshly loaded list
+  `conversationCache` (unless it is temporary — a temporary conversation belongs
+  to the session that created it, so a nameless caller resolves from the list
+  instead of landing inside it) → newest entry of a freshly loaded list
   (`loadConversations()` sorts by `updatedAt` desc).
 - **`createConversation({modelId, message, assistant})`** — fires a `create`
   job, reads `conversationId` out of the turbo-stream response (the server

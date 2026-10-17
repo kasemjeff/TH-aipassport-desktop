@@ -32,6 +32,12 @@ export class Harness {
   #planResolve = null;
   /** The WEB scratch conversation id, created lazily and reused. */
   #scratch = null;
+  /**
+   * How `conversation` came about, for the per-send temporary flag: true/false
+   * for a conversation this harness created, null when it was pointed at one
+   * (an explicit id, or one resolved from the bridge's own pointer).
+   */
+  #conversationTemporary = null;
 
   /**
    * @param {object} opts
@@ -81,23 +87,6 @@ export class Harness {
     this.skills = opts.skills ?? SkillLibrary.default({ root: this.root, repoDir: REPO_SKILLS });
     this.store = opts.store === 'off' ? null : (opts.store ?? new SessionStore(path.join(home(), 'sessions')));
     this.overlay = new Overlay(this.root);
-    this.tools = createTools({
-      root: this.root,
-      overlay: this.overlay,
-      skills: this.skills,
-      bridge: this.bridge,
-      model: this.bridge.model,
-      allowRun: this.options.allowRun,
-      // The CLI's --max-result / --read-lines are per-run knobs: without this
-      // plumbing they sat in this.options and the tools kept their defaults,
-      // so the flags were notes nobody read.
-      maxResult: this.options.maxResult,
-      readLines: this.options.readLines,
-      events: this.events,
-      log: (_level, text) => this.events.emit('note', { text }),
-      // WEB on a scratch conversation (P2-B), when the run opts in.
-      webConversation: this.options.webScratch ? () => this.#scratchConversation() : null,
-    });
     /* ------------------------------------------------------------- path rules *
      *
      * Two stores have held permission rules, and this is where they meet.
@@ -140,6 +129,38 @@ export class Harness {
     this.#planResolve = null;
   }
 
+  /**
+   * The tool table for one run.
+   *
+   * A fresh table per run is what the read-first gate needs: `readSet`
+   * (tools.mjs) is the list of files THIS run has looked at, and a table
+   * shared across runs carries a mark from a previous run into the next —
+   * letting a blind CREATE past the very gate that exists to refuse it. The
+   * ATTACH queue rides the same lifetime: a part belongs to the message it
+   * was queued for, not to the harness. Building here also keeps the table's
+   * copy of live options (allowRun's refusal text, the web scratch hook) in
+   * step with setPolicy between runs.
+   */
+  #makeTools() {
+    return createTools({
+      root: this.root,
+      overlay: this.overlay,
+      skills: this.skills,
+      bridge: this.bridge,
+      model: this.bridge.model,
+      allowRun: this.options.allowRun,
+      // The CLI's --max-result / --read-lines are per-run knobs: without this
+      // plumbing they sat in this.options and the tools kept their defaults,
+      // so the flags were notes nobody read.
+      maxResult: this.options.maxResult,
+      readLines: this.options.readLines,
+      events: this.events,
+      log: (_level, text) => this.events.emit('note', { text }),
+      // WEB on a scratch conversation (P2-B), when the run opts in.
+      webConversation: this.options.webScratch ? () => this.#scratchConversation() : null,
+    });
+  }
+
   /* ------------------------------------------------------------ sessions */
 
   async startSession({ title = null, sessionId = null } = {}) {
@@ -160,6 +181,7 @@ export class Harness {
     if (this.options.conversation) {
       await this.bridge.config({ conversation: this.options.conversation });
       this.conversation = this.options.conversation;
+      this.#conversationTemporary = null;
       return;
     }
     if (this.options.reuse) {
@@ -182,6 +204,7 @@ export class Harness {
       throw err;
     });
     this.conversation = made?.id ?? null;
+    this.#conversationTemporary = made?.id ? !this.options.permanent : null;
     this.events.emit('conversation', { id: this.conversation, temporary: !this.options.permanent });
   }
 
@@ -214,11 +237,17 @@ export class Harness {
     return this.permissions.rules;
   }
   async #rotate(summary, task) {
-    await this.bridge.createConversation({ temporary: true, message: 'Continuing earlier work.' });
-    const st = await this.bridge.status().catch(() => null);
-    this.conversation = st?.conversation ?? this.conversation;
+    // The id the create just returned, not a re-read of the bridge's shared
+    // pointer: another harness may adopt its own conversation in the gap
+    // between create and status, and `status` would then hand this run the
+    // other session's conversation to continue in.
+    const made = await this.bridge.createConversation({ temporary: true, message: 'Continuing earlier work.' });
+    this.conversation = made?.id ?? this.conversation;
+    this.#conversationTemporary = true;
     this.events.emit('conversation', { id: this.conversation, temporary: true, rotated: true });
-    return summary;
+    // The loop re-binds its own send target from this: its copy of the id is
+    // what names every message until the run ends.
+    return { conversation: this.conversation, temporary: this.#conversationTemporary };
   }
 
   /** One throwaway conversation all WEB lookups share (P2-B), lazily made. */
@@ -246,7 +275,10 @@ export class Harness {
    */
   async compactNow(task = '') {
     if (!this.session) throw new Error('no session to compact');
-    const summary = await this.compactor.summarize(this.session, { task, model: this.bridge.model });
+    const summary = await this.compactor.summarize(this.session, {
+      task, model: this.bridge.model,
+      conversation: this.conversation, temporary: this.#conversationTemporary,
+    });
     this.session.append('compaction', { summary, firstKeptEntryId: this.session.entries.at(-1)?.id ?? null });
     await this.#rotate(summary, task);
     this.events.emit('compacted', { summary });
@@ -323,7 +355,14 @@ export class Harness {
 
       return await runTask(task, {
         bridge: this.bridge,
-        tools: this.tools,
+        // The run talks in its own conversation, named on every send: with
+        // several projects running at once the bridge's shared pointer can be
+        // moved by any of them, and a nameless send would land wherever it
+        // happens to point. The temporary flag rides along because every turn
+        // of a temporary conversation has to repeat it.
+        conversation: this.conversation,
+        conversationTemporary: this.conversation ? this.#conversationTemporary : null,
+        tools: this.#makeTools(),
         overlay: this.overlay,
         session: this.session,
         permissions: this.permissions,
@@ -402,7 +441,15 @@ export class Harness {
       // A verifier may RUN checks, but only where the run itself may: the
       // child narrows the parent's permissions, never widens them.
       const canRun = Boolean(spec?.run) && Boolean(this.options.allowRun);
-      const child = new Overlay(this.root);
+      // The helper reads through the parent's staged tree (Overlay.base): the
+      // work in progress is its starting point, so its edit builds on what the
+      // parent staged instead of re-deriving it from disk. Its own edits stay
+      // in `child.map` — the copy-back below merges them.
+      const child = new Overlay(this.root, { base: this.overlay });
+      // What the parent looked like when this helper started. The copy-back
+      // uses it to tell this helper's own edits apart from a version staged
+      // while it was running — by the parent itself or by a sibling helper.
+      const before = new Map(this.overlay.map);
       const childSession = this.store.create({ root: this.root, model: this.bridge.model, title: `${role ? `${role}: ` : 'helper: '}${task.slice(0, 60)}` });
       // The parent's path rules travel with the helper. They are statements
       // about the project (`.env*  deny`), not about which run is editing, so
@@ -425,7 +472,6 @@ export class Harness {
           tools: createTools({
             root: this.root, overlay: child, skills: this.skills, bridge: this.bridge,
             model: this.bridge.model, allowRun: canRun, events: this.events,
-            maxResult: this.options.maxResult, readLines: this.options.readLines,
             readOnly: Boolean(spec),
             readOnlyNote: spec ? 'this helper is read-only — report it in your summary instead.' : null,
             conversation: helperConversation, temporary: true,
@@ -446,18 +492,35 @@ export class Harness {
       }
 
       const prepared = [];
+      const skipped = [];
       for (const [abs, value] of child.map) {
+        const rel = path.relative(this.root, abs).split(path.sep).join('/');
+        // Last-write-wins is how a sibling's finished work disappears without
+        // a trace: when the parent staged something here after this helper
+        // started, the helper's version does not overwrite it — it is named
+        // in the reply instead, so it can be redone or merged deliberately.
+        const stagedSinceStart = this.overlay.map.has(abs)
+          ? this.overlay.map.get(abs) !== before.get(abs)
+          : before.has(abs);
+        if (stagedSinceStart && this.overlay.map.get(abs) !== value) {
+          skipped.push(rel);
+          continue;
+        }
         this.overlay.map.set(abs, value);
-        prepared.push(path.relative(this.root, abs).split(path.sep).join('/'));
+        prepared.push(rel);
       }
       if (prepared.length) {
         this.events.emit('diff_update', { changes: this.pendingChanges() });
         this.session?.append('note', { text: `helper prepared edits pending approval: ${prepared.join(', ')}` });
       }
-      this.events.emit('helper_end', { task, role: role || null, summary: result.summary ?? '', prepared });
+      if (skipped.length) {
+        this.session?.append('note', { text: `a newer version was already staged, so the helper's edits were not applied: ${skipped.join(', ')}` });
+      }
+      this.events.emit('helper_end', { task, role: role || null, summary: result.summary ?? '', prepared, skipped });
 
       const lines = [result.summary ?? 'The helper finished without a summary.'];
       if (prepared.length) lines.push(`Files prepared and waiting for approval: ${prepared.join(', ')}`);
+      if (skipped.length) lines.push(`Not applied — a newer version of these files was already staged by the parent run or a parallel helper, so this helper's edits were left alone: ${skipped.join(', ')}. Read them back if they still need changing.`);
       return lines.join('\n\n');
     };
   }
@@ -547,7 +610,6 @@ export class Harness {
           tools: createTools({
             root: this.root, overlay: staged, skills: this.skills, bridge: this.bridge,
             model: this.bridge.model, allowRun: true, events: childEvents,
-            maxResult: this.options.maxResult, readLines: this.options.readLines,
             conversation: checkerConversation, temporary: true, readOnly: true,
           }),
           overlay: new Overlay(this.root),

@@ -29,6 +29,14 @@ suite.
   empty default — point `AIPASS_SKILLS_DIR` there, or link it the same way.
 - **Cleanup**: the proof worktree removed; no other processes started.
 
+## 2026-10-17 — opencode — five-fix round: project-scoped runs, helper base layer, per-run readSet, rotation keeps created id
+
+- **Files**: `desktop/ui/app.js` (`state.root` from refreshProjects/projects.switch/restoreFromSnapshot; `onRun`/`onAny` wrappers around ~35 handlers dropping foreign-project events; run/cancel carry `root: state.root`; foreign permission/plan modals show with a project label and route answers by project), `aipass-bridge/harness/rpc.mjs` (`run(params)` switches the harness when `params.root` differs with remember:false; `cancel(params)` targets the named harness; `status()` exposes per-project `running`), `aipass-bridge/harness/overlay.mjs` (read-through `base` layer), `aipass-bridge/harness/harness.mjs` (helper uses `child = new Overlay(root, {base: overlay})` with a `before` snapshot; copy-back skips files staged since start and records them in `helper_end.skipped`; `#makeTools()` called in `run()` so `readSet` resets per run; `#rotate` uses `made.id`; sends carry `conversation`/`conversationTemporary`), `aipass-bridge/harness/loop.mjs` (rebinds `conversation` after rotation), `aipass-bridge/bridge/server.mjs` (`resolveConversation` skips a temporary `conversationCache` for nameless callers), `aipass-bridge/harness/compact.mjs` (`summarize` accepts `conversation`/`temporary`), `aipass-bridge/test/bridge.test.mjs`, `checker.test.mjs`, `ask.test.mjs` (conversation-id contract), `aipass-bridge/test/harness-fixes.test.mjs` (+6 tests), `CHANGELOG.md`, `docs/WORKLOG.md`.
+- **Tests**: `npm test` green (535 tests, 534 pass, 1 skip, 0 fail); `node --check` clean on all touched files.
+- **Deferred**: live UI multi-project smoke (needs a real window run); desktop.test.mjs multi-project run routing (covered at the harness/rpc layer by the new harness-fixes tests and existing desktop-window tests).
+- **Risks**: the per-project running map and foreign-event filter rely on every handler going through `onRun`/`onAny`; a handler added later that bypasses them silently re-introduces cross-project painting.
+- **Cleanup**: debug removed; edits confined to the `aipass-fix` worktree.
+
 ## 2026-10-17 — opencode — the closing message carries the answer; the picker marks a dropped model
 
 - **Files**: `aipass-bridge/harness/protocol.mjs` (the standing instructions now

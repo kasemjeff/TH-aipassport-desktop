@@ -39,7 +39,9 @@ Read it before non-trivial bridge changes and keep it current with them.
 - **Conversation rotation** (`resolveConversation`, `startChat`): reuse the
   most recent (or just-created) conversation; on `404` (deleted) / `409`
   (generation still running) advance to the next-most-recent — but only when
-  no deltas were delivered yet and `AIPASS_CONVERSATION_ID` isn't pinned.
+  no deltas were delivered yet and `AIPASS_CONVERSATION_ID` isn't pinned. A
+  nameless send never resolves into a *temporary* conversation: those are the
+  private space of the session that minted them, which names them per send.
 - **turbo-stream**: the app's `.data` loaders return react-router turbo-stream
   (a flat indexed pool). `decodeTurboStream()` in `server.mjs` reads it;
   `encodeTurboStream()` in `test/harness.mjs` builds fixtures the same way.

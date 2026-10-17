@@ -71,21 +71,6 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
-- **The CLI's `--max-result` and `--read-lines` reach the tools.** Both were
-  parsed into the run's options and never forwarded to the tool context, so
-  every tool kept the 3,000-byte / 250-line defaults whatever the run asked
-  for — `--max-result` was a note nobody read (`test/harness-fixes.test.mjs`).
-- **A pace-score 403 cools the whole tab, not just the job it refused.** The
-  edge 403s by pace as well as by content — the same limiter family as a 429 —
-  but only the refused job used to wait: every send behind it left at full
-  pace into the window that had just said no. The page now arms the tab-wide
-  `rateQuietUntil` clock and the five-minute `RATE_MEMORY_MS` pacing on a 403
-  exactly as on a 429 (`test/page.test.mjs`).
-- **The settings sheet's budgets reach the live run the moment Save lands.**
-  `maxToolCalls`, `maxWallClockMs` and `maxCredits` join the keys re-applied
-  to the running harness on save — before this a budget change only took
-  effect at the next backend start while the sheet said it was live
-  (`test/hardening.test.mjs`).
 - **A closing message carries the answer.** The standing instructions now say
   the findings belong above the DONE — a question or a summary never closes
   with a "done summarizing" line while the substance stays inside a pasted
@@ -98,6 +83,17 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   the run at the catalog check; the option now carries that verdict before
   the run starts, and a model missing from a fallback list stays unjudged —
   the same rule the loop applies (`test/ui.test.mjs`).
+- **A pace-score 403 cools the whole tab, not just the job it refused.** The
+  edge 403s by pace as well as by content — the same limiter family as a 429 —
+  but only the refused job used to wait: every send behind it left at full
+  pace into the window that had just said no. The page now arms the tab-wide
+  `rateQuietUntil` clock and the five-minute `RATE_MEMORY_MS` pacing on a 403
+  exactly as on a 429 (`test/page.test.mjs`).
+- **The settings sheet's budgets reach the live run the moment Save lands.**
+  `maxToolCalls`, `maxWallClockMs` and `maxCredits` join the keys re-applied
+  to the running harness on save — before this a budget change only took
+  effect at the next backend start while the sheet said it was live
+  (`test/hardening.test.mjs`).
 - **The `models:` line covers history, not just new runs.** A run that
   predates `run_stats.model` is attributed to the model its session recorded
   — the one a fresh run started on — so older sessions no longer blend under
@@ -142,6 +138,29 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   and the real cause was lost — and the supervisor restarted the backend, making
   the crash look like a restart. The import is restored, so a crash now prints
   the error that caused it (`test/hardening.test.mjs`).
+- **A project is a first-class scope in the window.** `state.root` is set from
+  the project list/switch/snapshot, every run and cancel carries `root`, and
+  events from other projects are dropped so a run in one project cannot paint
+  another; a foreign permission/plan modal still shows, tagged with the other
+  project's name, and its answer is routed back by project
+  (`test/ui.test.mjs`).
+- **A run is bound to its root.** `run(params)` switches the harness when
+  `params.root` differs (remember:false), `cancel(params)` targets the named
+  harness, and `status()` reports per-project `running`; the window sends
+  `root: state.root` on run/cancel (`test/desktop.test.mjs`).
+- **Helpers read the parent's staged tree.** `Overlay` gains a read-through
+  `base` layer; a helper is built with `base: overlay` and its own `before`
+  snapshot, and copy-back skips files staged since it started, naming them in
+  `helper_end.skipped` (`test/harness-fixes.test.mjs`).
+- **`readSet` is per run.** `#makeTools()` is called in `run()`, not shared,
+  so a read in one run no longer licenses a blind CREATE in the next
+  (`test/harness-fixes.test.mjs`).
+- **Rotation keeps the conversation its `create` returned.** `#rotate` uses
+  `made.id` instead of re-reading the bridge's shared pointer; the server's
+  `resolveConversation` skips a temporary `conversationCache` for nameless
+  callers; sends now carry `conversation`/`conversationTemporary` per send
+  (including summarize), and the loop rebinds `conversation` after rotation
+  (`test/harness-fixes.test.mjs`, `test/bridge.test.mjs`).
 
 ## [0.2.0]
 

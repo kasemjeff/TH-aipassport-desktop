@@ -431,7 +431,14 @@ export function createRpc({
       const st = await current.bridge.status().catch(() => null);
       return {
         root: current.root,
-        projects: appSettings.projectList().map((p) => ({ ...p, current: p.path === current.root })),
+        // Every project's running flag, not just the current one's: a window
+        // on project A must be able to see that B still has a run going, so a
+        // switch is an informed move instead of a surprise.
+        projects: appSettings.projectList().map((p) => ({
+          ...p,
+          current: p.path === current.root,
+          running: harnesses.get(path.resolve(p.path))?.running === true,
+        })),
         bridge: Boolean(st?.ok),
         extensions: st?.extensions ?? 0,
         // The harness's model first: it is the one a run sends. The bridge's
@@ -651,6 +658,12 @@ export function createRpc({
 
     async run(params = {}) {
       if (!params.task?.trim()) throw new Error('no task given');
+      // The window names the project it is looking at. Another window may have
+      // switched the backend since — running where `current` happens to point
+      // would put the task in the wrong project and stream it to a window that
+      // is not showing that project. remember:false keeps the project list's
+      // order alone: this is a target for the call, not a switch by the human.
+      if (params.root && path.resolve(params.root) !== current.root) switchProject(params.root, { remember: false });
       current.setPolicy({ mode: params.mode ?? null, allowRun: params.allowRun ?? null });
       Object.assign(current.options, {
         plan: params.plan ?? current.options.plan,
@@ -688,7 +701,7 @@ export function createRpc({
         result = await current.run(params.task, { runPluginTool: (marker, args) => plugins.runTool(marker, args) });
         const verdict = result.check?.verdict ?? null;
         if (used === attempts || verdict !== 'fail') break;
-        emit('note', { text: `check failed after attempt ${used} of ${attempts} — running the task again` });
+        emit('note', { text: `check failed after attempt ${used} of ${attempts} — running the task again`, project: current.root });
       }
       return {
         summary: result.summary,
@@ -701,12 +714,29 @@ export function createRpc({
       };
     },
 
-    cancel() { current.cancel(); return { ok: true }; },
+    cancel(params = {}) {
+      // A window cancels what it is looking at: when it names a project, the
+      // cancel goes to that project's harness — another window may have made
+      // a different project current since this window's run started. A root
+      // with no harness (nothing ever ran there) has nothing to cancel.
+      const h = params.root ? harnesses.get(path.resolve(params.root)) : current;
+      h?.cancel();
+      return { ok: true };
+    },
 
     /* -------------------------------------------------------- permissions */
 
-    async 'permission.answer'(params = {}) { return { ok: current.answer(params.id, params.decision) }; },
-    async 'plan.answer'(params = {}) { current.answerPlan(Boolean(params.ok)); return { ok: true }; },
+    async 'permission.answer'(params = {}) {
+      // The question names its project: a window may be answering a request
+      // that belongs to a run the backend has since switched away from.
+      const h = params.project ? harnesses.get(path.resolve(params.project)) : current;
+      return { ok: h ? h.answer(params.id, params.decision) : false };
+    },
+    async 'plan.answer'(params = {}) {
+      const h = params.project ? harnesses.get(path.resolve(params.project)) : current;
+      h?.answerPlan(Boolean(params.ok));
+      return { ok: true };
+    },
 
     /* -------------------------------------------------------------- diffs */
 

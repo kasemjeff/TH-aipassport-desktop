@@ -514,10 +514,31 @@ test('creates a temporary conversation and repeats the flag on every turn', asyn
   // the id comes from the conversation object, not a conversationId field
   assert.equal(made.id, 'M5uhmgOBsPk0v4WN');
 
-  await post({ messages: [{ role: 'user', content: 'hi' }] });
+  // Named per send, the temporary conversation is used and the flag repeats.
+  await post({ messages: [{ role: 'user', content: 'hi' }], conversation: made.id, temporary: true });
   const chat = ext.chats.at(-1);
   assert.equal(chat.conversationId, 'M5uhmgOBsPk0v4WN');
   assert.equal(chat.temporary, true, 'every turn must repeat isTemporary');
+});
+
+test('a nameless send never lands inside a temporary conversation', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  // Creating adopts the pointer, as usual for the session that created it.
+  const made = await (await fetch(`${bridge.base}/conversations/new`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ temporary: true }),
+  })).json();
+
+  // A caller with no conversation of its own resolves from the account's own
+  // list instead: a temporary conversation is private to the session that
+  // minted it, and its send must not read context it never saw written.
+  await post({ messages: [{ role: 'user', content: 'hi' }] });
+  const chat = ext.chats.at(-1);
+  assert.notEqual(chat.conversationId, made.id);
+  assert.equal(chat.conversationId, 'aaaa1111aaaa1111', 'the account list is what a nameless caller gets');
+  assert.ok(!chat.temporary);
 });
 
 test('a normal conversation is not marked temporary', async (t) => {

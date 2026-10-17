@@ -84,8 +84,10 @@ export async function runTask(taskText, ctx = {}) {
     bridge, tools, overlay, session = null, permissions = null, events = null,
     subagent = null, check = null, approvePlan = null, options = {}, first = true,
     runPluginTool = null, compactor = null, rotate = null,
-    conversation = null, conversationTemporary = null,
-  } = ctx;  // The step cap, or no cap at all: 0 (the shipped default) means the
+  } = ctx;
+  let conversation = ctx.conversation ?? null;
+  let conversationTemporary = ctx.conversationTemporary ?? null;
+  // The step cap, or no cap at all: 0 (the shipped default) means the
   // run goes until it is DONE, a guard stops it, or a budget below is spent. A
   // positive number caps the run, and the last step says so (step_limit).
   const rawCap = Number(options.maxSteps ?? 0);
@@ -789,9 +791,17 @@ export async function runTask(taskText, ctx = {}) {
     if (compactor && session && compactor.needsCompaction(session, { pending: next })) {
       try {
         events?.emit('note', { text: 'context is filling up — summarising this conversation and rotating to a fresh one' });
-        const note = await compactor.summarize(session, { task: taskText, model });
+        const note = await compactor.summarize(session, { task: taskText, model, conversation, temporary: conversationTemporary });
         session.append('compaction', { summary: note, firstKeptEntryId: session.entries.at(-1)?.id ?? null });
-        await rotate?.(note);
+        const rotated = await rotate?.(note);
+        // The fresh conversation is where the seed and every later send must
+        // go. The harness hands its new id back because this loop's own
+        // `conversation` binding would otherwise keep naming the conversation
+        // the rotation just left behind.
+        if (rotated?.conversation) {
+          conversation = rotated.conversation;
+          conversationTemporary = rotated.temporary === true;
+        }
         events?.emit('compacted', { summary: note });
         // The fresh conversation keeps what a summary would drop: the files
         // staged so far (deletes marked) and the last check that has not

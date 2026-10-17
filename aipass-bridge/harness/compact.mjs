@@ -142,8 +142,12 @@ export class Compactor {
   /**
    * Ask the model for a summary of the work so far, in the conversation that
    * already holds the history — it is the only party that can see all of it.
+   * The conversation is named explicitly (when there is one): the bridge's
+   * shared pointer can have been moved by another session's run since this
+   * one started, and a summary request is the one message that must land in
+   * the conversation it is summarising.
    */
-  async summarize(session, { task = '', model = null } = {}) {
+  async summarize(session, { task = '', model = null, conversation = null, temporary = null } = {}) {
     const sent = session.sentMessages().slice(-40);
     const transcript = sent.map((m) => m.text.slice(0, 1200)).join('\n---\n');
     const prompt = `Summarise the work carried out so far in this session, so it can continue in a fresh conversation.
@@ -153,7 +157,7 @@ Capture, in under 400 words: what was asked, what was found, what files were rea
 Conversation so far, oldest first:
 ${transcript}`;
 
-    const res = await this.bridge.chat({ message: outbound(prompt), model });
+    const res = await this.bridge.chat({ message: outbound(prompt), model, ...(conversation ? { conversation, temporary } : {}) });
     return res.text.trim();
   }
 
