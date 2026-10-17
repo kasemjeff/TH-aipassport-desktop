@@ -933,6 +933,21 @@ async function refreshPending() {
   renderPending(pending);
 }
 
+/* Thai day words for the session list. The backend names a session after the
+   moment it started ("2026-10-17 09:07"), and a wall of those spells the same
+   date twice in every row — those rows show the clock face, and the day it
+   belongs to reads as a word. */
+const TH_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+function sessionDay(when) {
+  const midnight = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const away = Math.round((midnight(new Date()) - midnight(when)) / 86_400_000);
+  if (away <= 0) return 'วันนี้';
+  if (away === 1) return 'เมื่อวาน';
+  if (away < 7) return `${away} วันก่อน`;
+  const day = `${when.getDate()} ${TH_MONTHS[when.getMonth()]}`;
+  return when.getFullYear() === new Date().getFullYear() ? day : `${day} ${String(when.getFullYear()).slice(2)}`;
+}
+
 /**
  * The session list. 99 sessions on this machine and counting — a list of 40 with
  * no filter is a list nobody scrolls, so it filters as you type, shows the date
@@ -952,9 +967,16 @@ async function refreshSessions() {
   }
   for (const s of shown) {
     const li = el('li', s.id === state.sessionId ? 'active' : '');
-    const when = s.updated ? new Date(s.updated) : null;
-    li.append(el('span', null, s.title || '(untitled)'));
-    if (when) li.append(el('span', 'sub', when.toLocaleDateString(undefined, { day: '2-digit', month: 'short' })));
+    // A timestamp title only needs its clock face in the row; the day is the
+    // sub-column's job, said in a word when it is close enough to have a word.
+    const stamped = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2})/.exec(s.title ?? '');
+    const when = s.updated
+      ? new Date(s.updated)
+      : stamped
+        ? new Date(+stamped[1], +stamped[2] - 1, +stamped[3], +stamped[4], +stamped[5])
+        : null;
+    li.append(el('span', null, stamped ? stamped[4] : (s.title || '(untitled)')));
+    if (when) li.append(el('span', 'sub', sessionDay(when)));
     li.title = `${s.title ?? '(untitled)'}\n${s.id}\n${when ? when.toLocaleString() : ''}`;
     li.onclick = () => void openSession(s.id);
     ul.append(li);

@@ -12,6 +12,7 @@
     "test": "node scripts/test.mjs",
     "agents:lint": "node scripts/agents-lint.mjs",
     "verify": "node scripts/verify.mjs",
+    "smoke:e2e": "node scripts/smoke-e2e.mjs",
     "qa": "node scripts/qa-loop.mjs",
     "qa:loop": "node scripts/qa-loop.mjs",
     "check": "node scripts/agents-lint.mjs && node scripts/test.mjs && node scripts/qa-loop.mjs",
