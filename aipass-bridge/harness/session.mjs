@@ -15,6 +15,7 @@
 //   {"type":"compaction","id":"…","parentId":…,"summary":…,"firstKeptEntryId":…}
 //   {"type":"note",    "id":"…","parentId":…,"text":…}
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const id = () => Math.random().toString(16).slice(2, 10);
@@ -39,13 +40,24 @@ const slug = (s) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').slice
  */
 export const HEADER_EVERY = 25;
 
+// A rewrite that writes in place loses the whole file if the process dies
+// between the truncate and the last byte. Temp file plus rename makes the
+// swap atomic: a crash leaves the previous version on disk, never a half one.
+// rename() replaces an existing destination on both platforms (libuv uses
+// MoveFileEx with MOVEFILE_REPLACE_EXISTING on Windows).
+function writeAtomic(file, text) {
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, text);
+  fs.renameSync(tmp, file);
+}
+
 // The header is the first line; rewriting it keeps list() cheap enough that
 // the session picker never has to parse whole files.
 function rewriteHeader(session) {
   const lines = fs.readFileSync(session.file, 'utf8').split('\n');
   lines[0] = JSON.stringify(session.header);
   while (lines.at(-1) === '') lines.pop();
-  fs.writeFileSync(session.file, lines.join('\n') + '\n');
+  writeAtomic(session.file, lines.join('\n') + '\n');
 }
 
 export class Session {
@@ -117,7 +129,7 @@ export class Session {
     const chain = fromEntryId ? this.chainTo(fromEntryId) : this.entries.slice();
     const header = { ...this.header, id: id(), title: title ?? `${this.title} (fork)`, created: Date.now(), updated: Date.now(), forkedFrom: this.id };
     const file = path.join(path.dirname(this.file), `session-${header.id}.jsonl`);
-    fs.writeFileSync(file, [header, ...chain.filter((e) => e.type !== 'header')].map((e) => JSON.stringify(e)).join('\n') + '\n');
+    writeAtomic(file, [header, ...chain.filter((e) => e.type !== 'header')].map((e) => JSON.stringify(e)).join('\n') + '\n');
     return new Session({ file, header, entries: chain.filter((e) => e.type !== 'header') });
   }
 
@@ -168,7 +180,7 @@ export class SessionStore {
       schema: 1,
     };
     const file = path.join(dir, `session-${header.id}.jsonl`);
-    fs.writeFileSync(file, JSON.stringify(header) + '\n');
+    writeAtomic(file, JSON.stringify(header) + '\n');
     return new Session({ file, header });
   }
 
@@ -233,7 +245,9 @@ function findById(dir, id) {
   for (const d of [dir, ...readDirs(dir)]) {
     let files = [];
     try { files = fs.readdirSync(d); } catch { continue; }
-    const hit = files.find((f) => f.includes(id));
+    // Only real session files: a .tmp left behind by a crash mid-rewrite must
+    // never shadow the session it was born from.
+    const hit = files.find((f) => f.endsWith('.jsonl') && f.includes(id));
     if (hit) return path.join(d, hit);
   }
   return null;

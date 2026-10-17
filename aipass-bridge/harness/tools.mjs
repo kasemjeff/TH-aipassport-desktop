@@ -39,6 +39,22 @@ const MAX_SEARCH_FILE = 1_000_000;
  * file it read. (The directory is in overlay's SKIP, so walks never surface
  * it; read() still reaches it, because that is what the locator is for.)
  */
+// How many spill files a project keeps. The model is told these are on disk,
+// so they are pruned oldest-first rather than deleted eagerly — but they must
+// not grow forever either. Every write sweeps: a readdir plus a stat per file,
+// and the directory stays bounded whatever the process does.
+export const SPILL_KEEP = Number(process.env.AIPASS_SPILL_KEEP ?? 200);
+
+export function pruneSpill(dir, keep = SPILL_KEEP) {
+  try {
+    const files = fs.readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name.endsWith('.txt'))
+      .map((e) => { const p = path.join(dir, e.name); return { p, mtime: fs.statSync(p).mtimeMs }; })
+      .sort((a, b) => b.mtime - a.mtime);
+    for (const f of files.slice(keep)) fs.rmSync(f.p, { force: true });
+  } catch { /* missing or unreadable: nothing to sweep */ }
+}
+
 function spill(text, cap, root, tailShare = 0) {
   const id = Math.random().toString(16).slice(2, 10);
   const dir = path.join(root, '.aipass', 'spill');
@@ -46,6 +62,7 @@ function spill(text, cap, root, tailShare = 0) {
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, `${id}.txt`);
     fs.writeFileSync(file, text);
+    pruneSpill(dir);
     const rel = `.aipass/spill/${id}.txt`;
     const lines = text.split('\n').length;
     if (tailShare > 0) {

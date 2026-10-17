@@ -28,6 +28,8 @@ import { Emitter } from './events.mjs';
 // AIPASS_BRIDGE decides, otherwise the loopback default.
 import { resolveBridgeURL } from './bridge.mjs';
 import { loadOrMintToken, authorized, authorizedQuery } from './authtoken.mjs';
+import { openLogFile } from './log-file.mjs';
+import { scrubSecrets } from '../bridge/log-scrub.mjs';
 
 // Re-exported for desktop/main.mjs, whose ensureBridge probe must resolve the
 // bridge exactly the way the harness's own client does.
@@ -214,9 +216,9 @@ export function createRpc({
     const script = bridgeScript();
     if (!script) return;
     try {
-      const logDir = path.join(aipassHome(), 'logs');
-      fs.mkdirSync(logDir, { recursive: true });
-      const log = fs.openSync(path.join(logDir, 'bridge.log'), 'a');
+      // Size-capped rotation (harness/log-file.mjs): a bridge left running for
+      // weeks used to grow bridge.log without bound.
+      const log = openLogFile(path.join(aipassHome(), 'logs', 'bridge.log'));
       const child = spawn(process.execPath, [script], { cwd: root, stdio: ['ignore', log, log], detached: true, env: process.env });
       child.unref();
       fs.closeSync(log);
@@ -869,8 +871,23 @@ const json = (res, code, body) => {
 // Run standalone: node aipass-bridge/harness/rpc.mjs [--port 8790] [--root DIR]
 const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invokedDirectly) {
+  // Crash visibility, entry point only: tests import createRpc in-process, and
+  // a handler that calls process.exit would take the test runner down with it.
+  // As the desktop backend, an unrecovered throw used to end the process with
+  // nothing but whatever faint line was mid-flight; one scrubbed line names it,
+  // and the non-zero exit is what the desktop shell's supervisor watches.
+  const fatal = (label, err) => {
+    console.error(`[fatal] ${label}: ${scrubSecrets(err?.stack ?? String(err))}`);
+    process.exit(1);
+  };
+  process.on('uncaughtException', (err) => fatal('uncaught exception', err));
+  process.on('unhandledRejection', (reason) => fatal('unhandled rejection', reason));
+
   const argv = process.argv.slice(2);
   const arg = (n, d) => { const i = argv.indexOf(`--${n}`); return i === -1 ? d : argv[i + 1]; };
   const rpc = createRpc({ port: Number(arg('port', 8790)), root: arg('root', process.cwd()) });
+  // The desktop probes the port before spawning, but a race is still possible;
+  // name the port instead of dying with a raw EADDRINUSE stack.
+  rpc.server.on('error', (err) => fatal('backend cannot bind', err));
   process.stdout.write(`aipass desktop backend on ${rpc.url}\n`);
 }

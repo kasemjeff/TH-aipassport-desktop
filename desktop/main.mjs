@@ -24,6 +24,8 @@ const { createRpc, resolveBridgeURL } = await import(pathToFileURL(path.join(REP
 // The one resolver for state, shared with the backend and the CLI, so
 // AIPASS_HOME steers every surface including the detached log below.
 const { aipassHome } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'settings.mjs')));
+// Size-capped log files, the same helper the backend uses for bridge.log.
+const { openLogFile } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'log-file.mjs')));
 // One resolver for the probe and the harness client alike: AIPASS_BRIDGE
 // (http(s)://host:port, host:port or a bare port) or the loopback default.
 const BRIDGE_URL = resolveBridgeURL();
@@ -107,9 +109,10 @@ if (DETACH && (await backendUp())) {
   // before it launches the window, and the window then adopts what is already
   // running rather than starting a second backend. Everything lands in
   // ~/.aipass/logs, so a detach that misbehaves is still diagnosable.
+  // openLogFile makes the directory, rotates past the size cap, and appends;
+  // logDir stays for the "did not come up" message below.
   const logDir = path.join(aipassHome(), 'logs');
-  fs.mkdirSync(logDir, { recursive: true });
-  const log = fs.openSync(path.join(logDir, 'desktop-backend.log'), 'a');
+  const log = openLogFile(path.join(logDir, 'desktop-backend.log'));
   const bridge = await ensureBridge({ detached: true, log });
   const backend = spawn(process.execPath, [path.join(REPO, 'aipass-bridge', 'harness', 'rpc.mjs'), '--port', String(PORT), '--root', ROOT], {
     cwd: ROOT,

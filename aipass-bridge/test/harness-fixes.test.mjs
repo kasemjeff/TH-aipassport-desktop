@@ -163,13 +163,16 @@ test('append batches the header rewrite, and rename still fixes it at once', (t)
 
   // rewriteHeader() is the only thing that rewrites an existing session file,
   // so counting the writeFileSync calls it makes counts exactly the rewrites.
+  // There is one such call per rewrite: the atomic swap writes the temp file
+  // and renames it over the session (renameSync, which is not spied).
   // appendFileSync has to be told apart from it: on Node 24 an append is
   // implemented as a writeFileSync, so the caller is the only thing that
   // separates "one entry appended" from "the whole file rewritten".
   const real = fs.writeFileSync;
   const rewrites = [];
   fs.writeFileSync = function spied(file, ...rest) {
-    if (String(file) === session.file && /rewriteHeader/.test(new Error().stack)) rewrites.push(String(file));
+    const target = String(file) === session.file || String(file) === `${session.file}.tmp`;
+    if (target && /rewriteHeader/.test(new Error().stack)) rewrites.push(String(file));
     return real.call(this, file, ...rest);
   };
   t.after(() => { fs.writeFileSync = real; });

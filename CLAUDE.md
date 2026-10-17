@@ -166,5 +166,6 @@ token; warns at every boot).
 
 Harness and clients: `AIPASS_HOME` (state dir), `AIPASS_BRIDGE` (bridge URL),
 `AIPASS_SKILLS_DIR`, `AIPASS_FETCH_ALLOW_PRIVATE` (FETCH may reach private
-hosts) and `AIPASS_FETCH_MAX_BYTES`. Desktop: `AIPASS_DESKTOP_PORT` (8790),
-`AIPASS_DESKTOP_NO_OPEN`.
+hosts), `AIPASS_FETCH_MAX_BYTES`, `AIPASS_SPILL_KEEP` (spill files kept per
+project, 200), `AIPASS_LOG_MAX_BYTES` (log rotation cap, 5 MB). Desktop:
+`AIPASS_DESKTOP_PORT` (8790), `AIPASS_DESKTOP_NO_OPEN`.

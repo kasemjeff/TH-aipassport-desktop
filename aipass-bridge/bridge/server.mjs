@@ -9,6 +9,7 @@
 // for the web UI, so there is nothing to reconstruct on this side.
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { DOCUMENT_TYPES, MAX_ATTACHMENT_BYTES, isAllowedAttachment } from './attachment-types.mjs';
 
 const PORT = Number(process.env.AIPASS_PORT ?? 8787);
@@ -1503,6 +1504,20 @@ server.listen(PORT, HOST, () => {
   }
   log('  waiting for the Chrome extension…');
 });
+
+// Crash visibility, entry point only. A server-side throw that no handler
+// caught used to end the process with at most a stray log line; the same death
+// is now named, with the non-zero exit code a supervisor keys on. Not
+// registered when this module is imported in-process — the test suite does
+// exactly that — because one background throw would otherwise exit the runner.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const fatal = (label, err) => {
+    log(`[fatal] ${label}:`, err?.stack ?? err);
+    process.exit(1);
+  };
+  process.on('uncaughtException', (err) => fatal('uncaught exception', err));
+  process.on('unhandledRejection', (reason) => fatal('unhandled rejection', reason));
+}
 
 // For tests: the SSRF guard's redirect behaviour cannot be driven through the
 // HTTP surface without a public host, so it is exercised directly, and the
