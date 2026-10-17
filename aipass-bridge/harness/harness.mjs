@@ -47,7 +47,7 @@ export class Harness {
     this.root = path.resolve(opts.root ?? process.cwd());
     this.events = opts.events ?? new Emitter();
     this.options = {
-      maxSteps: 10,
+      maxSteps: 0,   // no cap — settings.mjs ships the same default
       maxToolCalls: 300,
       maxWallClockMs: 1_800_000,
       allowRun: false,
@@ -422,7 +422,9 @@ export class Harness {
           events: this.events,
           conversation: helperConversation,
           conversationTemporary: helperConversation ? true : null,
-          options: { ...this.options, maxSteps: Math.min(this.options.maxSteps, 8), subagent: false, allowRun: canRun, signal: this.abort.signal },
+          // A helper is a bounded subtask: its cap is 8, and a capped parent
+          // can only lower it — an uncapped parent does not uncap a helper.
+          options: { ...this.options, maxSteps: this.options.maxSteps > 0 ? Math.min(this.options.maxSteps, 8) : 8, subagent: false, allowRun: canRun, signal: this.abort.signal },
           first: true,
         });
       } catch (err) {
@@ -541,7 +543,9 @@ export class Harness {
           conversationTemporary: true,
           options: {
             ...this.options,
-            maxSteps: Math.min(this.options.maxSteps, 6),
+            // The checker is run-and-report, bounded at 6: an uncapped parent
+            // does not uncap it, a capped one can only lower it.
+            maxSteps: this.options.maxSteps > 0 ? Math.min(this.options.maxSteps, 6) : 6,
             plan: false,
             requirePlanApproval: false,
             subagent: false,

@@ -518,7 +518,7 @@ let   agentAllowRun = false;
 // Mode state — toggled by /agent with no task
 let   agentMode        = false;  // true = agent mode, false = chat mode
 let   agentModeAllowRun = false; // persists across tasks while in agent mode
-let   agentModeMaxSteps = 10;
+let   agentModeMaxSteps = 0;  // 0 = no cap — the run goes until DONE, a guard, or a budget
 let   agentModeAutoApply = /** @type {boolean | null} */ (null);
 const AGENT_MAX_RESULT = 3000;
 const AGENT_READ_LINES = 200;
@@ -1644,7 +1644,7 @@ function agentShowDiff() {
  * @param {string} taskText
  * @param {{ maxSteps?: number, allowRun?: boolean, autoApply?: boolean | null, attachedImages?: Array<{ tag: string, dataUri: string }>, attachedDocuments?: AttachedDocument[] }} [opts]
  */
-async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApply = null, attachedImages = [], attachedDocuments = [] } = {}) {
+async function runAgentTask(taskText, { maxSteps = 0, allowRun = false, autoApply = null, attachedImages = [], attachedDocuments = [] } = {}) {
   // autoApply: null = ask y/N, true = apply automatically, false = dry run
   overlay.clear();
   const prevAllowRun = agentAllowRun;
@@ -1672,7 +1672,8 @@ async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApp
 
   let nudges = 0;
   let toolsRun = 0;
-  for (let step = 1; step <= maxSteps; step++) {
+  const stepCap = maxSteps > 0 ? maxSteps : Infinity;   // 0 = no cap
+  for (let step = 1; step <= stepCap; step++) {
     const stepStart = Date.now();
     out('');
 
@@ -1682,7 +1683,7 @@ async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApp
     reply = reply != null ? agentInbound(reply) : '';
 
     const elapsed = ((Date.now() - stepStart) / 1000).toFixed(1);
-    out(cyan('○') + ' ' + bold(`agent step ${step}/${maxSteps}`) + ' ' + dim(`(${elapsed}s)`));
+    out(cyan('○') + ' ' + bold(maxSteps > 0 ? `agent step ${step}/${maxSteps}` : `agent step ${step}`) + ' ' + dim(`(${elapsed}s)`));
 
     const proseText = agentProse(reply);
     const calls = agentParse(reply);
@@ -1774,7 +1775,7 @@ async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApp
     }
     if (done) out(dim('  (ignoring DONE — it came alongside a tool request)'));
     next = `${results.join('\n\n')}\n\n${AGENT_REMINDER}`;
-    if (step === maxSteps) out(red('  reached the step limit'));
+    if (maxSteps > 0 && step === maxSteps) out(red('  reached the step limit'));
   }
 
   agentAllowRun = prevAllowRun;
@@ -2676,7 +2677,7 @@ while (!question) {
       const flags = [
         agentModeAllowRun ? red('--allow-run') : '',
         agentModeAutoApply === true ? dim('--apply') : '',
-        dim(`max:${agentModeMaxSteps}`),
+        dim(`max:${agentModeMaxSteps || '∞'}`),
         dim(`root: ${agentRoot}`),
       ].filter(Boolean).join(dim(' · '));
       out('  ' + cyan('⬡') + ' ' + bold(cyan('agent mode')) + '  ' + flags);
@@ -3415,12 +3416,16 @@ while (!question) {
     const parts = raw.split(/\s+/).filter(Boolean);
     const hasFlags = parts.some((p) => p.startsWith('--'));
     const taskParts = [];
-    let tAllowRun = false, tAutoApply = /** @type {boolean | null} */ (null), tMaxSteps = 10;
+    let tAllowRun = false, tAutoApply = /** @type {boolean | null} */ (null), tMaxSteps = /** @type {number | null} */ (null);
     for (let pi = 0; pi < parts.length; pi++) {
       if (parts[pi] === '--allow-run') { tAllowRun = true; continue; }
       if (parts[pi] === '--apply') { tAutoApply = true; continue; }
       if (parts[pi] === '--no-apply') { tAutoApply = false; continue; }
-      if (parts[pi] === '--max') { tMaxSteps = Math.max(1, Number(parts[++pi]) || 10); continue; }
+      if (parts[pi] === '--max') {
+        const n = Number(parts[++pi]);
+        tMaxSteps = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;   // 0 = no cap
+        continue;
+      }
       taskParts.push(parts[pi]);
     }
     const taskText = taskParts.join(' ').trim();
@@ -3443,15 +3448,15 @@ while (!question) {
     if (!taskText && hasFlags) {
       if (tAllowRun)           agentModeAllowRun  = !agentModeAllowRun; // toggle
       if (tAutoApply !== null) agentModeAutoApply = tAutoApply;
-      if (tMaxSteps !== 10)    agentModeMaxSteps  = tMaxSteps;
-      out(dim(`  agent mode settings: allow-run=${agentModeAllowRun}  max=${agentModeMaxSteps}  auto-apply=${agentModeAutoApply ?? 'ask'}`));
+      if (tMaxSteps !== null)  agentModeMaxSteps  = tMaxSteps;   // --max 0 = no cap
+      out(dim(`  agent mode settings: allow-run=${agentModeAllowRun}  max=${agentModeMaxSteps || '∞'}  auto-apply=${agentModeAutoApply ?? 'ask'}`));
       continue;
     }
 
     // Has task text → run once (use per-task flags if given, else fall back to mode settings)
     const runAllowRun  = tAllowRun  || agentModeAllowRun;
     const runAutoApply = tAutoApply !== null ? tAutoApply : (taskText ? null : agentModeAutoApply);
-    const runMaxSteps  = tMaxSteps !== 10 ? tMaxSteps : agentModeMaxSteps;
+    const runMaxSteps  = tMaxSteps !== null ? tMaxSteps : agentModeMaxSteps;
     out('');
     out(bold(`  🤖 agent  root: ${agentRoot}`) + (runAllowRun ? red('  --allow-run') : ''));
     const matched = getAttachedImagesForLine(taskText);

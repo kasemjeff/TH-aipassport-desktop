@@ -59,7 +59,7 @@ const previewOf = (call) => {
 };
 
 /**
- * Drive one task to a DONE (or the step limit).
+ * Drive one task to a DONE — or to whatever ends it first: a guard, a cap, a budget.
  *
  * @param {string} taskText
  * @param {object} ctx
@@ -82,11 +82,18 @@ export async function runTask(taskText, ctx = {}) {
     subagent = null, check = null, approvePlan = null, options = {}, first = true,
     runPluginTool = null, compactor = null, rotate = null,
     conversation = null, conversationTemporary = null,
-  } = ctx;  const maxSteps = Number(options.maxSteps ?? 10);
+  } = ctx;  // The step cap, or no cap at all: 0 (the shipped default) means the
+  // run goes until it is DONE, a guard stops it, or a budget below is spent. A
+  // positive number caps the run, and the last step says so (step_limit).
+  const rawCap = Number(options.maxSteps ?? 0);
+  const maxSteps = Number.isFinite(rawCap) && rawCap > 0 ? Math.floor(rawCap) : Infinity;
+  // 0 on the wire means "no cap" — Infinity does not survive JSON, so events
+  // carry the option as the surfaces know it.
+  const maxStepsWire = Number.isFinite(maxSteps) ? maxSteps : 0;
   // Per-run budgets — the same defaults the settings file ships. A reply full
   // of markers used to execute every one of them, and a yolo RUN can hold one
-  // step open for minutes; either budget spent stops the run the way the step
-  // limit does, with its own stop reason in run_stats.
+  // step open for minutes; either budget spent stops the run with its own stop
+  // reason in run_stats — the real bound once the step cap is off.
   const maxToolCalls = Number(options.maxToolCalls) > 0 ? Math.floor(Number(options.maxToolCalls)) : 300;
   const maxWallClockMs = Number(options.maxWallClockMs) > 0 ? Math.floor(Number(options.maxWallClockMs)) : 1_800_000;
   const runStart = Date.now();
@@ -120,7 +127,7 @@ export async function runTask(taskText, ctx = {}) {
   let planApproved = !options.requirePlanApproval;
 
   session?.append('task', { text: taskText });
-  events?.emit('task_start', { task: taskText, maxSteps });
+  events?.emit('task_start', { task: taskText, maxSteps: maxStepsWire });
 
   const creditsBefore = await bridge.quota().catch(() => null);
 
@@ -373,7 +380,7 @@ export async function runTask(taskText, ctx = {}) {
 
     const elapsed = ((Date.now() - stepStart) / 1000).toFixed(1);
     stepMs.push(Math.round((Date.now() - stepStart)));
-    events?.emit('step', { step, maxSteps, elapsed });
+    events?.emit('step', { step, maxSteps: maxStepsWire, elapsed });
 
     const proseText = prose(reply, pluginTools);
     const calls = parse(reply, { plugins: pluginTools });

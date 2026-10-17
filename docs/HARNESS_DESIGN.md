@@ -16,7 +16,7 @@ run(task)
   │                        conversation, seed it with the summary
   ├─ ensure conversation  (create a temporary one unless told otherwise)
   │
-  ▼  repeat, at most maxSteps times
+  ▼  repeat, at most maxSteps (no cap by default)
   ┌──────────────────────────────────────────────────────────────────┐
   │ send ONE user message                                            │
   │   turn 1: preamble + listing + task                              │
@@ -298,13 +298,17 @@ its first live firing was the smoke re-run below.
 
 **Shipped since (Oct 2026):** per-run tool-call and wall-clock budgets
 (`maxToolCalls` / `maxWallClockMs` — checked between tools, at every step and
-before a helper fan-out; a spent budget stops the run like the step limit and
+before a helper fan-out; a spent budget stops the run and
 records `tools-limited` / `time-limited` in `run_stats`); task-specific helper
 instructions (a `role:` line on SUBAGENT — `verifier` may RUN checks, `reviewer`
 and `summariser` only read; all three are read-only by construction, their
 write markers answer `err:` before anything is staged); spill reads return the
 asked-for range verbatim (no second gutter over the numbered copy, no spill of
-a spill); every write answers with a first/last line read-back.
+a spill); every write answers with a first/last line read-back. Later the same
+month, the step cap turned opt-in: `maxSteps: 0` (now the shipped default) means
+no cap — a run goes until DONE, a guard stops it, or a budget is spent — while
+`1..200` still caps and announces it on the last step; helpers stay bounded at 8
+and the checker at 6, so an uncapped parent never uncaps a child.
 
 **Still noted, not shipped:** the elision tier that replaces stale, bulky tool
 results with stubs before paying for summarisation — the summary transcript

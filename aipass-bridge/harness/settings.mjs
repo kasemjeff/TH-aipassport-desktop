@@ -25,7 +25,9 @@ export const DEFAULTS = {
   // 'yolo' (writes and shell both go through)
   mode: 'ask',
   allowRun: false,
-  maxSteps: 10,
+  // The step cap one run may spend, or 0 for no cap: the run goes until DONE,
+  // a guard stops it, or a budget below is spent. A positive cap is 1..200.
+  maxSteps: 0,
   // Per-run budgets, checked by the loop and recorded as stop reasons in
   // run_stats: the most tool calls one run may execute, and its wall-clock
   // ceiling in ms. Generous by design — they catch a runaway reply (a hundred
@@ -155,11 +157,12 @@ export class Settings {
   /**
    * Clamp the values that can silently break a run.
    *
-   * `maxSteps: 0` is the case that justifies this: the loop exits before its
-   * first step, the window accepts the message and answers nothing, and no error
-   * appears anywhere. Rather than trusting every caller, the numbers that govern
-   * a run are clamped here — the one place the CLI, the window and any future
-   * surface all write through.
+   * A negative or unparsable step count is the case that justifies this: it
+   * used to reach the loop and stop a run before its first step — the window
+   * accepted the message and answered nothing, no error anywhere. Zero no
+   * longer belongs in that family (it means "no cap" by design), so only the
+   * values that break a run are clamped here — the one place the CLI, the
+   * window and any future surface all write through.
    */
   static sane(values) {
     const next = structuredClone(values);
@@ -168,7 +171,13 @@ export class Settings {
       if (!Number.isFinite(n)) return fallback;
       return Math.min(max, Math.max(min, Math.round(n)));
     };
-    next.maxSteps = num(next.maxSteps, 1, 200, 10);
+    // 0 is the deliberate escape the step cap has: no cap at all, with the
+    // budgets below as the only bound. A positive count is a cap within 1..200;
+    // a negative or unparsable one falls back to the default (no cap).
+    const steps = Number(next.maxSteps);
+    next.maxSteps = Number.isFinite(steps) && steps >= 0
+      ? Math.min(200, Math.round(steps))
+      : DEFAULTS.maxSteps;
     // The per-run budgets follow the step limit's rule; a zero or nonsense
     // value means "use the default" rather than "instantly stop the run".
     const toolCalls = Number(next.maxToolCalls);

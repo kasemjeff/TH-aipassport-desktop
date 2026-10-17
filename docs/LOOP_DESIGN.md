@@ -35,7 +35,7 @@ runTask(task):
   overlay.clear()                    ← writes land here, never on disk
   say(preamble + task)               ← turn 1 only
   │
-  ▼  repeat, at most maxSteps (default 10)
+  ▼  repeat, at most maxSteps (default: no cap — until DONE, a guard, a budget)
   ┌──────────────────────────────────────────────────────────────┐
   │ say(results of the last reply)   ← ONE message, whatever the  │
   │                                    reply carried              │
@@ -71,7 +71,8 @@ factories live. The context that matters:
 | `compactor` / `rotate` | always | checked against the message about to go out |
 | `permissions` | always | `ask` / `auto` / `yolo`, persisted rules and "always" grants; nobody listening means deny |
 
-Defaults come from `settings.mjs`: `maxSteps: 10` (clamped 1–200),
+Defaults come from `settings.mjs`: `maxSteps: 0` (no cap — a cap is 1–200 and
+the last step says so),
 `maxToolCalls: 300`, `maxWallClockMs: 30 min`, `repeatGuardMax: 4`,
 `minThaiRatio: 0.4` (the recorded closings split at a wide gap: English at 0,
 Thai at 0.57+). `requirePlanApproval` is a saved setting — a run call
@@ -179,7 +180,7 @@ conversation that still holds the history → rotate → `compacted`. If the
 compaction itself fails, the results still go out (`error` emitted) — losing a
 step to a summariser fault would be worse.
 
-**12. Loop end.** `step_limit` when the last step runs; a spent budget becomes
+**12. Loop end.** `step_limit` when a set cap's last step runs; a spent budget becomes
 the stop reason; credits are diffed (`quota(true)`); `run_stats` and
 `finished` go out; the loop returns.
 
@@ -192,7 +193,7 @@ the stop reason; credits are diffed (`quota(true)`); `run_stats` and
 | err loop | the same failure (kind + masked error line) on calls in a row | correction on the third result, `errLoops` | streak > `repeatGuardMax` → `stalled` |
 | chain guard | a failed change, mid-reply | the reply's later changes/RUNs skipped and stated, `chainSkips`; reads still run | — |
 | stagnation | same step ×3, or two trading places ×2 | `stagnation` warn + "do something different" | `stagnation` |
-| budgets | tool count (300) and wall clock (30 min) | `budget` event | `tools-limited` / `time-limited` |
+| budgets | tool count (300) and wall clock (30 min) — the only bound when no step cap is set | `budget` event | `tools-limited` / `time-limited` |
 | plan gate | `PLAN` and no approval yet | `plan_request`, wait however long | decline → `plan-rejected` |
 | checker | DONE (or a stalled step) with staged code | read-only verifier runs it; a self-run does not stand it down; a re-check only when the tree moved | fail → a correcting step; pass → `done`; two verdicts a run, the last recorded |
 | verify nudge | staged code, nothing verified since the change | `verify_prompt` (once per run) | — |
@@ -210,7 +211,7 @@ them correct *evidence*, never intent: a call runs as written first.
 |---|---|
 | `done` | DONE accepted (possibly after the checker or a language rewrite) |
 | `ask` | the model paused on a question (ASK) — the next message answers it |
-| `steps` | the step limit ran out — the default |
+| `steps` | a set step cap ran out (no cap is the default) |
 | `stalled` | hollow replies ×3, repeat refusals past the cap, or a same-failure streak past it |
 | `stagnation` | the same step, or two trading places, with identical results |
 | `cancelled` | the user pressed stop |
