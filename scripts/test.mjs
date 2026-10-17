@@ -43,7 +43,13 @@ if (!files.length) {
 }
 
 const extra = process.argv.slice(2); // e.g. --test-name-pattern=…
-const result = spawnSync(process.execPath, ['--test', ...extra, ...files], { stdio: 'inherit' });
+// Ten minutes is a stuck-run ceiling, not a budget — the suite runs in ~30 s.
+// A leaked handle makes the runner wait forever (the Node 24 CI runners did,
+// for hours); a timeout fails the step instead of stalling it.
+const result = spawnSync(process.execPath, ['--test', ...extra, ...files], {
+  stdio: 'inherit',
+  timeout: 10 * 60 * 1000,
+});
 
 if (result.error) {
   console.error(result.error.message);

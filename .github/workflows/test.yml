@@ -7,10 +7,19 @@ on:
     branches: [master]
   pull_request:
 
+# A push supersedes its predecessors: cancel their runs so a hung runner
+# cannot queue every newer run behind it (five runs piled up on 2026-10-17).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: node ${{ matrix.node }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # A stuck job would otherwise hold its runner for the platform default of
+    # six hours; the suite itself runs in minutes.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
