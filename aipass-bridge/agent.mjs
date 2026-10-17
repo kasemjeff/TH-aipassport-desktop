@@ -37,7 +37,10 @@ const task = argv.filter((a, i) => !a.startsWith('--') && !argv[i - 1]?.startsWi
 const ROOT = path.resolve(flag('root', process.cwd()));
 const BRIDGE = (flag('bridge', 'http://127.0.0.1:8787')).replace(/\/+$/, '');
 const MODEL = flag('model', null);
-const MAX_STEPS = Number(flag('max', 10));
+// --max caps this run's steps. Without it (or with 0) the run goes until it is
+// DONE, a guard stops it, or a per-run budget is spent.
+const MAX_RAW = Number(flag('max', 0));
+const MAX_STEPS = Number.isFinite(MAX_RAW) && MAX_RAW > 0 ? Math.floor(MAX_RAW) : 0;
 const APPLY = has('apply');
 const ALLOW_RUN = has('allow-run');
 const MAX_RESULT = Number(flag('max-result', 3000));
@@ -116,7 +119,7 @@ if (!task || HELP) {
   --thinking LVL  model thinking: off|low|medium|high|max  (default: low)
   --apply         write without asking               (default: ask after the diff)
   --allow-run     let the agent run shell commands   (default: off)
-  --max N         max steps                          (default: 10)
+  --max N         cap this run's steps (0 = none)     (default: none)
   --max-result N  truncate each tool result          (default: 3000 bytes)
   --read-lines N  max lines per read page            (default: 250)
   --file PATH     attach a document or image to the session
@@ -339,7 +342,7 @@ events.on('assistant_delta', ({ text }) => process.stdout.write(dim(text)));
 events.on('reasoning_delta', ({ text }) => processReasoning(text));
 events.on('step', ({ step, maxSteps, elapsed }) => {
   flushThought();
-  console.log(bold(`\n○ agent step ${step}/${maxSteps}`) + ' ' + dim(`(${elapsed}s)`));
+  console.log(bold(`\n○ agent ${maxSteps > 0 ? `step ${step}/${maxSteps}` : `step ${step}`}`) + ' ' + dim(`(${elapsed}s)`));
 });
 events.on('thinking', ({ text, hasMore }) =>
   console.log(`  ${gray(hasMore ? '├── ' : '└── ')}${dim('thinking:')} ${truncate(text, 80)}`));
@@ -347,6 +350,7 @@ events.on('nudge', ({ n }) => console.log(red(`\nno marker in that reply — nud
 events.on('give_up', () => console.log(red('\nno marker after three replies — stopping.')));
 events.on('ignore_done', () => console.log(dim('  (ignoring DONE — it came before the results it asked for)')));
 events.on('step_limit', () => console.log(red('\nreached the step limit')));
+events.on('budget', ({ used }) => console.log(red(`\nbudget spent — ${used}; stopping`)));
 events.on('firewall_note', ({ text }) => console.log(dim(`  ${text}`)));
 events.on('error', ({ message }) => { flushThought(); console.error(red(`\n${message}`)); });
 events.on('tool', ({ kind, arg, ok, head, lines, isLast }) => {

@@ -7,5 +7,5 @@
   "scripts": {
     "start": "node server.mjs"
   },
-  "engines": { "node": ">=18" }
+  "engines": { "node": ">=20" }
 }

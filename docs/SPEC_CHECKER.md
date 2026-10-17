@@ -102,7 +102,8 @@ pass them through and the summary line prints them. The checker's steps and
 timings live in its session; credits are global, so the parent's `spent`
 (`loop.mjs:367`) already includes the check.
 
-**Bounds.** Child `maxSteps = Math.min(parent.maxSteps, 6)` (run-and-report is
+**Bounds.** Child `maxSteps = 6` — or the parent's own cap when that is lower;
+an uncapped parent (0) does not uncap the checker (run-and-report is
 narrower than a helper's 8, `harness.mjs:384`); the child's own stagnation
 guard and the 120 s RUN timeout come free through the same `runTask`/`tools.run`;
 `signal: this.abort.signal` propagates cancel; `subagent: false` in the child

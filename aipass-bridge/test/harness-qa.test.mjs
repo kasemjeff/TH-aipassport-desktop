@@ -107,7 +107,7 @@ test('settings.reset returns to defaults but keeps the project you are in', asyn
     const reset = await call('settings.reset');
     assert.equal(reset.ok, true);
     assert.equal(reset.result.mode, 'ask', 'permissions go back to the safe default');
-    assert.equal(reset.result.maxSteps, 10);
+    assert.equal(reset.result.maxSteps, 0, 'and the step cap returns to no cap');
     assert.equal(reset.result.defaultModel, null);
     assert.equal(reset.result.root, root, 'but the current project stays where it is');
   } finally { stop(); }

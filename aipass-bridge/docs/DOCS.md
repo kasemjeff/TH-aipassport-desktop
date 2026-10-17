@@ -126,7 +126,7 @@ aipass-bridge/
 └── test/
     ├── harness.mjs      spawns the real bridge + a scriptable fake extension
     ├── bridge.test.mjs  HTTP surface, conversation rotation, loopback round-trip
-    ├── agent.test.mjs   action protocol, 403 splitting, line dropping, dry run
+    ├── agent.test.mjs   action protocol, 403 waits and splitting, line dropping, dry run
     └── chat.test.mjs    one-shot output, tool/sources rendering, error messages
 ```
 
@@ -212,7 +212,11 @@ where objects address their keys and values by index, and negative numbers are
 request body is ignored. Stream mode emits OpenAI-shaped
 `chat.completion.chunk` frames; `status` parts from the extension become
 `reasoning_content` deltas unless `AIPASS_TOOL_VISIBILITY` says otherwise
-(`text` inlines them into `content`, `off` drops them).
+(`text` inlines them into `content`, `off` drops them). `note` parts — lines
+that are neither the answer nor tool activity, like a mid-reply model switch
+or the page waiting a 429 out — become a `note` delta with the same
+`reasoning_content` echo, so readers that never learned the field lose
+nothing and the harness can tell a pause from an answer.
 
 ### CORS
 
@@ -411,7 +415,7 @@ lines, no dependencies.
 
 | line | effect |
 |---|---|
-| `NEED dir <path>` | list a directory |
+| `NEED dir <path>` (or `NEED list` / `NEED ls`) | list a directory |
 | `NEED file <path> [a-b]` | read a file with a line-number gutter; optional range |
 | `SEARCH <text>` | grep the tree → `file:line: excerpt` (max 50 hits) |
 | `EDIT <p>` / `FIND` … / `NEW` … / `END` | replace an exact snippet — refused unless `FIND` matches **one** place |
@@ -579,9 +583,9 @@ All on `http://127.0.0.1:8787` by default. Every response has
    posting each batch back via `content.js` → `background.js` →
    `POST /ext/chunk`.
 6. **bridge** `extPost` → `job.delta(part)` for each part → `onDelta` →
-   `emit({ content })` (or `{ reasoning_content }` for `status`) as a
-   `chat.completion.chunk` on the CLI's still-open response. `touch()` re-arms
-   the idle timer on every delta.
+   `emit({ content })` (or `{ reasoning_content }` for `status`/`note` — a note
+   also sends its own `note` field) as a `chat.completion.chunk` on the CLI's
+   still-open response. `touch()` re-arms the idle timer on every delta.
 7. Upstream `finish` → `page.js` posts `POST /ext/done` → `job.done()` → the
    bridge emits the final chunk + `data: [DONE]` and ends the response.
 8. **`chat.mjs`** has been streaming the whole time (dim live echo); on

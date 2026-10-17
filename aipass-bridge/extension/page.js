@@ -25,6 +25,23 @@
     conflictActive: 'another video job is still running on this conversation',
   };
   const inflight = new Map();
+
+  // The edge's rate memory, shared by every job in this tab. A 429 (or a 503
+  // from the same Cloudflare edge) is the edge saying "you are moving too
+  // fast" — and every retry probe is itself a request that counts against the
+  // window it is waiting for, which is how a retry storm keeps its own
+  // limiter hot. So the refusal is one pause for the whole tab, not one pause
+  // per job: no send starts before `rateQuietUntil`, and for a while after
+  // any refusal the sends are also paced apart (`RATE_PACE_GAP_MS` between
+  // attempts until `RATE_MEMORY_MS` has passed), so the burst that drew the
+  // 429 cannot immediately draw another. The ladders live in sendWithRetry
+  // below.
+  let rateQuietUntil = 0;   // wall-clock time before which no send may start
+  let rateMemoryUntil = 0;  // after a refusal, pace every send until this time
+  let lastSendAt = 0;       // when the last attempt actually left
+  const RATE_MEMORY_MS = 5 * 60_000;
+  const RATE_PACE_GAP_MS = 3000;
+
   // How many bytes of media may be carried back inline as a data URI; above
   // this it goes back as a link. The bridge accepts an extension post up to
   // 128 MB, and base64 costs a third on top, so every cap here fits through.
@@ -210,9 +227,27 @@
     // two layers — waiting here, inside the request, is the cheapest; the
     // client above adds a second one (harness/bridge.mjs RATE_WAITS_MS)
     // before a run gives up. retry-after is honoured when the edge sends one;
-    // otherwise 5s → 15s → 45s, and then the failure is real and surfaces
-    // with its forensics.
-    const RETRY_WAITS_MS = [5000, 15000, 45000];
+    // otherwise 10s → 45s → 120s. Every probe is itself a request and counts
+    // against the window it is waiting for, which is how a retry storm keeps
+    // its own limiter hot — so the waits grow instead of tightening, and a
+    // refusal is one pause for the whole tab, not one per job: the clocks in
+    // paceBuffer below are shared, and for RATE_MEMORY_MS after any refusal
+    // every send is paced RATE_PACE_GAP_MS apart, so the burst that drew the
+    // 429 cannot immediately draw another. The waiting line below rides the
+    // note kind, not tool status: it is written while the send was refused,
+    // and as a note it explains the pause without counting as the answer the
+    // client must never resend past (harness/bridge.mjs reads the note field,
+    // not the echo).
+    //
+    // 403 rides the same pause-and-resend, with its own shorter budget
+    // (5s → 15s): the edge 403s by pace score as well as by content, and the
+    // identical bytes go through a moment later — recorded live, Oct 17 2026,
+    // a run's 214-byte tool result refused whole and then accepted unchanged
+    // (harness/bridge.mjs EDGE_WAITS_MS has the recording). Content-shaped
+    // refusals are deterministic: they survive these waits too, and the
+    // rewrite chain above this layer takes over then.
+    const RETRY_WAITS_MS = [10_000, 45_000, 120_000];
+    const EDGE_WAITS_403_MS = [5000, 15000];
     const aborted = () => { const err = new Error('aborted'); err.name = 'AbortError'; return err; };
     const sleep = (ms, signal) => new Promise((resolve, reject) => {
       if (signal?.aborted) { reject(aborted()); return; }
@@ -220,17 +255,54 @@
       const timer = setTimeout(() => { signal?.removeEventListener?.('abort', onAbort); resolve(); }, ms);
       signal?.addEventListener?.('abort', onAbort, { once: true });
     });
+    // This job's own next-attempt time (the 403 ladder) and the waits its own
+    // notes already announced; the tab-wide clocks are at module scope.
+    let localUntil = 0;
+    let announcedUntil = 0;
+    const paceBuffer = async (signal) => {
+      const now = Date.now();
+      const floor = rateMemoryUntil > now ? lastSendAt + RATE_PACE_GAP_MS : 0;
+      const until = Math.max(rateQuietUntil, localUntil, floor);
+      if (until > now) {
+        if (until > announcedUntil && until - now >= 1000) {
+          push('note', `the edge is pacing sends — waiting ${Math.ceil((until - now) / 1000)}s before this one`);
+        }
+        await sleep(until - now, signal);
+      }
+      lastSendAt = Date.now();
+    };
     const sendWithRetry = async (url, init, signal) => {
-      for (let attempt = 0; ; attempt++) {
+      let rateTries = 0;
+      let edgeTries = 0;
+      for (;;) {
+        await paceBuffer(signal);
         const res = await fetch(url, init);
-        if (res.ok || (res.status !== 429 && res.status !== 503)) return res;
-        if (attempt >= RETRY_WAITS_MS.length) return res;
+        if (res.ok) return res;
+        const waiting = res.status === 429 || res.status === 503
+          ? { list: RETRY_WAITS_MS, tried: rateTries, kind: 'rate' }
+          : res.status === 403
+            ? { list: EDGE_WAITS_403_MS, tried: edgeTries, kind: 'edge' }
+            : null;
+        if (!waiting || waiting.tried >= waiting.list.length) return res;
         const after = Number.parseFloat(res.headers.get('retry-after'));
         const wait = Number.isFinite(after) && after >= 0
-          ? Math.min(after * 1000, 60_000)
-          : RETRY_WAITS_MS[attempt];
-        push('status', `[${res.status}] rate limited by the edge — waiting ${Math.round(wait / 1000)}s, then retrying (${attempt + 2}/${RETRY_WAITS_MS.length + 1})`);
-        await sleep(wait, signal);
+          ? Math.min(after * 1000, 120_000)
+          : waiting.list[waiting.tried];
+        if (waiting.kind === 'rate') {
+          rateTries++;
+          // Tab-wide: no send starts before this, in this job or any other.
+          rateQuietUntil = Math.max(rateQuietUntil, Date.now() + wait);
+          rateMemoryUntil = Date.now() + RATE_MEMORY_MS;
+          announcedUntil = Math.max(announcedUntil, rateQuietUntil);
+          push('note', `[${res.status}] rate limited by the edge — waiting ${Math.round(wait / 1000)}s, then retrying (${rateTries + 1}/${RETRY_WAITS_MS.length + 1})`);
+        } else {
+          edgeTries++;
+          localUntil = Date.now() + wait;
+          announcedUntil = Math.max(announcedUntil, localUntil);
+          push('note', `[403] refused at the edge — waiting ${Math.round(wait / 1000)}s, then sending the same message again (${edgeTries + 1}/${EDGE_WAITS_403_MS.length + 1})`);
+        }
+        // No sleep here: the loop top waits, so the clocks stay the one place
+        // a pause happens and a stop still lands inside it.
       }
     };
 
@@ -328,6 +400,7 @@
         throw new Error(
           `aipass returned ${res.status} ${res.statusText} [${body.length} bytes]` +
           `${res.status === 429 ? ` — rate-limited through ${RETRY_WAITS_MS.length} retries` : ''}` +
+          `${res.status === 403 ? ` — refused at the edge through ${EDGE_WAITS_403_MS.length} retries` : ''}` +
           `${forensics ? ` {${forensics}}` : ''}${detail ? ` — ${detail}` : ''}`
         );
       }
@@ -339,6 +412,7 @@
       const toolNames = new Map();
       const sources = [];
       const seenUnknown = new Set();
+      let announcedSwitch = '';   // the last model the site said it switched to
       // The generation runs on the server, so losing the socket does not stop
       // it — the answer is produced and nobody is listening. The app exposes the
       // same reattach the Vercel AI SDK calls reconnectToStream, and this uses
@@ -476,6 +550,21 @@
                 if (found) found.title ??= link.title;
                 else sources.push({ url: link.url, title: link.title, domain: link.domain });
               }
+              break;
+            }
+            // The site replaces a model that left the catalog mid-conversation
+            // and says so on this frame. It used to fall to the unknown
+            // handler, where the text died inside the reasoning fold (the
+            // live stall of Oct 2026, docs/HARNESS_DESIGN.md). It is a
+            // message to the person: hand it to the bridge as a note — one
+            // line per distinct switch.
+            case 'data-model_switched': {
+              const to = String(evt.modelId ?? evt.model ?? evt.to ?? evt.data?.modelId ?? evt.data?.model ?? '').trim();
+              if (to === announcedSwitch) break;
+              announcedSwitch = to;
+              push('note', to
+                ? `the site switched this conversation's model mid-reply to "${to}" — replies continue on the substitute`
+                : "the site switched this conversation's model mid-reply — replies continue on the substitute");
               break;
             }
             case 'error':

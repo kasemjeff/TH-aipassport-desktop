@@ -1079,6 +1079,15 @@ async function chatCompletions(req, res) {
           else emit({ reasoning_content: `${part.text}\n` });
           return;
         }
+        if (part.kind === 'note') {
+          // A line for the person, not the answer and not tool churn — a
+          // mid-reply model switch arrives this way. It rides its own delta
+          // so the harness can show a transcript note, and keeps the
+          // reasoning echo for clients that never learned the field (the
+          // chat console reads reasoning), so nothing loses the line.
+          emit({ note: part.text, ...(TOOL_VISIBILITY !== 'off' ? { reasoning_content: `${part.text}\n` } : {}) });
+          return;
+        }
         if (MEDIA_KINDS.has(part.kind)) return void emit({ content: mediaMarkdown(part.kind, part.text, part.filename) });
         if (part.kind === 'reasoning') emit({ reasoning_content: part.text });
         else emit({ content: part.text });
@@ -1109,6 +1118,7 @@ async function chatCompletions(req, res) {
       conversation, temporary: conversationTemporary,
       onDelta: (p) => {
         if (p.kind === 'status') { if (TOOL_VISIBILITY !== 'off') reasoning += `${p.text}\n`; return; }
+        if (p.kind === 'note') { if (TOOL_VISIBILITY !== 'off') reasoning += `${p.text}\n`; return; }
         if (MEDIA_KINDS.has(p.kind)) { out += mediaMarkdown(p.kind, p.text, p.filename); return; }
         if (p.kind === 'reasoning') reasoning += p.text;
         else out += p.text;
@@ -1269,6 +1279,11 @@ const server = http.createServer(async (req, res) => {
       const models = want.length ? all.filter((m) => want.includes(m.kind)) : all;
       return json(res, 200, {
         object: 'list',
+        // 'live' once the site's catalog filled the cache, 'fallback' while
+        // the two-id stub is all there is. A caller about to judge a saved
+        // model against the catalog (the harness pre-flight) must see a real
+        // one — the stub is not the catalog.
+        source: modelCache.models.length ? 'live' : 'fallback',
         data: models.map((m) => ({
           id: m.id, object: 'model', created: 0, owned_by: m.provider ?? 'aipass',
           name: m.name, free_credit: m.free, thinking: m.thinking,

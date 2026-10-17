@@ -22,7 +22,11 @@ const FENCE_LINE = /^\s*(```|~~~)/;
 
 // The single-line calls, mirrored from protocol.parse() in its own order.
 const SINGLE = [
-  { re: /^\s*NEED\s+(dir|file)\s+(.+?)\s*$/i, pick: (m) => ({ kind: m[1].toLowerCase() === 'dir' ? 'list' : 'read', arg: m[2].trim() }) },
+  // `dir`/`list`/`ls` all mean the listing; `file` means a read. Mirrors
+  // parse()'s alias branch.
+  { re: /^\s*NEED\s+(dir|list|ls|file)\s+(.+?)\s*$/i, pick: (m) => ({ kind: m[1].toLowerCase() === 'file' ? 'read' : 'list', arg: m[2].trim() }) },
+  // A bare listing word with the path forgotten — the project root.
+  { re: /^\s*NEED\s+(?:dir|list|ls)\s*$/i, pick: () => ({ kind: 'list', arg: '.' }) },
   // The bare file shape — `NEED events.mjs` — mirroring parse()'s fallback.
   { re: /^\s*NEED\s+([^\s]+(?: \d+-\d+)?)\s*$/i, pick: (m) => ({ kind: 'read', arg: m[1].trim() }) },
   { re: /^\s*SEARCH\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'search', arg: m[1].trim() }) },

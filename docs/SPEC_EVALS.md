@@ -233,7 +233,7 @@ text left open, as built:
 
 ### Thai pack additions (2026-10-16)
 
-- **`evals/thai/` — the Thai/English pair set**: 27 pairs, 54 tasks, each
+- **`evals/thai/` — the Thai/English pair set**: 50 pairs, 100 tasks, each
   `<id>` (Thai) paired with `<id>-en` (English) carrying the same work and its
   own check. `task.json` gained two optional keys — `lang` (`th`|`en`) and
   `pair` — which the runner reads into the row but never validates. Every
@@ -252,6 +252,28 @@ text left open, as built:
 - **The preamble changed with the Thai pack**, so the replay fingerprint was
   recomputed: `evals/fixtures/math-fix-replay.json` now records
   `preambleBytes: 4275`, digest `6c09ebfd7abff693`.
+
+### Thai pack expansion + the eval-set lint (2026-10-17)
+
+- **The Thai pair set grew 27 → 50 pairs (`evals/thai/`)**: the 23 new pairs
+  add CLI argument handling (the first checks that spawn a child process),
+  CSV with quoted commas, INI→JSON, HTML escape/strip, URI percent-encoding,
+  base64 decode, character-exact line wrapping, trailing-newline exactness,
+  quoted-text preservation, and five small JS-bug fixes (loop bound, regex
+  anchoring, numeric sort, missing return, path joining). Every new check was
+  proven fail-before / pass-after with an independent solution before landing;
+  the per-pair contract (`lang`/`pair` keys) is unchanged.
+- **`evals/**` is pinned to LF** in `.gitattributes` (`text eol=lf`). A CRLF
+  checkout made byte-wise checks fail on Windows only — `fix-year` failed even
+  after the year was fixed, because `2568\r` is not `2568`. The pin plus a
+  refresh of the stored tree fixed it; the rule must never be dropped.
+- **`npm run evals:lint`** (`scripts/evals-lint.mjs`) is the pre-run trust
+  check: for every task under `tasks/`, `holdout/` and `thai/` it copies the
+  tree and proves the task's own check FAILS untouched (a vacuous check scores
+  nothing); it validates Thai pair symmetry (twin exists, `lang` matches the
+  `-en` suffix, `pair` names the base id); and it flags any file under
+  `evals/` still carrying a CR byte. `--fast` skips the check spawns. Exit 1
+  when a category fails; CI runs it right after the test suite.
 
 ### Closing the audit round (2026-10-17)
 

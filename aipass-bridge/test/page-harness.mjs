@@ -57,7 +57,7 @@ export const brokenStream = (frames) => {
   );
 };
 
-export function loadPage({ onFetch, origin = 'https://de.aipass.net' } = {}) {
+export function loadPage({ onFetch, origin = 'https://de.aipass.net', fastTimers = false } = {}) {
   const listeners = [];
   const sent = [];        // everything page.js posted back
   const requests = [];    // every fetch it made
@@ -79,6 +79,13 @@ export function loadPage({ onFetch, origin = 'https://de.aipass.net' } = {}) {
   };
 
   const src = fs.readFileSync(PAGE, 'utf8');
+  // The edge waits (10s/45s/120s) are real seconds in the browser and would be
+  // real seconds here too; a capped timer shortens every page sleep for tests
+  // that care about the order of attempts rather than the clock. setInterval
+  // is untouched, so the 40ms flush ticker keeps its cadence.
+  const timer = fastTimers
+    ? (fn, ms, ...rest) => setTimeout(fn, Math.min(ms, 15), ...rest)
+    : setTimeout;
   // eslint-disable-next-line no-new-func
   const run = new Function(
     'window', 'location', 'fetch', 'FileReader', 'crypto', 'TextDecoder',
@@ -86,7 +93,7 @@ export function loadPage({ onFetch, origin = 'https://de.aipass.net' } = {}) {
     src,
   );
   run(window, location, fetchImpl, FileReaderShim, globalThis.crypto, TextDecoder,
-    AbortController, FormData, Blob, setTimeout, setInterval, clearInterval, URL);
+    AbortController, FormData, Blob, timer, setInterval, clearInterval, URL);
 
   const deliver = (msg) => { for (const fn of listeners) fn({ source: window, data: msg }); };
 

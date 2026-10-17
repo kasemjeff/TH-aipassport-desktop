@@ -15,19 +15,26 @@ import { aipassHome } from './settings.mjs';
 export const SKILL_NAME = /^[a-z0-9][a-z0-9-]*$/i;
 
 export class SkillLibrary {
-  constructor(dirs = [], { maxResult = 3000 } = {}) {
+  constructor(dirs = [], { maxResult = 3000, roles = null } = {}) {
     this.dirs = [...new Set(dirs.map((d) => path.resolve(d)))].filter((d) => fs.existsSync(d));
     this.maxResult = maxResult;
+    // dir → 'project' | 'user', keyed by path, for the generated index's
+    // source labels. Keyed by path, not by position: a workspace with no
+    // `.aipass/skills` of its own used to relabel the user's library as the
+    // project's (any first-existing-dir assumption does exactly that).
+    this.roles = new Map(Object.entries(roles ?? {}).map(([dir, role]) => [path.resolve(dir), role]));
   }
 
   static default({ root = process.cwd(), repoDir = null, extra = [] } = {}) {
+    const project = path.join(root, '.aipass', 'skills');
+    const user = path.join(aipassHome(), 'skills');
     const dirs = [
-      path.join(root, '.aipass', 'skills'),
-      path.join(aipassHome(), 'skills'),
+      project,
+      user,
       ...(repoDir ? [repoDir] : []),
       ...extra,
     ].filter(Boolean);
-    return new SkillLibrary(dirs);
+    return new SkillLibrary(dirs, { roles: { [project]: 'project', [user]: 'user' } });
   }
 
   /** Where each name resolves from; first match wins, later dirs are fallbacks. */
@@ -60,7 +67,7 @@ export class SkillLibrary {
     const items = this.list();
     if (!items.length) return 'the skills library folder is missing or empty.';
     if (this.dirs.length === 1) return items.map((s) => s.name).join('\n');
-    const label = (dir) => (dir === this.dirs[0] ? 'project' : dir === path.join(aipassHome(), 'skills') ? 'user' : 'built-in');
+    const label = (dir) => this.roles.get(dir) ?? 'built-in';
     return items.map((s) => `${s.name}  (${label(s.dir)})`).join('\n');
   }
 

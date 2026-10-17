@@ -27,6 +27,54 @@ test('a text answer streams back as text parts', async () => {
   assert.equal(page.parts('j1').filter((p) => p.kind === 'text').map((p) => p.text).join(''), 'สวัสดี');
 });
 
+// The edge 403s by pace score as well as by content (harness/bridge.mjs
+// EDGE_WAITS_MS has the recording): the message is refused whole and the
+// identical bytes go through a moment later. The page waits one out in place
+// and sends the same body again — it must not rewrite anything, and it must
+// not surface a refusal that only the message layer could mend by splitting.
+test('a 403 blip is waited out, and the identical body goes again', async () => {
+  let sends = 0;
+  const page = loadPage({
+    fastTimers: true,
+    onFetch: async (url) => {
+      if (url.includes('/actions/send-message/') && ++sends === 1) {
+        return new Response('', { status: 403, statusText: 'Forbidden', headers: { server: 'cloudflare' } });
+      }
+      return sseResponse(textFrames('สวัสดี'));
+    },
+  });
+  page.run(chatJob());
+  await page.settled('j1');
+
+  const posts = page.requests.filter((r) => r.url.includes('/actions/send-message/'));
+  assert.equal(posts.length, 2, 'one refusal, then one resend');
+  assert.equal(posts[1].init.body, posts[0].init.body, 'the body went again untouched');
+  assert.ok(page.parts('j1').some((p) => p.kind === 'note' && /403/.test(p.text)), 'the pause is explained on the wire');
+  assert.equal(page.parts('j1').filter((p) => p.kind === 'text').map((p) => p.text).join(''), 'สวัสดี');
+});
+
+test('a 403 that outlasts the waits surfaces with its forensics', async () => {
+  let sends = 0;
+  const page = loadPage({
+    fastTimers: true,
+    onFetch: async (url) => {
+      if (url.includes('/actions/send-message/')) {
+        sends++;
+        return new Response('', { status: 403, statusText: 'Forbidden', headers: { server: 'cloudflare' } });
+      }
+      return sseResponse([]);
+    },
+  });
+  page.run(chatJob());
+  const end = await page.settled('j1');
+
+  assert.equal(end.kind, 'error');
+  assert.equal(sends, 3, 'the first send plus two bounded waits, then it surfaces');
+  assert.match(end.message, /aipass returned 403/);
+  assert.match(end.message, /refused at the edge through 2 retries/);
+  assert.match(end.message, /server=cloudflare/);
+});
+
 // Regression for the frame that used to be dumped into the answer as raw JSON,
 // and for sonar, which sends only this and no source-url.
 test('web search results become titled sources, not JSON in the answer', async () => {
@@ -47,6 +95,25 @@ test('web search results become titled sources, not JSON in the answer', async (
   const sources = all.find((p) => p.kind === 'status' && p.text.startsWith('sources:'));
   assert.match(sources.text, /BBC ไทย https:\/\/bbc\.com\/a/);
   assert.match(sources.text, /thaigov\.go\.th https:\/\/thaigov\.go\.th\/b/, 'no title falls back to the domain');
+});
+
+// The live stall of Oct 2026: the site swapped the run's model mid-reply and
+// the frame fell to the unknown handler, where the text died inside the
+// reasoning fold. It must arrive as a note — a line the person can see.
+test('a mid-reply model switch surfaces as a note, not an unhandled frame', async () => {
+  const page = loadPage({ onFetch: async () => sseResponse([
+    { type: 'text-delta', delta: 'answer' },
+    { type: 'data-model_switched', modelId: 'gemini-3.5-flash-lite' },
+    { type: 'finish', finishReason: 'stop' },
+  ]) });
+  page.run(chatJob());
+  await page.settled('j1');
+
+  const all = page.parts('j1');
+  assert.ok(!all.some((p) => /unhandled/.test(p.text)), 'a known frame must not be reported as unknown');
+  const note = all.find((p) => p.kind === 'note');
+  assert.ok(note, 'the switch reaches the bridge as a note part');
+  assert.match(note.text, /gemini-3\.5-flash-lite/);
 });
 
 test('generated media is routed by its media type', async () => {
@@ -138,7 +205,10 @@ test('an aborted job does not try to reattach', async () => {
 // the edge sends one, then backoff; only after the waits run out is the
 // failure real.
 test('a 429 is waited out and retried, not failed on the spot', async () => {
+  // fastTimers: after a refusal the tab paces sends 3s apart by design; the
+  // capped timer keeps the test about the order of attempts, not the clock.
   const page = loadPage({
+    fastTimers: true,
     onFetch: async (_url, _init, n) => (n === 1
       ? new Response('<!doctype html><title>429</title>429 Too Many Requests', {
           status: 429, headers: { 'retry-after': '0', server: 'cloudflare' },
@@ -150,11 +220,12 @@ test('a 429 is waited out and retried, not failed on the spot', async () => {
   assert.equal(end.kind, 'done', 'the job survives the pause');
   assert.equal(page.requests.length, 2, 'one retry after the 429');
   assert.equal(page.parts('j1').filter((p) => p.kind === 'text').map((p) => p.text).join(''), 'สวัสดีหลังรอ');
-  assert.ok(page.parts('j1').some((p) => p.kind === 'status' && /429/.test(p.text)), 'and the wait is reported');
+  assert.ok(page.parts('j1').some((p) => p.kind === 'note' && /429/.test(p.text)), 'and the wait is reported as a note, not tool status');
 });
 
 test('a 429 that never clears surfaces as the real failure, after the retries', async () => {
   const page = loadPage({
+    fastTimers: true, // the paced retries are 3s apart by design; see above
     onFetch: async () => new Response('<html>429 Too Many Requests</html>', {
       status: 429, headers: { 'retry-after': '0' },
     }),
@@ -177,6 +248,50 @@ test('an abort during the wait stops the retrying', async () => {
   const end = await page.settled('j1');
   assert.equal(end.kind, 'done', 'a cancel is still a cancel, not an error');
   assert.equal(page.requests.length, 1, 'no second attempt after the cancel');
+});
+
+// The rate clock is shared, and it outlives the request that set it. Probes
+// are themselves requests and count against the window they are waiting for —
+// that is how a retry storm keeps its own limiter hot — so one job's 429 is
+// one pause for the whole tab, and for a while after any refusal the sends
+// are paced apart instead of bursting back.
+test('a rate refusal pauses the whole tab, not just the refused job', async () => {
+  const page = loadPage({
+    fastTimers: true,
+    onFetch: async (_url, _init, n) => (n === 1
+      ? new Response('', { status: 429, headers: { 'retry-after': '5' } })
+      : sseResponse(textFrames('ok'))),
+  });
+  page.run(chatJob());
+  const first = await page.settled('j1');
+  assert.equal(first.kind, 'done');
+
+  page.run(chatJob({ jobId: 'j2' }));
+  const second = await page.settled('j2');
+  assert.equal(second.kind, 'done', 'the second job waited the first job\'s clock out, not its own');
+  assert.ok(
+    page.parts('j2').some((p) => p.kind === 'note' && /pacing sends — waiting [45]s/.test(p.text)),
+    'the tab-wide wait is reported for the job that did not draw the 429',
+  );
+});
+
+test('after a rate refusal the tab paces its sends apart', async () => {
+  let refused = 0;
+  const page = loadPage({
+    fastTimers: true,
+    onFetch: async () => {
+      if (refused++ === 0) return new Response('', { status: 429, headers: { 'retry-after': '0' } });
+      return sseResponse(textFrames('ok'));
+    },
+  });
+  page.run(chatJob());
+  const end = await page.settled('j1');
+  assert.equal(end.kind, 'done');
+  assert.equal(page.requests.length, 2, 'the retry still happened');
+  assert.ok(
+    page.parts('j1').some((p) => p.kind === 'note' && /pacing sends — waiting [23]s/.test(p.text)),
+    'the retry after a refusal is itself paced, so the burst cannot re-draw the limiter',
+  );
 });
 
 // The extension owns which paths and intents the bridge may reach. A job asking

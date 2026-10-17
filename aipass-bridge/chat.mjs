@@ -16,6 +16,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execSync, spawnSync } from 'node:child_process';
 import { authHeaders } from './harness/authtoken.mjs';
+import { edgeWaits, rateWaits, waitLabel, RATE_REFUSED } from './harness/bridge.mjs';
 import { outbound, inbound } from './harness/waf.mjs';
 
 /**
@@ -455,7 +456,7 @@ let   agentAllowRun = false;
 // Mode state — toggled by /agent with no task
 let   agentMode        = false;  // true = agent mode, false = chat mode
 let   agentModeAllowRun = false; // persists across tasks while in agent mode
-let   agentModeMaxSteps = 10;
+let   agentModeMaxSteps = 0;  // 0 = no cap — the run goes until DONE, a guard, or a budget
 let   agentModeAutoApply = /** @type {boolean | null} */ (null);
 const AGENT_MAX_RESULT = 3000;
 const AGENT_READ_LINES = 200;
@@ -1340,6 +1341,10 @@ async function sayAgent(text, images = [], files = []) {
 
   startSpin();
   let collected = '';
+  // Anything already rendered (reasoning included) must not be resent by the
+  // layers above: a refusal that lands after this mark surfaces instead
+  // (sayResilient reads `streamed` before it decides anything).
+  let streamedAny = false;
   const reader  = /** @type {ReadableStream<Uint8Array>} */ (res.body).getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -1365,14 +1370,20 @@ async function sayAgent(text, images = [], files = []) {
       if (!data || data === '[DONE]') continue;
       let evt;
       try { evt = JSON.parse(data); } catch { continue; }
-      if (evt.error) { stopSpin(); throw new Error(evt.error.message); }
+      if (evt.error) {
+        stopSpin();
+        const ref = /** @type {Error & { streamed?: boolean }} */ (new Error(evt.error.message));
+        if (streamedAny) ref.streamed = true;
+        throw ref;
+      }
       const delta = evt.choices?.[0]?.delta ?? {};
       if (delta.reasoning_content) {
         stopSpin();
+        streamedAny = true;
         renderTool(delta.reasoning_content);
         startSpin();
       }
-      if (delta.content) collected += delta.content;
+      if (delta.content) { collected += delta.content; streamedAny = true; }
     }
   }
   stopSpin();
@@ -1412,6 +1423,30 @@ async function sayResilient(text, depth = 0, images = [], files = []) {
   if (depth === 0) text = agentOutbound(text);
   try { return await sayAgent(text, depth === 0 ? images : [], depth === 0 ? files : []); }
   catch (err) {
+    // A refusal that arrived after something already rendered must surface —
+    // resending would print that part a second time (sayAgent marks these).
+    if (/** @type {any} */ (err)?.streamed) throw err;
+
+    // Rate refusals are pace, never content: the same message waits and goes
+    // again, and nothing below (redact → split) is ever reached for a 429/503
+    // — the rewrite chain doubles the messages the edge is refusing and every
+    // probe counts against the window. The sibling contract is spelled out in
+    // harness/bridge.mjs (resilientSay).
+    if (RATE_REFUSED.test(/** @type {Error} */ (err).message)) {
+      let waited = 0;
+      for (const wait of rateWaits()) {
+        out('  ' + dim(`  rate limited by the edge — waiting ${waitLabel(wait)}, then sending the same message again`));
+        await new Promise((r) => setTimeout(r, wait));
+        waited += wait;
+        try { return await sayAgent(text); } catch (err2) {
+          if (!RATE_REFUSED.test(/** @type {Error} */ (err2).message)) throw err2;
+          err = err2;
+        }
+      }
+      /** @type {Error} */ (err).message += ` — rate limited for ~${Math.round(waited / 1000)}s; the account is moving too fast. Pause a moment, then continue`;
+      throw err;
+    }
+
     const blocked = /\b40[39]\b/.test(/** @type {Error} */ (err).message);
     if (!blocked) throw err;
 
@@ -1420,7 +1455,21 @@ async function sayResilient(text, depth = 0, images = [], files = []) {
     const { redacted, dropped } = agentRedact(text);
     if (dropped && redacted !== text) {
       out('  ' + dim(`  rejected — omitting ${dropped} line(s) that cannot be sent`));
-      try { return await sayAgent(redacted); } catch { /* fall through to split */ }
+      try { return await sayAgent(redacted); } catch (err2) {
+        if (!/\b40[39]\b/.test(/** @type {Error} */ (err2).message)) throw err2;
+      }
+    }
+
+    // A 403 is not always about the content: the edge also refuses by pace
+    // score, and the identical bytes go through a moment later. Wait it out
+    // and send the same message again before rewriting anything — the styled
+    // console's sibling (harness/bridge.mjs) spells the whole contract out.
+    for (const wait of edgeWaits()) {
+      out('  ' + dim(`  refused at the edge — waiting ${waitLabel(wait)}, then sending the same message again`));
+      await new Promise((r) => setTimeout(r, wait));
+      try { return await sayAgent(text); } catch (err2) {
+        if (!/\b40[39]\b/.test(/** @type {Error} */ (err2).message)) throw err2;
+      }
     }
 
     if (depth > 2 || Buffer.byteLength(text) < AGENT_MIN_SPLIT) {
@@ -1434,7 +1483,12 @@ async function sayResilient(text, depth = 0, images = [], files = []) {
     let last = '';
     for (let i = 0; i < parts.length; i++) {
       const final  = i === parts.length - 1;
-      const prefix = final ? 'Final part.\n\n' : `Part ${i + 1}, more follows. Reply with just: ok\n\n`;
+      // Only the outermost split announces the part protocol; a fragment that
+      // gets split again is already inside its "more follows" (the styled
+      // console says the same thing about this console's sibling).
+      const prefix = depth === 0
+        ? (final ? 'Final part.\n\n' : `Part ${i + 1}, more follows. Reply with just: ok\n\n`)
+        : '';
       last = await sayResilient(prefix + parts[i], depth + 1);
     }
     return last;
@@ -1581,7 +1635,7 @@ function agentShowDiff() {
  * @param {string} taskText
  * @param {{ maxSteps?: number, allowRun?: boolean, autoApply?: boolean | null, attachedImages?: Array<{ tag: string, dataUri: string }>, attachedDocuments?: AttachedDocument[] }} [opts]
  */
-async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApply = null, attachedImages = [], attachedDocuments = [] } = {}) {
+async function runAgentTask(taskText, { maxSteps = 0, allowRun = false, autoApply = null, attachedImages = [], attachedDocuments = [] } = {}) {
   // autoApply: null = ask y/N, true = apply automatically, false = dry run
   overlay.clear();
   const prevAllowRun = agentAllowRun;
@@ -1609,7 +1663,8 @@ async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApp
 
   let nudges = 0;
   let toolsRun = 0;
-  for (let step = 1; step <= maxSteps; step++) {
+  const stepCap = maxSteps > 0 ? maxSteps : Infinity;   // 0 = no cap
+  for (let step = 1; step <= stepCap; step++) {
     const stepStart = Date.now();
     out('');
 
@@ -1619,7 +1674,7 @@ async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApp
     reply = reply != null ? agentInbound(reply) : '';
 
     const elapsed = ((Date.now() - stepStart) / 1000).toFixed(1);
-    out(cyan('○') + ' ' + bold(`agent step ${step}/${maxSteps}`) + ' ' + dim(`(${elapsed}s)`));
+    out(cyan('○') + ' ' + bold(maxSteps > 0 ? `agent step ${step}/${maxSteps}` : `agent step ${step}`) + ' ' + dim(`(${elapsed}s)`));
 
     const proseText = agentProse(reply);
     const calls = agentParse(reply);
@@ -1711,7 +1766,7 @@ async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApp
     }
     if (done) out(dim('  (ignoring DONE — it came alongside a tool request)'));
     next = `${results.join('\n\n')}\n\n${AGENT_REMINDER}`;
-    if (step === maxSteps) out(red('  reached the step limit'));
+    if (maxSteps > 0 && step === maxSteps) out(red('  reached the step limit'));
   }
 
   agentAllowRun = prevAllowRun;
@@ -2621,7 +2676,7 @@ while (!stopped && !question) {
       const flags = [
         agentModeAllowRun ? red('--allow-run') : '',
         agentModeAutoApply === true ? dim('--apply') : '',
-        dim(`max:${agentModeMaxSteps}`),
+        dim(`max:${agentModeMaxSteps || '∞'}`),
         dim(`root: ${agentRoot}`),
       ].filter(Boolean).join(dim(' · '));
       out('  ' + cyan('⬡') + ' ' + bold(cyan('agent mode')) + '  ' + flags);
@@ -3360,12 +3415,16 @@ while (!stopped && !question) {
     const parts = raw.split(/\s+/).filter(Boolean);
     const hasFlags = parts.some((p) => p.startsWith('--'));
     const taskParts = [];
-    let tAllowRun = false, tAutoApply = /** @type {boolean | null} */ (null), tMaxSteps = 10;
+    let tAllowRun = false, tAutoApply = /** @type {boolean | null} */ (null), tMaxSteps = /** @type {number | null} */ (null);
     for (let pi = 0; pi < parts.length; pi++) {
       if (parts[pi] === '--allow-run') { tAllowRun = true; continue; }
       if (parts[pi] === '--apply') { tAutoApply = true; continue; }
       if (parts[pi] === '--no-apply') { tAutoApply = false; continue; }
-      if (parts[pi] === '--max') { tMaxSteps = Math.max(1, Number(parts[++pi]) || 10); continue; }
+      if (parts[pi] === '--max') {
+        const n = Number(parts[++pi]);
+        tMaxSteps = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;   // 0 = no cap
+        continue;
+      }
       taskParts.push(parts[pi]);
     }
     const taskText = taskParts.join(' ').trim();
@@ -3388,15 +3447,15 @@ while (!stopped && !question) {
     if (!taskText && hasFlags) {
       if (tAllowRun)           agentModeAllowRun  = !agentModeAllowRun; // toggle
       if (tAutoApply !== null) agentModeAutoApply = tAutoApply;
-      if (tMaxSteps !== 10)    agentModeMaxSteps  = tMaxSteps;
-      out(dim(`  agent mode settings: allow-run=${agentModeAllowRun}  max=${agentModeMaxSteps}  auto-apply=${agentModeAutoApply ?? 'ask'}`));
+      if (tMaxSteps !== null)  agentModeMaxSteps  = tMaxSteps;   // --max 0 = no cap
+      out(dim(`  agent mode settings: allow-run=${agentModeAllowRun}  max=${agentModeMaxSteps || '∞'}  auto-apply=${agentModeAutoApply ?? 'ask'}`));
       continue;
     }
 
     // Has task text → run once (use per-task flags if given, else fall back to mode settings)
     const runAllowRun  = tAllowRun  || agentModeAllowRun;
     const runAutoApply = tAutoApply !== null ? tAutoApply : (taskText ? null : agentModeAutoApply);
-    const runMaxSteps  = tMaxSteps !== 10 ? tMaxSteps : agentModeMaxSteps;
+    const runMaxSteps  = tMaxSteps !== null ? tMaxSteps : agentModeMaxSteps;
     out('');
     out(bold(`  🤖 agent  root: ${agentRoot}`) + (runAllowRun ? red('  --allow-run') : ''));
     const matched = getAttachedImagesForLine(taskText);

@@ -80,6 +80,7 @@ const state = {
   pluginTools: [],      // {marker, takesBody} — what the transcript must hide
   needsTab: false,      // the last run could not proceed for want of a chat tab
   needsCompaction: false, // the budget is close to full and a rotation is coming
+  runCursor: null,      // where in the log the live run's rows begin
 };
 
 /* -------------------------------------------------------------- transcript */
@@ -228,6 +229,40 @@ function foldThinking() {
 function endTurn() {
   foldThinking();
   state.assistant = null;
+}
+
+/**
+ * The run is over: fold its working trail — tool rows, step notes, folded
+ * reasoning, the intermediate prose — into one collapsed line, so the closing
+ * bubble is the answer and nothing else competes with it. Two kinds of row
+ * stay in the open, because their buttons have to stay reachable when the run
+ * stopped short: a step-limit "carry on" row and a no-chat-tab banner. Only a
+ * run that ended with something to say (done or a question) folds; an error or
+ * a stall keeps the whole trail visible — what went wrong is the result then.
+ */
+function foldRun(stopReason) {
+  const start = state.runCursor;
+  state.runCursor = null;
+  if (start == null) return;
+  if (!['done', 'ask'].includes(stopReason)) return;
+  const kids = [...log.children].slice(start);
+  if (!kids.length) return;
+
+  // The closing bubble — the last assistant reply of the run — is the result.
+  let result = null;
+  for (let i = kids.length - 1; i >= 0; i--) {
+    if (/\bassistant\b/.test(kids[i].className ?? '')) { result = kids[i]; break; }
+  }
+  const foldable = kids.filter((k) => k !== result && !/continue-row|needs-tab/.test(k.className ?? ''));
+  if (!result || !foldable.length) return; // a plain Q&A turn has nothing to fold
+
+  const wrap = el('details', 'run');
+  wrap.open = false;
+  wrap.append(el('summary', null, `✻ ระหว่างทำงาน · ${foldable.length} รายการ`));
+  for (const k of foldable) wrap.append(k); // append moves the node
+  log.insertBefore(wrap, result);
+  result.classList.add('result');
+  scrollDown();
 }
 
 /**
@@ -464,6 +499,9 @@ setInterval(() => {
 stream.addEventListener('task_start', (e) => {
   addTask(JSON.parse(e.data).task);
   hideWelcome();
+  // Everything appended from here until `finished` is this run's working
+  // trail; foldRun() picks it up by this mark so an earlier turn is untouched.
+  state.runCursor = log.children.length;
   refreshMeter();
   lastEventAt = Date.now();
 });
@@ -497,7 +535,7 @@ stream.addEventListener('step', (e) => {
   // rows trail prose that was written after them.
   foldThinking();
   state.assistant = null;
-  addNote(`step ${step}/${maxSteps} · ${elapsed}s`);
+  addNote(maxSteps > 0 ? `step ${step}/${maxSteps} · ${elapsed}s` : `step ${step} · ${elapsed}s`);
 });
 stream.addEventListener('thinking', (e) => {
   const { text } = JSON.parse(e.data);
@@ -525,12 +563,11 @@ stream.addEventListener('check_end', (e) => {
         : 'ตรวจแล้ว ไม่มีคำสั่งให้รัน';
   addNote(what);
 });
-stream.addEventListener('step_limit', () => {
-  addNote('reached the step limit');
-  // A run that stops for want of steps is a dead end unless the next move is
-  // offered: "carry on" is one click instead of retyping what to do next.
+/** A stopped run is a dead end unless the next move is offered: "carry on" is
+ *  one click instead of retyping what to do next. */
+function offerCarryOn(what) {
   const row = el('div', 'note continue-row');
-  row.append(el('span', null, 'หยุดเพราะใช้ครบ step — '));
+  row.append(el('span', null, what));
   const on = el('button', 'mini', 'ให้ทำต่อ');
   on.onclick = () => {
     row.remove();
@@ -539,6 +576,17 @@ stream.addEventListener('step_limit', () => {
   row.append(on);
   log.append(row);
   scrollDown();
+}
+stream.addEventListener('step_limit', () => {
+  addNote('reached the step limit');
+  offerCarryOn('หยุดเพราะใช้ครบ step — ');
+});
+// With no step cap set, a spent budget is what ends a long run — the same dead
+// end the step limit used to be, so it gets the same way out.
+stream.addEventListener('budget', (e) => {
+  const { used } = JSON.parse(e.data);
+  addNote(`budget spent (${used}) — stopping`);
+  offerCarryOn(`หยุดเพราะครบ budget (${used}) — `);
 });
 stream.addEventListener('error', (e) => addNote(`error: ${JSON.parse(e.data).message}`));
 stream.addEventListener('todo', (e) => renderTodo(JSON.parse(e.data).items));
@@ -580,6 +628,7 @@ stream.addEventListener('finished', async (e) => {
   // list says whether Apply is about to write something a check passed.
   state.lastCheck = check ?? null;
   endTurn();
+  foldRun(stopReason);
   state.running = false;
   $('send').textContent = 'ส่ง';
   $('hint').textContent = '';
@@ -1127,7 +1176,7 @@ const SETTINGS_SECTIONS = [
       { key: 'defaultModel', label: 'โมเดลเริ่มต้น', type: 'text', note: 'id ของโมเดล — ดูรายการได้ที่ /models หรือกดที่หัวหน้าต่าง' },
       { key: 'mode', label: 'สิทธิ์แก้ไฟล์', type: 'select', options: [['ask', 'ถามก่อนเขียนทุกไฟล์'], ['auto', 'เขียนเลยไม่ถาม'], ['yolo', 'เขียน + รันคำสั่ง shell']] },
       { key: 'allowRun', label: 'อนุญาตให้รันคำสั่ง shell', type: 'checkbox', note: 'ปิด = โมเดลแก้ไฟล์ได้อย่างอื่นไม่ได้' },
-      { key: 'maxSteps', label: 'สูงสุดกี่ Step ต่อคำสั่ง', type: 'number', note: 'กันเรื่องราวยาวไม่จบ — ตัวเลขสูง = เสียเครดิตรัวกว่า' },
+      { key: 'maxSteps', label: 'สูงสุดกี่ Step ต่อคำสั่ง', type: 'number', note: '0 = ไม่จำกัด — งานยาวไปจนจบ; เบรกจริงคือ budget ด้านล่าง (tool calls / เวลา)' },
       { key: 'maxToolCalls', label: 'สูงสุดกี่ tool call ต่อคำสั่ง', type: 'number', note: 'เพดานกันหลุด — คำตอบเดียวที่สั่งเครื่องมือร้อยครั้งจะหยุดเมื่อถึงตัวเลขนี้ (ค่าเริ่มต้น 300)' },
       { key: 'maxWallClockMin', label: 'เวลาสูงสุดต่อคำสั่ง (นาที)', type: 'number', note: 'เพดานเวลา — งานที่ค้างจะหยุดเอง (ค่าเริ่มต้น 30)' },
       { key: 'maxCredits', label: 'เพดานเครดิตต่อคำสั่ง', type: 'number', note: '0 = ไม่จำกัด — หยุดงานเมื่อใช้เครดิตถึงเพดาน (เช็คกับยอดที่แคชไว้ ~30 วิ ต่อครั้ง)' },
@@ -1136,7 +1185,7 @@ const SETTINGS_SECTIONS = [
       { key: 'subagent', label: 'ให้เรียก helper ย่อย', type: 'checkbox', note: 'งานยาวถูกแบ่งให้ตัวช่วย แล้วรีพอร์ตกลับ' },
       { key: 'replyLanguage', label: 'ภาษาที่ตอบผู้ใช้', type: 'select', options: [['th', 'ไทย — ค่าเริ่มต้น'], ['en', 'English']], note: 'โค้ด คำสั่ง และพาธเป็นอังกฤษเสมอ ไม่ว่าตัวนี้จะตั้งไว้อย่างไร' },
       { key: 'langCheck', label: 'เตือนเมื่อลืมตอบไทย', type: 'checkbox', note: 'ตรวจสัดส่วนอักษรไทยของข้อความปิดงานก่อนรับ DONE — เตือนหนึ่งครั้ง' },
-      { key: 'minThaiRatio', label: 'สัดส่วนอักษรไทยขั้นต่ำ', type: 'number', note: '0-1 (ค่าเริ่มต้น 0.25) — ไม่นับบล็อกโค้ด/ลิงก์' },
+      { key: 'minThaiRatio', label: 'สัดส่วนอักษรไทยขั้นต่ำ', type: 'number', note: '0-1 (ค่าเริ่มต้น 0.4) — ไม่นับบล็อกโค้ด/ลิงก์' },
       { key: 'repeatGuard', label: 'กันเรียกซ้ำซาก', type: 'checkbox', note: 'เรียก tool เดิม + อาร์กิวเมนต์เดิมครั้งที่สามโดยไม่มีอะไรเปลี่ยน = ถูกบล็อกพร้อมคำแนะนำ' },
       { key: 'repeatGuardMax', label: 'เพดานการบล็อกซ้ำต่อรอบ', type: 'number', note: 'เกินแล้วหยุดรอบเป็น stalled (ค่าเริ่มต้น 4)' },
       { key: 'attempts', label: 'รอบลองสูงสุดต่อคำสั่ง', type: 'number', note: 'ลองซ้ำเมื่อ checker ไม่ผ่าน (1 = ไม่ลอง; ทุกรอบคิดเครดิตเต็ม)' },
@@ -1454,12 +1503,12 @@ async function openSettings() {
 
   const save = el('button', 'primary', 'บันทึก');
   save.onclick = async () => {
-    // Check before writing: a budget under its reserve, or a step limit of
-    // zero, is a mistake the person should hear about — not a setting that
-    // quietly misbehaves on the next run.
+    // Check before writing: a budget under its reserve is a mistake the person
+    // should hear about — not a setting that quietly misbehaves on the next
+    // run. Zero steps is no mistake: it is the deliberate "no cap".
     const problems = [];
     const maxSteps = Number(draft.maxSteps);
-    if (!Number.isFinite(maxSteps) || maxSteps < 1) problems.push('สูงสุดกี่ step ต้องเป็นตัวเลขอย่างน้อย 1');
+    if (!Number.isFinite(maxSteps) || maxSteps < 0) problems.push('สูงสุดกี่ step ต้องเป็น 0 ขึ้นไป (0 = ไม่จำกัด)');
     const maxToolCalls = Number(draft.maxToolCalls);
     if (!Number.isFinite(maxToolCalls) || maxToolCalls < 1) problems.push('สูงสุดกี่ tool call ต้องเป็นตัวเลขอย่างน้อย 1');
     const maxWallClockMin = Number(draft.maxWallClockMin);

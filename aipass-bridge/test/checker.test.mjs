@@ -383,3 +383,28 @@ test('a declared check is run verbatim, read from disk', async () => {
   assert.equal(result.check?.verdict, 'pass');
   assert.equal(result.check?.declared, 'node check.mjs');
 });
+
+// The chain guard skips the calls after a failed change in the same reply.
+// A skipped RUN never executed - counting it made the checker report a fail
+// over a check that never ran, and the parent had to answer for nothing.
+test('a run the chain guard skipped is not counted as a failed check', async () => {
+  const root = tempDir({ 'a.mjs': 'export const a = 1;\n' });
+  const bridge = new StubBridge({
+    parent: [
+      'NEED file a.mjs\n',
+      'CREATE a.mjs\nexport const a = 2;\nEND\nDONE staged the change\n',
+    ],
+    'conv-2': ['CREATE oops.mjs\nx\nEND\nRUN\nnode -e "process.exit(1)"\nEND\nDONE tried to check\n'],
+  });
+  const { h, store } = makeHarness({ root, bridge });
+
+  const result = await h.run('bump the constant');
+
+  assert.equal(result.stopReason, 'done');
+  const child = store.list().map((m) => store.load(m.id)).find((s) => (s.title ?? '').startsWith('check:'));
+  const skipped = child.entries.find((e) => e.type === 'tool' && e.kind === 'run');
+  assert.match(String(skipped?.out), /^skipped/, 'the premise: the run never executed');
+  assert.equal(result.check?.verdict, 'none', 'nothing ran, so nothing failed');
+  assert.equal(statsOf(h).checkVerdict, 'none');
+  assert.ok(!parentPrompts(bridge).some((p) => /did not pass/.test(p.message)), 'no false failure reached the parent');
+});

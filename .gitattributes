@@ -1,0 +1,4 @@
+# Eval fixtures are compared byte-wise by their own check.mjs — a Windows
+# checkout with core.autocrlf=true must not grow \r on every line, or a
+# correct fix reads as a failing check (fix-year caught this the hard way).
+evals/** text eol=lf

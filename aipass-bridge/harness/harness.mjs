@@ -47,7 +47,7 @@ export class Harness {
     this.root = path.resolve(opts.root ?? process.cwd());
     this.events = opts.events ?? new Emitter();
     this.options = {
-      maxSteps: 10,
+      maxSteps: 0,   // no cap — settings.mjs ships the same default
       maxToolCalls: 300,
       maxWallClockMs: 1_800_000,
       maxCredits: 0,
@@ -73,6 +73,10 @@ export class Harness {
           // A 429 wait must read as a pause, not a stuck run: the client's
           // note rides the same dim-note channel as the firewall notes.
           onNote: (text) => this.events.emit('firewall_note', { text }),
+          // A mid-reply model switch is the site talking to the person: it
+          // belongs in the transcript as a visible note line, not folded
+          // into the reasoning beside the tool churn.
+          onStreamNote: (text) => this.events.emit('note', { text }),
         });
     this.skills = opts.skills ?? SkillLibrary.default({ root: this.root, repoDir: REPO_SKILLS });
     this.store = opts.store === 'off' ? null : (opts.store ?? new SessionStore(path.join(home(), 'sessions')));
@@ -252,10 +256,17 @@ export class Harness {
       summary,
       task,
       listing: '',
+      // The same preamble the run would send, flags and all: a rotation that
+      // silently dropped SEARCH -i, ATTACH or a plugin's markers was a
+      // different run wearing the same name (the loop's own rotation passes
+      // every one of them).
       preambleText: buildPreamble({
         allowRun: Boolean(this.options.allowRun),
         plan: Boolean(this.options.plan),
         subagent: Boolean(this.options.subagent),
+        searchI: Boolean(this.options.searchI),
+        attach: Boolean(this.options.attach),
+        plugins: this.options.pluginTools ?? [],
         lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
       staged,
@@ -419,7 +430,9 @@ export class Harness {
           events: this.events,
           conversation: helperConversation,
           conversationTemporary: helperConversation ? true : null,
-          options: { ...this.options, maxSteps: Math.min(this.options.maxSteps, 8), subagent: false, allowRun: canRun, signal: this.abort.signal },
+          // A helper is a bounded subtask: its cap is 8, and a capped parent
+          // can only lower it — an uncapped parent does not uncap a helper.
+          options: { ...this.options, maxSteps: this.options.maxSteps > 0 ? Math.min(this.options.maxSteps, 8) : 8, subagent: false, allowRun: canRun, signal: this.abort.signal },
           first: true,
         });
       } catch (err) {
@@ -538,7 +551,9 @@ export class Harness {
           conversationTemporary: true,
           options: {
             ...this.options,
-            maxSteps: Math.min(this.options.maxSteps, 6),
+            // The checker is run-and-report, bounded at 6: an uncapped parent
+            // does not uncap it, a capped one can only lower it.
+            maxSteps: this.options.maxSteps > 0 ? Math.min(this.options.maxSteps, 6) : 6,
             plan: false,
             requirePlanApproval: false,
             subagent: false,
@@ -551,7 +566,13 @@ export class Harness {
       }
 
       // The verdict is computed, not read: from what the child actually ran.
-      const runs = (childSession?.entries ?? []).filter((e) => e.type === 'tool' && e.kind === 'run');
+      // A run the chain guard skipped never executed — the entry only exists
+      // to say why — so it is evidence of nothing, least of all a failure.
+      // Counting it turned a refused edit in the checker's own reply into a
+      // reported fail the parent had to answer.
+      const runs = (childSession?.entries ?? []).filter((e) => (
+        e.type === 'tool' && e.kind === 'run' && !/^skipped\b/.test(String(e.out ?? ''))
+      ));
       const failed = runs.filter((e) => !e.ok);
       const verdict = failed.length ? 'fail' : runs.length ? 'pass' : 'none';
       const evidence = failed.slice(0, 3).map((e) => String(e.out ?? '').trim()).filter(Boolean).join('\n\n');

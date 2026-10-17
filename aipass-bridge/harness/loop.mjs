@@ -15,7 +15,7 @@
 import path from 'node:path';
 import { outbound } from './waf.mjs';
 import {
-  REMINDER, prose, parse, parseTodo, mergeTodo, READING,
+  REMINDER, prose, parse, parseTodo, mergeTodo, READING, attemptedMarker,
   preamble as buildPreamble,
 } from './protocol.mjs';
 import { resilientSay, decode } from './bridge.mjs';
@@ -59,7 +59,7 @@ const previewOf = (call) => {
 };
 
 /**
- * Drive one task to a DONE (or the step limit).
+ * Drive one task to a DONE — or to whatever ends it first: a guard, a cap, a budget.
  *
  * @param {string} taskText
  * @param {object} ctx
@@ -82,11 +82,18 @@ export async function runTask(taskText, ctx = {}) {
     subagent = null, check = null, approvePlan = null, options = {}, first = true,
     runPluginTool = null, compactor = null, rotate = null,
     conversation = null, conversationTemporary = null,
-  } = ctx;  const maxSteps = Number(options.maxSteps ?? 10);
+  } = ctx;  // The step cap, or no cap at all: 0 (the shipped default) means the
+  // run goes until it is DONE, a guard stops it, or a budget below is spent. A
+  // positive number caps the run, and the last step says so (step_limit).
+  const rawCap = Number(options.maxSteps ?? 0);
+  const maxSteps = Number.isFinite(rawCap) && rawCap > 0 ? Math.floor(rawCap) : Infinity;
+  // 0 on the wire means "no cap" — Infinity does not survive JSON, so events
+  // carry the option as the surfaces know it.
+  const maxStepsWire = Number.isFinite(maxSteps) ? maxSteps : 0;
   // Per-run budgets — the same defaults the settings file ships. A reply full
   // of markers used to execute every one of them, and a yolo RUN can hold one
-  // step open for minutes; either budget spent stops the run the way the step
-  // limit does, with its own stop reason in run_stats.
+  // step open for minutes; either budget spent stops the run with its own stop
+  // reason in run_stats — the real bound once the step cap is off.
   const maxToolCalls = Number(options.maxToolCalls) > 0 ? Math.floor(Number(options.maxToolCalls)) : 300;
   const maxWallClockMs = Number(options.maxWallClockMs) > 0 ? Math.floor(Number(options.maxWallClockMs)) : 1_800_000;
   // (credit cap) Optional ceiling on observed spend, in credits. 0 = no cap.
@@ -111,7 +118,7 @@ export async function runTask(taskText, ctx = {}) {
   const replyLanguage = options.replyLanguage === 'en' ? 'en' : 'th';
   const langCheck = Boolean(options.langCheck);
   const minThaiRatio = Number.isFinite(Number(options.minThaiRatio))
-    ? Math.min(1, Math.max(0, Number(options.minThaiRatio))) : 0.25;
+    ? Math.min(1, Math.max(0, Number(options.minThaiRatio))) : 0.4;
   // (Thai pack) The pre-tool guard. repeatGuard refuses an identical call
   // (same kind, argument and body) already made twice with nothing staged in
   // between — a loop, not a step; repeatGuardMax is how many such refusals
@@ -124,7 +131,7 @@ export async function runTask(taskText, ctx = {}) {
   let planApproved = !options.requirePlanApproval;
 
   session?.append('task', { text: taskText });
-  events?.emit('task_start', { task: taskText, maxSteps });
+  events?.emit('task_start', { task: taskText, maxSteps: maxStepsWire });
 
   const creditsBefore = await bridge.quota().catch(() => null);
   // Spent-so-far, for the optional credit cap: the pre-run reading is the
@@ -311,9 +318,16 @@ export async function runTask(taskText, ctx = {}) {
   // — once. A short closing never triggers it (a dozen letters is a glance,
   // not a message), and code, commands and URLs do not count toward the
   // ratio. `closing` is the line the window will keep as the run's summary.
-  const replyLangMsg = (proseText, closing) => {
+  //
+  // `plain` says the closing reply was prose only. A reply that also carried
+  // calls shows their bodies in `proseText` — a CREATE's file body, a plan
+  // block — and a body is content, not a message: only the closing line is
+  // judged then, so a run that ends by writing its file is not re-prompted
+  // over the file's language. What is measured is the user-facing text.
+  const replyLangMsg = (proseText, closing, plain = true) => {
     if (!langCheck || langSent) return null;
-    const { ratio, letters } = thaiRatio(`${proseText ?? ''}\n${closing ?? ''}`);
+    const judged = plain ? `${proseText ?? ''}\n${closing ?? ''}` : `${closing ?? ''}`;
+    const { ratio, letters } = thaiRatio(judged);
     if (letters < 12 || ratio >= minThaiRatio) return null;
     langSent = true;
     langPrompts += 1;
@@ -334,7 +348,30 @@ export async function runTask(taskText, ctx = {}) {
     return base.length || queued.length ? [...base, ...queued] : null;
   };
 
-  for (let step = 1; step <= maxSteps; step++) {
+  // (stability, the live stall of Oct 2026) A saved model the site no longer
+  // offers used to be found out mid-run, when the site swapped the
+  // conversation to a substitute and the transcript never said so. The
+  // catalog is the judge now: when the bridge serves a live list and the
+  // chosen model is not on it, the run fails here, by name, before any send.
+  // A missing or fallback list skips the check — it may never block a run it
+  // cannot judge — and `auto` is never judged: it delegates the pick to the
+  // site by design.
+  const chosenModel = String(model ?? bridge?.model ?? '').trim();
+  let modelGone = false;
+  if (chosenModel && chosenModel !== 'auto' && typeof bridge?.models === 'function') {
+    const catalog = await bridge.models().catch(() => null);
+    const ids = Array.isArray(catalog?.data) ? catalog.data.map((m) => m?.id).filter(Boolean) : [];
+    if (catalog?.source === 'live' && ids.length
+        && !ids.includes(chosenModel.replace(/^aipass\//, ''))) {
+      modelGone = true;
+      summary = `the model "${chosenModel}" is not in the model catalog anymore — the site would have swapped it for a substitute mid-run without saying so. Pick a current model in Settings and start the run again.`;
+      stopReason = 'error';
+      session?.append('note', { text: `catalog check: ${summary}` });
+      events?.emit('error', { message: summary });
+    }
+  }
+
+  for (let step = 1; !modelGone && step <= maxSteps; step++) {
     // The wall clock is checked before every reply too, not only between
     // tools: waiting on a slow model is as real a spend as running a command.
     if (Date.now() - runStart > maxWallClockMs) { spendBudget('time-limited'); break; }
@@ -364,7 +401,7 @@ export async function runTask(taskText, ctx = {}) {
 
     const elapsed = ((Date.now() - stepStart) / 1000).toFixed(1);
     stepMs.push(Math.round((Date.now() - stepStart)));
-    events?.emit('step', { step, maxSteps, elapsed });
+    events?.emit('step', { step, maxSteps: maxStepsWire, elapsed });
 
     const proseText = prose(reply, pluginTools);
     const calls = parse(reply, { plugins: pluginTools });
@@ -381,12 +418,18 @@ export async function runTask(taskText, ctx = {}) {
       // ASK is the one ending that wants an answer, not a verdict: the
       // question rides the finished turn and the next message resumes.
       if (askCall) {
-        const langMsg = replyLangMsg(proseText, askCall.arg);
+        const langMsg = replyLangMsg(proseText, askCall.arg, work.length === 0);
         if (langMsg && step < maxSteps) { next = `${langMsg}\n\n${REMINDER}`; continue; }
         pauseForAsk(askCall.arg);
         break;
       }
-      const effectiveDone = done || (toolsRun > 0 && proseText ? { kind: 'done', arg: 'done' } : null);
+      // A reply with no readable call ends the run as done once real work has
+      // happened — a closing sentence is an answer. But not when the reply was
+      // trying to speak the protocol and mangled it: recorded live, a reply of
+      // `NEED list desktop` followed by prose parsed to nothing, and the run
+      // was marked done 633ms later with the nudges never sent. A marker-shaped
+      // line earns the nudge that teaches the shape instead.
+      const effectiveDone = done || (toolsRun > 0 && proseText && !attemptedMarker(reply) ? { kind: 'done', arg: 'done' } : null);
       if (effectiveDone) {
         const cleanArg = (effectiveDone.arg || proseText || 'done').replace(/^[-—–:]\s*/, '').trim();
         summary = cleanArg || 'done';
@@ -399,7 +442,7 @@ export async function runTask(taskText, ctx = {}) {
           next = `${checkMsg}\n\n${REMINDER}`;
           continue;
         }
-        const langMsg = replyLangMsg(proseText, cleanArg);
+        const langMsg = replyLangMsg(proseText, cleanArg, work.length === 0);
         if (langMsg && step < maxSteps) {
           next = `${langMsg}\n\n${REMINDER}`;
           continue;
@@ -430,7 +473,7 @@ export async function runTask(taskText, ctx = {}) {
         events?.emit('give_up', {}); stopReason = 'stalled'; break;
       }
       events?.emit('nudge', { n: nudgeStreak });
-      next = `That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it. I will paste back exactly what you ask for. ${REMINDER}`;
+      next = `That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it. I will paste back exactly what you ask for. ${REMINDER}`;
       continue;
     }
     nudgeStreak = 0;
@@ -625,7 +668,7 @@ export async function runTask(taskText, ctx = {}) {
     // (a NEED beside the ASK) skips it: the preamble says the two do not mix,
     // and running the read first beats stranding its result.
     if (askCall && !stillLooking) {
-      const langMsg = replyLangMsg(proseText, askCall.arg);
+      const langMsg = replyLangMsg(proseText, askCall.arg, work.length === 0);
       if (langMsg && step < maxSteps) { next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${langMsg}`; continue; }
       pauseForAsk(askCall.arg);
       break;
@@ -638,7 +681,7 @@ export async function runTask(taskText, ctx = {}) {
       // through the stagnation guard and the compaction estimate like any
       // other step, so the correction is a step the run actually took.
       const checkMsg = await finishCheck();
-      const langMsg = checkMsg && step < maxSteps ? null : replyLangMsg(proseText, summary);
+      const langMsg = checkMsg && step < maxSteps ? null : replyLangMsg(proseText, summary, work.length === 0);
       if (checkMsg && step < maxSteps) {
         next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${checkMsg}`;
       } else if (langMsg && step < maxSteps) {
