@@ -6,6 +6,29 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-17 — opencode — the playbook library is back in reach, and the run's two dead flags reach the tools
+
+- **Files**: `aipass-bridge/harness/harness.mjs` (the run's `maxResult` /
+  `readLines` now reach all three tool contexts — main, helper, checker),
+  `aipass-bridge/test/harness-fixes.test.mjs` (H11: a run's options clip a
+  6 KB read at 500 bytes behind the spill locator, and page a 10-line file at
+  three — red at `be0e1c5`, proven in a throwaway worktree), `CHANGELOG.md`,
+  `docs/WORKLOG.md`. Machine-local, outside the repo: `D:\skills` is now a
+  junction to `D:\aipass2\skills` (the library HOW-TO.md documents, stranded
+  when the repo moved beside `aipass2` instead of inside it) and
+  `~/.aipass/settings.json` carries `skillsDirs: ["D:\\aipass2\\skills"]` for
+  the desktop backend.
+- **Tests**: `npm test` green on this machine (one git-absent skip; see
+  `npm test` for the count — parallel sessions move it); `npm run agents:lint`
+  and `npm run evals:lint` green.
+- **Deferred**: the two remaining quick wins — bootstrap snapshot (git status
+  + scripts on turn 1) and step-cap visibility — are new prompt surface, not
+  plumbing; they want their own design pass with the eval gate behind them.
+- **Risks**: the junction and `skillsDirs` are machine-local; a CLI run from a
+  tree not on `D:\` (e.g. `C:\Users\ASUS\aipass-bridge`) still resolves an
+  empty default — point `AIPASS_SKILLS_DIR` there, or link it the same way.
+- **Cleanup**: the proof worktree removed; no other processes started.
+
 ## 2026-10-17 — opencode — the `models:` line covers history, not just new runs
 
 - **Files**: `aipass-bridge/stats.mjs` (`collectRuns()` attributes a run that

@@ -71,6 +71,10 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **The CLI's `--max-result` and `--read-lines` reach the tools.** Both were
+  parsed into the run's options and never forwarded to the tool context, so
+  every tool kept the 3,000-byte / 250-line defaults whatever the run asked
+  for — `--max-result` was a note nobody read (`test/harness-fixes.test.mjs`).
 - **A pace-score 403 cools the whole tab, not just the job it refused.** The
   edge 403s by pace as well as by content — the same limiter family as a 429 —
   but only the refused job used to wait: every send behind it left at full

@@ -673,3 +673,58 @@ test('a roled helper is read-only: its edit is refused and nothing is staged', a
     `the helper's edit was refused by its role:\n${JSON.stringify(seen)}`);
   assert.equal(h.overlay.size, 0, 'nothing was staged, in the helper or the parent');
 });
+
+/* H11 - the run's max-result and read-lines reach the tools ------------------ */
+
+test("a run's max-result and read-lines options reach the tools (H11)", async () => {
+  // Both flags were parsed into the run's options and never forwarded to the
+  // tool context, so every tool kept the 3,000-byte / 250-line defaults
+  // whatever the run asked for — `--max-result` was a note nobody read
+  // (aipass-bridge/AGENTS.md: "Tool results are capped at --max-result bytes").
+  const root = tempDir({
+    'big.txt': 'x'.repeat(6000) + '\n',
+    'lines.txt': Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join('\n'),
+  });
+
+  class StubBridge extends BridgeClient {
+    constructor(replies) {
+      super('http://127.0.0.1:1');
+      this.model = 'stub';
+      this.replies = replies;
+      this.turn = 0;
+      this.received = [];
+    }
+    async chat({ message }) {
+      this.received.push(message);
+      return { text: this.replies[Math.min(this.turn++, this.replies.length - 1)], reasoning: '' };
+    }
+    async quota() { return { available: 10 }; }
+    async createConversation() { return { id: 'stub-conversation' }; }
+    async config() {}
+    async status() { return { conversation: 'stub-conversation' }; }
+  }
+
+  const bridge = new StubBridge(['NEED file big.txt\nNEED file lines.txt\n', 'DONE read both\n']);
+  const h = new Harness({
+    root,
+    bridge,
+    store: new SessionStore(tempDir()),
+    events: new Emitter(),
+    options: { mode: 'auto', maxSteps: 3, maxResult: 500, readLines: 3 },
+  });
+
+  const result = await h.run('read the files');
+  assert.equal(result.stopReason, 'done');
+
+  const resultsMessage = bridge.received[1];
+  assert.ok(resultsMessage, 'the results message was sent');
+  // 6,001 bytes against the run's 500-byte cap: the head rides the message,
+  // the rest waits on disk behind the locator.
+  assert.match(resultsMessage, /more bytes/, 'the max-result cap spilled instead of inlining');
+  assert.match(resultsMessage, /\.aipass\/spill\/[a-f0-9]+\.txt/, 'with the locator to the rest');
+  assert.ok(!resultsMessage.includes('x'.repeat(600)), 'nothing past the cap rides the message');
+
+  // Ten lines against the run's 3-line page: the page stops at three and the
+  // note says how to continue.
+  assert.match(resultsMessage, /7 more line\(s\)/, 'the read-lines cap paginated the file');
+});

@@ -88,6 +88,11 @@ export class Harness {
       bridge: this.bridge,
       model: this.bridge.model,
       allowRun: this.options.allowRun,
+      // The CLI's --max-result / --read-lines are per-run knobs: without this
+      // plumbing they sat in this.options and the tools kept their defaults,
+      // so the flags were notes nobody read.
+      maxResult: this.options.maxResult,
+      readLines: this.options.readLines,
       events: this.events,
       log: (_level, text) => this.events.emit('note', { text }),
       // WEB on a scratch conversation (P2-B), when the run opts in.
@@ -420,6 +425,7 @@ export class Harness {
           tools: createTools({
             root: this.root, overlay: child, skills: this.skills, bridge: this.bridge,
             model: this.bridge.model, allowRun: canRun, events: this.events,
+            maxResult: this.options.maxResult, readLines: this.options.readLines,
             readOnly: Boolean(spec),
             readOnlyNote: spec ? 'this helper is read-only — report it in your summary instead.' : null,
             conversation: helperConversation, temporary: true,
@@ -541,6 +547,7 @@ export class Harness {
           tools: createTools({
             root: this.root, overlay: staged, skills: this.skills, bridge: this.bridge,
             model: this.bridge.model, allowRun: true, events: childEvents,
+            maxResult: this.options.maxResult, readLines: this.options.readLines,
             conversation: checkerConversation, temporary: true, readOnly: true,
           }),
           overlay: new Overlay(this.root),
