@@ -88,8 +88,9 @@ const corsHeaders = () => (CORS_ORIGIN
 // The scrub patterns live in their own module so tests pin the same list the
 // logger uses (OWASP Logging Cheat Sheet: never log secrets).
 import { scrubSecrets } from './log-scrub.mjs';
+import { formatLogLine, requestId } from '../harness/log-line.mjs';
 
-const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a.map(scrubSecrets));
+const log = (...a) => console.log(formatLogLine({ msg: a.map((x) => scrubSecrets(x instanceof Error ? x.stack : String(x))).join(' ') }));
 
 /* ------------------------------------------------- react-router turbo-stream */
 
@@ -329,6 +330,8 @@ function extractModels(decoded) {
 
 const jobs = new Map();
 const extClients = new Set();
+/** The cache warm already ran for this process; see extEvents(). */
+let warmLoaded = false;
 let rr = 0;
 
 const pickClient = () => {
@@ -344,6 +347,11 @@ const sendToClient = (client, event, data) => {
     return false; // socket died mid-dispatch — the caller fails the job, not the process
   }
 };
+
+/** Deltas buffer this long before one flush downstream; see Job.delta. */
+const DELTA_FLUSH_MS = 25;
+/** Part kinds whose text coalesces harmlessly when adjacent. */
+const TEXT_KINDS = new Set(['content', 'reasoning', 'status']);
 
 class Job {
   constructor({ kind = 'chat', modelId, text, parts, conversationId, aspectRatio: ratio, url, message, requestId, assistant, assistantField, temporary, thinkingLevel, video, spec, imageStyleId, outputTone, outputFormat, timeoutMs, onDelta, onDone, onError }) {
@@ -399,15 +407,45 @@ class Job {
       return this.fail(`could not dispatch to the extension: ${err.message}`);
     }
   }
-  delta(part) { if (!this.settled) { this.touch(); this.onDelta(part); } }
-  done(value) { if (this.settled) return; this.cleanup(); this.onDone(value ?? 'stop'); }
-  fail(message) { if (this.settled) return; this.cleanup(); this.onError(message); }
+  // Deltas arrive in bursts (the page already batches at 40 ms), and each part
+  // used to become its own SSE frame downstream. Buffer for one short tick,
+  // then flush: adjacent text of the same kind merges into one part — the same
+  // bytes, in the same order, as a fraction of the frames. Flushing before
+  // done/fail/abort makes the buffer invisible at every edge, so nothing is
+  // ever lost to the timer.
+  delta(part) {
+    if (this.settled) return;
+    this.touch();
+    (this.pending ??= []).push(part);
+    if (this.flushTimer) return;
+    this.flushTimer = setTimeout(() => { this.flushTimer = null; this.flush(); }, DELTA_FLUSH_MS);
+    this.flushTimer.unref?.();
+  }
+  flush() {
+    const parts = this.pending;
+    this.pending = undefined;
+    if (!parts) return;
+    const out = [];
+    for (const p of parts) {
+      const last = out.at(-1);
+      if (last && last.kind === p.kind && TEXT_KINDS.has(p.kind)
+        && typeof last.text === 'string' && typeof p.text === 'string') {
+        last.text += p.text;
+        continue;
+      }
+      out.push({ ...p });
+    }
+    for (const p of out) this.onDelta(p);
+  }
+  done(value) { if (this.settled) return; this.flush(); this.cleanup(); this.onDone(value ?? 'stop'); }
+  fail(message) { if (this.settled) return; this.flush(); this.cleanup(); this.onError(message); }
   abort() {
     if (this.settled) return;
+    this.flush();
     if (this.client) sendToClient(this.client, 'abort', { jobId: this.id });
     this.cleanup();
   }
-  cleanup() { this.settled = true; clearTimeout(this.timer); jobs.delete(this.id); }
+  cleanup() { this.settled = true; clearTimeout(this.timer); clearTimeout(this.flushTimer); jobs.delete(this.id); }
 }
 
 const fetchLoader = (url, timeoutMs = 20_000) =>
@@ -1114,12 +1152,17 @@ function extEvents(req, res) {
   sendToClient(client, 'ready', { clientId: client.id });
   // Warm the caches a moment after the tab attaches — but only if this client
   // is still the reason to: a tab that closed in the meantime would otherwise
-  // send a loader job to whoever connected next.
+  // send a loader job to whoever connected next. Once per process: the tab's
+  // SSE cycles every few minutes, and four forced upstream fetches on every
+  // cycle bought nothing the caches' own TTLs do not already cover.
   const warm = (fn, ms) => setTimeout(() => { if (extClients.has(client)) fn().catch(() => {}); }, ms);
-  warm(() => listModels({ force: true }), 500);
-  warm(() => getQuota({ force: true }), 900);
-  warm(() => refreshVideoOptions(), 1300);
-  warm(() => refreshStyleOptions(), 1700);
+  if (!warmLoaded) {
+    warmLoaded = true;
+    warm(() => listModels({ force: false }), 500);
+    warm(() => getQuota({ force: false }), 900);
+    warm(() => refreshVideoOptions(), 1300);
+    warm(() => refreshStyleOptions(), 1700);
+  }
 
   const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* closed */ } }, 15_000);
   req.on('close', () => {
@@ -1166,6 +1209,11 @@ async function extPost(req, res, kind) {
 /* --------------------------------------------------------------- the server */
 
 const server = http.createServer(async (req, res) => {
+  // Every request gets a short id: it rides the response header and any error
+  // line this request produces, so one quoted log line points back at the
+  // exchange it came from.
+  const rid = requestId();
+  res.setHeader('x-aipass-rid', rid);
   // The Host check comes first and reads the raw header, because the URL
   // construction below it throws on a malformed one — an async handler that
   // throws before the try block is an unhandled rejection, and Node exits.
@@ -1475,7 +1523,7 @@ const server = http.createServer(async (req, res) => {
 
     return oaiError(res, 404, `no route for ${req.method} ${path}`, 'not_found');
   } catch (err) {
-    log('unhandled', err);
+    log('unhandled', `[${rid}]`, err);
     if (!res.headersSent) oaiError(res, 500, String(err?.message ?? err), 'server_error');
     else res.end();
   }

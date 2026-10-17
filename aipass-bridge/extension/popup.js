@@ -277,6 +277,18 @@ $('refresh').addEventListener('click', async () => {
   render();
 });
 
+// The dev loop for a repo-loaded extension: disk changed → put it into effect.
+// The extension reload is harmless to a resting browser but kills any job the
+// worker is holding, so it waits for runs to finish; the tab reload is the
+// user's to time.
+$('reloadExt').addEventListener('click', async () => {
+  const srv = await bridgeStatus();
+  if (srv?.activeJobs) return toast(`A run is active (${srv.activeJobs}) — wait for it before reloading`);
+  try { chrome.runtime.reload(); } catch { toast('Could not reload the extension'); }
+});
+
+$('reloadTab').addEventListener('click', reloadChatTab);
+
 // Enter in the URL field saves.
 $('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('save').click(); });
 

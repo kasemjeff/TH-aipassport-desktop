@@ -61,3 +61,33 @@ test('an empty list means everything found, and a reload honours a changed filte
   assert.equal(manager.hasMethod('beta.ping'), false);
   assert.deepEqual(manager.details().loaded.map((p) => p.name), ['alpha']);
 });
+
+test('a plugin that needs a newer plugin API is refused before setup; silence means 1', async () => {
+  const dir = tempDir({
+    'settings.json': JSON.stringify({ plugins: [] }),
+    'plugins/future.mjs': `
+export default {
+  name: 'future',
+  version: '9.0.0',
+  apiVersion: 99,
+  setup(ctx) { ctx.tools.register('FUTURE_TOOL', () => 'x'); },
+};
+`,
+    'plugins/plain.mjs': `
+export default {
+  name: 'plain',
+  version: '1.0.0',
+  setup(ctx) { ctx.tools.register('PLAIN_TOOL', () => 'ok'); },
+};
+`,
+  });
+  const manager = new PluginManager({ dir: path.join(dir, 'plugins'), settings: new Settings(dir), log: () => {} });
+
+  const details = await manager.load();
+
+  assert.deepEqual(details.loaded.map((p) => p.name), ['plain'], 'the future plugin never loads');
+  assert.equal(details.failed.length, 1);
+  assert.match(details.failed[0].error, /apiVersion 99 needs a newer harness/);
+  assert.deepEqual(details.tools, ['PLAIN_TOOL'], 'the refused plugin setup never ran');
+  assert.equal(details.loaded[0].apiVersion, null, 'silence means API 1, recorded as null');
+});

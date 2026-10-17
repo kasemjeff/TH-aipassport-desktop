@@ -42,9 +42,21 @@ export function isPrivateHost(host) {
 // answer is loopback / RFC1918 / link-local. DNS failure fails open (the
 // literal check already ran); a private answer fails closed. Shared by the
 // bridge attachment path and the harness FETCH tool so neither drifts.
+// Answers are cached briefly per process: one run can fetch the same host on
+// every hop of a redirect chain, and a resolver round trip per hop is pure
+// latency. The TTL is short on purpose — a long-lived backend must eventually
+// see a rebinding flip — and failures are never cached (they fail open).
+const DNS_TTL_MS = 60_000;
+const dnsCache = new Map(); // host → { at, value }
+
 export async function hostResolvesPrivate(host) {
+  const key = String(host).toLowerCase();
+  const hit = dnsCache.get(key);
+  if (hit && Date.now() - hit.at < DNS_TTL_MS) return hit.value;
   try {
-    const answers = await dnsLookup(host, { all: true });
-    return (answers ?? []).some((a) => isPrivateHost(a.address));
+    const answers = await dnsLookup(key, { all: true });
+    const value = (answers ?? []).some((a) => isPrivateHost(a.address));
+    dnsCache.set(key, { at: Date.now(), value });
+    return value;
   } catch { return false; }
 }

@@ -45,17 +45,17 @@ test('a long RUN keeps its head and its tail, and the locator names the elided m
   assert.match(fs.readFileSync(path.join(dir, rel), 'utf8'), /line 200 of filler/, 'the spilled copy is complete');
 });
 
-test('a SEARCH hit carries one line of context on each side', () => {
+test('a SEARCH hit carries one line of context on each side', async () => {
   const dir = mkTracked({ 'app.js': 'const before = 1;\nconst needle = 2;\nconst after = 3;\n' });
-  const out = toolsIn(dir).search('needle');
+  const out = await toolsIn(dir).search('needle');
   assert.match(out, /app\.js:1- const before = 1;/);
   assert.match(out, /app\.js:2: const needle = 2;/);
   assert.match(out, /app\.js:3- const after = 3;/);
 });
 
-test('adjacent hits do not repeat their shared context line', () => {
+test('adjacent hits do not repeat their shared context line', async () => {
   const dir = mkTracked({ 'app.js': 'needle one\nneedle two\nplain\n' });
-  const out = toolsIn(dir).search('needle');
+  const out = await toolsIn(dir).search('needle');
   assert.match(out, /app\.js:1: needle one/);
   assert.match(out, /app\.js:2: needle two/, 'a line first queued as context is upgraded to a match');
   assert.match(out, /app\.js:3- plain/);

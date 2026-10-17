@@ -89,7 +89,7 @@ test('deleting the sandbox never follows a junction into the project', () => {
   assert.ok(fs.existsSync(path.join(dir, 'keep.txt')), 'the project survives sandbox cleanup');
 });
 
-test('a heavy directory is linked, not copied, and staged files sit beside it', () => {
+test('a heavy directory is linked, not copied, and staged files sit beside it', async () => {
   const dir = tempDir({ 'src/app.js': 'x\n' });
   fs.mkdirSync(path.join(dir, 'node_modules', 'dep'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'node_modules', 'dep', 'index.js'), 'module.exports = 1;\n');
@@ -97,7 +97,7 @@ test('a heavy directory is linked, not copied, and staged files sit beside it', 
   overlay.set(path.join(dir, 'src', 'app.js'), 'x changed\n');
   const sandbox = createSandbox(dir);
   try {
-    materializeTree(dir, overlay, sandbox);
+    await materializeTree(dir, overlay, sandbox);
 
     assert.ok(fs.lstatSync(path.join(sandbox, 'node_modules')).isSymbolicLink(), 'node_modules is a junction');
     assert.equal(fs.readFileSync(path.join(sandbox, 'src', 'app.js'), 'utf8'), 'x changed\n', 'the staged content is in the projection');

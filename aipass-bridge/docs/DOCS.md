@@ -243,8 +243,10 @@ MV3, three script contexts, loaded unpacked.
 
 - **`connect()`** opens `GET {bridgeUrl}/ext/events` and reads the SSE stream,
   parsing `event:` / `data:` frames into `handleJob` / `abort`. It self-cycles
-  every **4 min** (`CYCLE_MS`, under Chrome's long-request ceiling) and retries
-  **3 s** after any drop. `chrome.alarms` (`keepalive`, every 30 s),
+  every **4 min** (`CYCLE_MS`, under Chrome's long-request ceiling); the first
+  retry after a drop waits **300 ms**, doubling to a **3 s** ceiling while the
+  bridge itself is away — the self-cycle costs a blink, not seconds.
+  `chrome.alarms` (`keepalive`, every minute),
   `onStartup`, `onInstalled`, and a `keepalive` port connection all call
   `connect()`; a guard makes duplicate calls harmless.
 - **`handleJob(job)`** → `findChatTab()` (a non-discarded `de.aipass.net` tab,
@@ -264,7 +266,7 @@ Two jobs:
    re-posted as a `window.postMessage`. Page → worker:
    `window.addEventListener('message')` results are sent via
    `chrome.runtime.sendMessage`, retried up to 5× because the target worker may
-   be mid-eviction.
+   be mid-eviction — but only while this copy is still the extension's.
 2. **Keep the worker alive.** `keepAlive()` opens a long-lived
    `chrome.runtime.connect({ name: 'keepalive' })` port, beats it every 20 s,
    and cycles it every 4 min. Chrome evicts an idle MV3 worker after ~30 s and
@@ -274,7 +276,9 @@ Two jobs:
 
 Both scripts carry a **generation guard** (`window.__aipassBridge*Gen`): each
 injection claims a higher number, older copies stand down. This is how a
-re-loaded extension replaces stale code in a tab that was already open.
+re-loaded extension replaces stale code in a tab that was already open. A copy
+orphaned by a reload (`chrome.runtime.id` is gone) stops its retry loops —
+the replacement that a re-injection installs owns the relay and keepalive.
 
 ### `page.js` — MAIN world
 
@@ -306,9 +310,12 @@ do three narrow things:
 ### `popup.js`
 
 Polls `chrome.runtime.sendMessage({ type: 'status' })` and `GET /status` every
-1.5 s. Shows connected/not, the chat tab's path, active job count, a
+2 s. Shows connected/not, the chat tab's path, active job count, a
 default-model `<select>` (writes `POST /config`), and a bridge-URL field
-(writes `chrome.storage.local` + triggers a reconnect).
+(writes `chrome.storage.local` + triggers a reconnect). An Advanced row
+carries **Reload extension** (`chrome.runtime.reload()` — it refuses while a
+run is active, since the worker holds live jobs) and **Reload chat tab**: the
+two steps that put changed extension files into effect.
 
 ---
 

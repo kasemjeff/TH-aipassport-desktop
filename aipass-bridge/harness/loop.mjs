@@ -89,6 +89,10 @@ export async function runTask(taskText, ctx = {}) {
   // limit does, with its own stop reason in run_stats.
   const maxToolCalls = Number(options.maxToolCalls) > 0 ? Math.floor(Number(options.maxToolCalls)) : 300;
   const maxWallClockMs = Number(options.maxWallClockMs) > 0 ? Math.floor(Number(options.maxWallClockMs)) : 1_800_000;
+  // (credit cap) Optional ceiling on observed spend, in credits. 0 = no cap.
+  // The check rides the bridge's cached quota (its own 30s TTL), so it bounds
+  // a runaway run without turning into an upstream request per step.
+  const maxCredits = Number(options.maxCredits) > 0 ? Number(options.maxCredits) : 0;
   const runStart = Date.now();
   const model = options.model ?? null;
   // How hard the model thinks before each reply. 'off' (or nothing) means the
@@ -123,6 +127,20 @@ export async function runTask(taskText, ctx = {}) {
   events?.emit('task_start', { task: taskText, maxSteps });
 
   const creditsBefore = await bridge.quota().catch(() => null);
+  // Spent-so-far, for the optional credit cap: the pre-run reading is the
+  // baseline, and when that was unavailable the first successful reading
+  // becomes one. null until a reading lands — an unknown spend never stops a
+  // run on its own.
+  let creditBaseline = creditsBefore?.available ?? null;
+  let creditObserved = null;
+  const creditSpent = async () => {
+    if (!maxCredits) return null;
+    const q = await bridge.quota().catch(() => null);
+    if (!q || q.available == null) return null;
+    if (creditBaseline == null) creditBaseline = q.available;
+    creditObserved = creditBaseline - q.available;
+    return creditObserved;
+  };
 
   // Per-run metrics (P2-D): the session already records every tool call and
   // the run records credits; these counters are what turns that into rates.
@@ -236,13 +254,15 @@ export async function runTask(taskText, ctx = {}) {
 
   // A spent budget is an ending, and it is recorded like one: the session
   // keeps the note, the window keeps the event, run_stats keeps the reason.
-  let budgetHit = null;      // 'tools-limited' | 'time-limited'
+  let budgetHit = null;      // 'tools-limited' | 'time-limited' | 'credit-limited'
   const spendBudget = (reason) => {
     budgetHit = reason;
     const used = reason === 'tools-limited'
       ? `${toolsRun}/${maxToolCalls} tool calls`
-      : `${Math.round((Date.now() - runStart) / 1000)}s of ${Math.round(maxWallClockMs / 1000)}s`;
-    session?.append('note', { text: `budget guard: the run has spent its ${reason === 'tools-limited' ? 'tool-call' : 'wall-clock'} budget (${used}) — stopping the run` });
+      : reason === 'credit-limited'
+        ? `≈${creditObserved ?? 0} of ${maxCredits} credits`
+        : `${Math.round((Date.now() - runStart) / 1000)}s of ${Math.round(maxWallClockMs / 1000)}s`;
+    session?.append('note', { text: `budget guard: the run has spent its ${reason === 'tools-limited' ? 'tool-call' : reason === 'credit-limited' ? 'credit' : 'wall-clock'} budget (${used}) — stopping the run` });
     events?.emit('budget', { reason, used });
   };
 
@@ -318,6 +338,7 @@ export async function runTask(taskText, ctx = {}) {
     // The wall clock is checked before every reply too, not only between
     // tools: waiting on a slow model is as real a spend as running a command.
     if (Date.now() - runStart > maxWallClockMs) { spendBudget('time-limited'); break; }
+    if (maxCredits && (await creditSpent()) >= maxCredits) { spendBudget('credit-limited'); break; }
     const stepStart = Date.now();
     let reply;
     try { reply = await saySafe(next, partsForSend()); sends++; }
@@ -426,6 +447,7 @@ export async function runTask(taskText, ctx = {}) {
       const helpers = work.filter((c) => c.kind === 'subagent').length;
       if (toolsRun + helpers > maxToolCalls) spendBudget('tools-limited');
       else if (Date.now() - runStart > maxWallClockMs) spendBudget('time-limited');
+      else if (maxCredits && (await creditSpent()) >= maxCredits) spendBudget('credit-limited');
       else {
         helperResults = await Promise.all(work.map((c) => c.kind === 'subagent'
           ? execute(c, execCtx).catch((err) => `err: ${err.message}`)
@@ -485,6 +507,7 @@ export async function runTask(taskText, ctx = {}) {
       // both budgets before it executes.
       if (toolsRun >= maxToolCalls) { spendBudget('tools-limited'); break; }
       if (Date.now() - runStart > maxWallClockMs) { spendBudget('time-limited'); break; }
+      if (maxCredits && (await creditSpent()) >= maxCredits) { spendBudget('credit-limited'); break; }
       const call = work[i];
       // A RUN's label is its command: the parser puts the command in the body,
       // so `arg` alone leaves a row that says "run" and nothing else — in the
@@ -722,6 +745,9 @@ export async function runTask(taskText, ctx = {}) {
   // protocol drift shows up before it is guessed at.
   const runStats = {
     stopReason,
+    // The model that produced this run — `stats` groups by it (`byModel`), so
+    // "which model drifts" is a field, not a guess. Null on a bridge without one.
+    model: bridge.model ?? null,
     steps: toolsRun,
     tools: Object.fromEntries(toolStats),
     nudges,

@@ -367,7 +367,9 @@ This works within the constraints above rather than against them:
   and `.env` / `process.env` (the classic secrets-probe pattern). They go out as `LCLHST`, `CMT-OPEN`, `DOT-ENV` and so
   on, and are restored before anything is written — the bytes on disk are exactly
   what the file had. A file whose *name* is encoded (a real `.env` shown as
-  `DOT-ENV`) still opens, because the decode runs on the model's actions too.
+  `DOT-ENV`) is decoded before the permission check, so the rules always see the
+  real path — and the secret floor (`SECRET_RULES`, `harness/settings.mjs`)
+  denies `.env*` reads and writes in every mode, obfuscated spelling included.
 
 - **Lines that cannot be sent at all are dropped.** Real source contains
   code-execution shapes — `node -e`, `curl`, `rm -rf`, `/bin/sh`, `../../` —

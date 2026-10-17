@@ -115,7 +115,7 @@ let boots = 0;
  * settings, sessions, plugins — must land in this test's scratch directory, not
  * in the real ~/.aipass of whoever is running the suite.
  */
-async function bootApp(backend) {
+async function bootApp(backend, { token = null } = {}) {
   process.env.AIPASS_HOME = fs.mkdtempSync(path.join(tmpdir(), 'aipass-ui-'));
 
   const nodes = new Map();
@@ -148,10 +148,15 @@ async function bootApp(backend) {
   close() {}
 };
   globalThis.setInterval = () => 0; // the header refresher must not keep the process alive
+  const shots = []; // { url, headers } — what the token wiring rides on
   globalThis.fetch = async (_url, init = {}) => {
+    if (String(_url).endsWith('/token')) {
+      return token ? { ok: true, json: async () => ({ ok: true, token }) } : { json: async () => ({}) };
+    }
     const { method, params } = JSON.parse(init.body ?? '{}');
     calls.push(method);
     sent.push({ method, params });
+    shots.push({ url: String(_url), headers: { ...(init.headers ?? {}) } });
     const result = backend[method]?.(params) ?? { ok: true };
     return { json: async () => ({ ok: true, result }) };
   };
@@ -163,6 +168,8 @@ async function bootApp(backend) {
     node,
     calls,
     sent,
+    shots,
+    streamUrl: () => globalThis.__stream?.url,
     tick,
     dispatch: (type, ev) => globalThis.document.dispatch(type, ev),
     /** The built screen, for everything app.js creates with an id at runtime. */
@@ -221,6 +228,20 @@ test('typing "/" opens the palette and filters it as you type', async (t) => {
   const shown = node('slash-list').children.map((li) => li.children[0].textContent);
   assert.deepEqual(shown, ['/model', '/models', '/mode'], 'commands sharing a prefix all show');
   assert.equal(node('slash').classList.contains('hidden'), false, 'palette stays visible while a command is typed');
+});
+
+test('the window carries the loopback token on both transports', async () => {
+  // SECURITY.md's claim: the window asks the backend it was served from for
+  // the loopback token and attaches it everywhere a browser can — the
+  // EventSource as ?token=, /rpc as a bearer. The regression pinned here:
+  // /rpc went out bare, so a REQUIRED-auth backend 403ed every panel call.
+  const { tick, shots, streamUrl } = await bootApp(BACKEND, { token: 'tok-123' });
+  await tick();
+  assert.equal(streamUrl(), '/events?token=tok-123', 'the stream carries the token');
+  assert.ok(
+    shots.some((s) => s.url.endsWith('/rpc') && s.headers.authorization === 'Bearer tok-123'),
+    'rpc carries the bearer'
+  );
 });
 
 test('a slash that matches nothing says so instead of vanishing', async () => {

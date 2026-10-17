@@ -53,7 +53,7 @@ function toolsIn(dir) {
 
 /* H1 — the project's own spill directory ---------------------------------- */
 
-test('the spill directory is out of every listing, but still readable', () => {
+test('the spill directory is out of every listing, but still readable', async () => {
   const dir = tempDir({
     'a.ts': 'export const needle = 1;\n',
     // What spill() leaves behind after a long tool result: the same "needle",
@@ -62,7 +62,7 @@ test('the spill directory is out of every listing, but still readable', () => {
   });
   const tools = toolsIn(dir);
 
-  const search = tools.search('needle');
+  const search = await tools.search('needle');
   assert.ok(search.includes('a.ts'), 'the real file is still found');
   assert.ok(!search.includes('.aipass'), `an earlier run's spill is not searchable:\n${search}`);
 
@@ -161,21 +161,29 @@ test('append batches the header rewrite, and rename still fixes it at once', (t)
   const store = new SessionStore(tempDir());
   const session = store.create({ root: tempDir(), title: 'batch me' });
 
-  // rewriteHeader() is the only thing that rewrites an existing session file,
-  // so counting the writeFileSync calls it makes counts exactly the rewrites.
-  // There is one such call per rewrite: the atomic swap writes the temp file
-  // and renames it over the session (renameSync, which is not spied).
-  // appendFileSync has to be told apart from it: on Node 24 an append is
-  // implemented as a writeFileSync, so the caller is the only thing that
-  // separates "one entry appended" from "the whole file rewritten".
-  const real = fs.writeFileSync;
+  // rewriteHeader() is the only thing that rewrites an existing session file.
+  // Since headers are padded to a fixed width, a rewrite is normally one
+  // writeSync at offset 0 (the atomic writeFileSync swap remains the fallback
+  // for unpadded files) — so both write paths count as one rewrite. That also
+  // tells appendFileSync apart from it: on Node 24 an append is implemented as
+  // a writeFileSync, and the caller in the stack is what separates "one entry
+  // appended" from "the header rewritten".
+  const realWrite = fs.writeFileSync;
+  const realWriteSync = fs.writeSync;
   const rewrites = [];
-  fs.writeFileSync = function spied(file, ...rest) {
+  const count = (file) => {
     const target = String(file) === session.file || String(file) === `${session.file}.tmp`;
     if (target && /rewriteHeader/.test(new Error().stack)) rewrites.push(String(file));
-    return real.call(this, file, ...rest);
   };
-  t.after(() => { fs.writeFileSync = real; });
+  fs.writeFileSync = function spied(file, ...rest) {
+    count(file);
+    return realWrite.call(this, file, ...rest);
+  };
+  fs.writeSync = function spiedSync(fd, ...rest) {
+    if (typeof fd === 'number') count(session.file);
+    return realWriteSync.call(this, fd, ...rest);
+  };
+  t.after(() => { fs.writeFileSync = realWrite; fs.writeSync = realWriteSync; });
 
   for (let i = 0; i < 60; i++) session.append('note', { text: `note ${i}` });
 

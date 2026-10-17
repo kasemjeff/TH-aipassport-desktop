@@ -17,7 +17,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { readFileSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -46,12 +46,29 @@ const bridgeUp = () =>
     .then((r) => r.ok)
     .catch(() => false);
 
-/** Ensure the bridge is running. Warn and exit if not. */
+/** Ensure the bridge is running — starting it in the background if it is not. */
 async function ensureBridge() {
   if (await bridgeUp()) return;
+  // The help text has always promised `aipass` starts the bridge itself; this
+  // is that promise. Detached, stdio ignored, pid recorded — `aipass stop`
+  // reads exactly this file — then wait for /status before talking to it.
+  mkdirSync(STATE, { recursive: true });
+  const child = spawn(process.execPath, [sibling('bridge/server.mjs')], { detached: true, stdio: 'ignore', env: process.env });
+  child.unref();
+  writeFileSync(PIDFILE, `${child.pid}\n`);
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    if (await bridgeUp()) {
+      console.log(dim(`started the bridge in the background (pid ${child.pid}; aipass stop ends it)`));
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  try { process.kill(child.pid); } catch { /* never started */ }
+  rmSync(PIDFILE, { force: true });
   process.stderr.write(
     red(`\n✗ Bridge not running at ${BRIDGE}\n`) +
-    dim(`  Please start the bridge in a separate terminal:\n`) +
+    dim(`  It was started in the background but did not answer. Run it in the foreground to see why:\n`) +
     `  ${dim('$')} \x1b[36maipass dev\x1b[0m   ${dim('(or npm run dev)')}\n\n`
   );
   process.exit(1);

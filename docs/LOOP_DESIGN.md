@@ -191,7 +191,7 @@ the stop reason; credits are diffed (`quota(true)`); `run_stats` and
 | err loop | the same failure (kind + masked error line) on calls in a row | correction on the third result, `errLoops` | streak > `repeatGuardMax` → `stalled` |
 | chain guard | a failed change, mid-reply | the reply's later changes/RUNs skipped and stated, `chainSkips`; reads still run | — |
 | stagnation | same step ×3, or two trading places ×2 | `stagnation` warn + "do something different" | `stagnation` |
-| budgets | tool count (300) and wall clock (30 min) | `budget` event | `tools-limited` / `time-limited` |
+| budgets | tool count (300), wall clock (30 min), and — only when set — credits (`maxCredits`, 0 = off, checked against the cached quota) | `budget` event | `tools-limited` / `time-limited` / `credit-limited` |
 | plan gate | `PLAN` and no approval yet | `plan_request`, wait however long | decline → `plan-rejected` |
 | checker | DONE (or a stalled step) with staged code | read-only verifier runs it; a self-run does not stand it down; a re-check only when the tree moved | fail → a correcting step; pass → `done`; two verdicts a run, the last recorded |
 | verify nudge | staged code, nothing verified since the change | `verify_prompt` (once per run) | — |
@@ -217,6 +217,7 @@ them correct *evidence*, never intent: a call runs as written first.
 | `plan-rejected` | the human declined the plan |
 | `tools-limited` | the tool-call budget was spent |
 | `time-limited` | the wall-clock budget was spent |
+| `credit-limited` | the optional credit cap (`maxCredits`) was reached — observed spend against the cached quota |
 
 ## The contracts the loop holds
 
@@ -241,6 +242,23 @@ them correct *evidence*, never intent: a call runs as written first.
    proposals that wait for the parent's approval; a named role
    (`SUBAGENT_ROLES`: `verifier`, `reviewer`, `summariser`) is read-only, and
    only the verifier may RUN — its report is the deliverable.
+8. **Helpers report; the parent decides.** Results come back in the order
+   their markers ran, as ordinary tool results — no vote, no merge, no
+   last-writer-wins. A role's verdict (`pass` / `fail` / `not-checkable`) is
+   evidence the parent must read like any other result. When the run declares
+   a check, that check's verdict is the one automatic verdict in play — and
+   even it only reports; nothing is applied without the same human approval
+   as any other edit. Two helpers that disagree leave both claims on the
+   table, and the disagreement surfaces as prose to the model and as the
+   diff list to the person — never as a tie broken by arrival order or size.
+9. **Uncertainty escalates to a person, never sideways.** A model that is
+   unsure asks (`ASK`) or says so in prose — the loop surfaces it and waits.
+   Conflicting evidence (two helpers, a failed check, a staged change nobody
+   approved) is *presented*, never resolved by the loop: the diff list, the
+   check verdict and the notes are the escalation, and the only paths to a
+   real write are human (Apply, `--apply`, a granted rule). A run that
+   cannot say what it is unsure about stops through a guard (`stalled` /
+   `stagnation` / `steps`) with the reason recorded.
 
 ## The event stream
 
@@ -273,4 +291,5 @@ the helper keeps its original behaviour.
 | `test/compact.test.mjs` | rotation mid-run; the estimate's script-aware divisor |
 | `test/protocol.test.mjs` | markers, fences, the preamble |
 | `test/stats.test.mjs` | `run_stats` and its aggregation |
+| `test/secret-screen.test.mjs` | the secret screen past the file tools — RUN bodies, GIT args, SEARCH walks |
 | `test/desktop-window.test.mjs` · `test/ui.test.mjs` | the whole run through the backend — plan gate, permissions, todos — and the window's handlers |

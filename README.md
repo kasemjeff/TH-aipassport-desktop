@@ -203,7 +203,7 @@ plugins, uploads, logs).
 
 ## Documentation
 
-The design docs live in [`docs/`](./docs/):
+The design and operations docs live in [`docs/`](./docs/):
 
 | Doc | What it holds |
 |---|---|
@@ -212,6 +212,13 @@ The design docs live in [`docs/`](./docs/):
 | [`docs/SPEC_CHECKER.md`](./docs/SPEC_CHECKER.md) | the checker: the read-only pass a `DONE` earns, verdicts, the declared check |
 | [`docs/SPEC_EVALS.md`](./docs/SPEC_EVALS.md) | the eval runner: task fixtures, live and replay modes, scoring |
 | [`docs/TECH_STACK.md`](./docs/TECH_STACK.md) | what runs where, and the reasons each piece is what it is |
+| [`docs/DATA_FORMATS.md`](./docs/DATA_FORMATS.md) | what lands on disk: settings, session JSONL, the token, uploads, eval results |
+| [`docs/TROUBLESHOOTING.md`](./docs/TROUBLESHOOTING.md) | when something is broken: doctor, the common failures, where the logs are |
+| [`docs/RELIABILITY.md`](./docs/RELIABILITY.md) | what healthy means: the SLIs and their targets, the error budget, degradation modes |
+| [`docs/RELEASE.md`](./docs/RELEASE.md) | versioning, the release checklist, upgrade and rollback, dependency review |
+
+The behavior-level change history is [`CHANGELOG.md`](./CHANGELOG.md); it is
+what release notes are cut from.
 
 Component-level docs sit next to their code:
 [`aipass-bridge/README.md`](./aipass-bridge/README.md) (bridge, CLI, protocol),
@@ -236,7 +243,7 @@ aipass/
 │  ├─ ui/               plain HTML/CSS/JS — no build step
 │  ├─ src-tauri/        native shell: tray, sidecar node, bundles
 │  └─ plugins-example/  a plugin worth copying
-├─ docs/                the five design docs — see Documentation above
+├─ docs/                design and operations docs — see Documentation above
 ├─ evals/               task fixtures — smoke set, holdout, Thai/English pairs
 ├─ scripts/             test runner, QA loop, verify, evals
 ├─ public/              static pages and the README image

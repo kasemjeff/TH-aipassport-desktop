@@ -13,12 +13,21 @@
 // Everything runs in this process, with the same access the harness has —
 // including the filesystem. That is the deal: plugins are code you chose to
 // install, not sandboxed. Load only what you have read.
+//
+// Compatibility: the ctx surface above is `PLUGIN_API` 1. Within one major
+// the harness only ever grows ctx — new helpers, never new required fields —
+// and a plugin marker can never shadow a built-in one. A plugin may declare
+// `apiVersion`; one that needs a newer harness than this build is refused at
+// load before setup() runs, and one that declares nothing loads as
+// `apiVersion: null` (read: 1). `details()` carries whichever it was.
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { aipassHome } from './settings.mjs';
 import { pathToFileURL } from 'node:url';
+
+export const PLUGIN_API = 1;
 
 export class PluginManager {
   constructor({ dir = path.join(aipassHome(), 'plugins'), settings = null, events = null, log = () => {} } = {}) {
@@ -87,12 +96,20 @@ export class PluginManager {
           this.log(`plugin ${name} is disabled in settings — not registering it`);
           continue;
         }
+        // A plugin that needs a newer API must not run setup at all: half a
+        // plugin registered against a harness it does not understand is
+        // worse than a named refusal. Silence means API 1 (the only one).
+        const api = plugin.apiVersion ?? null;
+        if (api !== null && (!Number.isInteger(api) || api < 1 || api > PLUGIN_API)) {
+          throw new Error(`plugin apiVersion ${api} needs a newer harness (this build speaks ${PLUGIN_API})`);
+        }
         const ctx = this.#context(plugin);
         await plugin.setup(ctx);
         this.loaded.push({
           name,
           version: plugin.version ?? '0.0.0',
           description: plugin.description ?? '',
+          apiVersion: api,
           file,
           sha256: crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16),
           bytes: stat.size,

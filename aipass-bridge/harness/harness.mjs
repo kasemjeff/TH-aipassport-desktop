@@ -50,6 +50,7 @@ export class Harness {
       maxSteps: 10,
       maxToolCalls: 300,
       maxWallClockMs: 1_800_000,
+      maxCredits: 0,
       allowRun: false,
       mode: 'ask',
       plan: false,

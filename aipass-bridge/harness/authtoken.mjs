@@ -23,14 +23,23 @@ export const tokenPath = (home = aipassHome()) => path.join(home, TOKEN_FILE);
 /** False only under the explicit escape hatch — every other value requires auth. */
 export const authRequired = () => process.env.AIPASS_REQUIRE_AUTH !== '0';
 
+// authorized() runs on every /rpc call and on every SSE frame's auth check,
+// and each one used to re-read the token file. The read is memoized and the
+// memo revalidated from mtime+size: a rotated file is picked up on the next
+// call, an unchanged one costs a stat.
+let tokenCache = { file: null, stamp: '', value: null };
+
 /** The active token: explicit env wins, otherwise the minted file (created once). */
 export function loadOrMintToken(home = aipassHome()) {
   const env = process.env.AIPASS_TOKEN?.trim();
   if (env) return env;
   const file = tokenPath(home);
   try {
+    const st = fs.statSync(file);
+    const stamp = `${st.mtimeMs}:${st.size}`;
+    if (tokenCache.file === file && tokenCache.stamp === stamp) return tokenCache.value;
     const saved = fs.readFileSync(file, 'utf8').trim();
-    if (saved) return saved;
+    if (saved) { tokenCache = { file, stamp, value: saved }; return saved; }
   } catch { /* first run — mint below */ }
   const fresh = crypto.randomBytes(32).toString('hex');
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });

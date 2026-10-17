@@ -13,11 +13,12 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { exec, spawnSync } from 'node:child_process';
+import { exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { SKIP, binaryKind, posix, stripGutter } from './overlay.mjs';
 import { createSandbox, materializeTree, restorePaths } from './sandbox.mjs';
 import { outbound, inbound } from './waf.mjs';
+import { secretHit, scrubSecretDiff } from './permissions.mjs';
 import { isPrivateHost, hostResolvesPrivate } from '../bridge/private-hosts.mjs';
 import { loadGitignore } from './gitignore.mjs';
 import { stripInvisibles } from './lang.mjs';
@@ -41,9 +42,15 @@ const MAX_SEARCH_FILE = 1_000_000;
  */
 // How many spill files a project keeps. The model is told these are on disk,
 // so they are pruned oldest-first rather than deleted eagerly — but they must
-// not grow forever either. Every write sweeps: a readdir plus a stat per file,
-// and the directory stays bounded whatever the process does.
+// not grow forever either. A sweep is a readdir plus a stat per file; running
+// it on every single spill made a tool-heavy run pay for the same listing over
+// and over, so it runs every SPILL_PRUNE_EVERY writes — the directory stays
+// bounded within that slack whatever the process does.
 export const SPILL_KEEP = Number(process.env.AIPASS_SPILL_KEEP ?? 200);
+
+/** How many writes between sweeps; see SPILL_KEEP. */
+const SPILL_PRUNE_EVERY = Number(process.env.AIPASS_SPILL_PRUNE_EVERY ?? 25);
+let spillsSincePrune = 0;
 
 export function pruneSpill(dir, keep = SPILL_KEEP) {
   try {
@@ -62,7 +69,7 @@ function spill(text, cap, root, tailShare = 0) {
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, `${id}.txt`);
     fs.writeFileSync(file, text);
-    pruneSpill(dir);
+    if (++spillsSincePrune >= SPILL_PRUNE_EVERY) { spillsSincePrune = 0; pruneSpill(dir); }
     const rel = `.aipass/spill/${id}.txt`;
     const lines = text.split('\n').length;
     if (tailShare > 0) {
@@ -99,7 +106,24 @@ function spill(text, cap, root, tailShare = 0) {
 // it inside the run costs one round trip instead of a broken apply later.
 const JS_FILE = /\.(mjs|cjs|js)$/i;
 
-function syntaxNote(rel, text) {
+/** Run a child to completion, never throwing on a non-zero exit. */
+function runChild(cmd, args, timeoutMs) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', (error) => resolve({ error, status: null, stdout, stderr }));
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+    const t = setTimeout(() => { try { child.kill(); } catch { /* already gone */ } }, timeoutMs);
+    t.unref?.();
+  });
+}
+
+// Awaited, not spawnSync: this runs in the backend's process, and a blocked
+// event loop there freezes the window's stream for the length of the check.
+async function syntaxNote(rel, text) {
   if (!JS_FILE.test(rel) || text.length > 512 * 1024) return '';
   // The extension decides the grammar: .mjs is a module, .cjs a script. A
   // project .js file is whichever its package.json says, so sniff the one
@@ -109,7 +133,7 @@ function syntaxNote(rel, text) {
   const tmp = path.join(os.tmpdir(), `aipass-check-${process.pid}-${Math.random().toString(16).slice(2, 8)}${ext}`);
   try {
     fs.writeFileSync(tmp, text);
-    const res = spawnSync(process.execPath, ['--check', tmp], { encoding: 'utf8', timeout: 15_000 });
+    const res = await runChild(process.execPath, ['--check', tmp], 15_000);
     if (res.error || res.status === null) return '';
     if (res.status === 0) return 'syntax check ok';
     const line = String(res.stderr ?? '').split('\n').map((l) => l.trim()).find((l) => /^\w*Error\b/.test(l)) || 'the content does not parse';
@@ -311,7 +335,7 @@ export function createTools(ctx) {
       // on half a file.
       return clip(numbered) + note;
     },
-    write(arg, rawBody) {
+    async write(arg, rawBody) {
       const abs = safe(arg);
       // (read-first, Claude Code's rule) CREATE over a file that already
       // exists is the accidental-overwrite shape: allowed once this run has
@@ -323,7 +347,7 @@ export function createTools(ctx) {
       }
       const body = inbound(rawBody);
       overlay.set(abs, body);
-      const note = syntaxNote(arg, body);
+      const note = await syntaxNote(arg, body);
       // (R4, the hard half) The write answers with what it actually staged —
       // first and last line — so "the file was written" is never the model's
       // own word alone, and a body the marker parser mangled shows up here
@@ -336,7 +360,7 @@ export function createTools(ctx) {
         : '';
       return `wrote ${arg}, ${wrote.length} lines${note ? '\n' + note : ''}${readBack}`;
     },
-    replace(arg, rawBody) {
+    async replace(arg, rawBody) {
       const abs = safe(arg);
       if (!existsAt(abs)) return `err: no such file: ${arg}`;
       const before = inbound(stripGutter(rawBody[0]));
@@ -356,7 +380,7 @@ export function createTools(ctx) {
         if (normalized !== before && text.split(normalized).length - 1 === 1) {
           const matched = text.replace(normalized, after);
           overlay.set(abs, matched);
-          const note = syntaxNote(arg, matched);
+          const note = await syntaxNote(arg, matched);
           return `updated ${arg} (1 change; the FIND text carried invisible characters — they were dropped to make the match)${note ? '\n' + note : ''}`;
         }
         const hint = nearHint(text, before);
@@ -379,10 +403,10 @@ export function createTools(ctx) {
 
       const updated = text.replace(before, after);
       overlay.set(abs, updated);
-      const note = syntaxNote(arg, updated);
+      const note = await syntaxNote(arg, updated);
       return `updated ${arg} (1 change)${note ? '\n' + note : ''}`;
     },
-    search(arg) {
+    async search(arg) {
       const raw = String(arg).trim();
       const ci = /^-i\s+/i.test(raw);
       const query = (ci ? raw.slice(2) : raw).trim();
@@ -393,25 +417,26 @@ export function createTools(ctx) {
       let matches = 0; // only match lines count toward MAX; context rides along
       const MAX = 50;
       const ign = loadGitignore(root);
-      const walk = (dir) => {
+      const walk = async (dir) => {
         if (matches >= MAX) return;
         let entries;
-        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
         for (const e of entries) {
           if (SKIP.has(e.name) || e.name.startsWith('.')) continue;
           const full = path.join(dir, e.name);
           const rel = posix(path.relative(root, full));
           if (e.isDirectory()) {
-            if (!ign.ignored(rel, true)) walk(full);
+            if (!ign.ignored(rel, true)) await walk(full);
             continue;
           }
           if (matches >= MAX) return;
           if (ign.ignored(rel, false)) continue;
+          if (secretHit(rel)) continue; // a secret file is not a search result
           let size = 0;
           try { size = fs.statSync(full).size; } catch { /* overlay-only or vanished: read it anyway */ }
           if (size > MAX_SEARCH_FILE) continue;
           let text;
-          try { text = readAt(full); } catch { continue; }
+          try { text = overlay.has(full) ? readAt(full) : await fs.promises.readFile(full, 'utf8'); } catch { continue; }
           if (text.includes('\u0000')) continue; // skip binary
           const lines = text.split('\n');
           // One line of context on each side, ripgrep-style: a match line
@@ -442,7 +467,7 @@ export function createTools(ctx) {
           }
         }
       };
-      walk(root);
+      await walk(root);
       if (!hits.length) return `no matches for "${query}".`;
       const more = matches >= MAX ? `\n… stopped at ${MAX} matches; make the search more specific for the rest.` : '';
       return clip(hits.join('\n') + more);
@@ -452,6 +477,11 @@ export function createTools(ctx) {
       if (!String(body ?? '').trim()) {
         return 'err: the RUN block has no command. One command per RUN, e.g. RUN\nnode check.mjs\nEND.';
       }
+      // The secret floor covers tool args; a RUN carries its command in the
+      // body, so `type .env` used to walk straight past it. Command words are
+      // all that can be screened — see secretHit's note on runtime-built names.
+      const secret = secretHit(body);
+      if (secret) return `err: the command names ${secret.token} (${secret.pattern}) — secret files stay on this machine.`;
       // With anything staged, the command runs against a projection of the
       // tree that has the staged edits written in (sandbox.mjs) — the disk
       // itself is untouched. Without staged changes it runs in the project,
@@ -462,7 +492,7 @@ export function createTools(ctx) {
       if (overlay.size) {
         try {
           sandbox = createSandbox(root);
-          materializeTree(root, overlay, sandbox);
+          await materializeTree(root, overlay, sandbox);
         } catch {
           if (sandbox) { try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* left under .aipass */ } }
           sandbox = null; // a projection that cannot be built must not block the run
@@ -477,9 +507,9 @@ export function createTools(ctx) {
         const { stdout } = await execP(body, {
           cwd: sandbox ?? root, timeout: 120_000, windowsHide: true, maxBuffer: 10 * 1024 * 1024,
         });
-        return clipRun(scrub(stdout));
+        return clipRun(scrubSecretDiff(scrub(stdout)));
       } catch (err) {
-        return clipRun(scrub(`err: exit ${err.code ?? err.signal ?? '?'}\n${String(err.stdout ?? '')}${String(err.stderr ?? '')}`));
+        return clipRun(scrubSecretDiff(scrub(`err: exit ${err.code ?? err.signal ?? '?'}\n${String(err.stdout ?? '')}${String(err.stderr ?? '')}`)));
       } finally {
         if (sandbox) { try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* left under .aipass */ } }
       }
@@ -542,6 +572,10 @@ export function createTools(ctx) {
       // Newlines/NUL ride along in tool args, so they are punctuation too.
       if (/[;&|`$<>\r\n\0]/.test(sub))
         return `err: one read-only git subcommand, no shell punctuation. Got: ${sub}`;
+      // Same screen as RUN, applied to the argument: `show HEAD:.env` names a
+      // secret inside the repository, which the file floor never sees.
+      const secret = secretHit(sub);
+      if (secret) return `err: git may not name ${secret.token} (${secret.pattern}) — secret files stay on this machine.`;
       if (!gitAllowed(sub))
         return `err: only read-only git subcommands are allowed (status, diff, log, show, branch, ls-files, …). Got: ${sub}`;
       try {
@@ -550,14 +584,16 @@ export function createTools(ctx) {
         const { stdout } = await execP(`git ${sub}`, {
           cwd: root, timeout: 15_000, windowsHide: true, maxBuffer: 10 * 1024 * 1024,
         });
-        return clip(stdout);
+        return clip(scrubSecretDiff(stdout));
       } catch (err) {
         const detail = String(err.stderr ?? err.stdout ?? '');
         // `git diff` outside a repository answers with a page of option help
         // and exit 129 (live finding, 2026-10-15). The one fact worth having
-        // fits in a line — say the fact, not the wall.
-        if (/not a git repository/i.test(detail)) return 'err: not a git repository — GIT only works inside one. Run git init first, or skip git here.';
-        return clip(`err: exit ${err.code ?? err.status ?? 1}\n${detail}`);
+        // fits in a line — say the fact, not the wall. The no-repository
+        // phrasing varies by git build (sandbox projections: "gitfile does
+        // not point to a valid repository" on the CI runners), so match both.
+        if (/not a git repository|gitfile does not point to a valid repository/i.test(detail)) return 'err: not a git repository — GIT only works inside one. Run git init first, or skip git here.';
+        return clip(scrubSecretDiff(`err: exit ${err.code ?? err.status ?? 1}\n${detail}`));
       }
     },
     async fetch(url) {

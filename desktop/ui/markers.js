@@ -51,6 +51,24 @@ const normalizePlugins = (plugins = []) => plugins
   .map((p) => (typeof p === 'string' ? { marker: p } : p))
   .filter((p) => p?.marker);
 
+// The window re-walks the whole reply on every streamed paint, so the stop
+// line regexes and the plugin marker regexes are compiled once and kept here:
+// the walk used to build a fresh RegExp per line per marker, which made every
+// repaint grow with the reply's length even for text that never changed.
+const STOP_RES = new Map();
+const stopRe = (stops) => {
+  const key = stops.join('|');
+  let re = STOP_RES.get(key);
+  if (!re) { re = new RegExp(`^\\s*(?:${key})\\s*$`, 'i'); STOP_RES.set(key, re); }
+  return re;
+};
+const PLUGIN_RES = new Map();
+const pluginRe = (marker) => {
+  let re = PLUGIN_RES.get(marker);
+  if (!re) { re = new RegExp(`^\\s*${marker}\\b\\s*(.*)$`, 'i'); PLUGIN_RES.set(marker, re); }
+  return re;
+};
+
 /**
  * One pass over a reply: `kept` is the lines a reader should see, `calls` is
  * what the loop would act on. The consumption rules are copied from
@@ -63,12 +81,14 @@ function walk(reply, plugins) {
   const calls = [];
   let inFence = false;
   let i = 0;
+  const pluginList = normalizePlugins(plugins); // normalised once per walk, not once per line
 
   // Skip to the next stop line — END, or one of the EDIT block's stops. The
   // marker regexes tolerate trailing whitespace (\r included) exactly as the
   // protocol does.
   const skipUntil = (stops) => {
-    while (i < lines.length && !stops.some((st) => new RegExp(`^\\s*${st}\\s*$`, 'i').test(lines[i]))) i += 1;
+    const re = stopRe(stops);
+    while (i < lines.length && !re.test(lines[i])) i += 1;
   };
   const skipEnd = () => { if (/^\s*END\s*$/i.test(lines[i] ?? '')) i += 1; };
 
@@ -114,8 +134,8 @@ function walk(reply, plugins) {
 
     // Plugin markers last: a built-in name is never shadowed by one.
     let matchedPlugin = false;
-    for (const p of normalizePlugins(plugins)) {
-      const pm = new RegExp(`^\\s*${p.marker}\\b\\s*(.*)$`, 'i').exec(line);
+    for (const p of pluginList) {
+      const pm = pluginRe(p.marker).exec(line);
       if (!pm) continue;
       i += 1;
       if (p.takesBody) { skipUntil(['END']); skipEnd(); }

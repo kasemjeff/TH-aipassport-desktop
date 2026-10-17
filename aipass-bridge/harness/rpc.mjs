@@ -175,12 +175,23 @@ export function createRpc({
   //     the middle of a run or duplicating what it already rendered
   let seq = 0;
   const replay = [];
-  const REPLAY_LIMIT = 500;
+  let replayBytes = 0;
+  // Two bounds, not one count: 500 tiny delta frames covered only seconds of
+  // a long run (its middle went missing on reload), while a handful of huge
+  // tool results could crowd the same window. The byte bound keeps a
+  // reconnecting window's gap small in wall-clock terms; the count is the
+  // memory backstop.
+  const REPLAY_LIMIT = 5000;
+  const REPLAY_BYTES = 4 * 1024 * 1024;
   const emit = (type, payload) => {
     const body = { seq: ++seq, ...(payload ?? {}) };
-    replay.push({ event: type, seq: body.seq, body });
-    if (replay.length > REPLAY_LIMIT) replay.shift();
-    const frame = `event: ${type}\nid: ${seq}\ndata: ${JSON.stringify(body)}\n\n`;
+    const data = JSON.stringify(body);
+    replay.push({ event: type, seq: body.seq, data });
+    replayBytes += data.length;
+    while (replay.length > REPLAY_LIMIT || (replayBytes > REPLAY_BYTES && replay.length > 1)) {
+      replayBytes -= replay.shift().data.length;
+    }
+    const frame = `event: ${type}\nid: ${seq}\ndata: ${data}\n\n`;
     // A listener whose socket died between frames must be dropped, not written
     // to — one dead window must not take down the backend for the live ones.
     for (const res of [...listeners]) {
@@ -445,18 +456,24 @@ export function createRpc({
      * showing half a truth while the run it abandoned is still going.
      */
     async snapshot() {
+      const status = await methods.status();
       return {
-        status: await methods.status(),
+        status,
         session: current.session ? current.session.meta() : null,
         entries: current.session?.entries ?? [],
-        pending: current.pendingChanges(),
-        context: current.contextUsage(),
+        // status answered both of these already; asking again was a second
+        // diff of every staged file for a single reply.
+        pending: status.pending,
+        context: status.context,
         skills: current.skills.list(),
       };
     },
 
     async models() { return current.bridge.models(true); },
-    async credits() { return current.bridge.quota(true); },
+    // Forced by default — a caller that asks for credits wants a number, not
+    // a cache — but the window passes force:false while idle so the
+    // extension's tab is not poked upstream every 10 seconds forever.
+    async credits(params = {}) { return current.bridge.quota(params.force !== false); },
     async conversations() { return current.bridge.conversations(); },
 
     async 'config.set'(params = {}) {
@@ -632,6 +649,7 @@ export function createRpc({
         maxSteps: params.maxSteps ?? current.options.maxSteps,
         maxToolCalls: params.maxToolCalls ?? current.options.maxToolCalls,
         maxWallClockMs: params.maxWallClockMs ?? current.options.maxWallClockMs,
+        maxCredits: params.maxCredits ?? current.options.maxCredits,
         searchI: params.searchI ?? current.options.searchI,
         attach: params.attach ?? current.options.attach,
         webScratch: params.webScratch ?? current.options.webScratch,
@@ -687,7 +705,9 @@ export function createRpc({
     async diff(params = {}) {
       const abs = current.overlay.safe(params.file);
       if (!current.overlay.has(abs)) throw new Error('no pending change for that file');
-      return current.overlay.changes().find((c) => c.abs === abs) ?? null;
+      // One file's diff, not every staged file's diff searched for one: a
+      // diff is the expensive part and the panel asks a file at a time.
+      return current.overlay.changeFor(abs);
     },
     async apply(params = {}) { return current.apply(params.files ?? null); },
     async discard() { return { dropped: current.discard() }; },
@@ -726,14 +746,20 @@ export function createRpc({
     async 'fs.list'(params = {}) {
       const dir = current.overlay.trySafe(params.dir ?? '.');
       if (!dir) throw new Error(`outside project root: ${params.dir ?? '.'}`);
-      return fs.readdirSync(dir, { withFileTypes: true }).map((e) => ({ name: e.name, dir: e.isDirectory() }))
+      // A panel click on a directory with thousands of entries: the async read
+      // keeps the event loop free for the run's own stream while it fills.
+      const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      return entries.map((e) => ({ name: e.name, dir: e.isDirectory() }))
         .filter((e) => !['node_modules', '.git', '.next', 'dist', 'build', '.cache'].includes(e.name));
     },
     async 'fs.read'(params = {}) {
       const abs = current.overlay.trySafe(params.file);
       if (!abs) throw new Error(`outside project root: ${params.file}`);
       if (!current.overlay.existsAt(abs)) throw new Error('no such file');
-      return { file: params.file, text: current.overlay.readAt(abs) };
+      const text = current.overlay.has(abs)
+        ? current.overlay.readAt(abs)
+        : await fs.promises.readFile(abs, 'utf8');
+      return { file: params.file, text };
     },
   };
 
@@ -782,12 +808,17 @@ export function createRpc({
       );
       if (Number.isFinite(since) && since > 0) {
         for (const frame of replay) {
-          if (frame.seq > since) res.write(`event: ${frame.event}\nid: ${frame.seq}\ndata: ${JSON.stringify(frame.body)}\n\n`);
+          if (frame.seq > since) res.write(`event: ${frame.event}\nid: ${frame.seq}\ndata: ${frame.data}\n\n`);
         }
       }
       res.write(`event: hello\ndata: ${JSON.stringify({ seq })}\n\n`);
       listeners.add(res);
-      const ping = setInterval(() => { try { res.write(': keepalive\n\n'); } catch { /* closed */ } }, 15_000);
+      // A named frame, never a bare `: keepalive` comment: comments are
+      // invisible to EventSource, so the window's watchdog (no event for 20 s
+      // ⇒ run lost) fired on any long RUN or SEARCH while the backend was
+      // perfectly alive. It carries no id — a reconnect's Last-Event-ID still
+      // points at the last real frame.
+      const ping = setInterval(() => { try { res.write('event: ping\ndata: {}\n\n'); } catch { /* closed */ } }, 15_000);
       req.on('close', () => { clearInterval(ping); listeners.delete(res); });
       return;
     }
@@ -796,12 +827,16 @@ export function createRpc({
       if (!authorized(req)) {
         return json(res, 401, { ok: false, error: 'unauthorized: missing or wrong loopback bearer token' });
       }
-      let body = '';
-      req.on('data', (c) => { body += c; if (body.length > 32_000_000) req.destroy(); });
+      // Chunks collected, joined once: `body += c` re-flattens the whole body
+      // on every packet — O(n²) on a big attachments upload — and can split a
+      // UTF-8 sequence sitting across two chunks.
+      const chunks = [];
+      let size = 0;
+      req.on('data', (c) => { chunks.push(c); size += c.length; if (size > 32_000_000) req.destroy(); });
       req.on('end', async () => {
         let msg = {};
         try {
-          msg = JSON.parse(body || '{}');
+          msg = JSON.parse(chunks.length ? Buffer.concat(chunks).toString('utf8') : '{}');
         } catch (err) {
           // A body that does not parse is the caller's bug — say so, instead of
           // letting `msg = {}` fall through to "no such method: undefined",
@@ -852,8 +887,10 @@ export function createRpc({
   plugins.load().catch((err) => process.stderr.write(`plugin load failed: ${err.message}\n`));
 
   // A run that cannot proceed because no chat tab is open is a one-click fix, so
-  // the backend offers the click (and takes it when settings allow).
-  current.events.on('needs_tab', async ({ url }) => {
+  // the backend offers the click (and takes it when settings allow). This hangs
+  // off the shared bus, not the boot harness: every project's harness forwards
+  // its events there, so the auto-open keeps working after a project switch.
+  bus.on('needs_tab', async ({ url }) => {
     if (appSettings.get('autoOpenTab') === false) return;
     const opened = await openBrowser(url);
     emit('tab_opened', { url, opened });
@@ -877,7 +914,7 @@ if (invokedDirectly) {
   // nothing but whatever faint line was mid-flight; one scrubbed line names it,
   // and the non-zero exit is what the desktop shell's supervisor watches.
   const fatal = (label, err) => {
-    console.error(`[fatal] ${label}: ${scrubSecrets(err?.stack ?? String(err))}`);
+    console.error(formatLogLine({ level: 'error', msg: `[fatal] ${label}: ${scrubSecrets(err?.stack ?? String(err))}` }));
     process.exit(1);
   };
   process.on('uncaughtException', (err) => fatal('uncaught exception', err));

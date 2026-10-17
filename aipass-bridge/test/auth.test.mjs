@@ -11,6 +11,7 @@ import path from 'node:path';
 import { startBridge, freePort, tempDir } from './harness.mjs';
 import { createRpc } from '../harness/rpc.mjs';
 import { Settings } from '../harness/settings.mjs';
+import { loadOrMintToken, authorized, tokenPath } from '../harness/authtoken.mjs';
 
 const mkhome = () => fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-auth-'));
 
@@ -121,4 +122,32 @@ test('bridge: AIPASS_REQUIRE_AUTH=0 leaves the loopback surface as before', asyn
     const r = await fetch(`${bridge.base}/v1/models`);
     assert.ok(r.status !== 401, `gate must be off under the escape hatch (got ${r.status})`);
   } finally { bridge.stop(); }
+});
+
+// Revocation, the desktop way: the token file *is* the credential. Deleting
+// it (or `~/.aipass` whole) revokes the token — the next read mints a fresh
+// one, and the deleted token stops opening anything.
+test('deleting the token file revokes it — the next load mints a different one', () => {
+  const home = mkhome();
+  const prevToken = process.env.AIPASS_TOKEN;
+  const prevFlag = process.env.AIPASS_REQUIRE_AUTH;
+  delete process.env.AIPASS_TOKEN;
+  process.env.AIPASS_REQUIRE_AUTH = '1';
+  try {
+    const req = (t) => ({ headers: { authorization: `Bearer ${t}` } });
+    const first = loadOrMintToken(home);
+    assert.match(first, /^[0-9a-f]{64}$/, 'minted token is 256-bit hex');
+    assert.equal(authorized(req(first), home), true, 'the minted token authorizes');
+
+    fs.rmSync(tokenPath(home));
+    assert.equal(authorized(req(first), home), false, 'the deleted token is dead at once');
+
+    const second = loadOrMintToken(home);
+    assert.notEqual(second, first, 'a fresh token is minted');
+    assert.equal(authorized(req(second), home), true);
+    assert.equal(authorized(req(first), home), false, 'the old one stays dead');
+  } finally {
+    if (prevToken === undefined) delete process.env.AIPASS_TOKEN; else process.env.AIPASS_TOKEN = prevToken;
+    if (prevFlag === undefined) delete process.env.AIPASS_REQUIRE_AUTH; else process.env.AIPASS_REQUIRE_AUTH = prevFlag;
+  }
 });

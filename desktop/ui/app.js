@@ -12,12 +12,41 @@ const log = $('log');
 
 /* ------------------------------------------------------------------- rpc */
 
+// When the backend asks for one — AIPASS_REQUIRE_AUTH, the default — every
+// /rpc and /events call needs the loopback token. The window is a same-origin
+// page served by that same backend, so it asks /token for it once at boot
+// instead of anyone pasting a file; when auth is off the endpoint refuses and
+// authToken stays null, which is exactly the bare-request shape used before.
+let authToken = null;
+
+async function fetchToken() {
+  try {
+    const res = await fetch('/token');
+    if (!res.ok) return null;
+    const body = await res.json();
+    return typeof body.token === 'string' && body.token ? body.token : null;
+  } catch {
+    return null;
+  }
+}
+
 async function rpc(method, params = {}) {
-  const res = await fetch('/rpc', {
+  const send = () => fetch('/rpc', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+    },
     body: JSON.stringify({ method, params }),
   });
+  let res = await send();
+  // A 401 on a token-less call means the boot fetch lost a race (or the
+  // backend restarted between page load and now): fetch once more and retry,
+  // but only when that actually changes what we would send.
+  if (res.status === 401) {
+    const fresh = await fetchToken();
+    if (fresh && fresh !== authToken) { authToken = fresh; res = await send(); }
+  }
   const body = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
   if (!body.ok) throw new Error(body.error ?? 'rpc failed');
   return body.result;
@@ -102,10 +131,42 @@ function paintAssistant(a) {
   scrollDown();
 }
 
+/**
+ * Paints at most once per frame. The stream delivers dozens of deltas a
+ * second and each one used to re-render the whole reply — a long answer spent
+ * most of its time re-rendering its own prefix. Text accumulates as it
+ * arrives; the queued frame paints the latest state once, and the queue holds
+ * bubble objects, so a step that closed one bubble and opened the next still
+ * paints both. With no frame clock (the test window) a 0 ms timeout stands in
+ * — still a task later, so a burst inside one turn coalesces there too.
+ */
+const paintQueue = new Set();
+let thinkingDirty = false;
+let paintQueued = false;
+const nextFrame = typeof requestAnimationFrame === 'function'
+  ? requestAnimationFrame
+  : (fn) => setTimeout(fn, 0);
+function flushPaints() {
+  paintQueued = false;
+  const due = [...paintQueue];
+  paintQueue.clear();
+  for (const b of due) paintAssistant(b);
+  if (thinkingDirty) {
+    thinkingDirty = false;
+    if (state.thinking) { state.thinking.el.textContent = state.thinking.text; scrollDown(); }
+  }
+}
+function queuePaint(bubble = null) {
+  if (bubble) paintQueue.add(bubble); else thinkingDirty = true;
+  if (paintQueued) return;
+  paintQueued = true;
+  nextFrame(flushPaints);
+}
+
 function assistantText(delta) {
   const a = ensureAssistant();
   a.text += delta;
-  paintAssistant(a);
+  queuePaint(a);
 }
 
 /**
@@ -148,8 +209,7 @@ function thinkingText(delta) {
     state.thinking = { el: pre, text: '', box, summary, since: Date.now() };
   }
   state.thinking.text += delta;
-  state.thinking.el.textContent = state.thinking.text;
-  scrollDown();
+  queuePaint();
 }
 
 /** Like the terminal's steps: when the turn ends the reasoning folds away,
@@ -331,7 +391,11 @@ function askPlan() {
 
 /* ------------------------------------------------------------------ events */
 
-const stream = new EventSource('/events');
+// EventSource cannot set headers, so the token (when there is one) rides the
+// URL — rpc.mjs accepts `?token=` on /events. This resolves before the stream
+// opens: a window under auth never starts in a 401 reconnect loop.
+authToken = authToken ?? (await fetchToken());
+const stream = new EventSource(authToken ? `/events?token=${encodeURIComponent(authToken)}` : '/events');
 
 // The transport, not the run. When the backend process goes away the stream
 // drops and the window used to sit there with a live spinner on a run that no
@@ -340,6 +404,10 @@ const stream = new EventSource('/events');
 let lastEventAt = Date.now();
 stream.addEventListener('open', () => { lastEventAt = Date.now(); void restoreFromSnapshot(); });
 stream.addEventListener('message', () => { lastEventAt = Date.now(); });
+// rpc.mjs sends a named ping every 15 s precisely so this watchdog reads
+// "the backend died", not "the model went quiet": a long RUN or SEARCH streams
+// no other frames for a while, and nothing else here refreshes the clock.
+stream.addEventListener('ping', () => { lastEventAt = Date.now(); });
 
 /**
  * Put the window back where it was after a reload or a reconnect.
@@ -1062,6 +1130,7 @@ const SETTINGS_SECTIONS = [
       { key: 'maxSteps', label: 'สูงสุดกี่ Step ต่อคำสั่ง', type: 'number', note: 'กันเรื่องราวยาวไม่จบ — ตัวเลขสูง = เสียเครดิตรัวกว่า' },
       { key: 'maxToolCalls', label: 'สูงสุดกี่ tool call ต่อคำสั่ง', type: 'number', note: 'เพดานกันหลุด — คำตอบเดียวที่สั่งเครื่องมือร้อยครั้งจะหยุดเมื่อถึงตัวเลขนี้ (ค่าเริ่มต้น 300)' },
       { key: 'maxWallClockMin', label: 'เวลาสูงสุดต่อคำสั่ง (นาที)', type: 'number', note: 'เพดานเวลา — งานที่ค้างจะหยุดเอง (ค่าเริ่มต้น 30)' },
+      { key: 'maxCredits', label: 'เพดานเครดิตต่อคำสั่ง', type: 'number', note: '0 = ไม่จำกัด — หยุดงานเมื่อใช้เครดิตถึงเพดาน (เช็คกับยอดที่แคชไว้ ~30 วิ ต่อครั้ง)' },
       { key: 'plan', label: 'plan mode', type: 'checkbox', note: 'โมเดลร่างแผนก่อนลงมือ' },
       { key: 'requirePlanApproval', label: 'รอให้อนุมัติแผนก่อนทำ', type: 'checkbox', note: 'ใช้ได้ก็ต่อเมื่อ plan mode เปิด' },
       { key: 'subagent', label: 'ให้เรียก helper ย่อย', type: 'checkbox', note: 'งานยาวถูกแบ่งให้ตัวช่วย แล้วรีพอร์ตกลับ' },
@@ -1395,6 +1464,10 @@ async function openSettings() {
     if (!Number.isFinite(maxToolCalls) || maxToolCalls < 1) problems.push('สูงสุดกี่ tool call ต้องเป็นตัวเลขอย่างน้อย 1');
     const maxWallClockMin = Number(draft.maxWallClockMin);
     if (!Number.isFinite(maxWallClockMin) || maxWallClockMin < 1) problems.push('เวลาสูงสุดต่อคำสั่ง ต้องเป็นตัวเลขอย่างน้อย 1 นาที');
+    if (draft.maxCredits != null) {
+      const creditCap = Number(draft.maxCredits);
+      if (!Number.isFinite(creditCap) || creditCap < 0) problems.push('เพดานเครดิตต้องเป็น 0 (ไม่จำกัด) หรือตัวเลขบวก');
+    }
     // The language keys are checked only when the payload carries them: a
     // window talking to a backend that predates them must still save (the
     // server's own sane() fills the defaults), and an absent key is not an
@@ -1547,7 +1620,9 @@ async function refreshHeader() {
   $('status').append(dot(st.bridge, 'bridge'), dot(st.extensions > 0, `extension ×${st.extensions}`));
   refreshMeter();
   if (st.model) {
-    const credits = await rpc('credits').catch(() => null);
+    // Live while a run spends credits; idle windows ride the bridge's cache
+    // instead of poking the de.aipass.net tab every ten seconds.
+    const credits = await rpc('credits', { force: Boolean(state.running) }).catch(() => null);
     if (credits) $('status').append(el('span', null, `credits ${credits.available?.toLocaleString?.() ?? credits.available} / ${credits.limit?.toLocaleString?.() ?? credits.limit}`));
   }
   if (st.model && !$('model').options.length) await fillModels(st.model);

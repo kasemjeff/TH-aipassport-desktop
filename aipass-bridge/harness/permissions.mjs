@@ -135,6 +135,65 @@ export function globMatch(pattern, text) {
   return re.test(text);
 }
 
+/* --------------------------------------------------------- the secret screen
+ *
+ * The file tools are covered by the floor in evaluate() — a NEED for `.env`
+ * is denied before the mode is consulted. Three other channels used to walk
+ * past it: a RUN carries its command in `body` (never in `arg`), a GIT can
+ * name a path inside the repository (`show HEAD:.env`), and SEARCH read any
+ * file whose name did not start with a dot. This is the one screen they
+ * share: the same SECRET_RULES table, applied to the words a command spells.
+ *
+ * What this is not: a sandbox. A command that builds the name at runtime
+ * (`node -e "readFileSync('.e'+'nv')"`) is arbitrary code and cannot be
+ * screened — `allowRun` is the gate, and ask mode shows every command before
+ * it runs. The screen stops the straight-line spellings; SECURITY.md says the
+ * rest out loud.
+ */
+
+// A command line splits the way a shell sees it: whitespace plus the quoting
+// and punctuation that can separate one word from the next. Splitting on
+// `=`/`:` too peels `--env-file=.env` and repo refs like `HEAD:.env`; the
+// backslash-to-slash normalization in secretHit keeps Windows paths whole.
+const SECRET_TOKEN_SPLIT = /[\s'";&|<>()\[\]{}$`=:]+/;
+
+/**
+ * The first command word that matches a SECRET_RULES pattern, or null.
+ * Matched with globMatch — the same way the floor matches a tool arg — so a
+ * new secret pattern only ever needs to be added in one place.
+ */
+export function secretHit(text) {
+  for (const token of String(text ?? '').replace(/\\/g, '/').split(SECRET_TOKEN_SPLIT)) {
+    if (!token) continue;
+    for (const rule of SECRET_RULES) {
+      if (globMatch(rule.pattern, token)) return { token, pattern: rule.pattern };
+    }
+  }
+  return null;
+}
+
+/**
+ * Drop `git diff`-shaped chunks whose file is a secret. `git diff`, `git show`
+ * and `git log -p` print the patch of anything committed — including a secret
+ * file committed before the floor existed. The chunks are structured
+ * (`diff --git a/<path> b/<path>`), so the scrub is surgical: every chunk
+ * whose path is clean stays, the rest go, and the count is named rather than
+ * pretending nothing was there.
+ */
+export function scrubSecretDiff(text) {
+  const s = String(text ?? '');
+  if (!s.includes('diff --git')) return s;
+  let withheld = 0;
+  const kept = s.split(/(?=^diff --git )/m).filter((chunk) => {
+    const line = chunk.split('\n', 1)[0];
+    if (!line.startsWith('diff --git ') || !secretHit(line)) return true;
+    withheld++;
+    return false;
+  });
+  if (!withheld) return s;
+  return `${kept.join('')}\n[${withheld} diff${withheld > 1 ? 's' : ''} of a secret file withheld — it stays on this machine]`;
+}
+
 export class PermissionEngine {
   /**
    * @param {object}   opts

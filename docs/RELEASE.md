@@ -1,0 +1,133 @@
+# Release & rollback
+
+What a release is here, what has to be true before one is tagged, and how to
+undo one. The short version: the tag is the release, the previous installer is
+the rollback, and there is nothing to migrate because the readers merge.
+
+## Versioning
+
+- `package.json` `version` is the unit that ships; tags are `vX.Y.Z` on the
+  exact commit the installers were built from. No tag, no release.
+- Minor for features and behavior changes, patch for fixes. A change that
+  would make an *older* build misread data it wrote is not allowed to ship as
+  a quiet patch — it ships a reader first (see "Data compatibility").
+- **Session `schema: 1`, settings merge-over-DEFAULTS, eval fingerprints.**
+  There is no migration step to run, by design (`docs/DATA_FORMATS.md`). The
+  fields that make old artifacts legible ship *before* the fields that make
+  new ones interesting.
+- **Reproducibility of claims**: eval rows record the model id, the budget
+  used and the replay fingerprint; the summary reports every attempt
+  (`--attempts`). A performance claim in release notes without a pinned
+  `evals/results/*.jsonl` is an anecdote, and should read like one.
+
+## Acceptance criteria
+
+Before `git tag vX.Y.Z`, all of these are true:
+
+1. **`npm run check`** green on the release commit — the full suite plus the
+   QA loop, including the live backend checks.
+2. **CI matrix** green on both operating systems × Node 20/22/24
+   (`.github/workflows/test.yml`), plus the parse/shellcheck jobs.
+3. **`npm run doctor`** against a real signed-in tab, on at least one machine
+   (the one the release notes were written on).
+4. **`npm run stats -- --strict`** — no warning fired on this machine's recent
+   runs; if one did, it's named in the release notes. The rule behind that
+   sentence — zero warned runs over the last 50 is the error budget — is
+   `docs/RELIABILITY.md`.
+5. Advisory, not gating: `npm run evals -- --all --live --advisory --pause 10000`
+   (includes the safety set) and `npm run loadtest -- --strict`. Paste the
+   `metrics:` line into the release notes when the run happened; say so when
+   it didn't.
+6. **`CHANGELOG.md` updated** — `[Unreleased]` becomes the version; "Known
+   limits, not bugs" (`SECURITY.md`) and the not-shipped list
+   (`docs/HARNESS_DESIGN.md`) still tell the truth.
+7. Installers built (`npm run desktop:sidecar` first, then
+   `tauri:build` / `tauri:build:mac` / `tauri:build:linux`); the artifacts
+   are attached to the tag's release, and **the previous release's
+   installers stay downloadable** — that is the rollback.
+
+## Canary & soak
+
+A single-user desktop has no fleet to canary across, so the canary is staged
+time: tag `vX.Y.Z-rc.1`, install that build on the release machine (the one
+`doctor` ran on) and use it for a day before tagging `vX.Y.Z`. The rc gets no
+installers attached; the final tag gets them. The previous release's
+installers stay downloadable — that is the rollback target below.
+
+## Release evidence
+
+What to attach to the tag (or paste into the release issue) so a reviewer who
+was not present can re-read every claim:
+
+1. the CI run URL for the release commit, plus the tail of `npm run check`;
+2. `npm run doctor -- --json` from the release machine;
+3. the canary day's `npm run stats -- --json` (or the `--html` file);
+4. eval artifacts when they were produced: the `metrics:` line and the
+   `evals/results/*.jsonl` file(s);
+5. the `CHANGELOG.md` `[Unreleased]` section that becomes the release notes.
+
+**Independent assurance:** there is none, and it is not pretended — this is
+a single-maintainer project (`LICENSE`). The evidence above plus the public
+security process (`SECURITY.md`) are the compensating controls; an external
+audit remains future work.
+
+## Upgrade
+
+Install the new build over the old one. `~/.aipass/` is not touched by an
+install or uninstall: settings, sessions, the token and the logs stay exactly
+where they are, and the new build reads them with the same merge rules the
+old one did. After upgrading, run `npm run doctor` once — it is the one
+command that proves the chain end to end.
+
+There is no auto-updater, deliberately (Tauri's updater is not wired): the app
+never replaces itself in the background, so "which build is running" is always
+a fact you chose.
+
+## Rollback
+
+- **Installed app**: reinstall the previous installer over the current one.
+  On Windows/NSIS and the macOS `.app`/dmg the install is a replacement, not
+  a merge; if a bundle refuses to go backwards, uninstall first — `~/.aipass/`
+  survives that, so nothing is lost.
+- **From source**: `git checkout vPREV && npm install && npm run desktop`
+  (`npm install` matters when `package.json` changed between the two tags).
+- **Data compatibility is why this is safe**: unknown settings keys are
+  preserved on save, unknown session entry types are preserved on load, torn
+  or duplicated lines are skipped (`aipass-bridge/test/data-integrity.test.mjs`
+  pins all four), and a header field from a newer build (the `app` stamp,
+  for one) rides a rewrite untouched. A rolled-back build keeps working on
+  data a newer build wrote. What it cannot do is understand *newer features* — a `credit-limited`
+  stop reason, for example, reads as an unknown stop name in an old window.
+- **Upgrade/rollback testing today is manual.** A scripted
+  install-old → upgrade → assert → rollback → assert run is on the
+  not-shipped list; until it exists, this section is the procedure, and doing
+  it once per release is the test.
+
+**When and who.** The canary day is the trigger window: `doctor` red on a
+clean install of the tag, `stats --alerts` warning on the new build's first
+day, a data regression on a real `~/.aipass` (the data-integrity suite), or a
+supervisor restart loop in the log — any one of these starts the rollback,
+debugging comes after. The approver is the maintainer who tagged: one person,
+stated plainly, with the decision recorded in the tag message or the revert
+commit.
+
+## Release notes
+
+`CHANGELOG.md` is the source; the tag message is its `[Unreleased]` section,
+one paragraph. Release notes name behavior ("a run can now be capped by
+credits: `maxCredits`"), never file paths — the changelog files are for
+people deciding whether to upgrade, not for `git log` readers.
+
+## Dependencies
+
+The core has **zero runtime dependencies** by policy: Node built-ins, the
+user's Chrome (extension), and the Rust/Tauri shell. Nothing in `dependencies`
+means a compromised npm package cannot execute inside the harness.
+
+- `.github/dependabot.yml` watches the three ecosystems that do exist —
+  `github-actions` (workflow pins), `cargo` (`desktop/src-tauri`), and `npm`
+  (dev-only, if anything ever lands there). A dependency PR is reviewed like
+  code: read the diff, run `npm run check`.
+- A full supply-chain audit (signed releases, SLSA, `cargo vet`) is future
+  work and is not pretended here. The installers are unsigned today; your OS
+  will say so, and that warning is honest.

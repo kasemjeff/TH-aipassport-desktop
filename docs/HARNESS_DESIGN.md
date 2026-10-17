@@ -60,7 +60,7 @@ event — is in [`LOOP_DESIGN.md`](LOOP_DESIGN.md).
 | `harness.mjs` | the facade a CLI, the window and tests all drive | the one-conversation resource is managed nowhere else; helpers propose into the parent overlay |
 | `session.mjs` | JSONL append with a forkable tree | a session opened next week reads as one continuous piece of work |
 | `skills.mjs` | plain markdown, project → user → repo | the library grows without code changes |
-| `plugins.mjs` | `setup(ctx)` in-process: markers, rpc, panels, settings | plugins are code you chose to install — not sandboxed, and it says so |
+| `plugins.mjs` | `setup(ctx)` in-process: markers, rpc, panels, settings; `apiVersion` checked against `PLUGIN_API` (1) | plugins are code you chose to install — not sandboxed, and it says so |
 
 What is already right and should not be "improved" away: unique-match REPLACE
 (refuses when FIND matches twice), binary detection by magic signature before
@@ -299,7 +299,9 @@ its first live firing was the smoke re-run below.
 **Shipped since (Oct 2026):** per-run tool-call and wall-clock budgets
 (`maxToolCalls` / `maxWallClockMs` — checked between tools, at every step and
 before a helper fan-out; a spent budget stops the run like the step limit and
-records `tools-limited` / `time-limited` in `run_stats`); task-specific helper
+records `tools-limited` / `time-limited` in `run_stats`); the optional credit
+cap (`maxCredits`, 0 = off — observed spend against the cached quota, records
+`credit-limited`); task-specific helper
 instructions (a `role:` line on SUBAGENT — `verifier` may RUN checks, `reviewer`
 and `summariser` only read; all three are read-only by construction, their
 write markers answer `err:` before anything is staged); spill reads return the

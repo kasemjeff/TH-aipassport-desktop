@@ -18,6 +18,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+// The build that wrote a file, recorded in every new header. Reading an old
+// file under a newer build is normal here; the one thing that answers "which
+// version did this transcript come from?" is a field, not a memory. A read
+// that fails (a package layout without package.json beside it) costs the
+// field, never the session.
+const APP_VERSION = (() => {
+  try { return JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version ?? null; }
+  catch { return null; }
+})();
+
 const id = () => Math.random().toString(16).slice(2, 10);
 const slug = (s) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'root';
 
@@ -40,6 +50,18 @@ const slug = (s) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').slice
  */
 export const HEADER_EVERY = 25;
 
+// Every header line this module writes is padded to this many bytes once, at
+// create()/fork() time. JSON.parse ignores the trailing spaces, and the fixed
+// width turns a header rewrite from read-the-whole-file-plus-swap into one
+// 2 KB overwrite at offset 0 — O(1) however long the log has grown. A header
+// that outgrows the block (a very long title) falls back to the atomic swap.
+export const HEADER_WIDTH = 2048;
+const padHeader = (header) => {
+  const base = JSON.stringify(header);
+  const room = HEADER_WIDTH - Buffer.byteLength(base);
+  return room >= 0 ? base + ' '.repeat(room) : null;
+};
+
 // A rewrite that writes in place loses the whole file if the process dies
 // between the truncate and the last byte. Temp file plus rename makes the
 // swap atomic: a crash leaves the previous version on disk, never a half one.
@@ -52,10 +74,27 @@ function writeAtomic(file, text) {
 }
 
 // The header is the first line; rewriting it keeps list() cheap enough that
-// the session picker never has to parse whole files.
+// the session picker never has to parse whole files. Since every header this
+// module writes is padded to HEADER_WIDTH, the common case is a single
+// fixed-size write in place — no read of the body, no whole-file rewrite.
+// The atomic swap stays as the fallback: an unpadded file (an older version,
+// a hand-written one) or a header that outgrew its block.
 function rewriteHeader(session) {
+  const line = padHeader(session.header);
+  if (line) {
+    try {
+      const first = readFirstLine(session.file);
+      if (Buffer.byteLength(first) === HEADER_WIDTH) {
+        if (first === line) return;
+        const fd = fs.openSync(session.file, 'r+');
+        try { fs.writeSync(fd, Buffer.from(line), 0, HEADER_WIDTH, 0); }
+        finally { fs.closeSync(fd); }
+        return;
+      }
+    } catch { /* fall through to the atomic rewrite */ }
+  }
   const lines = fs.readFileSync(session.file, 'utf8').split('\n');
-  lines[0] = JSON.stringify(session.header);
+  lines[0] = line ?? JSON.stringify(session.header);
   while (lines.at(-1) === '') lines.pop();
   writeAtomic(session.file, lines.join('\n') + '\n');
 }
@@ -129,7 +168,7 @@ export class Session {
     const chain = fromEntryId ? this.chainTo(fromEntryId) : this.entries.slice();
     const header = { ...this.header, id: id(), title: title ?? `${this.title} (fork)`, created: Date.now(), updated: Date.now(), forkedFrom: this.id };
     const file = path.join(path.dirname(this.file), `session-${header.id}.jsonl`);
-    writeAtomic(file, [header, ...chain.filter((e) => e.type !== 'header')].map((e) => JSON.stringify(e)).join('\n') + '\n');
+    writeAtomic(file, [padHeader(header) ?? JSON.stringify(header), ...chain.filter((e) => e.type !== 'header').map((e) => JSON.stringify(e))].join('\n') + '\n');
     return new Session({ file, header, entries: chain.filter((e) => e.type !== 'header') });
   }
 
@@ -145,6 +184,23 @@ export class Session {
       else if (e.type === 'note') lines.push(`_${e.text}_`, '');
     }
     return lines.join('\n');
+  }
+}
+
+/**
+ * The first line of a file, without reading the rest of it. A run's log grows
+ * to megabytes, and the picker only ever needs the header: listing the whole
+ * store used to read every session end to end.
+ */
+function readFirstLine(file, cap = 64 * 1024) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(cap);
+    const n = fs.readSync(fd, buf, 0, cap, 0);
+    return buf.subarray(0, n).toString('utf8').split('\n', 1)[0];
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed */ } }
   }
 }
 
@@ -177,10 +233,11 @@ export class SessionStore {
       updated: Date.now(),
       entryCount: 0,
       forkedFrom,
+      app: APP_VERSION,
       schema: 1,
     };
     const file = path.join(dir, `session-${header.id}.jsonl`);
-    writeAtomic(file, JSON.stringify(header) + '\n');
+    writeAtomic(file, (padHeader(header) ?? JSON.stringify(header)) + '\n');
     return new Session({ file, header });
   }
 
@@ -194,8 +251,11 @@ export class SessionStore {
         if (!f.endsWith('.jsonl')) continue;
         const file = path.join(dir, f);
         try {
-          const first = fs.readFileSync(file, 'utf8').split('\n', 1)[0];
+          const first = readFirstLine(file);
           const header = JSON.parse(first);
+          // Wrong-type data must not reach the picker: a first line that parses
+          // to anything but a header object is skipped like a torn one.
+          if (!header || typeof header !== 'object' || typeof header.id !== 'string') continue;
           out.push({ ...header, file, entries: header.entryCount ?? 0 });
         } catch { /* a half-written file is skipped, not fatal */ }
       }
@@ -209,16 +269,20 @@ export class SessionStore {
       : findById(this.dir, idOrFile);
     if (!file || !fs.existsSync(file)) return null;
     const entries = [];
-    let header = null;
+    const seen = new Set(); // entry ids already loaded — a duplicated append
+    let header = null;      // (a crash between write and fsync) loads once
     for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
       if (!line.trim()) continue;
       try {
         const e = JSON.parse(line);
-        if (e.type === 'header') header = e;
-        else entries.push(e);
+        if (!e || typeof e !== 'object' || Array.isArray(e)) continue;
+        if (e.type === 'header') { header = e; continue; }
+        if (typeof e.id !== 'string' || seen.has(e.id)) continue;
+        seen.add(e.id);
+        entries.push(e);
       } catch { /* skip a torn line rather than lose the session */ }
     }
-    if (!header) return null;
+    if (!header || typeof header.id !== 'string') return null;
     return new Session({ file, header, entries });
   }
 

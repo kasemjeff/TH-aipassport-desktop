@@ -33,6 +33,11 @@ export const DEFAULTS = {
   // nonsense value falls back to the default; there is no off switch.
   maxToolCalls: 300,
   maxWallClockMs: 1_800_000,
+  // The optional credit cap: stop a run once observed spend reaches this many
+  // credits. 0 (the default) means no cap — the one budget with an off switch.
+  // Checked against the bridge's cached quota, which upstream refreshes at
+  // most every 30s, so it bounds a runaway run without a request per step.
+  maxCredits: 0,
   // plan mode: the model writes a PLAN/TODO first, and (optionally) waits for
   // the human to approve before it touches anything
   plan: false,
@@ -207,6 +212,11 @@ export class Settings {
     const wallClock = Number(next.maxWallClockMs);
     next.maxWallClockMs = Number.isFinite(wallClock) && wallClock > 0
       ? Math.min(86_400_000, Math.max(10_000, Math.round(wallClock))) : DEFAULTS.maxWallClockMs;
+    // The credit cap's rule differs on purpose: 0 is a real value (no cap),
+    // not a value to replace with a default.
+    const creditCap = Number(next.maxCredits);
+    next.maxCredits = Number.isFinite(creditCap) && creditCap > 0
+      ? Math.min(10_000_000, Math.round(creditCap)) : 0;
     // An unknown thinking level would reach the bridge and come back stripped,
     // which reads as "thinking is on" in the form and "off" in the run. The
     // one place every surface writes keeps the two equal.

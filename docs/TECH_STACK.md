@@ -87,6 +87,37 @@ Saying the quiet parts out loud, since a stack is a set of tradeoffs:
   containment — `waf.mjs` and `protocol.mjs` are the only modules allowed
   to know — not abstraction; there is nothing else to abstract to.
 
+## Single points of failure
+
+Every graph has cut points; these are this one's, named with what happens
+when they are cut:
+
+- **The signed-in Chrome tab.** No tab, no upstream call: a run pauses with
+  `needs_tab` and the bridge says `extension: 0 connected`. Nothing is lost —
+  reconnect and the run continues. The extension popup and `npm run doctor`
+  are the two places that say so.
+- **The backend process.** One Node process owns the run loop. The desktop
+  shell supervises it — a crash is logged as `[supervisor]` lines and
+  restarted, and the window redials; an in-flight run is the one thing a
+  restart costs, and the transcript reads as a pause, not a loss.
+- **`~/.aipass` (the whole store).** Settings, sessions, uploads, token and
+  logs live in one folder; a dead disk loses the lot. That is the honest
+  trade for "your directory, no server" (`docs/DATA_FORMATS.md` says how to
+  be done with it — and to back it up, copy the folder).
+- **One run per project.** The harness refuses a second concurrent run
+  ("a run is already in flight — cancel it first"); parallel work means a
+  second window on another project, not a queue inside one.
+- **One upstream account.** Credits, rate limits and terms are the account's
+  and are shared by every window and CLI on the machine. There is no
+  automatic fallback model: the model is chosen explicitly per surface, and
+  `AIPASS_MODELS` only fills the listing when no tab is attached — a model
+  swap is an audited change (`docs/SPEC_EVALS.md`).
+
+The tightest coupling is deliberate: `protocol.mjs` (markers) and the event
+stream (`docs/LOOP_DESIGN.md`) are the two contracts every surface shares,
+so changing either is a cross-cutting change on purpose — `npm run qa` walks
+the whole wire.
+
 ## What would change the stack
 
 | trigger | change |

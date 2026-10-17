@@ -12,6 +12,21 @@ Open a [security advisory](https://github.com/niawjunior/aipass-bridge/security/
 or email the maintainer if you would rather not file publicly. Please do not open
 a normal issue for something exploitable.
 
+The process, as small as the project:
+
+1. **Triage asks the configuration question first.** Does the report need
+   `AIPASS_ALLOW_REMOTE`, `AIPASS_ADMIN`, `AIPASS_CORS_ORIGIN` or
+   `AIPASS_REQUIRE_AUTH=0` to matter? A default-configuration hole ships
+   before a non-default one — both get fixed.
+2. **A fix lands with its test.** Every closed hole carries a regression
+   test in the same change — code, a `SECURITY.md` bullet, tests that pin
+   the refusal; the hardening bullets below all follow that shape.
+3. **Verify closure.** The regression test is the proof; the `CHANGELOG.md`
+   `[Unreleased]` line names the behavior change (no exploit walkthrough
+   before users can update); the advisory closes naming the fixed tag.
+4. **Announce when copies are affected** — like the pre-2-Sep notice below,
+   because a fix without a notice leaves old clones running the hole.
+
 ## If you cloned or forked before 2 Sep 2026
 
 **Update.** Every copy taken before commit
@@ -68,7 +83,15 @@ Then restart the bridge and reload the extension.
   included. An explicit user rule naming the same file still wins (operator
   override), and `kinds` narrowing keeps its documented meaning (H9). The
   WAF-encoded spelling (`DOT-ENV`) is decoded before the check, so
-  obfuscation is not a bypass.
+  obfuscation is not a bypass. The same floor now covers the execution
+  channels (`harness/permissions.mjs` `secretHit` + `harness/tools.mjs`): a
+  RUN whose command spells a secret path is refused before anything spawns,
+  SEARCH skips secret files even when their names are not dot-hidden
+  (`server.pem`, `id_rsa`), and git patches (`diff` / `show` / `log -p`) drop
+  any chunk whose file is a secret and say how many were dropped. What no
+  screen can catch is a command that builds the name at runtime (`node -e`
+  tricks) — that is arbitrary code, `--allow-run` is the gate, and ask mode
+  shows every command before it runs.
 - **The bridge refuses to bind off-loopback** (`bridge/server.mjs`): setting
   `AIPASS_HOST` to anything but `127.0.0.1`/`localhost`/`::1` without
   `AIPASS_ALLOW_REMOTE=1` exits instead of listening with no auth.
@@ -109,12 +132,54 @@ Then restart the bridge and reload the extension.
   copy — already diverged — is gone, and a run pins its own conversation id
   (`harness/harness.mjs`), so surfaces cannot drift and runs cannot cross-talk.
 
+## Data classes
+
+Three classes, one rule each:
+
+- **The repository (public):** code, docs and fixtures. Never secrets —
+  `*.har` and `aipass*.md` captures are git-ignored for exactly this reason.
+- **The machine store, `~/.aipass/` (sensitive):** sessions (your text
+  verbatim), uploads, logs and eval rows. Copyable and deletable by category
+  (`docs/DATA_FORMATS.md`); treat it like a drawer of documents, not a cache.
+- **Secrets (never read by the model):** anything matching the
+  `SECRET_RULES` floor above, plus `~/.aipass/.token`. The token is a
+  credential: same-user processes can read it — the boundary is other users,
+  sandboxed apps and browser pages.
+
+## Owners
+
+- **Data:** whoever runs the install — single-user by design, and nothing
+  phones home, so there is no one else to ask.
+- **System and changes:** the maintainer (`LICENSE`); a release requires the
+  acceptance checklist and the tagged approver named in `docs/RELEASE.md`.
+- **Security reports:** the maintainer, through the advisory channel above.
+- **Legal:** the code is MIT. Using it spends *your* deAiPASS account through
+  *your* browser session — the account's terms apply, and every message
+  enters its chat history ("Known limits" below). Eval fixtures are
+  synthetic; importing a public dataset waits on license review
+  (`docs/SPEC_EVALS.md`).
+
+## Threat model
+
+The model is treated as an **untrusted author, not an attacker behind an OS
+boundary**: the worst case taken seriously is writing files and running what
+it was allowed to run (`docs/TECH_STACK.md` on rejected containerisation).
+The boundary is the permission floor, the overlay and the loopback token —
+not a sandbox. Reviewed each hardening round (the dated entries above): a
+new finding gets a dated bullet here and a regression test in the same
+change. The honest residuals are the "Known limits" below.
+
 ## Known limits, not bugs
 
 - Every message appears in your account's chat history. This drives the real
   product.
 - The agent's `--allow-run` executes shell commands in the project root. It is off
   by default for that reason.
+- `RUN` runs on this machine's terms: a 120-second cap per command, 10 MB of
+  captured output, no CPU or memory cage, and the sandbox (when edits are
+  staged) is a projection for honest checks, not a jail. Network access is
+  not filtered — FETCH's private-address guard does not apply to a shell
+  command.
 - Remote image URLs are fetched server-side behind a private-address guard. The
   guard understands IPv4 in every spelling the URL parser leaves (integer, hex,
   octal and IPv4-mapped IPv6 forms) and re-checks every redirect hop. Since
