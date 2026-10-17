@@ -317,3 +317,19 @@ test('the extension requests only the hosts it uses', (t) => {
     assert.ok(cs.matches.every((p) => p.includes('aipass.net')), 'content scripts stay on the aipass origin');
   }
 });
+
+/* 8 — the backend's crash path names its error ---------------------------- */
+
+// The desktop backend installs an uncaughtException handler whose whole job is
+// to name the crash before the process exits. Calling a symbol it never
+// imported turned every real crash into a masked `ReferenceError` and hid the
+// cause (and the supervisor restarted the backend, making the crash look like
+// a restart). The import must be present for the handler to do its job.
+test('the backend fatal line can name the crash it was called for', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(here, '..', 'harness', 'rpc.mjs'), 'utf8');
+  assert.match(src, /const fatal = [\s\S]*?formatLogLine/,
+    'the fatal handler must call the formatter it is supposed to print through');
+  assert.match(src, /import \{ formatLogLine \} from '\.\/log-line\.mjs'/,
+    'the formatter must actually be imported — otherwise the handler throws a ReferenceError and the real error is lost');
+});
