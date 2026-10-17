@@ -540,3 +540,24 @@ test('reading helpers: file listing, file text, and the playbook library', async
   // A path outside the root is refused, not served.
   await assert.rejects(() => env.call('fs.read', { file: '../outside.txt' }));
 });
+
+// The same slip with a helper: DONE in the SUBAGENT's own reply used to end
+// the run before the summary arrived - the helper's whole report went unread.
+test('a DONE beside a SUBAGENT waits for the helper summary', async (t) => {
+  const env = await startRpc({
+    files: { 'notes.md': 'one\ntwo\n' },
+    replies: [
+      'SUBAGENT\ntask: say what notes.md holds\nEND\nDONE delegated it',
+      'The helper read notes.md and reports two short lines',
+      'DONE the helper summary is in',
+    ],
+  });
+  t.after(() => env.stop());
+
+  const result = await env.call('run', { task: 'delegate a piece', mode: 'auto', subagent: true });
+  assert.equal(result.stopReason, 'done');
+  assert.equal(env.types('helper_end').length, 1, 'the helper reported back');
+  assert.equal(env.types('ignore_done').length, 1, 'the premature DONE was not accepted');
+  assert.equal(env.types('done_line').at(-1)?.text, 'the helper summary is in',
+    'the run carried on with the summary and ended on the second DONE');
+});

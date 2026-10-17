@@ -755,3 +755,23 @@ test('reasoning streams as its own dim line, apart from the step', async (t) => 
   assert.match(out, /⟡ the README looks like a starter/);
   assert.match(out, /✓ It is a starter project/, 'and the answer still reads as the answer');
 });
+
+// A DONE beside a gathering call is the same slip as a DONE beside a NEED:
+// its result only travels with the run's next message, so accepting the DONE
+// at once threw the result away unread. GLOB stands in for the family - GIT,
+// FETCH, WEB and a helper's summary follow the identical path.
+test('a DONE beside a GLOB is held back so the listing reaches the model', async (t) => {
+  const dir = tempDir({ 'a.txt': 'hello\n' });
+  const handler = scripted([
+    'GLOB **/*.txt\n\nDONE looked around',
+    'DONE looked around, nothing else to do',
+  ]);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir);
+
+  assert.equal(handler.sent.length, 2, 'the run stayed alive for one more turn');
+  assert.match(handler.sent[1], /Result of glob/, 'the listing rode back to the model');
+  assert.match(out, /looked around, nothing else to do/, 'the final closing line is the one kept');
+});

@@ -182,8 +182,11 @@ export function attemptedMarker(reply) {
 
 /** Tool kinds that mean "the model is still gathering", never a stopping point.
  *  ATTACH is here because a queued attachment only rides the NEXT message —
- *  a DONE in the same reply would silently drop it. */
-export const READING = new Set(['list', 'read', 'search', 'skill', 'attach']);
+ *  a DONE in the same reply would silently drop it. GLOB, GIT, FETCH, WEB and
+ *  SUBAGENT are reads in the same sense: their result travels with the NEXT
+ *  message too, so a DONE beside one of them used to end the run and throw
+ *  the payoff away unread (a listing, a fetched page, a helper's summary). */
+export const READING = new Set(['list', 'read', 'search', 'glob', 'skill', 'attach', 'git', 'fetch', 'web', 'subagent']);
 
 export function parse(reply, { plugins = [] } = {}) {
   const lines = reply.split('\n');
