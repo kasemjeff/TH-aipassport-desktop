@@ -49,6 +49,25 @@ test('web search results become titled sources, not JSON in the answer', async (
   assert.match(sources.text, /thaigov\.go\.th https:\/\/thaigov\.go\.th\/b/, 'no title falls back to the domain');
 });
 
+// The live stall of Oct 2026: the site swapped the run's model mid-reply and
+// the frame fell to the unknown handler, where the text died inside the
+// reasoning fold. It must arrive as a note — a line the person can see.
+test('a mid-reply model switch surfaces as a note, not an unhandled frame', async () => {
+  const page = loadPage({ onFetch: async () => sseResponse([
+    { type: 'text-delta', delta: 'answer' },
+    { type: 'data-model_switched', modelId: 'gemini-3.5-flash-lite' },
+    { type: 'finish', finishReason: 'stop' },
+  ]) });
+  page.run(chatJob());
+  await page.settled('j1');
+
+  const all = page.parts('j1');
+  assert.ok(!all.some((p) => /unhandled/.test(p.text)), 'a known frame must not be reported as unknown');
+  const note = all.find((p) => p.kind === 'note');
+  assert.ok(note, 'the switch reaches the bridge as a note part');
+  assert.match(note.text, /gemini-3\.5-flash-lite/);
+});
+
 test('generated media is routed by its media type', async () => {
   const cases = [
     ['audio/mpeg', 'audio'],

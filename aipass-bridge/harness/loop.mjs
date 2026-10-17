@@ -321,7 +321,30 @@ export async function runTask(taskText, ctx = {}) {
     return base.length || queued.length ? [...base, ...queued] : null;
   };
 
-  for (let step = 1; step <= maxSteps; step++) {
+  // (stability, the live stall of Oct 2026) A saved model the site no longer
+  // offers used to be found out mid-run, when the site swapped the
+  // conversation to a substitute and the transcript never said so. The
+  // catalog is the judge now: when the bridge serves a live list and the
+  // chosen model is not on it, the run fails here, by name, before any send.
+  // A missing or fallback list skips the check — it may never block a run it
+  // cannot judge — and `auto` is never judged: it delegates the pick to the
+  // site by design.
+  const chosenModel = String(model ?? bridge?.model ?? '').trim();
+  let modelGone = false;
+  if (chosenModel && chosenModel !== 'auto' && typeof bridge?.models === 'function') {
+    const catalog = await bridge.models().catch(() => null);
+    const ids = Array.isArray(catalog?.data) ? catalog.data.map((m) => m?.id).filter(Boolean) : [];
+    if (catalog?.source === 'live' && ids.length
+        && !ids.includes(chosenModel.replace(/^aipass\//, ''))) {
+      modelGone = true;
+      summary = `the model "${chosenModel}" is not in the model catalog anymore — the site would have swapped it for a substitute mid-run without saying so. Pick a current model in Settings and start the run again.`;
+      stopReason = 'error';
+      session?.append('note', { text: `catalog check: ${summary}` });
+      events?.emit('error', { message: summary });
+    }
+  }
+
+  for (let step = 1; !modelGone && step <= maxSteps; step++) {
     // The wall clock is checked before every reply too, not only between
     // tools: waiting on a slow model is as real a spend as running a command.
     if (Date.now() - runStart > maxWallClockMs) { spendBudget('time-limited'); break; }

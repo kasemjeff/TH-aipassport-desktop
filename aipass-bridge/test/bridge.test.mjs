@@ -131,7 +131,9 @@ test('lists every model the account can pick, tagged by kind', async () => {
   const ext = await new FakeExtension(bridge.base).connect();
   await waitFor(async () => (await (await fetch(`${bridge.base}/v1/models?refresh=1`)).json()).data.length > 1);
 
-  const { data } = await (await fetch(`${bridge.base}/v1/models`)).json();
+  const list = await (await fetch(`${bridge.base}/v1/models`)).json();
+  const { data } = list;
+  assert.equal(list.source, 'live', 'a refreshed list from the extension is the live catalog');
   const kind = (id) => data.find((m) => m.id === id)?.kind;
   assert.equal(kind('gemini-3.1-flash-lite'), 'chat');
   assert.equal(kind('gpt-image-2'), 'image');
@@ -159,6 +161,22 @@ test('?kind narrows the list the way the web UI tabs do', async () => {
   assert.deepEqual(both.data.map((m) => m.id).sort(),
     ['gemini-3-pro-image', 'gpt-image-2', 'seedance-2.0-mini', 'veo-3.1-fast-generate-001']);
   await ext.disconnect();
+});
+
+test('the model list flags the fallback stub as fallback', async (t) => {
+  // A bridge no extension has ever reached serves a two-id stub; a caller
+  // judging a saved model against the catalog must be able to tell it apart
+  // from the real thing (the harness pre-flight reads this field).
+  const solo = await startBridge();
+  t.after(() => solo.stop());
+  const cold = await (await fetch(`${solo.base}/v1/models`)).json();
+  assert.equal(cold.source, 'fallback', 'no extension has connected — this is the stub');
+
+  const ext = await new FakeExtension(solo.base).connect();
+  t.after(() => ext.disconnect());
+  await waitFor(async () => (await (await fetch(`${solo.base}/v1/models?refresh=1`)).json()).source === 'live');
+  const live = await (await fetch(`${solo.base}/v1/models`)).json();
+  assert.equal(live.source, 'live', 'the catalog answers as live once the extension refreshed it');
 });
 
 test('AIPASS_MODEL_FILTER=chat restores the text-only list', async (t) => {

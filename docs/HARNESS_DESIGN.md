@@ -631,12 +631,20 @@ fixes shipped:
    were removed the same day; the sidebar went from a stalled 7,270-entry
    read to one project's five conversations.
 
-**Queued, not guessed:** the extension reports `data-model_switched` as an
-unhandled-frame note that dies in the assistant's reasoning; it should
-surface as a visible transcript line, and `settings.defaultModel` that has
-vanished from the catalog should fail the run with that sentence instead of
-swapping models silently. (The user's own setting was reset to `auto` the
-same day — the site's own default, free, and always in the catalog.)
+**Shipped (the stability pass):** the extension knows the frame now —
+`data-model_switched` arrives as a `note` part (one line per distinct switch),
+the bridge maps note parts onto a `delta.note` beside the reasoning echo the
+chat console already reads, and `BridgeClient` hands that to the harness as
+the same `note` event the budget guard uses: a visible transcript line, not
+text folded into the reasoning. The other half is a pre-flight: a run whose
+saved model is not on the live catalog list fails before its first send, by
+name (`stopReason: "error"`, the sentence in the summary), instead of letting
+the site swap in a substitute and say nothing — `/v1/models` now carries
+`source: "live" | "fallback"` so only a real catalog can judge, and `auto`
+(the pick the site delegates to itself — where the user's setting landed the
+same day) is never judged, nor is a run ever blocked because a list was
+missing. Pinned by `test/page.test.mjs`, `test/run-resilience.test.mjs`,
+`test/bridge.test.mjs` and `test/model-catalog.test.mjs`.
 
 ## The four-minute blip (Oct 2026): a run must not die of a reconnect
 
