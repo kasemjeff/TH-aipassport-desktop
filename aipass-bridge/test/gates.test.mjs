@@ -292,7 +292,7 @@ test('a projected tree carries no repository and git cannot write the real one',
   overlay.set(path.join(dir, 'a.txt'), 'after\n');
   const sandbox = createSandbox(dir);
   try {
-    materializeTree(dir, overlay, sandbox);
+    await materializeTree(dir, overlay, sandbox);
     const marker = path.join(sandbox, '.git');
     if (fs.existsSync(marker)) {
       const st = fs.lstatSync(marker);
@@ -302,12 +302,15 @@ test('a projected tree carries no repository and git cannot write the real one',
     assert.ok(!fs.existsSync(path.join(sandbox, '.git', 'objects')), 'no repository contents in the projection');
 
     // A write-shaped git command fails safely instead of moving the real repo.
+    // The phrasing varies by git build — the CI runners say "gitfile does not
+    // point to a valid repository" where this machine says "not a git
+    // repository" — but either way the report must be that no repository exists.
     const probe = await gitIn(sandbox, ['config', 'user.name', 'sandbox-probe']);
     assert.equal(probe.ok, false, 'a git write in the projection must fail');
-    assert.match(probe.out, /not a git repository/i, `git must report no repository, got: ${probe.out}`);
+    assert.match(probe.out, /not a git repository|gitfile does not point to a valid repository/i, `git must report no repository, got: ${probe.out}`);
     const status = await gitIn(sandbox, ['status']);
     assert.equal(status.ok, false);
-    assert.match(status.out, /not a git repository/i);
+    assert.match(status.out, /not a git repository|gitfile does not point to a valid repository/i);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
@@ -332,7 +335,7 @@ test('a projected git RUN fails safely through the tool path too', async (t) => 
   const tools = createTools({ root: dir, overlay, skills: new SkillLibrary([]), allowRun: true, maxResult: 6000 });
 
   const out = await tools.run('', 'git status');
-  assert.match(out, /not a git repository/i, `the projected git sees no repo, got: ${out}`);
+  assert.match(out, /not a git repository|gitfile does not point to a valid repository/i, `the projected git sees no repo, got: ${out}`);
   assert.equal(fs.readFileSync(path.join(dir, '.git', 'HEAD'), 'utf8'), headBefore);
 });
 
