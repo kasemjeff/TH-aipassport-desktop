@@ -215,7 +215,16 @@
     // tool status: it is written while the send was refused, and as a note it
     // explains the pause without counting as the answer the client must never
     // resend past (harness/bridge.mjs reads the note field, not the echo).
+    //
+    // 403 rides the same pause-and-resend, with its own shorter budget
+    // (5s → 15s): the edge 403s by pace score as well as by content, and the
+    // identical bytes go through a moment later — recorded live, Oct 17 2026,
+    // a run's 214-byte tool result refused whole and then accepted unchanged
+    // (harness/bridge.mjs EDGE_WAITS_MS has the recording). Content-shaped
+    // refusals are deterministic: they survive these waits too, and the
+    // rewrite chain above this layer takes over then.
     const RETRY_WAITS_MS = [5000, 15000, 45000];
+    const EDGE_WAITS_403_MS = [5000, 15000];
     const aborted = () => { const err = new Error('aborted'); err.name = 'AbortError'; return err; };
     const sleep = (ms, signal) => new Promise((resolve, reject) => {
       if (signal?.aborted) { reject(aborted()); return; }
@@ -224,15 +233,28 @@
       signal?.addEventListener?.('abort', onAbort, { once: true });
     });
     const sendWithRetry = async (url, init, signal) => {
-      for (let attempt = 0; ; attempt++) {
+      let rateTries = 0;
+      let edgeTries = 0;
+      for (;;) {
         const res = await fetch(url, init);
-        if (res.ok || (res.status !== 429 && res.status !== 503)) return res;
-        if (attempt >= RETRY_WAITS_MS.length) return res;
+        if (res.ok) return res;
+        const waiting = res.status === 429 || res.status === 503
+          ? { list: RETRY_WAITS_MS, tried: rateTries, kind: 'rate' }
+          : res.status === 403
+            ? { list: EDGE_WAITS_403_MS, tried: edgeTries, kind: 'edge' }
+            : null;
+        if (!waiting || waiting.tried >= waiting.list.length) return res;
         const after = Number.parseFloat(res.headers.get('retry-after'));
         const wait = Number.isFinite(after) && after >= 0
           ? Math.min(after * 1000, 60_000)
-          : RETRY_WAITS_MS[attempt];
-        push('note', `[${res.status}] rate limited by the edge — waiting ${Math.round(wait / 1000)}s, then retrying (${attempt + 2}/${RETRY_WAITS_MS.length + 1})`);
+          : waiting.list[waiting.tried];
+        if (waiting.kind === 'rate') {
+          rateTries++;
+          push('note', `[${res.status}] rate limited by the edge — waiting ${Math.round(wait / 1000)}s, then retrying (${rateTries + 1}/${RETRY_WAITS_MS.length + 1})`);
+        } else {
+          edgeTries++;
+          push('note', `[403] refused at the edge — waiting ${Math.round(wait / 1000)}s, then sending the same message again (${edgeTries + 1}/${EDGE_WAITS_403_MS.length + 1})`);
+        }
         await sleep(wait, signal);
       }
     };
@@ -331,6 +353,7 @@
         throw new Error(
           `aipass returned ${res.status} ${res.statusText} [${body.length} bytes]` +
           `${res.status === 429 ? ` — rate-limited through ${RETRY_WAITS_MS.length} retries` : ''}` +
+          `${res.status === 403 ? ` — refused at the edge through ${EDGE_WAITS_403_MS.length} retries` : ''}` +
           `${forensics ? ` {${forensics}}` : ''}${detail ? ` — ${detail}` : ''}`
         );
       }

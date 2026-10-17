@@ -9,7 +9,13 @@ let bridge;
 before(async () => { bridge = await startBridge(); });
 after(() => bridge.stop());
 
-const agent = (dir, args = [], opts = {}) => run(AGENT, ['task text', '--root', dir, '--bridge', bridge.base, ...args], opts);
+// Every agent test here passes through the 403 waits; shorten them to nothing
+// so a refusal test exercises the order of attempts, not the clock — a test
+// that cares about the pause itself passes its own AIPASS_EDGE_WAITS_MS.
+const agent = (dir, args = [], opts = {}) => run(AGENT, ['task text', '--root', dir, '--bridge', bridge.base, ...args], {
+  ...opts,
+  env: { AIPASS_EDGE_WAITS_MS: '0', ...opts.env },
+});
 
 test('reads files and reports a summary, touching nothing on disk', async (t) => {
   const dir = tempDir({ 'README.md': 'a starter project\n' });
@@ -298,6 +304,27 @@ test('splits and resends a turn the upstream rejects', async (t) => {
   const { out } = await agent(dir);
   assert.match(out, /splitting into 2 parts/);
   assert.match(out, /✓ read it/);
+});
+
+// The pace-shaped 403, end to end: the edge refuses each message once and
+// accepts the identical bytes on the resend — no rewrite, no fragment lost.
+// The live recording behind this is in harness/bridge.mjs (EDGE_WAITS_MS).
+test('a flaky refusal is waited out whole, never split or dropped', async (t) => {
+  const dir = tempDir({ 'notes.txt': 'buy milk\n' });
+  const seen = new Set();
+  const handler = scripted(['NEED file notes.txt', 'DONE read it'], {
+    reject: (t) => { const first = !seen.has(t); seen.add(t); return first; },
+  });
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir, [], { env: { AIPASS_EDGE_WAITS_MS: '60,60' } });
+  assert.match(out, /refused at the edge — waiting/, 'the pause is explained');
+  assert.doesNotMatch(out, /splitting into/, 'a pace refusal is not the split path');
+  assert.doesNotMatch(out, /omitting/, 'and nothing is dropped for it');
+  assert.match(out, /✓ read it/, 'the run finishes');
+  assert.equal(handler.rejected.length, 2, 'each of the run’s two messages was refused once');
+  assert.ok(handler.sent.includes(handler.rejected[0]), 'the identical message is what was sent again');
 });
 
 test('drops a line that cannot be sent at any size, and keeps going', async (t) => {

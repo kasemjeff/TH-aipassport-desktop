@@ -27,7 +27,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { startBridge, FakeExtension, scripted, waitFor } from './harness.mjs';
-import { BridgeClient } from '../harness/bridge.mjs';
+import { BridgeClient, resilientSay } from '../harness/bridge.mjs';
 
 let bridge;
 before(async () => { bridge = await startBridge(); });
@@ -183,4 +183,68 @@ test('a 429 is waited out even when the page\'s waiting note streamed first', as
   assert.match(notes.join('\n'), /429/, 'and the client wait was reported, not silent');
   assert.match(streamNotes.join('\n'), /waiting 5s/, 'the page\'s waiting line arrived as a stream note');
   assert.doesNotMatch(res.text, /rate limited/, 'the note never leaked into the answer');
+});
+
+/* The pace-403, and what must not stack ------------------------------------ */
+
+// Recorded live, Oct 17 2026: not every 403 is about the content. The edge
+// also refuses by pace score, and the identical bytes go through a moment
+// later (a 214-byte tool result refused and then accepted unchanged; a read
+// refused whole while both of its halves passed on their own). The message
+// layer's answer is the 429 treatment — wait, then the same text again — not
+// a rewrite that fragments a run the edge is already unhappy with.
+test('a flaky refusal is waited out with the identical message, never rewritten', async () => {
+  const saved = process.env.AIPASS_EDGE_WAITS_MS;
+  process.env.AIPASS_EDGE_WAITS_MS = '5,5';
+  try {
+    const sent = [];
+    const notes = [];
+    let calls = 0;
+    const say = async (t) => {
+      sent.push(t);
+      if (++calls === 1) throw new Error('aipass returned 403 Forbidden {server=cloudflare}');
+      return 'ok';
+    };
+    const text = 'an ordinary tool result with nothing a filter would look for\n'.repeat(8);
+    await resilientSay(say, text, (_lvl, t) => notes.push(t));
+
+    assert.equal(sent.length, 2, 'the refusal plus one resend');
+    assert.equal(sent[1], sent[0], 'the resend was the very same message');
+    assert.ok(notes.some((t) => /refused at the edge — waiting/.test(t)), 'the pause is reported as a note');
+    assert.ok(!notes.some((t) => /splitting/.test(t)), 'no split for a refusal that was pace');
+    assert.ok(!notes.some((t) => /omitting/.test(t)), 'and nothing was dropped for it');
+  } finally {
+    if (saved === undefined) delete process.env.AIPASS_EDGE_WAITS_MS;
+    else process.env.AIPASS_EDGE_WAITS_MS = saved;
+  }
+});
+
+// What survives the waits is content: only then does the split come out. The
+// old chain announced parts at every level, so a fragment that had to be split
+// again carried "Part 1, more follows" stacked on the outer one — the garble
+// the live sessions recorded. Announcing is the outermost split's job alone.
+test('a nested split never stacks a second part prefix', async () => {
+  const saved = process.env.AIPASS_EDGE_WAITS_MS;
+  process.env.AIPASS_EDGE_WAITS_MS = '0';
+  try {
+    const sent = [];
+    const say = async (t) => {
+      if (t.includes('GAMMA') && Buffer.byteLength(t) > 400) throw new Error('aipass returned 403 Forbidden');
+      sent.push(t);
+      return 'ok';
+    };
+    const filler = 'a line of perfectly ordinary words that pads the message\n';
+    const text = `GAMMA-ONE\n${filler.repeat(8)}GAMMA-TWO\n${filler.repeat(8)}`;
+    await resilientSay(say, text, () => {});
+
+    assert.ok(sent.length >= 2, 'the split continued where the refusal followed');
+    assert.ok(sent.some((t) => /GAMMA-ONE/.test(t)), 'the fragments arrived');
+    for (const t of sent) {
+      const prefixes = (t.match(/Part 1, more follows/g) || []).length;
+      assert.ok(prefixes <= 1, `a fragment carries at most one part prefix:\n${t.slice(0, 120)}`);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.AIPASS_EDGE_WAITS_MS;
+    else process.env.AIPASS_EDGE_WAITS_MS = saved;
+  }
 });

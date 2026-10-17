@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execSync, spawnSync } from 'node:child_process';
+import { edgeWaits, waitLabel } from './harness/bridge.mjs';
 
 /**
  * @typedef {object} BridgeStatus
@@ -1483,7 +1484,21 @@ async function sayResilient(text, depth = 0, images = [], files = []) {
     const { redacted, dropped } = agentRedact(text);
     if (dropped && redacted !== text) {
       out('  ' + dim(`  rejected — omitting ${dropped} line(s) that cannot be sent`));
-      try { return await sayAgent(redacted); } catch { /* fall through to split */ }
+      try { return await sayAgent(redacted); } catch (err2) {
+        if (!/\b40[39]\b/.test(/** @type {Error} */ (err2).message)) throw err2;
+      }
+    }
+
+    // A 403 is not always about the content: the edge also refuses by pace
+    // score, and the identical bytes go through a moment later. Wait it out
+    // and send the same message again before rewriting anything — the styled
+    // console's sibling (harness/bridge.mjs) spells the whole contract out.
+    for (const wait of edgeWaits()) {
+      out('  ' + dim(`  refused at the edge — waiting ${waitLabel(wait)}, then sending the same message again`));
+      await new Promise((r) => setTimeout(r, wait));
+      try { return await sayAgent(text); } catch (err2) {
+        if (!/\b40[39]\b/.test(/** @type {Error} */ (err2).message)) throw err2;
+      }
     }
 
     if (depth > 2 || Buffer.byteLength(text) < AGENT_MIN_SPLIT) {
@@ -1497,7 +1512,12 @@ async function sayResilient(text, depth = 0, images = [], files = []) {
     let last = '';
     for (let i = 0; i < parts.length; i++) {
       const final  = i === parts.length - 1;
-      const prefix = final ? 'Final part.\n\n' : `Part ${i + 1}, more follows. Reply with just: ok\n\n`;
+      // Only the outermost split announces the part protocol; a fragment that
+      // gets split again is already inside its "more follows" (the styled
+      // console says the same thing about this console's sibling).
+      const prefix = depth === 0
+        ? (final ? 'Final part.\n\n' : `Part ${i + 1}, more follows. Reply with just: ok\n\n`)
+        : '';
       last = await sayResilient(prefix + parts[i], depth + 1);
     }
     return last;

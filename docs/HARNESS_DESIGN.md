@@ -377,6 +377,27 @@ the field — so the refusal behind it is waited out, not fatal.
 `run-resilience.test.mjs` plays the sequence — note, then 429 — and pins the
 retry.
 
+**Follow-up, Oct 17 — the 403 was not always about the content.** A live
+desktop run kept printing `rejected — splitting into 2 parts and resending`:
+the day's sessions hold 33 split entries, 13 of them with a second "Part 1,
+more follows" stacked on the first, and 18 fragments dropped outright after
+splitting — 137 bytes at the smallest. Under a pace refusal that is all cost
+and no cure, and the drops cost content: a 137-byte fragment has no split
+left, so the model never saw it. The edge refuses by pace score as well as by
+content, and those bytes pass a moment later: a 214-byte `Result of skill
+list` was refused whole and then accepted with no rewrite; a read was refused
+whole while both of its halves passed on their own. So the chain now
+distinguishes before it acts. Known offenders are still dropped at once (the
+deterministic families above), then the identical message is sent again after
+a short wait — 5s/15s in the page (`EDGE_WAITS_403_MS`), 10s/30s above it
+(`EDGE_WAITS_MS`, `AIPASS_EDGE_WAITS_MS` overrides) — and only a refusal that
+survives every wait is treated as content and split, with the part protocol
+announced by the outermost split alone (a chunk split again used to carry its
+prefix stacked on the outer one). The wait is the right medicine for pace and
+the wrong one for content, and the reverse holds for the split: splitting a
+pace refusal doubles the messages the edge is refusing, which is exactly what
+the day's cascades were made of.
+
 ## The re-run that passed, and the gap it stepped on (Oct 2026)
 
 The smoke task ran once more after the block lifted — same task, same project,

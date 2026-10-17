@@ -27,6 +27,54 @@ test('a text answer streams back as text parts', async () => {
   assert.equal(page.parts('j1').filter((p) => p.kind === 'text').map((p) => p.text).join(''), 'สวัสดี');
 });
 
+// The edge 403s by pace score as well as by content (harness/bridge.mjs
+// EDGE_WAITS_MS has the recording): the message is refused whole and the
+// identical bytes go through a moment later. The page waits one out in place
+// and sends the same body again — it must not rewrite anything, and it must
+// not surface a refusal that only the message layer could mend by splitting.
+test('a 403 blip is waited out, and the identical body goes again', async () => {
+  let sends = 0;
+  const page = loadPage({
+    fastTimers: true,
+    onFetch: async (url) => {
+      if (url.includes('/actions/send-message/') && ++sends === 1) {
+        return new Response('', { status: 403, statusText: 'Forbidden', headers: { server: 'cloudflare' } });
+      }
+      return sseResponse(textFrames('สวัสดี'));
+    },
+  });
+  page.run(chatJob());
+  await page.settled('j1');
+
+  const posts = page.requests.filter((r) => r.url.includes('/actions/send-message/'));
+  assert.equal(posts.length, 2, 'one refusal, then one resend');
+  assert.equal(posts[1].init.body, posts[0].init.body, 'the body went again untouched');
+  assert.ok(page.parts('j1').some((p) => p.kind === 'note' && /403/.test(p.text)), 'the pause is explained on the wire');
+  assert.equal(page.parts('j1').filter((p) => p.kind === 'text').map((p) => p.text).join(''), 'สวัสดี');
+});
+
+test('a 403 that outlasts the waits surfaces with its forensics', async () => {
+  let sends = 0;
+  const page = loadPage({
+    fastTimers: true,
+    onFetch: async (url) => {
+      if (url.includes('/actions/send-message/')) {
+        sends++;
+        return new Response('', { status: 403, statusText: 'Forbidden', headers: { server: 'cloudflare' } });
+      }
+      return sseResponse([]);
+    },
+  });
+  page.run(chatJob());
+  const end = await page.settled('j1');
+
+  assert.equal(end.kind, 'error');
+  assert.equal(sends, 3, 'the first send plus two bounded waits, then it surfaces');
+  assert.match(end.message, /aipass returned 403/);
+  assert.match(end.message, /refused at the edge through 2 retries/);
+  assert.match(end.message, /server=cloudflare/);
+});
+
 // Regression for the frame that used to be dumped into the answer as raw JSON,
 // and for sonar, which sends only this and no source-url.
 test('web search results become titled sources, not JSON in the answer', async () => {

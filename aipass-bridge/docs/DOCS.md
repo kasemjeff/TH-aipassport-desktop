@@ -126,7 +126,7 @@ aipass-bridge/
 └── test/
     ├── harness.mjs      spawns the real bridge + a scriptable fake extension
     ├── bridge.test.mjs  HTTP surface, conversation rotation, loopback round-trip
-    ├── agent.test.mjs   action protocol, 403 splitting, line dropping, dry run
+    ├── agent.test.mjs   action protocol, 403 waits and splitting, line dropping, dry run
     └── chat.test.mjs    one-shot output, tool/sources rendering, error messages
 ```
 

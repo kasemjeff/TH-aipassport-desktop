@@ -41,6 +41,9 @@ import { runTask } from '../harness/loop.mjs';
 // Nothing here may touch the real ~/.aipass.
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-fixes-home-'));
 process.env.AIPASS_HOME = HOME;
+// The 403 waits are pinned by their own tests; here H5 only needs the retry
+// order, not the clock.
+process.env.AIPASS_EDGE_WAITS_MS = '0';
 after(() => fs.rmSync(HOME, { recursive: true, force: true }));
 
 /** Tools over a plain directory, the way the CLI and the harness build them. */
