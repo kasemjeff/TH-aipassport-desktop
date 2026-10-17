@@ -81,34 +81,60 @@ export const TRANSIENT_SEND = /no extension connected/i;
 export const SEND_ATTEMPTS = 6; // ≈5s of patience at SEND_RETRY_MS — longer than a cycle gap
 export const SEND_RETRY_MS = 1000;
 
+// The edge in front of the site answers 429 when the account moves too fast —
+// ten messages in four minutes was enough to draw one (HARNESS_DESIGN.md has
+// the recording). Nothing about the payload is wrong: the same body goes
+// through a moment later, so a 429 is waited out, never rewritten or split.
+// The page waits one request out first, in place (extension/page.js
+// RETRY_WAITS_MS — 5s/15s/45s, retry-after honoured); this is the layer above
+// it, for a window longer than the page's budget. 503 rides along — the same
+// edge ships both.
+export const RATE_REFUSED = /aipass returned (429|503)\b/;
+export const RATE_WAITS_MS = [20_000, 60_000];
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Run `what` again while it fails in a way that heals by itself and nothing
- * was delivered yet. `streamed` reports whether any delta has left this
- * attempt family — a refusal after that must surface, never resend, or the
- * answer would enter the conversation twice. An abort is never retried.
+ * was delivered yet. Two heal-by-waiting refusals: the four-minute gap below
+ * and a 429/503 from the edge (RATE_REFUSED). `streamed` reports whether any
+ * delta has left this attempt family — a refusal after that must surface,
+ * never resend, or the answer would enter the conversation twice. An abort is
+ * never retried.
  */
-async function retrySend(what, { streamed = () => false, signal = null } = {}) {
+async function retrySend(what, { streamed = () => false, signal = null, rateWaits = RATE_WAITS_MS, note = null } = {}) {
+  let rateTries = 0;
   for (let attempt = 1; ; attempt++) {
     try {
       return await what();
     } catch (err) {
-      const again = attempt < SEND_ATTEMPTS
+      const text = String(err?.message ?? err);
+      const gap = attempt < SEND_ATTEMPTS && TRANSIENT_SEND.test(text);
+      const rate = rateTries < rateWaits.length && RATE_REFUSED.test(text);
+      const again = (gap || rate)
         && !streamed()
         && !signal?.aborted
-        && err?.name !== 'AbortError'
-        && TRANSIENT_SEND.test(String(err?.message ?? err));
+        && err?.name !== 'AbortError';
       if (!again) throw err;
-      await sleep(SEND_RETRY_MS);
+      if (rate) {
+        const wait = rateWaits[rateTries++];
+        note?.(`rate limited by the edge (429) — waiting ${Math.round(wait / 1000)}s, then sending again`);
+        await sleep(wait);
+      } else {
+        await sleep(SEND_RETRY_MS);
+      }
     }
   }
 }
 
 export class BridgeClient {
-  constructor(base = DEFAULT_BRIDGE_URL, { model = null } = {}) {
+  // `rateWaits` lets a caller shorten the 429 wait (the tests do); `onNote`
+  // is where the wait note goes, so a paused run reads as waiting, not stuck.
+  constructor(base = DEFAULT_BRIDGE_URL, { model = null, rateWaits = RATE_WAITS_MS, onNote = null } = {}) {
     this.base = String(base).replace(/\/+$/, '');
     this.model = model;
+    this.rateWaits = rateWaits;
+    this.onNote = onNote;
   }
 
   /**
@@ -120,14 +146,20 @@ export class BridgeClient {
    * `thinkingLevel` asks the model to reason at that level for this turn; the
    * bridge checks it against the model and strips what the model does not offer.
    *
-   * A refusal that heals by itself (see TRANSIENT_SEND) is retried: the
-   * extension's four-minute connection cycle leaves a gap no tab covers, and
-   * a run must not die for it. The retry only happens before any delta
-   * streamed back — after that a resend would deliver the answer twice.
+   * A refusal that heals by itself is retried: the extension's four-minute
+   * connection cycle leaves a gap no tab covers (TRANSIENT_SEND), and a 429
+   * from the edge is waited out (RATE_REFUSED → RATE_WAITS_MS) — a run must
+   * not die for either. The retry only happens before any delta streamed
+   * back — after that a resend would deliver the answer twice.
    */
   async chat(args = {}) {
     let streamed = false;
-    return retrySend(() => this.#sendOnce(args, () => { streamed = true; }), { streamed: () => streamed, signal: args.signal ?? null });
+    return retrySend(() => this.#sendOnce(args, () => { streamed = true; }), {
+      streamed: () => streamed,
+      signal: args.signal ?? null,
+      rateWaits: this.rateWaits,
+      note: this.onNote,
+    });
   }
 
   /** One wire attempt of chat(); `markStreamed` flips the retry gate above. */
@@ -198,7 +230,7 @@ export class BridgeClient {
       const made = await r.json().catch(() => null);
       if (!r.ok || made?.ok === false) throw new Error(made?.error ?? `bridge returned ${r.status}`);
       return made;
-    });
+    }, { rateWaits: this.rateWaits, note: this.onNote });
   }
 
   async config(patch) {

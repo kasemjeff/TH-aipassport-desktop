@@ -242,6 +242,28 @@ test('the substitution table round-trips byte for byte', () => {
   );
 });
 
+test('Thai text round-trips the substitution table byte for byte', () => {
+  // Thai is the other half of the input: U+0E33 (ำ) must stay composed — an
+  // NFKC-normalising pass would split it into NIKHAHIT+AA and silently break
+  // FIND/NEW matches — while the code around it still gets its placeholders.
+  const src = [
+    '// คอมเมนต์ภาษาไทย: ไฟล์นี้ทดสอบ WAF — ลำดับ ๑๒๓',
+    'const ข้อความ = "สวัสดีครับ — กำลังทดสอบอยู่";',
+    'console.log(ข้อความ);',
+    'if (ข้อความ === "สวัสดีครับ — กำลังทดสอบอยู่") { ทำงาน(); }',
+    '// เปิด http://localhost:3000 เพื่อลอง',
+    '',
+  ].join('\n');
+  const enc = outbound(src);
+  assert.ok(enc.includes('CONSOLE-LOG'), 'the logging family engaged');
+  assert.ok(enc.includes('OP-STRICT-EQ'), 'the comparison family engaged');
+  assert.ok(enc.includes('HTTP-URL') && enc.includes('LCLHST'), 'the URL family engaged');
+  assert.ok(enc.includes('กำลัง'), 'U+0E33 stays composed outbound');
+  assert.ok(!enc.includes('\u0E4D\u0E32'), 'no NIKHAHIT+AA decomposition');
+  assert.equal(inbound(enc), src, 'and everything comes back byte for byte');
+  assert.ok(inbound(enc).includes('๑๒๓'), 'Thai digits are not touched');
+});
+
 test('logging calls and comparisons are substituted outbound and restored on disk', async (t) => {
   // The upstream edge 403s any message carrying console.log & friends — in any
   // language and at any size — and blocks `==`/`===`/`!==` inside an if. Reads

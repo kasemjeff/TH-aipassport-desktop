@@ -687,7 +687,7 @@ export function createTools(ctx) {
     },
   };
 
-  // The checker's hand is tied (SPEC_CHECKER.md): every marker that would
+  // The checker's hand is tied (docs/SPEC_CHECKER.md): every marker that would
   // change the tree answers with the reason instead, so a read-only run
   // cannot stage a proposal that lands after the run it was checking.
   if (readOnly) {

@@ -1,4 +1,4 @@
-// The evals runner's self-tests (SPEC_EVALS.md §6), all offline: replay mode
+// The evals runner's self-tests (docs/SPEC_EVALS.md §6), all offline: replay mode
 // through a StubBridge, no fetch, no real bridge, no live model. The Harness
 // facade is driven for real — loop, tools, overlay, apply, check — only the
 // bytes between chat and the model are a stub.

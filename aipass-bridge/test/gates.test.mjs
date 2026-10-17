@@ -1,4 +1,4 @@
-// The four gates the hook review turned up (HARNESS_DESIGN.md, "Worth
+// The four gates the hook review turned up (docs/HARNESS_DESIGN.md, "Worth
 // closing" 2 and 3), each pinned by the assertion that would catch its bug:
 //
 //   1. the RUN command-risk classifier — a destructive body asks even in

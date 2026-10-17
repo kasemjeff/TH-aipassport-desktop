@@ -451,6 +451,37 @@ test('a finished run releases the composer', async () => {
   assert.equal(node('send').textContent, 'ส่ง', 'and send again when the run ends');
 });
 
+test('the apply panel carries the run’s check verdict', async () => {
+  // The person clicks Apply on this panel: if the run's changes never passed a
+  // check — the check said fail, nothing checked them, no RUN was allowed —
+  // the panel has to say so before the write, not after.
+  const changes = [{ file: 'a.mjs', added: 2, removed: 1, deleted: false, isNew: false }];
+  let pendingNow = changes;
+  const { node, tick } = await bootApp({ ...BACKEND, pending: () => pendingNow });
+  const done = (extra) => {
+    globalThis.__stream.emit('finished', { summary: 'done', stopReason: 'done', changes, ...extra });
+  };
+
+  done({ check: { verdict: 'fail', text: 'boom' } });
+  await tick(); await tick(); await tick();
+  const badge = node('pending-check');
+  assert.match(badge.textContent, /ตรวจไม่ผ่าน/, 'a failed check is worn on the panel');
+  assert.equal(badge.classList.contains('hidden'), false);
+
+  done({});
+  await tick(); await tick(); await tick();
+  assert.match(badge.textContent, /ยังไม่ผ่านการตรวจ/, 'no check at all reads as unverified');
+
+  done({ check: { verdict: 'pass' } });
+  await tick(); await tick(); await tick();
+  assert.match(badge.textContent, /ตรวจผ่าน/, 'a passing check reads pass');
+
+  pendingNow = [];
+  done({ check: { verdict: 'pass' } });
+  await tick(); await tick(); await tick();
+  assert.equal(badge.classList.contains('hidden'), true, 'nothing pending, nothing to say');
+});
+
 test('a typed draft survives a reload', async () => {
   // The composer keeps what you typed in the window's own storage, so a stray
   // reload does not cost the paragraph.

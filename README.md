@@ -6,13 +6,28 @@
   <img src="https://github.com/kasemjeff/TH-aipassport-harness/actions/workflows/test.yml/badge.svg" alt="test" />
   <img src="https://img.shields.io/badge/node-%E2%89%A520-blue?logo=node.js&style=flat-square" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/dependencies-zero-success?style=flat-square" alt="Zero Dependencies" />
-  <img src="https://img.shields.io/badge/tests-393%20passing-brightgreen?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-403%20passing-brightgreen?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgray?style=flat-square" alt="Platforms" />
 </p>
 
 ![aipass terminal chat](./public/image.png)
 
 ---
+
+## Contents
+
+- [Where this stands](#where-this-stands)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [The desktop window](#the-desktop-window)
+- [The terminal](#the-terminal)
+- [The agent](#the-agent)
+- [The bridge](#the-bridge)
+- [Configuration](#configuration)
+- [Documentation](#documentation)
+- [Repo layout](#repo-layout)
+- [Development](#development)
+- [Credits & license](#credits--license)
 
 ## Where this stands
 
@@ -176,6 +191,25 @@ localhost.
 The window and the CLI keep their state in `~/.aipass/` (settings, sessions,
 plugins, uploads, logs).
 
+## Documentation
+
+The design docs live in [`docs/`](./docs/):
+
+| Doc | What it holds |
+|---|---|
+| [`docs/HARNESS_DESIGN.md`](./docs/HARNESS_DESIGN.md) | the system end to end: bridge, window, backend, harness — who wires what and why |
+| [`docs/LOOP_DESIGN.md`](./docs/LOOP_DESIGN.md) | the agent loop itself: stage map, guards, stop reasons, the event stream |
+| [`docs/SPEC_CHECKER.md`](./docs/SPEC_CHECKER.md) | the checker: the read-only pass a `DONE` earns, verdicts, the declared check |
+| [`docs/SPEC_EVALS.md`](./docs/SPEC_EVALS.md) | the eval runner: task fixtures, live and replay modes, scoring |
+| [`docs/TECH_STACK.md`](./docs/TECH_STACK.md) | what runs where, and the reasons each piece is what it is |
+
+Component-level docs sit next to their code:
+[`aipass-bridge/README.md`](./aipass-bridge/README.md) (bridge, CLI, protocol),
+[`aipass-bridge/docs/DOCS.md`](./aipass-bridge/docs/DOCS.md) and
+[`desktop/README.md`](./desktop/README.md) (the window and native builds). For
+contributing see [`CONTRIBUTING.md`](./CONTRIBUTING.md); for reporting a
+vulnerability, [`SECURITY.md`](./SECURITY.md).
+
 ## Repo layout
 
 ```text
@@ -192,7 +226,10 @@ aipass/
 │  ├─ ui/               plain HTML/CSS/JS — no build step
 │  ├─ src-tauri/        native shell: tray, sidecar node, bundles
 │  └─ plugins-example/  a plugin worth copying
+├─ docs/                the five design docs — see Documentation above
+├─ evals/               task fixtures — smoke set, holdout, Thai/English pairs
 ├─ scripts/             test runner, QA loop, verify, evals
+├─ public/              static pages and the README image
 └─ package.json         npm run shortcuts — nothing to install
 ```
 
@@ -200,6 +237,7 @@ aipass/
 
 ```bash
 npm test        # the whole suite (bridge, extension, harness, window logic)
+npm run check   # npm test and npm run qa in one go — the pre-push pair
 npm run qa      # static checks + suite + fake-DOM window + live status
 npm run verify  # suite + a sandboxed live smoke of the bridge and backend
 npm run evals   # score agent runs against task checks

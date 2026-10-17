@@ -217,8 +217,9 @@ text left open, as built:
   overrides for a production-model matrix.
 - **Extra flags**: `--results DIR` (JSONL output location); `--budget`
   accepts maxSteps, model, thinking only; `--pause MS` spaces attempts in a
-  live set — the account edge 429s a burst (the extension retries an
-  in-flight 429; the pause keeps the burst from starting).
+  live set — the account edge 429s a burst (the page retries an in-flight
+  429 and the client waits one out at 20s/60s; the pause keeps the burst
+  from starting).
 - **Replay fingerprint**: sha256 over task bytes + preamble bytes + reply
   count (CRLF normalised, BOM tolerated); the digest rides the fixture's
   `fingerprint` block and every row, and a mismatch marks rows `stale` —

@@ -10,7 +10,7 @@ events instead of printing.
 For the whole harness — the review, the findings, the open designs — see
 [`HARNESS_DESIGN.md`](HARNESS_DESIGN.md). For the architecture around it,
 [`TECH_STACK.md`](TECH_STACK.md) and
-[`aipass-bridge/docs/DOCS.md`](aipass-bridge/docs/DOCS.md). Written against
+[`aipass-bridge/docs/DOCS.md`](../aipass-bridge/docs/DOCS.md). Written against
 v0.2 (2026-10).
 
 ## The constraints that shaped it
@@ -54,7 +54,8 @@ run_stats + finished: summary, stopReason, changes, credits spent
 The loop returns `{ summary, stopReason, steps, changes, credits, spent,
 check }`, records a `run_stats` line into the session, and emits `finished`.
 `npm run stats` aggregates those lines: refusal rates, nudges, stagnation
-corrections, verification nudges, firewall notes, step timings, credits.
+corrections, err-loop corrections, chain skips, verification nudges, firewall
+notes, the closing context estimate (`estTokens`), step timings, credits.
 
 ## Who wires what
 
@@ -65,7 +66,7 @@ factories live. The context that matters:
 | ctx | wired when | what it does |
 |---|---|---|
 | `subagent` | `options.subagent` | a child loop on its own conversation; role-less helpers propose edits into the parent overlay |
-| `check` | always wired by the facade | a read-only verifier child — runs when the run can (`subagent` + `allowRun`) and code is staged unchecked; returns `{verdict: pass/fail/none, text, ran}` |
+| `check` | always wired by the facade | a read-only verifier child — runs when the run can (`subagent` + `allowRun`) and code is staged; always at DONE (a self-run does not stand it down), at most two verdicts a run; returns `{verdict: pass/fail/none, text, ran}` |
 | `approvePlan` | `options.requirePlanApproval` | emits `plan_request`; the window's modal answers through `plan.answer` |
 | `compactor` / `rotate` | always | checked against the message about to go out |
 | `permissions` | always | `ask` / `auto` / `yolo`, persisted rules and "always" grants; nobody listening means deny |
@@ -85,7 +86,10 @@ waiting on a slow model is as real a spend as running a command. Stops:
 `time-limited` (via `spendBudget`).
 
 **2. The send.** `saySafe` → `resilientSay`: a message the edge rejects is
-retried once in a halved/rewritten form (`firewall_note` goes out). The user
+retried once in a halved/rewritten form (`firewall_note` goes out). A 429 is
+not rewritten — it is waited out, first in the page (5s/15s/45s) and then by
+the client (20s/60s, `RATE_WAITS_MS`), so a busy edge pauses a run instead of
+ending it. The user
 pressing stop surfaces as `AbortError` — an ending, not a failure — and the
 transcript must not read "error" for it: `cancelled`. An error naming a missing
 chat tab emits `needs_tab` so the window can offer the fix in one click.
@@ -102,8 +106,9 @@ are pulled out; everything else is `work`. The first real prose line becomes
   language check applies, nothing is checked — and the run pauses for the
   answer. Emits `done_line` + `ask`. Stops: `ask`;
 - an effective DONE (an explicit `DONE`, or prose-only after tools have run):
-  the finish pipeline — `finishCheck` if code is staged and unchecked, then
-  the language check, then `done_line`. Stops: `done`;
+  the finish pipeline — `finishCheck` when code is staged (always: a self-run
+  does not stand it down; at most two verdicts a run), then the language
+  check, then `done_line`. Stops: `done`;
 - otherwise the nudge pipeline: streaks 1–2 emit `nudge` and send a
   marker-shaped reminder; the third consecutive blank reply is the stall path
   — one last checker attempt if it can help, then `give_up`. Stops: `stalled`.
@@ -125,6 +130,13 @@ then `Promise.all`; results re-assemble in marker order.
 - **arg guard** — a path call refused for a missing file is retried once with
   invisible characters stripped and non-ASCII digits normalised, and the
   result says so;
+- **chain guard** — once a change has failed in this reply, every later change
+  or RUN in the same reply is skipped before it starts: the skip is stated in
+  the results as `err: skipped …`, flagged on `tool`, and spends no budget;
+  reads, git, web and control markers still run;
+- **err loop** — a failure is keyed by kind + first error line with the call's
+  own argument masked; the third same-key failure in a row earns a correction
+  on its result (`errLoops`), and a streak past `repeatGuardMax` stops the run;
 - **budgets** — both are checked before each call; a budget spent mid-reply
   stops the run where it is (later calls do not execute).
 
@@ -157,7 +169,8 @@ each result) is kept for the last six steps:
 **10. Verify nudge (R4).** Once a run has staged code and nothing checked it
 since the last change, the next message asks for proof — once. Running a check
 or reading a staged file back in the same step counts as the proof;
-`finishCheck` pre-empts the nudge when the checker can run.
+`finishCheck` pre-empts the nudge when the checker can run. R4's "verified"
+only silences the reminder — the exit check runs regardless.
 
 **11. Compaction.** Checked against the assembled message the way the server
 will receive it (after `outbound()` rewrites). Over budget: summarise in the
@@ -175,17 +188,20 @@ the stop reason; credits are diffed (`quota(true)`); `run_stats` and
 |---|---|---|---|
 | nudge | a reply with no actionable marker | `nudge` + reminder (×2) | 3rd: checker's last chance, then `give_up` → `stalled` |
 | repeat guard | identical call, 3rd time, nothing staged in between | refusal text as the result, `repeat_block` | > `repeatGuardMax` (4) refusals → `stalled` |
+| err loop | the same failure (kind + masked error line) on calls in a row | correction on the third result, `errLoops` | streak > `repeatGuardMax` → `stalled` |
+| chain guard | a failed change, mid-reply | the reply's later changes/RUNs skipped and stated, `chainSkips`; reads still run | — |
 | stagnation | same step ×3, or two trading places ×2 | `stagnation` warn + "do something different" | `stagnation` |
 | budgets | tool count (300) and wall clock (30 min) | `budget` event | `tools-limited` / `time-limited` |
 | plan gate | `PLAN` and no approval yet | `plan_request`, wait however long | decline → `plan-rejected` |
-| checker | DONE (or a stalled step) with staged, unchecked code | read-only verifier runs it | fail → a correcting step; pass → `done` |
+| checker | DONE (or a stalled step) with staged code | read-only verifier runs it; a self-run does not stand it down; a re-check only when the tree moved | fail → a correcting step; pass → `done`; two verdicts a run, the last recorded |
 | verify nudge | staged code, nothing verified since the change | `verify_prompt` (once per run) | — |
 | language check | closing message under `minThaiRatio` Thai | `lang_prompt`, one rewrite | — |
 | compaction | assembled message over the context budget | summarise + rotate | — |
 
-The mechanical guards (repeat, stagnation, budgets) stop a run that cannot
-move; the advisory ones (verify, language) ask once and let the model finish.
-All of them correct *evidence*, never intent: a call runs as written first.
+The mechanical guards (repeat, err loop, stagnation, budgets) stop a run that
+cannot move; the chain guard narrows one step after a failed change; the
+advisory ones (verify, language) ask once and let the model finish. All of
+them correct *evidence*, never intent: a call runs as written first.
 
 ## Stop reasons
 
@@ -194,7 +210,7 @@ All of them correct *evidence*, never intent: a call runs as written first.
 | `done` | DONE accepted (possibly after the checker or a language rewrite) |
 | `ask` | the model paused on a question (ASK) — the next message answers it |
 | `steps` | the step limit ran out — the default |
-| `stalled` | hollow replies ×3, or too many repeat refusals |
+| `stalled` | hollow replies ×3, repeat refusals past the cap, or a same-failure streak past it |
 | `stagnation` | the same step, or two trading places, with identical results |
 | `cancelled` | the user pressed stop |
 | `error` | transport/model failure, or a missing tab (with `needs_tab`) |
@@ -250,9 +266,9 @@ the helper keeps its original behaviour.
 | `test/run-resilience.test.mjs` | a gap in the extension: retried where safe, not retried mid-stream |
 | `test/run-overlay.test.mjs` | the staged tree projected into RUN; the disk untouched until Apply |
 | `test/gates.test.mjs` · `test/permissions.test.mjs` | the decisions the gate consumes — yolo still asks about destructive RUNs |
-| `test/checker.test.mjs` | verdicts pass/fail/none, the read-only child, one check per run, the declared check |
+| `test/checker.test.mjs` | verdicts pass/fail/none, the read-only child, the declared check, an always-run exit check bounded at two verdicts |
 | `test/ask.test.mjs` | the ASK pause: closing line, no check, deferral beside a NEED |
-| `test/lang-guard.test.mjs` | path variants (invisibles, Thai digits), the Thai reply policy, the repeat guard up to `stalled` |
+| `test/lang-guard.test.mjs` | path variants (invisibles, Thai digits), the Thai reply policy, the repeat / err-loop / chain guards up to `stalled` |
 | `test/harness-fixes.test.mjs` · `test/harness-research.test.mjs` | the stagnation guard's warn-then-stop |
 | `test/compact.test.mjs` | rotation mid-run; the estimate's script-aware divisor |
 | `test/protocol.test.mjs` | markers, fences, the preamble |

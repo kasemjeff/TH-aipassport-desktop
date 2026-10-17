@@ -13,6 +13,7 @@
     "verify": "node scripts/verify.mjs",
     "qa": "node scripts/qa-loop.mjs",
     "qa:loop": "node scripts/qa-loop.mjs",
+    "check": "node scripts/test.mjs && node scripts/qa-loop.mjs",
     "chat": "node aipass-bridge/chat.mjs",
     "agent": "node aipass-bridge/agent.mjs",
     "models": "node aipass-bridge/list.mjs models",

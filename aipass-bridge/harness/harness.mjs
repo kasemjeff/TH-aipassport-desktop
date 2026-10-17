@@ -67,7 +67,12 @@ export class Harness {
     };
     this.bridge = opts.bridge instanceof BridgeClient
       ? opts.bridge
-      : new BridgeClient(opts.bridgeURL ?? DEFAULT_BRIDGE_URL, { model: opts.model ?? this.options.model ?? null });
+      : new BridgeClient(opts.bridgeURL ?? DEFAULT_BRIDGE_URL, {
+          model: opts.model ?? this.options.model ?? null,
+          // A 429 wait must read as a pause, not a stuck run: the client's
+          // note rides the same dim-note channel as the firewall notes.
+          onNote: (text) => this.events.emit('firewall_note', { text }),
+        });
     this.skills = opts.skills ?? SkillLibrary.default({ root: this.root, repoDir: REPO_SKILLS });
     this.store = opts.store === 'off' ? null : (opts.store ?? new SessionStore(path.join(home(), 'sessions')));
     this.overlay = new Overlay(this.root);
@@ -235,6 +240,13 @@ export class Harness {
     this.session.append('compaction', { summary, firstKeptEntryId: this.session.entries.at(-1)?.id ?? null });
     await this.#rotate(summary, task);
     this.events.emit('compacted', { summary });
+    // The staged list rides along (deletes marked): a rotation is where a
+    // pending edit gets forgotten, and the fresh conversation must know the
+    // tree is not what the disk says yet.
+    const staged = this.overlay.keys().map((abs) => {
+      const rel = path.relative(this.root, abs).split(path.sep).join('/');
+      return this.overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
+    }).slice(0, 20);
     const seedText = this.compactor.seed({
       summary,
       task,
@@ -245,6 +257,7 @@ export class Harness {
         subagent: Boolean(this.options.subagent),
         lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
+      staged,
     });
     return { summary, seedText };
   }
@@ -430,7 +443,7 @@ export class Harness {
   }
 
   /**
-   * The checker (SPEC_CHECKER.md): one read-only child run over the staged
+   * The checker (docs/SPEC_CHECKER.md): one read-only child run over the staged
    * tree — the piece that puts a verdict behind a DONE. Its tools read a
    * snapshot of the parent's staged files, so `read` and `run` see the tree
    * Apply would produce, and every `run` goes through the projection for the

@@ -1,4 +1,4 @@
-// The checker (SPEC_CHECKER.md): one read-only child over the staged tree,
+// The checker (docs/SPEC_CHECKER.md): one read-only child over the staged tree,
 // asked for a verdict before a DONE is accepted. A stub bridge with a reply
 // queue per conversation keeps the parent's exchanges and the checker's
 // apart — the parent's sends carry no conversation id (they use the bridge
@@ -176,7 +176,7 @@ test('writes are refused in the checker, and nothing is merged back', async () =
   assert.deepEqual(pending.map((p) => p.file), ['extra.mjs'], 'only the parent edit is pending');
 });
 
-test('one check per run — a second DONE does not check again', async () => {
+test('a second DONE over the same tree does not check again', async () => {
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
     parent: [
@@ -193,7 +193,7 @@ test('one check per run — a second DONE does not check again', async () => {
   const result = await h.run('fix add()');
 
   assert.equal(result.stopReason, 'done');
-  assert.equal(starts.length, 1, 'the latch held: one check, at the first DONE');
+  assert.equal(starts.length, 1, 'the tree did not move, so the first verdict stands');
   assert.deepEqual(starts[0].files, [{ path: 'math.mjs', deleted: false }]);
   assert.equal(bridge.created, 2, 'no second checker conversation');
   assert.equal(statsOf(h).checks, 1);
@@ -242,6 +242,87 @@ test('a checker conversation that will not open is skipped, never the parent one
   assert.ok(h.session.entries.some((e) => e.type === 'note' && /check skipped/.test(e.text)), 'the skip says why');
   assert.equal(statsOf(h).checks, 0);
   assert.equal(statsOf(h).checkVerdict, 'none');
+});
+
+test('a run that checked itself still earns the child check', async () => {
+  // A self-run is exactly the weak evidence the checker exists for: the run
+  // "verified" itself with a run in the same reply and the old gate let it
+  // through unchecked. The check now runs regardless of what the run claims,
+  // and the verdict is the child's own.
+  const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
+  const bridge = new StubBridge({
+    parent: [
+      // Read-first: CREATE over an existing file needs the file read this run.
+      'NEED file math.mjs\n',
+      'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\n'
+      + 'RUN\nnode check.mjs\nEND\nDONE ran the check myself\n',
+    ],
+    'conv-2': [RUN_CHECK],
+  });
+  const { h, events } = makeHarness({ root, bridge });
+  const starts = [];
+  events.on('check_start', (p) => starts.push(p));
+
+  const result = await h.run('fix add()');
+
+  assert.equal(result.stopReason, 'done');
+  assert.equal(starts.length, 1, 'the self-run did not stand the check down');
+  assert.equal(statsOf(h).checks, 1);
+  assert.equal(statsOf(h).checkVerdict, 'pass');
+  assert.equal(bridge.created, 2, 'one checker conversation (parent + checker)');
+});
+
+test('a fix after a failed check earns one re-check, and a pass ends it', async () => {
+  const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
+  const bridge = new StubBridge({
+    parent: [
+      // Read-first, then the fix: the re-check below rides on the tree moving.
+      'NEED file math.mjs\n',
+      'CREATE math.mjs\nexport const add = (a, b) => a - b + 1;\nEND\nDONE staged a fix\n',
+      'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE fixed it properly\n',
+    ],
+    'conv-2': [RUN_CHECK],
+    'conv-3': [RUN_CHECK],
+  });
+  const { h, events } = makeHarness({ root, bridge });
+  const ends = [];
+  events.on('check_end', (p) => ends.push(p));
+
+  const result = await h.run('fix add()');
+
+  assert.equal(result.stopReason, 'done');
+  assert.deepEqual(ends.map((e) => e.verdict), ['fail', 'pass'], 'the fix moved the tree, so it was judged again');
+  assert.equal(statsOf(h).checks, 2);
+  assert.equal(result.check?.verdict, 'pass');
+  assert.equal(bridge.created, 3, 'one checker conversation per verdict');
+});
+
+test('the check cap holds: two verdicts, then the DONE is taken as it stands', async () => {
+  // A fix that keeps failing cannot farm infinite checks — CHECK_ROUNDS_MAX
+  // bounds the loop, and the last verdict stays on the finished event so the
+  // apply panel can say the change never passed.
+  const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
+  const bridge = new StubBridge({
+    parent: [
+      'NEED file math.mjs\n',
+      'CREATE math.mjs\nexport const add = (a, b) => a - b + 1;\nEND\nDONE attempt one\n',
+      'CREATE math.mjs\nexport const add = (a, b) => a - b - 1;\nEND\nDONE attempt two\n',
+      'DONE leaving it at that\n',
+    ],
+    'conv-2': [RUN_CHECK],
+    'conv-3': [RUN_CHECK],
+  });
+  const { h, events } = makeHarness({ root, bridge });
+  const starts = [];
+  events.on('check_start', (p) => starts.push(p));
+
+  const result = await h.run('fix add()');
+
+  assert.equal(result.stopReason, 'done');
+  assert.equal(starts.length, 2, 'the cap stopped a third check');
+  assert.equal(statsOf(h).checks, 2);
+  assert.equal(result.check?.verdict, 'fail', 'the last verdict rides the finished event');
+  assert.equal(bridge.created, 3);
 });
 
 test('the checker and its verdict name the staged test files', async () => {

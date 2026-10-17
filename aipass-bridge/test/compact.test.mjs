@@ -102,6 +102,21 @@ test('seed keeps its between-runs shape, and pastes the step results on a mid-ru
   assert.match(mid, /Earlier work, already done/);
   assert.match(mid, /Result of read big\.txt/);
   assert.doesNotMatch(mid, /What should I open first\?/, 'the model is mid-task, not starting');
+
+  // The two pins a rotation must not drop: the staged list (with deletes
+  // marked) and the last check that has not passed, verbatim enough to act on.
+  const pinned = c.seed({
+    summary: 'did things', task: 'the task', listing: '', preambleText: 'PRE',
+    staged: ['math.mjs', 'old.txt (deleted)'],
+    lastCheck: { verdict: 'fail', text: 'FAIL: add(2,3) = 0' },
+  });
+  assert.match(pinned, /Staged but not on disk yet/);
+  assert.match(pinned, /- math\.mjs/);
+  assert.match(pinned, /- old\.txt \(deleted\)/);
+  assert.match(pinned, /did not pass \(fail\)/);
+  assert.match(pinned, /FAIL: add\(2,3\) = 0/);
+  assert.match(pinned, /Task: the task/, 'the task stays verbatim');
+  assert.doesNotMatch(between, /Staged but not on disk/, 'no staged files, no block');
 });
 
 test('a long run rotates mid-run: summarise, fresh conversation, results still delivered', async (t) => {

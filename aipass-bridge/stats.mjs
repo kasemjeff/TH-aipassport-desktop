@@ -6,7 +6,7 @@
 // per-step timings, credits.
 // This reader aggregates those lines — the last N runs plus lifetime totals.
 // Refusal-rate and firewall trends are how protocol drift gets caught instead
-// of guessed at (HARNESS_DESIGN.md, P2-D).
+// of guessed at (docs/HARNESS_DESIGN.md, P2-D).
 //
 //   npm run stats                       last 20 runs, all projects
 //   npm run stats -- --root DIR         one project

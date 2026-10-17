@@ -29,6 +29,29 @@ import { PATHY, pathVariants, beYearNote } from './argguard.mjs';
 const MUTATING = new Set(['write', 'replace', 'delete', 'move']);
 const CODE_FILE = /\.(m?js|cjs|tsx?|jsx|py|rb|go|rs|java|cs|php|swift|kt|c|h|cpp|hpp|sh|ps1|css|html?|sql)$/i;
 
+// (chain guard) After a change has failed in the same reply, only calls whose
+// outcome cannot touch the tree keep running — reads, git, web, control
+// markers. Another edit or a RUN would act on the state the reply was planned
+// against, and one real error cascading into three consequential ones is how
+// a step gets lost. (Research round, after the false-success findings.)
+const SURVIVES_FAILURE = (kind) => !MUTATING.has(kind) && kind !== 'run';
+
+/**
+ * (research) The signature of one failure, for the err-loop guard: the first
+ * line of the error, lowercased, with the call's own argument (and a RUN's
+ * command) masked out, then any path-shaped tokens. Three different missing
+ * files — or three spellings of the same broken command — collapse to one
+ * key; a genuinely different failure keeps its own.
+ */
+function errKindOf(call, text) {
+  let line = String(text).split('\n')[0].toLowerCase().slice(0, 200);
+  const bits = [String(call.arg ?? ''), call.kind === 'run' ? String(call.body ?? '').split('\n')[0] : '']
+    .map((b) => b.trim().toLowerCase())
+    .filter((b) => b.length >= 3);
+  for (const b of bits) line = line.split(b).join('<arg>');
+  return `${call.kind}::${line.replace(/[\w.\\/:-]*[\\/][\w.\\/:-]*/g, '<path>').replace(/\s+/g, ' ').trim()}`;
+}
+
 const previewOf = (call) => {
   if (call.kind === 'replace') return String(call.body?.[1] ?? '').slice(0, 4000);
   if (call.body) return String(call.body).slice(0, 4000);
@@ -199,6 +222,18 @@ export async function runTask(taskText, ctx = {}) {
   let repeatedResults = 0;   // …and ones whose text was already seen
   const resultSeen = new Set();
 
+  // (research) The near-miss loop: arguments change, the failure does not —
+  // three spellings of one broken call never trip the exact-match repeat
+  // guard. One key per failure kind; a streak of three earns one correction,
+  // and a streak past the repeat guard's ceiling stops the run the same way.
+  // The chain guard's counters ride here too: a failed change stops the later
+  // changes of the same reply (reads still run), and run_stats counts it.
+  let errKindKey = '';       // the current failure-kind streak's key
+  let errStreak = 0;         // consecutive calls that failed with that kind
+  let errLoops = 0;          // (stats) corrections sent for such streaks
+  let errTrip = false;       // the streak ceiling was hit — stop after this step
+  let chainSkips = 0;        // (stats) calls skipped after a failed change
+
   // A spent budget is an ending, and it is recorded like one: the session
   // keeps the note, the window keeps the event, run_stats keeps the reason.
   let budgetHit = null;      // 'tools-limited' | 'time-limited'
@@ -211,20 +246,25 @@ export async function runTask(taskText, ctx = {}) {
     events?.emit('budget', { reason, used });
   };
 
-  // (checker, SPEC_CHECKER.md) A DONE over staged code earns one read-only
-  // check before it is accepted. The gate mirrors R4's so the two stages
-  // cannot disagree — code staged, nothing verified it — plus the two
-  // conditions only a check has: it is an execution, so it runs only where
-  // the run itself could run things, and it is one per run (up before the
-  // first await).
-  let checkTried = false;
-  let checks = 0;            // (stats) 1 when a check actually ran
-  let checkResult = null;    // what the check answered, or null
+  // (checker, docs/SPEC_CHECKER.md) A DONE over staged code earns a read-only
+  // check before it is accepted — always, even when the run "verified" itself
+  // with a run or a read-back: a temporary assertion is not a verdict, and
+  // only the child's own runs decide. It is an execution, so it runs only
+  // where the run itself could run things, and it is bounded at
+  // CHECK_ROUNDS_MAX per run: a failed check that earned a fix (the tree
+  // moved since the last verdict) earns one re-check; a DONE over the tree
+  // the check already judged earns none.
+  const CHECK_ROUNDS_MAX = 2;
+  let checks = 0;            // (stats) how many checks actually ran
+  let checkResult = null;    // what the last check answered, or null
+  let mutationsAtLastCheck = -1; // the tree state the last check judged
 
   const finishCheck = async () => {
-    if (checkTried || !check || !options.subagent || !options.allowRun) return null;
-    if (!overlay.size || !codeTouched || verifiedSinceChange) return null;
-    checkTried = true;
+    if (!check || !options.subagent || !options.allowRun) return null;
+    if (!overlay.size || !codeTouched) return null;
+    if (checks >= CHECK_ROUNDS_MAX) return null;
+    if (checks > 0 && mutations === mutationsAtLastCheck) return null;
+    mutationsAtLastCheck = mutations;
     verifySent = true; // the run is being checked; R4 stands down
     const files = overlay.keys()
       .map((abs) => ({ path: posix(path.relative(overlay.root, abs)), deleted: overlay.isDeleted(abs) }))
@@ -238,7 +278,7 @@ export async function runTask(taskText, ctx = {}) {
       // Structural failure never crosses the boundary.
       checkResult = { verdict: 'none', text: `check could not run: ${err.message}`, ran: 0 };
     }
-    if (!checkResult.skipped) checks = 1;
+    if (!checkResult.skipped) checks += 1;
     session?.append('note', { text: `check ${checkResult.verdict}: ${String(checkResult.text ?? '').slice(0, 2000)}` });
     events?.emit('check_end', { verdict: checkResult.verdict, ran: checkResult.ran ?? 0, skipped: Boolean(checkResult.skipped) });
     return checkResult.verdict === 'fail'
@@ -360,7 +400,7 @@ export async function runTask(taskText, ctx = {}) {
           next = `${checkMsg}\n\n${REMINDER}`;
           continue;
         }
-        if (checkTried && checkResult?.verdict === 'pass') {
+        if (checks > 0 && checkResult?.verdict === 'pass') {
           summary = summary ?? 'check passed after a stalled step';
           events?.emit('done_line', { text: summary, extra: '' });
           stopReason = 'done';
@@ -438,12 +478,37 @@ export async function runTask(taskText, ctx = {}) {
     };
 
     const results = [];
+    let brokenBy = null;    // the first change that failed in this reply …
+    let chainNoted = false; // … and whether the skip was spoken yet
     for (let i = 0; i < work.length; i++) {
       // One reply can carry a hundred markers; each one is checked against
       // both budgets before it executes.
       if (toolsRun >= maxToolCalls) { spendBudget('tools-limited'); break; }
       if (Date.now() - runStart > maxWallClockMs) { spendBudget('time-limited'); break; }
       const call = work[i];
+      // A RUN's label is its command: the parser puts the command in the body,
+      // so `arg` alone leaves a row that says "run" and nothing else — in the
+      // window, in the replayed session, and in the step result the model reads
+      // back. The first line is the label; a wrapped command reads until the
+      // first break, which is what fits a row.
+      const label = call.kind === 'run' && !call.arg ? String(call.body ?? '').split('\n')[0].trim() : call.arg;
+      // (chain guard) The first failed change poisons the rest of the reply:
+      // whatever else touches the tree was planned against the state the
+      // refusal just invalidated. It does not run — the model gets the skip
+      // spelled out and re-plans from the new state; reads keep running,
+      // because they are how it learns that state.
+      if (brokenBy && !SURVIVES_FAILURE(call.kind)) {
+        chainSkips += 1;
+        if (!chainNoted) {
+          chainNoted = true;
+          session?.append('note', { text: `chain guard: ${brokenBy.kind} ${brokenBy.arg ?? ''} failed — the reply's later changes were skipped so the model plans from the new state` });
+          events?.emit('note', { text: 'an earlier change failed — later changes in the same reply were skipped (reads still ran)' });
+        }
+        events?.emit('tool', { kind: call.kind, arg: label, ok: false, head: 'skipped — an earlier change failed', lines: [], isLast: i === work.length - 1 && !done });
+        session?.append('tool', { kind: call.kind, arg: label, out: 'skipped — an earlier change in the same reply failed; this call did not run', ok: false });
+        results.push(`Result of ${call.kind} ${label}:\nerr: skipped — an earlier change in this same reply failed, so this call did not run on the stale state. Read the results above and plan again from there.`);
+        continue;
+      }
       toolsRun++;
       const result = helperResults && call.kind === 'subagent'
         ? helperResults[i]
@@ -455,6 +520,25 @@ export async function runTask(taskText, ctx = {}) {
       // failure phrases — every new failure message used to miss the old
       // regexes silently.
       const refused = /^err:/i.test(text.trimStart());
+      if (refused && MUTATING.has(call.kind) && !brokenBy) brokenBy = call;
+      // (research) The near-miss loop: same kind, same failure text with the
+      // argument masked, different arguments each time. Three in a row earn a
+      // correction; past the repeat guard's ceiling the run is stopped — a
+      // streak survives because every call in it changes something, which is
+      // exactly what the exact-match guard cannot see.
+      let loopNote = null;
+      if (refused) {
+        const key = errKindOf(call, text);
+        if (key === errKindKey) errStreak += 1; else { errKindKey = key; errStreak = 1; }
+        if (errStreak === 3) {
+          errLoops += 1;
+          session?.append('note', { text: 'err-loop guard: three calls in a row failed the same way — sending a correction' });
+          events?.emit('note', { text: 'err-loop guard: the same failure three times in a row — asking for a different move' });
+          loopNote = `\n\nnote: that is the third call in a row to fail the same way — the arguments changed, the failure did not. Repeating the shape cannot move it: change something material (another path, another command), or say DONE and name what blocks the run.`;
+        } else if (errStreak > repeatGuardMax) {
+          errTrip = true;
+        }
+      } else { errKindKey = ''; errStreak = 0; }
       // (R4) What counts as touching code, and what counts as having checked
       // it: a shell command run in the same step, or a read-back of a file
       // the overlay holds. A refused call changed nothing.
@@ -474,23 +558,21 @@ export async function runTask(taskText, ctx = {}) {
       if (refused) stat.fail += 1;
       toolStats.set(call.kind, stat);
       const isLast = i === work.length - 1 && !done;
-      // A RUN's label is its command: the parser puts the command in the body,
-      // so `arg` alone leaves a row that says "run" and nothing else — in the
-      // window, in the replayed session, and in the step result the model reads
-      // back. The first line is the label; a wrapped command reads until the
-      // first break, which is what fits a row.
-      const label = call.kind === 'run' && !call.arg ? String(call.body ?? '').split('\n')[0].trim() : call.arg;
       events?.emit('tool', { kind: call.kind, arg: label, ok: !refused, head: head.slice(0, 70), lines: refused ? rest : [], isLast });
       session?.append('tool', { kind: call.kind, arg: label, out: text.slice(0, 20_000), ok: !refused });
       // (Thai pack) Evidence novelty: a result already seen this run is what a
       // loop smells like in the stats, before anyone reads the transcript.
       const seenKey = text.slice(0, 600);
       if (resultSeen.has(seenKey)) repeatedResults += 1; else { resultSeen.add(seenKey); novelResults += 1; }
-      results.push(`Result of ${call.kind} ${label}:\n${outbound(result)}`);
+      results.push(`Result of ${call.kind} ${label}:\n${outbound(result)}${loopNote ?? ''}`);
     }
 
-    if (repeatTrip) {
-      session?.append('note', { text: `repeat guard: the run hit its ceiling of ${repeatGuardMax} refused repeats — stopping` });
+    if (repeatTrip || errTrip) {
+      session?.append('note', {
+        text: errTrip
+          ? `err-loop guard: ${errStreak} calls in a row failed the same way — stopping`
+          : `repeat guard: the run hit its ceiling of ${repeatGuardMax} refused repeats — stopping`,
+      });
       events?.emit('give_up', {});
       stopReason = 'stalled';
       break;
@@ -611,7 +693,15 @@ export async function runTask(taskText, ctx = {}) {
         session.append('compaction', { summary: note, firstKeptEntryId: session.entries.at(-1)?.id ?? null });
         await rotate?.(note);
         events?.emit('compacted', { summary: note });
-        next = `${compactor.seed({ summary: note, task: taskText, listing: '', preambleText: pre, results: results.join('\n\n') })}\n\n${REMINDER}`;
+        // The fresh conversation keeps what a summary would drop: the files
+        // staged so far (deletes marked) and the last check that has not
+        // passed — the two constraints a rotation loses most expensively.
+        const stagedNow = overlay.keys().map((abs) => {
+          const rel = posix(path.relative(overlay.root, abs));
+          return overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
+        }).slice(0, 20);
+        const lastCheck = checkResult && checkResult.verdict && checkResult.verdict !== 'pass' ? checkResult : null;
+        next = `${compactor.seed({ summary: note, task: taskText, listing: '', preambleText: pre, results: results.join('\n\n'), staged: stagedNow, lastCheck })}\n\n${REMINDER}`;
       } catch (err) {
         events?.emit('error', { message: `compaction failed, sending the results without it: ${err.message}` });
       }
@@ -641,9 +731,16 @@ export async function runTask(taskText, ctx = {}) {
     checks,
     checkVerdict: checkResult?.verdict ?? null,
     repeatBlocks,
+    errLoops,
+    chainSkips,
     langPrompts,
     novelResults,
     repeatedResults,
+    // The run's closing context size, in the compactor's own estimate — the
+    // number that decides when the next run rotates. Real upstream tokens are
+    // not observable from a browser tab; this is the same yardstick the
+    // rotation uses, so per-run and per-success rates compare like with like.
+    estTokens: compactor && session ? compactor.estimate(session) : null,
     stepMs,
     spent,
   };

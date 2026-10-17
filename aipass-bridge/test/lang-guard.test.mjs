@@ -7,6 +7,11 @@
 //     argument rides raw until the guard has to normalize it
 //   - an identical call repeated with nothing staged in between is refused on
 //     the third time, counted, and a run past the refusal cap stops as stalled
+//   - calls that fail the same way three times in a row — different arguments,
+//     same failure — earn one correction, and a streak past the cap stops the
+//     run (the err-loop guard)
+//   - after a failed change, the rest of that reply's changes are skipped and
+//     spoken while reads still run (the chain guard)
 //   - the reply-language hook asks exactly once for Thai when the closing
 //     message comes back English
 //   - a stalled run still gets the checker's one shot at the staged tree
@@ -155,6 +160,59 @@ test('refusals past the cap stop the run as stalled', async () => {
 
   assert.equal(result.stopReason, 'stalled');
   assert.equal(b.stats().repeatBlocks, 2, 'two refusals: the cap is one');
+});
+
+/* The near-miss loop and the chain guard ------------------------------------- */
+
+test('after a failed change, the same reply’s other changes are skipped and spoken', async () => {
+  // One real error used to cascade: the reply was planned against the old
+  // state, the REPLACE failed, and the CREATE after it staged anyway. The
+  // chain guard stops everything that touches the tree, keeps the reads (how
+  // the model learns the new state), and says so in the results.
+  const dir = tempDir({ 'a.txt': 'hello\n' });
+  const b = boot(dir, [
+    'CREATE b.mjs\nexport const x = 1;\nEND\n'
+    + 'EDIT a.txt\nFIND\nzzz-not-there\nNEW\nyyy\nEND\n'
+    + 'CREATE c.mjs\nexport const y = 2;\nEND\n'
+    + 'NEED file a.txt',
+    'DONE finished the rest',
+  ]);
+  const result = await b.call();
+
+  assert.equal(result.stopReason, 'done');
+  const staged = b.overlay.keys().map((abs) => path.relative(dir, abs).split(path.sep).join('/'));
+  assert.deepEqual(staged, ['b.mjs'], 'the change after the failure was not staged');
+  assert.match(b.bridge.received[1], /skipped — an earlier change/, 'the model is told why it was skipped');
+  assert.match(b.bridge.received[1], /hello/, 'the read after the failed change still ran');
+  assert.equal(b.stats().chainSkips, 1);
+  assert.ok(b.session.entries.some((e) => e.type === 'note' && /chain guard/.test(e.text)), 'the session keeps the reason');
+});
+
+test('three calls in a row failing the same way earn a correction', async () => {
+  // The near-miss loop: the arguments change (three different missing files),
+  // the failure does not — exactly what the exact-match repeat guard cannot
+  // see. The third failure carries the correction back to the model.
+  const dir = tempDir({});
+  const b = boot(dir, ['NEED file no1.txt', 'NEED file no2.txt', 'NEED file no3.txt', 'DONE named three misses']);
+  const result = await b.call();
+
+  assert.equal(result.stopReason, 'done');
+  assert.match(b.bridge.received[3], /third call in a row to fail the same way/, 'the correction reached the model');
+  assert.equal(b.stats().errLoops, 1);
+  assert.equal(b.stats().repeatBlocks, 0, 'nothing was refused — the calls were all new');
+});
+
+test('a failure streak past the cap stops the run as stalled', async () => {
+  const dir = tempDir({});
+  const b = boot(dir, [
+    'NEED file no1.txt', 'NEED file no2.txt', 'NEED file no3.txt', 'NEED file no4.txt', 'NEED file no5.txt',
+    'DONE never reached',
+  ]);
+  const result = await b.call();
+
+  assert.equal(result.stopReason, 'stalled');
+  assert.equal(b.stats().errLoops, 1, 'one correction at three; the cap stopped it at five');
+  assert.ok(b.session.entries.some((e) => e.type === 'note' && /err-loop guard/.test(e.text)), 'the stop says why');
 });
 
 /* Test 8: the reply-language hook ------------------------------------------- */

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // npm run evals — run task fixtures against the harness and score the applied tree.
 //
-// The contract is SPEC_EVALS.md:
+// The contract is docs/SPEC_EVALS.md:
 //
 //   evals/tasks/<id>/     task.md (the only thing the agent sees), task.json
 //                         (check + budget + allowRun), tree/ (the fixture)
@@ -40,7 +40,7 @@ import { thaiRatio } from '../aipass-bridge/harness/lang.mjs';
 
 export const EVALS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'evals');
 export const DEFAULT_CHECK_TIMEOUT_MS = 60_000;
-// The loop has no wall cap (HARNESS_DESIGN.md keeps hard caps on the
+// The loop has no wall cap (docs/HARNESS_DESIGN.md keeps hard caps on the
 // not-shipped list), so the runner adds one: cancel the run and mark the
 // attempt invalid rather than let a hung tab hold the whole matrix.
 export const DEFAULT_WALL_MS = 10 * 60_000;
@@ -364,7 +364,7 @@ export function checkCommand(command, cwd, { timeoutMs = DEFAULT_CHECK_TIMEOUT_M
 /* --------------------------------------------------------------- attempt */
 
 /**
- * One attempt through the Harness facade, per SPEC_EVALS.md §2:
+ * One attempt through the Harness facade, per docs/SPEC_EVALS.md §2:
  * copy tree/ → temp, AIPASS_HOME + explicit store, run + apply, run the
  * check in the copy, read `run_stats` back from the attempt's session JSONL,
  * and assemble one result row. Never throws for a run that died — a failed
