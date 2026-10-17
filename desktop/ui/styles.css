@@ -110,6 +110,7 @@ body {
 .dim { color: var(--dim); }
 .grow { flex: 1; }
 .hidden { display: none !important; }
+::selection { background: var(--accent-ring); }
 
 select, button, textarea, input { font: inherit; color: inherit; }
 button {
@@ -151,6 +152,13 @@ button.mini { padding: 1px 8px; font-size: 12px; border-radius: 6px; }
   flex: none;
 }
 .icon-btn:hover { background: var(--bg-3); border-color: var(--line); color: var(--fg); }
+/* The header buttons draw themselves instead of borrowing a font glyph, and
+   the theme button shows the weather of the theme you will get, not the one
+   you have. */
+.icon-btn svg { display: block; pointer-events: none; }
+#theme-toggle .i-sun { display: none; }
+:root[data-theme="light"] #theme-toggle .i-sun { display: block; }
+:root[data-theme="light"] #theme-toggle .i-moon { display: none; }
 
 /* the chevron every native select gets, drawn once as a data uri */
 select {
@@ -286,8 +294,8 @@ main { flex: 1; display: grid; grid-template-columns: var(--side-w) minmax(0, 1f
 .new-row { display: flex; gap: 8px; align-items: center; }
 .btn-new {
   flex: 1;
-  height: 36px;
-  border-radius: 10px;
+  height: 34px;
+  border-radius: 9px;
   border: none;
   background: var(--accent-solid);
   color: var(--accent-on);
@@ -301,7 +309,7 @@ main { flex: 1; display: grid; grid-template-columns: var(--side-w) minmax(0, 1f
 .btn-new:hover { background: var(--accent-solid-hover); border-color: transparent; }
 .btn-new .pencil { font-size: 12px; opacity: .95; }
 .btn-dashed {
-  width: 36px; height: 36px; flex: none;
+  width: 34px; height: 34px; flex: none;
   border-radius: 50%;
   border: 1px dashed var(--line);
   background: transparent;
@@ -327,7 +335,8 @@ main { flex: 1; display: grid; grid-template-columns: var(--side-w) minmax(0, 1f
   transition: background-color .12s ease, color .12s ease;
 }
 .nav-item:hover { background: var(--bg-3); color: var(--fg); }
-.nav-ico { font-size: 14px; width: 18px; text-align: center; flex: none; }
+.nav-ico { width: 18px; flex: none; display: grid; place-items: center; color: inherit; }
+.nav-ico svg { width: 15px; height: 15px; display: block; }
 
 summary.nav-item { list-style: none; position: relative; padding-right: 26px; }
 summary.nav-item::-webkit-details-marker { display: none; }
@@ -378,7 +387,7 @@ summary.nav-item::after {
   color: var(--fg);
 }
 .list li:hover { background: var(--bg-3); }
-.list li.active { background: var(--accent-soft); color: var(--fg); font-weight: 600; }
+.list li.active { background: var(--accent-soft); color: var(--fg); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
 .list li .sub { color: var(--dim); font-size: 11px; margin-left: auto; padding-left: 6px; flex: none; }
 .list li.up { color: var(--accent); }
 /* A file row carries its own attach button; it only shows when you mean to. */
@@ -453,6 +462,10 @@ summary.nav-item::after {
   grid-template-rows: minmax(0, 1fr);
 }
 #log { grid-row: 1; grid-column: 1; overflow: auto; padding: 20px 26px 14px; min-height: 0; position: relative; z-index: 1; }
+/* One column, one rail: every block in the transcript — messages, runs, the
+   welcome card — takes the same width and centers like the composer does, so a
+   wide window does not leave the conversation hugging the left edge. */
+#log > * { width: 100%; max-width: 860px; margin-inline: auto; }
 
 /* ------------------------------------------------------------- transcript */
 
@@ -720,8 +733,8 @@ details.run > *:not(summary) { margin-left: 2px; }
 
 /* The pill that opens the palette for anyone who does not think to type "/". */
 .hint-pill {
-  background: transparent;
-  border: 1px dashed var(--line);
+  background: var(--bg-3);
+  border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--dim);
   font-size: 11.5px;
@@ -733,7 +746,6 @@ details.run > *:not(summary) { margin-left: 2px; }
 /* The model selector, where the reference design puts it: next to the +. It is
    the real #model select, so app.js keeps filling it exactly as before. */
 .model-chip { position: relative; display: inline-flex; align-items: center; flex: none; }
-.model-chip::after { content: "⌄"; position: absolute; right: 9px; font-size: 12px; color: var(--dim); pointer-events: none; }
 .model-chip select {
   height: 28px;
   border-radius: 999px;
@@ -750,7 +762,7 @@ details.run > *:not(summary) { margin-left: 2px; }
 
 .send-btn {
   min-width: 42px;
-  height: 36px;
+  height: 34px;
   border-radius: 999px;
   padding: 0 13px;
   font-size: 12.5px;
@@ -956,14 +968,14 @@ details.run > *:not(summary) { margin-left: 2px; }
    home screen until the first message arrives. */
 .welcome {
   max-width: 860px;
-  margin: 6px auto 20px;
-  padding: 18px 22px;
+  margin: 7vh auto 20px;
+  padding: 22px 26px;
   border: 1px solid var(--card-line);
   border-radius: 16px;
   background: linear-gradient(180deg, var(--accent-soft), transparent 55%), var(--card);
   box-shadow: var(--shadow-sm);
 }
-.welcome h2 { margin: 0 0 4px; font-size: 17px; }
+.welcome h2 { margin: 0 0 6px; font-size: 18px; }
 .welcome > p { margin: 0 0 12px; color: var(--dim); font-size: 13px; }
 .welcome ul { margin: 0 0 14px; padding-left: 20px; }
 .welcome li { margin: 0 0 6px; font-size: 13px; }

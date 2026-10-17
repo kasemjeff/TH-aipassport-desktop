@@ -326,6 +326,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tauri::WebviewUrl::External(url.parse().unwrap()),
             )
             .title("aipass desktop")
+            .theme(desktop_theme())
             .inner_size(1280.0, 860.0)
             .min_inner_size(900.0, 600.0)
             .build()?;
@@ -407,4 +408,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     Ok(())
+}
+
+/// The titlebar is the one surface the app cannot paint itself, so Windows
+/// draws a light frame over the warm window unless the theme is set before the
+/// window opens. The settings file is the only thing that knows this early —
+/// the backend that serves settings is not up yet — so read it directly;
+/// "auto" hands the frame back to the system, which is what auto means.
+fn desktop_theme() -> Option<tauri::Theme> {
+    let path = std::env::var("AIPASS_HOME")
+        .map(|home| PathBuf::from(home).join("settings.json"))
+        .ok()
+        .or_else(|| {
+            std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .ok()
+                .map(|home| PathBuf::from(home).join(".aipass").join("settings.json"))
+        });
+    let choice = path
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|json| json.get("theme")?.as_str().map(str::to_owned));
+    match choice.as_deref() {
+        Some("light") => Some(tauri::Theme::Light),
+        Some("auto") => None,
+        _ => Some(tauri::Theme::Dark),
+    }
 }
