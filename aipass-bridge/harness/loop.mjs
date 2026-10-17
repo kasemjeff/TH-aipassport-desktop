@@ -507,7 +507,7 @@ export async function runTask(taskText, ctx = {}) {
       const shapeHint = attempted
         ? `That reply looked like it was trying to act — something in it had the shape of a marker — but it did not parse as one. A marker must sit at the start of its own line, with no indentation, bold or code fence, and use an exact keyword: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it, and so on. One call per line. `
         : '';
-      next = `${shapeHint}That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it. I will paste back exactly what you ask for. ${REMINDER}`;
+      next = `${shapeHint}That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it — if your answer is already written above, that is all the reply needs. I will paste back exactly what you ask for. ${REMINDER}`;
       continue;
     }
     nudgeStreak = 0;

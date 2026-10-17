@@ -86,6 +86,18 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   to the running harness on save — before this a budget change only took
   effect at the next backend start while the sheet said it was live
   (`test/hardening.test.mjs`).
+- **A closing message carries the answer.** The standing instructions now say
+  the findings belong above the DONE — a question or a summary never closes
+  with a "done summarizing" line while the substance stays inside a pasted
+  web result — and the no-marker nudge says a written answer plus DONE is
+  enough (`test/protocol.test.mjs`, `test/harness-fixes.test.mjs`). The
+  math-fix replay fingerprint follows the new preamble
+  (`evals/fixtures/math-fix-replay.json`).
+- **The picker marks a model the live catalog dropped.** A saved model the
+  site no longer offers used to sit in the dropdown unmarked and then failed
+  the run at the catalog check; the option now carries that verdict before
+  the run starts, and a model missing from a fallback list stays unjudged —
+  the same rule the loop applies (`test/ui.test.mjs`).
 - **The `models:` line covers history, not just new runs.** A run that
   predates `run_stats.model` is attributed to the model its session recorded
   — the one a fresh run started on — so older sessions no longer blend under

@@ -29,6 +29,33 @@ suite.
   empty default — point `AIPASS_SKILLS_DIR` there, or link it the same way.
 - **Cleanup**: the proof worktree removed; no other processes started.
 
+## 2026-10-17 — opencode — the closing message carries the answer; the picker marks a dropped model
+
+- **Files**: `aipass-bridge/harness/protocol.mjs` (the standing instructions now
+  put the answer itself above the DONE — findings must not live only inside
+  pasted material, and "finished" alone is not an answer), `aipass-bridge/harness/loop.mjs`
+  (the no-marker nudge: if the answer is already written, the DONE line is all
+  that is missing), `aipass-bridge/test/protocol.test.mjs` +
+  `aipass-bridge/test/harness-fixes.test.mjs` (one new assertion each),
+  `desktop/ui/app.js` (`fillModels` marks a model the live catalog dropped,
+  keeps it visible either way, and never judges a fallback list — the catalog
+  check's verdict, moved before the run), `aipass-bridge/test/ui.test.mjs`,
+  `evals/fixtures/math-fix-replay.json` (fingerprint re-stamped: preambleBytes
+  5020, digest `c7baf38722feae54`), `CHANGELOG.md`.
+- **Tests**: `npm test` green on this machine (528 tests, 527 pass, 0 fail,
+  1 skip); `npm run agents:lint` clean. The pushed CI run is the judge.
+- **Deferred**: a live re-test of the recorded shapes (a WEB-search summary;
+  the mangled-marker stall) — needs a real window run, which is the user's to
+  start; the nudge half reaches conversations already in flight, the preamble
+  half reaches new ones only (it is sent once per conversation).
+- **Risks**: the guidance is prompt-level — a model that ignores it still
+  closes short; the nudge is the runtime half. `allowRun` was flipped to true
+  in the user's `~/.aipass/settings.json` (outside the repo): with mode=auto
+  ordinary shell auto-runs, hazardous commands still ask.
+- **Cleanup**: none needed — no processes started, edits confined to the
+  `aipass-fix` worktree; investigation timelines live under
+  `AppData/Local/Temp/opencode/inv/` (reference only).
+
 ## 2026-10-17 — opencode — the `models:` line covers history, not just new runs
 
 - **Files**: `aipass-bridge/stats.mjs` (`collectRuns()` attributes a run that

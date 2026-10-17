@@ -428,6 +428,28 @@ test('a model in use that the filter would drop stays visible', async () => {
   assert.equal(select.value, 'seedream-4.0', 'the header shows the model that will run');
 });
 
+test('a model the live catalog dropped is marked in the picker', async () => {
+  // Recorded live: the saved model was retired from the site and the picker
+  // kept it with no sign — the run then stopped at the catalog check and the
+  // window showed an error for a choice made days ago. The mark is that
+  // verdict, moved to where the fix lives.
+  const status = () => ({ root: '/p', bridge: true, extensions: 1, model: 'gemini-3.1-flash-lite', running: false, mode: 'ask', plan: false, pending: [], projects: [{ path: '/p', name: 'p', current: true }], settings: {} });
+  const live = { status, models: () => ({ source: 'live', data: [{ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', kind: 'chat' }] }) };
+  const { node } = await bootApp({ ...BACKEND, ...live });
+  const select = node('model');
+  const dead = select.children.find((c) => c.value === 'gemini-3.1-flash-lite');
+  assert.ok(dead, 'the retired model stays in view — hiding it would make the header lie');
+  assert.match(dead.textContent, /ไม่มีในรายการของเว็บแล้ว/, 'and it is marked as gone');
+  assert.equal(select.value, 'gemini-3.1-flash-lite', 'still the model the header shows');
+
+  // A fallback list cannot judge a pick — no mark, the same rule as the loop's.
+  const stale = { status, models: () => ({ source: 'fallback', data: [{ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', kind: 'chat' }] }) };
+  const second = await bootApp({ ...BACKEND, ...stale });
+  const kept = second.node('model').children.find((c) => c.value === 'gemini-3.1-flash-lite');
+  assert.ok(kept, 'the saved model is still kept in view');
+  assert.doesNotMatch(kept.textContent, /ไม่มีในรายการของเว็บแล้ว/, 'a list that cannot judge makes no verdict');
+});
+
 test('a run that stops for want of steps offers the next move', async () => {
   // Three dead-end reports used to just say "stopped". A "carry on" button turns
   // the same event into a run.

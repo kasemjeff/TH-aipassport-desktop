@@ -483,6 +483,7 @@ test('a marker-shaped line that parses to nothing earns the nudge, not a silent 
   assert.equal(result.stopReason, 'done', 'the run still finishes — after the nudge');
   assert.deepEqual(nudged.map((p) => p.n), [1], 'the broken marker earned exactly one nudge');
   assert.match(bridge.received[2], /no marker I could act on/, 'the nudge teaches the shape instead of ending the run');
+  assert.match(bridge.received[2], /if your answer is already written above, that is all the reply needs/, 'and a written answer plus DONE is enough');
   assert.equal(session.entries.find((e) => e.type === 'run_stats').nudges, 1);
 });
 

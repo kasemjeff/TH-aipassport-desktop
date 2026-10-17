@@ -1751,6 +1751,11 @@ async function refreshHeader() {
  * broke. The list is filtered to kind === 'chat', labelled with the human name
  * (the id stays the value), and the model in use is always kept in view so the
  * header never shows a different model than the one that would run.
+ *
+ * A saved model the live catalog no longer lists carries the run's own verdict
+ * on its option — the catalog check in harness/loop.mjs refuses such a run
+ * before any send — so the picker says "the site dropped this" before the run
+ * has to say it as an error. A fallback list cannot judge, so it never marks.
  */
 async function fillModels(currentModel) {
   const models = await rpc('models').catch(() => null);
@@ -1759,12 +1764,21 @@ async function fillModels(currentModel) {
   const list = chat.some((m) => (m.id ?? m) === currentModel)
     ? chat
     : [...chat, ...all.filter((m) => (m.id ?? m) === currentModel)];
+  // `aipass/`-prefixed ids compare bare, the same way the loop's check does.
+  const bare = (id) => String(id ?? '').replace(/^aipass\//, '');
+  const dropped = Boolean(currentModel) && models?.source === 'live'
+    && !all.some((m) => bare(m.id ?? m) === bare(currentModel));
+  if (currentModel && !list.some((m) => (m.id ?? m) === currentModel)) list.push({ id: currentModel });
   for (const m of list) {
     const opt = document.createElement('option');
     const id = m.id ?? m;
     opt.value = id;
     opt.textContent = m.name && m.name !== id ? m.name : id;
     opt.title = `${id}${m.description ? ` — ${m.description}` : ''}`;
+    if (dropped && id === currentModel) {
+      opt.textContent += ' — ไม่มีในรายการของเว็บแล้ว';
+      opt.title = `${id} — the site no longer offers this model; a run would stop and ask for a current pick`;
+    }
     $('model').append(opt);
   }
   if (list.length) $('model').value = currentModel;
