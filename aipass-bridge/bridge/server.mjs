@@ -10,7 +10,7 @@
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { DOCUMENT_TYPES, MAX_ATTACHMENT_BYTES, isAllowedAttachment } from './attachment-types.mjs';
+import { MAX_ATTACHMENT_BYTES, isAllowedAttachment } from './attachment-types.mjs';
 
 const PORT = Number(process.env.AIPASS_PORT ?? 8787);
 const HOST = process.env.AIPASS_HOST ?? '127.0.0.1';

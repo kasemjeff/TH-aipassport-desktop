@@ -81,13 +81,13 @@ test('the spill directory is out of every listing, but still readable', async ()
   const back = tools.read('.aipass/spill/x.txt');
   assert.ok(back.includes('needle from an earlier run'), 'NEED file still reads the spill');
 
-  const globbed = tools.glob('**/*.txt');
+  const globbed = await tools.glob('**/*.txt');
   assert.ok(!globbed.includes('.aipass'), 'and a glob does not surface it either');
 });
 
 /* H2 — glob honours the prefix before ** ---------------------------------- */
 
-test('glob matches the pattern against the whole path, not the last segment', () => {
+test('glob matches the pattern against the whole path, not the last segment', async () => {
   const dir = tempDir({
     'index.ts': 'zero\n',
     'src/a.ts': 'one\n',
@@ -95,18 +95,18 @@ test('glob matches the pattern against the whole path, not the last segment', ()
     'docs/c.ts': 'three\n',
   });
   const tools = toolsIn(dir);
-  const sorted = (s) => s.split('\n').sort();
+  const sorted = async (p) => (await tools.glob(p)).split('\n').sort();
 
-  assert.deepEqual(sorted(tools.glob('src/**/*.ts')), ['src/a.ts', 'src/deep/b.ts'],
+  assert.deepEqual(await sorted('src/**/*.ts'), ['src/a.ts', 'src/deep/b.ts'],
     'the prefix is honoured: docs/c.ts is not under src');
-  assert.deepEqual(sorted(tools.glob('src/*.ts')), ['src/a.ts'],
+  assert.deepEqual(await sorted('src/*.ts'), ['src/a.ts'],
     'a single * still stops at the separator');
-  assert.deepEqual(sorted(tools.glob('*.ts')), ['index.ts'], 'and so does a bare pattern');
+  assert.deepEqual(await sorted('*.ts'), ['index.ts'], 'and so does a bare pattern');
   // `**` matches no separators as well as many, which is what lets `**/*.ts`
   // reach index.ts at the root while still spanning src/deep.
-  assert.deepEqual(sorted(tools.glob('**/*.ts')), ['docs/c.ts', 'index.ts', 'src/a.ts', 'src/deep/b.ts']);
+  assert.deepEqual(await sorted('**/*.ts'), ['docs/c.ts', 'index.ts', 'src/a.ts', 'src/deep/b.ts']);
 
-  assert.match(tools.glob('src/**/*.tsx'), /^no files matched "src\/\*\*\/\*\.tsx"\.$/);
+  assert.match(await tools.glob('src/**/*.tsx'), /^no files matched "src\/\*\*\/\*\.tsx"\.$/);
 });
 
 /* H3 — the git gate ------------------------------------------------------- */

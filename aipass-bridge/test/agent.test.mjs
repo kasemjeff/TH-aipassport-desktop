@@ -327,6 +327,87 @@ test('a flaky refusal is waited out whole, never split or dropped', async (t) =>
   assert.ok(handler.sent.includes(handler.rejected[0]), 'the identical message is what was sent again');
 });
 
+// The end of the rewrite chain is not the end of the run: a refusal that
+// outlasts every wait is paused and sent again by the loop itself
+// (RECOVER_WAITS_MS — here 10ms), and the same message gets one more chance.
+// The chain's whole shape is refused first — the tool result and its 0ms
+// wait, then the split half and the omission note standing in for it — and
+// the count is spent exactly there, so the recovery resend is the one that
+// clears.
+test('a refusal that outlasts the rewrite chain is paused and sent again', async (t) => {
+  const dir = tempDir({ 'notes.txt': 'buy milk\n' });
+  let refused = 0;
+  const handler = scripted(['NEED file notes.txt', 'DONE read it'], {
+    reject: (text) => (text.includes('buy milk') || /A section of ~/.test(text)) && refused++ < 5,
+  });
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir, [], { env: { AIPASS_RECOVER_WAITS_MS: '10,10' } });
+  assert.match(out, /recovery 1\/2/, 'the run paused and said why');
+  assert.match(out, /✓ read it/, 'the resend cleared and the run finished');
+  assert.equal(handler.rejected.length, 5, 'the chain spent its attempts before the loop took over');
+});
+
+// ...and the recovery is bounded: a refusal that will not clear still ends
+// the run — after both waits are spent, with the old 'error' ending.
+test('a refusal that never clears ends the run once the waits are spent', async (t) => {
+  const dir = tempDir({ 'notes.txt': 'buy milk\n' });
+  const handler = scripted(['NEED file notes.txt', 'DONE read it'], {
+    reject: (text) => text.includes('buy milk') || /A section of ~/.test(text),
+  });
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir, [], { env: { AIPASS_RECOVER_WAITS_MS: '10,10' } });
+  assert.match(out, /recovery 1\/2/);
+  assert.match(out, /recovery 2\/2/);
+  assert.doesNotMatch(out, /✓ read it/);
+  assert.match(out, /aipass returned 403/, 'the cause the run died for is surfaced');
+});
+
+// The slower connection shapes — a tab still loading under its 15s ceiling —
+// are not the transport's to retry (six more of those is minutes, not
+// patience); the loop's recovery waits them out instead.
+test('a tab that is still loading is waited out at the run level', async (t) => {
+  const dir = tempDir({ 'notes.txt': 'buy milk\n' });
+  let blips = 0;
+  const handler = scripted(['NEED file notes.txt', 'DONE read it'], {
+    gap: (text) => (text.includes('buy milk') && blips++ < 2 ? 'tab did not finish loading' : null),
+  });
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir, [], { env: { AIPASS_RECOVER_WAITS_MS: '10,10' } });
+  assert.match(out, /recovery 1\/2/);
+  assert.match(out, /recovery 2\/2/);
+  assert.match(out, /✓ read it/, 'the tab finished loading and the message landed');
+  assert.doesNotMatch(out, /refused at the edge|splitting into|omitting/, 'a loading tab is not a refusal');
+  assert.equal(handler.rejected.length, 0, 'never treated as a firewall refusal');
+});
+
+// The fast connection shapes are the transport's: a content script
+// mid-reinjection is retried inside the send — never rewritten, never
+// surfaced to the loop.
+test('a send that fails while the content script reinjects is retried inside the send', async (t) => {
+  const dir = tempDir({ 'notes.txt': 'buy milk\n' });
+  let milkCalls = 0;
+  const handler = scripted(['NEED file notes.txt', 'DONE read it'], {
+    gap: (text) => {
+      if (!text.includes('buy milk')) return null;
+      milkCalls++;
+      return milkCalls === 1 ? 'Could not establish connection. Receiving end does not exist.' : null;
+    },
+  });
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir, [], { env: { AIPASS_SEND_RETRY_MS: '10' } });
+  assert.match(out, /✓ read it/);
+  assert.doesNotMatch(out, /recovery|refused at the edge|splitting into|omitting/, 'the retry layer covered it');
+  assert.equal(milkCalls, 2, 'one blip, then one retry of the identical message');
+});
+
 test('drops a line that cannot be sent at any size, and keeps going', async (t) => {
   const dir = tempDir({ 'package.json': '{\n  "scripts": {\n    "x": "node -e \\"fetch()\\"",\n    "build": "next build"\n  }\n}\n' });
   const handler = scripted(['NEED file package.json', 'DONE inspected it'], {

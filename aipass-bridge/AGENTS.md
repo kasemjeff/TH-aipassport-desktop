@@ -34,7 +34,8 @@ Read it before non-trivial bridge changes and keep it current with them.
 - **One-message constraint**: the upstream endpoint rejects assistant turns in
   `messages` and agent-style system prompts; `lastUserText()` forwards only the
   newest user message; multi-turn is server-side history. `agent.mjs` sends
-  its `PREAMBLE` once into a fresh conversation and then only tool results.
+  its instruction preamble once into a fresh conversation and then only tool
+  results.
 - **Conversation rotation** (`resolveConversation`, `startChat`): reuse the
   most recent (or just-created) conversation; on `404` (deleted) / `409`
   (generation still running) advance to the next-most-recent — but only when

@@ -4,7 +4,7 @@
  * reload because the session log is on disk, and the live run streams in over
  * `/events` — the window only has to render what it is told.
  */
-import { renderMarkdown } from './md.js';
+import { renderMarkdown, splitMarkdownStable } from './md.js';
 import { scan, transcript } from './markers.js';
 
 const $ = (id) => document.getElementById(id);
@@ -115,7 +115,11 @@ function ensureAssistant() {
   const body = el('div', 'body');
   msg.append(body);
   log.append(msg);
-  state.assistant = { el: body, text: '', tail: '' };
+  // The settled stretch and the moving tail paint into two wrappers (`.seg`,
+  // boxless by CSS): the window used to re-parse the whole reply per frame,
+  // which is exactly the cost that grows with the answer. The cache fields
+  // keep what has already been rendered, so a frame only touches the tail.
+  state.assistant = { el: body, text: '', tail: '', stableEl: null, tailEl: null, stableText: '', stableHtml: '' };
   return state.assistant;
 }
 
@@ -128,8 +132,34 @@ function ensureAssistant() {
  * text and must not be scanned like a reply.
  */
 function paintAssistant(a) {
-  a.el.innerHTML = renderMarkdown(transcript(a.text, state.pluginTools) + a.tail);
-  scrollDown();
+  // Painted as a settled stretch plus a moving tail (splitMarkdownStable):
+  // the settled layer renders once and only ever gains text, so a frame
+  // re-parses just the tail instead of the whole answer. A cache miss — the
+  // rewrite a late plugin report or DONE summary can cause — resets the layer
+  // and repaints it whole, once.
+  const full = transcript(a.text, state.pluginTools) + a.tail;
+  const { stable, tail } = splitMarkdownStable(full);
+  if (!stable.startsWith(a.stableText)) { a.stableText = ''; a.stableHtml = ''; }
+  if (stable.length > a.stableText.length) {
+    a.stableHtml += (a.stableHtml ? '\n' : '') + renderMarkdown(stable.slice(a.stableText.length));
+    a.stableText = stable;
+    if (!a.stableEl) {
+      a.stableEl = el('div', 'seg md-stable');
+      a.el.insertBefore(a.stableEl, a.tailEl);
+    }
+    a.stableEl.innerHTML = a.stableHtml;
+  } else if (a.stableEl && !a.stableText) {
+    a.stableEl.remove();
+    a.stableEl = null;
+  }
+  const tailHtml = renderMarkdown(tail);
+  if (tailHtml) {
+    if (!a.tailEl) { a.tailEl = el('div', 'seg md-tail'); a.el.append(a.tailEl); }
+    a.tailEl.innerHTML = tailHtml;
+  } else if (a.tailEl) {
+    a.tailEl.remove();
+    a.tailEl = null;
+  }
 }
 
 /**
@@ -151,11 +181,23 @@ function flushPaints() {
   paintQueued = false;
   const due = [...paintQueue];
   paintQueue.clear();
+  // One layout read for the whole frame, before any of the writes below: the
+  // per-paint scrollDown() used to force a synchronous layout per bubble, so
+  // a frame with reasoning and prose paid for two. Whether the reader was at
+  // the bottom is the same question for every write in the frame.
+  const pinned = atBottom();
   for (const b of due) paintAssistant(b);
   if (thinkingDirty) {
     thinkingDirty = false;
-    if (state.thinking) { state.thinking.el.textContent = state.thinking.text; scrollDown(); }
+    const t = state.thinking;
+    // Reasoning only ever grows; appending what arrived beats reassigning the
+    // whole text node per frame, which re-laid out a pre that can be long.
+    if (t && t.text.length > t.painted) {
+      t.el.append(document.createTextNode(t.text.slice(t.painted)));
+      t.painted = t.text.length;
+    }
   }
+  if (pinned) log.scrollTop = log.scrollHeight;
 }
 function queuePaint(bubble = null) {
   if (bubble) paintQueue.add(bubble); else thinkingDirty = true;
@@ -183,6 +225,7 @@ function assistantSummary(text) {
   if (visible && visible.toLowerCase().includes(line.toLowerCase())) return;
   a.tail += (visible ? '\n\n' : '') + line;
   paintAssistant(a);
+  scrollDown();
 }
 
 /**
@@ -207,7 +250,7 @@ function thinkingText(delta) {
     const pre = el('pre');
     box.append(summary, pre);
     log.append(box);
-    state.thinking = { el: pre, text: '', box, summary, since: Date.now() };
+    state.thinking = { el: pre, text: '', box, summary, since: Date.now(), painted: 0 };
   }
   state.thinking.text += delta;
   queuePaint();

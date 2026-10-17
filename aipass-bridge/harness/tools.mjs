@@ -475,7 +475,7 @@ export function createTools(ctx) {
           if (ign.ignored(rel, false)) continue;
           if (secretHit(rel)) continue; // a secret file is not a search result
           let size = 0;
-          try { size = fs.statSync(full).size; } catch { /* overlay-only or vanished: read it anyway */ }
+          try { size = (await fs.promises.stat(full)).size; } catch { /* overlay-only or vanished: read it anyway */ }
           if (size > MAX_SEARCH_FILE) continue;
           let text;
           try { text = overlay.has(full) ? readAt(full) : await fs.promises.readFile(full, 'utf8'); } catch { continue; }
@@ -556,7 +556,7 @@ export function createTools(ctx) {
         if (sandbox) { try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* left under .aipass */ } }
       }
     },
-    glob(pattern) {
+    async glob(pattern) {
       if (!pattern) return 'err: give me a glob pattern, e.g. **/*.ts';
       // Models commonly write brace alternation (public/**/*.{js,css,html});
       // the old code escaped the braces and answered "no files matched" for a
@@ -585,10 +585,14 @@ export function createTools(ctx) {
       const hits = [];
       const MAX = 200;
       const ign = loadGitignore(root);
-      const walk = (dir) => {
+      // Async, like the search walk: this runs in the backend process, and a
+      // readdirSync over a big tree freezes every window call for the length
+      // of the walk (rule 9). Sequential and depth-first, so which files the
+      // MAX cutoff returns for a huge tree stays the same as before.
+      const walk = async (dir) => {
         if (hits.length >= MAX) return;
         let entries;
-        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
         for (const e of entries) {
           if (SKIP.has(e.name) || e.name.startsWith('.')) continue;
           const full = path.join(dir, e.name);
@@ -598,10 +602,10 @@ export function createTools(ctx) {
             hits.push(rel);
             if (hits.length >= MAX) return;
           }
-          if (e.isDirectory()) walk(full);
+          if (e.isDirectory()) await walk(full);
         }
       };
-      walk(root);
+      await walk(root);
       if (!hits.length) return `no files matched "${pattern}".`;
       const more = hits.length >= MAX ? `\n… stopped at ${MAX} results.` : '';
       // A glob answer goes through the same cap as every other result: a

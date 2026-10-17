@@ -467,7 +467,8 @@ for a `403`. So:
 
 ### Session shape
 
-`PREAMBLE` (the division-of-labour explainer, deliberately prose-shaped — no
+`preamble()` in `harness/protocol.mjs` (the division-of-labour explainer,
+deliberately prose-shaped — no
 angle brackets, no `key=value`, no absolute paths, all of which drew 403s) is
 sent **once** as the first message, plus the top-level directory listing.
 `--slim` / `--assistant <id>` drop it when a custom aipass assistant already

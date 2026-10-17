@@ -70,19 +70,26 @@ export function redact(text) {
 // extension cycles its connection to the bridge every four minutes
 // (extension/background.js CYCLE_MS — "reconnect before Chrome's long-request
 // ceiling") and for the few seconds around each cycle the bridge has no tab to
-// dispatch to, so it answers "no extension connected" instantly. The CLI
-// already waits that gap out (chat.mjs's grace period before it gives up);
-// retrying here gives every BridgeClient caller the same endurance — a run
-// that would otherwise die for a three-second blip just pauses, while a tab
-// that is really gone still surfaces once the attempts run out.
+// dispatch to, so it answers "no extension connected" instantly. A tab being
+// reloaded reads the same way — the content script is mid-reinjection and
+// chrome.runtime answers "Could not establish connection. Receiving end does
+// not exist." until it is back. The CLI already waits that gap out (chat.mjs's
+// grace period before it gives up); retrying here gives every BridgeClient
+// caller the same endurance — a run that would otherwise die for a
+// three-second blip just pauses, while a tab that is really gone still
+// surfaces once the attempts run out. The slower shapes — a tab still loading
+// under its 15s ceiling (background.js waitForComplete), a job timing out on a
+// wedged client — are not retried here, because six more of those are minutes,
+// not patience; the loop's own recovery (RECOVER_WAITS_MS) is their second
+// chance.
 //
 // Deliberately not retried: a fetch that fails outright ("fetch failed" — the
 // bridge process itself is down). That is not a gap, nothing heals it in
 // seconds, and a run must fail on the way in, not spend five seconds
 // pretending it might start.
-export const TRANSIENT_SEND = /no extension connected/i;
+export const TRANSIENT_SEND = /no extension connected|could not establish connection|receiving end does not exist/i;
 export const SEND_ATTEMPTS = 6; // ≈5s of patience at SEND_RETRY_MS — longer than a cycle gap
-export const SEND_RETRY_MS = 1000;
+export const SEND_RETRY_MS = Number(process.env.AIPASS_SEND_RETRY_MS) || 1000; // tests shrink it
 
 // The edge in front of the site answers 429 when the account moves too fast —
 // ten messages in four minutes was enough to draw one (docs/HARNESS_DESIGN.md
@@ -139,6 +146,47 @@ export function edgeWaits(raw = process.env.AIPASS_EDGE_WAITS_MS) {
   const waits = raw.split(',').map((v) => Number(v.trim()));
   if (waits.some((n) => !Number.isFinite(n) || n < 0)) return EDGE_WAITS_MS;
   return waits;
+}
+
+// The last layer of send patience, and the one the run itself pays: a failure
+// that delivered nothing and heals by waiting gets the same message again
+// after a pause (loop.mjs drives these; resilientSay's chain is the rewrite
+// side, this is the clock side). Everything refused past redact, the waits,
+// the split and the fallback note lands here, as do the slower connection
+// shapes the transport does not retry. Bounded on purpose: the waits run out
+// and the old ending — 'error' with the cause recorded — still stands.
+export const RECOVER_WAITS_MS = [30_000, 60_000];
+
+/** The waits above, from the environment or the default. */
+export function recoverWaits(raw = process.env.AIPASS_RECOVER_WAITS_MS) {
+  if (raw === undefined || raw.trim() === '') return RECOVER_WAITS_MS;
+  const waits = raw.split(',').map((v) => Number(v.trim()));
+  if (waits.some((n) => !Number.isFinite(n) || n < 0)) return RECOVER_WAITS_MS;
+  return waits;
+}
+
+/**
+ * Whether a failed send is worth one more pause-and-resend at the run level.
+ *
+ * Everything answered true delivered nothing and heals by waiting: the
+ * connection-cycle shapes above, a tab that was still loading under its own
+ * 15s ceiling, a job that timed out on a wedged client, a rate window, and the
+ * 403s that survived the rewrite chain because they never were about the
+ * content after all. The shapes that do not heal are answered false: a bridge
+ * process that is down ("fetch failed") and a tab that is really gone ("no
+ * extension connected" — the one failure with a prompt of its own; the loop
+ * raises needs_tab for it instead).
+ */
+export function sendRecoverable(err) {
+  if (!err || err.streamed || err.name === 'AbortError') return false;
+  const m = String(err.message ?? err);
+  if (/no extension connected|no de\.aipass\.net tab is open/i.test(m)) return false;
+  if (/fetch failed|econnrefused|econnreset|socket hang up/i.test(m)) return false;
+  return RATE_REFUSED.test(m)
+    || TRANSIENT_SEND.test(m)
+    || /timed out waiting for the extension|tab did not finish loading/i.test(m)
+    || /aipass returned 40[39]\b/.test(m)
+    || /bridge returned 5\d\d\b/.test(m);
 }
 
 /** A wait as a note reads it: seconds when it has any, milliseconds below. */

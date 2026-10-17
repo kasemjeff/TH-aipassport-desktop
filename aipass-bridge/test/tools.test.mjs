@@ -24,15 +24,15 @@ after(() => { for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: t
 
 const toolsIn = (dir, extra = {}) => createTools({ root: dir, overlay: new Overlay(dir), ...extra });
 
-test('GLOB honours the directories before **', () => {
+test('GLOB honours the directories before **', async () => {
   const dir = mkTracked({ 'src/a.ts': 'a', 'src/deep/b.ts': 'b', 'c.ts': 'c', 'src/x.md': 'm' });
   const tools = toolsIn(dir);
-  const hit = (pattern) => tools.glob(pattern).split('\n').filter((l) => !l.startsWith('…')).sort();
-  assert.deepEqual(hit('src/**/*.ts'), ['src/a.ts', 'src/deep/b.ts'], 'c.ts is outside src/');
-  assert.deepEqual(hit('**/*.ts'), ['c.ts', 'src/a.ts', 'src/deep/b.ts']);
-  assert.deepEqual(hit('*.ts'), ['c.ts'], 'a bare pattern stays root-only');
-  assert.deepEqual(hit('src/**'), ['src/a.ts', 'src/deep/b.ts', 'src/x.md'], 'a trailing ** means everything below');
-  assert.match(tools.glob('src/**/*.md'), /src\/x\.md/);
+  const hit = async (pattern) => (await tools.glob(pattern)).split('\n').filter((l) => !l.startsWith('…')).sort();
+  assert.deepEqual(await hit('src/**/*.ts'), ['src/a.ts', 'src/deep/b.ts'], 'c.ts is outside src/');
+  assert.deepEqual(await hit('**/*.ts'), ['c.ts', 'src/a.ts', 'src/deep/b.ts']);
+  assert.deepEqual(await hit('*.ts'), ['c.ts'], 'a bare pattern stays root-only');
+  assert.deepEqual(await hit('src/**'), ['src/a.ts', 'src/deep/b.ts', 'src/x.md'], 'a trailing ** means everything below');
+  assert.match(await tools.glob('src/**/*.md'), /src\/x\.md/);
 });
 
 test('FETCH refuses private and internal addresses in every spelling', async () => {
@@ -92,7 +92,7 @@ test('failures carry the err: prefix the loop keys on', async () => {
   assert.match(await tools.replace('a.txt', ['', 'x']), /^err: the text to change was empty/);
   assert.match(await tools.replace('a.txt', ['not there at all', 'x']), /^err: the text to change was not found/);
   assert.match(await tools.search('   '), /^err: give me some text/);
-  assert.match(tools.glob(''), /^err: give me a glob/);
+  assert.match(await tools.glob(''), /^err: give me a glob/);
   assert.match(tools.delete(''), /^err: give me a file path/);
   assert.match(tools.delete('nope.txt'), /^err: no such file/);
   assert.match(tools.move('a.txt'), /^err: usage/);
@@ -131,10 +131,10 @@ test('SEARCH and GLOB honour .gitignore, and the SKIP suspects are out even with
   assert.doesNotMatch(hits, /(^|\/)root-only\.txt: \d+: needle at root/);
   assert.doesNotMatch(hits, /target\/|vendor\/|coverage\//, 'SKIP suspects are excluded with no gitignore at all');
 
-  assert.deepEqual(tools.glob('**/*.log').split('\n'), ['keep.log']);
+  assert.deepEqual((await tools.glob('**/*.log')).split('\n'), ['keep.log']);
 });
 
-test('GLOB expands brace alternation and single-char ? like the shells do', () => {
+test('GLOB expands brace alternation and single-char ? like the shells do', async () => {
   const dir = mkTracked({
     'index.html': 'x\n',
     'about.html': 'x\n',
@@ -144,14 +144,14 @@ test('GLOB expands brace alternation and single-char ? like the shells do', () =
   });
   const tools = toolsIn(dir);
   assert.deepEqual(
-    tools.glob('**/*.{js,css,html}').split('\n').sort(),
+    (await tools.glob('**/*.{js,css,html}')).split('\n').sort(),
     ['about.html', 'app.css', 'app.js', 'index.html'],
   );
   assert.deepEqual(
-    tools.glob('index.?tml').split('\n').sort(),
+    (await tools.glob('index.?tml')).split('\n').sort(),
     ['index.html'],
   );
-  assert.match(tools.glob('**/*.{ts,tsx}'), /^no files matched/);
+  assert.match(await tools.glob('**/*.{ts,tsx}'), /^no files matched/);
 });
 
 test('SEARCH skips files over the 1 MB cap instead of reading them line by line', async () => {

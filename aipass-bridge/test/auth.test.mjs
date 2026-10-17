@@ -105,12 +105,23 @@ test('rpc: /rpc gated, /token is same-origin-browser-only', async () => {
       headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.test' },
     }).then((r) => r.status);
     assert.equal(cross, 403);
-    // The bootstrapped token opens /events in the EventSource query form.
-    assert.equal(await fetch(`${base}/events?token=${token}`).then((r) => r.status), 200);
-    assert.equal(await fetch(`${base}/events`).then((r) => r.status), 401);
+    // The bootstrapped token opens /events in the EventSource query form. The
+    // stream never ends on its own — cancel it after the status check, or the
+    // close() below waits on this live connection (7 s on Windows, 16 s on
+    // Ubuntu 22, and on the Node 24 runners it never resolved; desktop.test.mjs
+    // cancels for the same reason).
+    const stream = await fetch(`${base}/events?token=${token}`);
+    assert.equal(stream.status, 200);
+    await stream.body.cancel();
+    const denied = await fetch(`${base}/events`);
+    assert.equal(denied.status, 401);
+    await denied.body.cancel();
   } finally {
     if (prevToken === undefined) delete process.env.AIPASS_TOKEN; else process.env.AIPASS_TOKEN = prevToken;
     if (prevFlag === undefined) delete process.env.AIPASS_REQUIRE_AUTH; else process.env.AIPASS_REQUIRE_AUTH = prevFlag;
+    // Keep-alive sockets from the fetches above would still hold close() for
+    // the server's 5 s idle timeout; the test is done — drop them now.
+    rpc?.server.closeAllConnections?.();
     await new Promise((resolve) => rpc?.server.close(resolve));
   }
 });
