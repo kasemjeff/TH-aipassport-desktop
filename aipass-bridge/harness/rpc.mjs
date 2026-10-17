@@ -255,14 +255,18 @@ export function createRpc({
     // Order: explicit folders from settings, then the project's own library,
     // then the user's, then the ones shipped with the CLI. First match wins.
     const repoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills');
+    const projectDir = path.join(abs, '.aipass', 'skills');
     const userDir = path.join(aipassHome(), 'skills');
     const dirs = [
       ...(appSettings.get('skillsDirs') ?? []),
-      path.join(abs, '.aipass', 'skills'),
+      projectDir,
       userDir,
       repoDir,
     ].filter(Boolean);
-    return new SkillLibrary(dirs);
+    // The generated index labels each library by its stated role; the two
+    // known folders are named, not inferred from position, so a missing
+    // project folder cannot mark the user's library as the project's.
+    return new SkillLibrary(dirs, { roles: { [projectDir]: 'project', [userDir]: 'user' } });
   };
 
   const pickRoot = () => {
