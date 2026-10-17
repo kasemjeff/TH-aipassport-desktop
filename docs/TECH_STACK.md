@@ -56,7 +56,7 @@ Four programs, none of which share a runtime:
 | webview | **WebView2** (offline installer) | guaranteed present on Windows 10/11 via the installer; Evergreen updates come from the OS | CEF (another Chromium to ship), Firefox/Gecko (no Windows guarantee) |
 | backend | **Node ≥ 20, zero npm deps** | the CLI is the same code; `node:http`, SSE, `node:crypto` and `fetch` cover every need; nothing to audit, nothing to break | Express/Fastify (a dependency for a router we don't need — the surface is two endpoints), Bun/Deno (the bridge predates them and the sidecar fetch story is Node's) |
 | wire protocol | **POST `/rpc` + GET `/events` (SSE)** | one request/response channel for commands, one push channel for streams; SSE needs no client library and survives WebView2 | WebSockets (a second protocol to implement on both sides for no capability we use — the window never talks to the bridge directly), Tauri IPC commands (would weld the harness to the shell and break `npm run desktop` in a plain browser) |
-| UI | **vanilla HTML/CSS/JS, no build step** | the served files are the source files; a fix is a reload; 743 lines of `app.js` so far, well under the weight where a framework pays rent | React/Vue/Svelte (a node_modules tree, a bundler, and a source/served split — all three violate constraint 4 for a single-window app) |
+| UI | **vanilla HTML/CSS/JS, no build step** | the served files are the source files; a fix is a reload; `app.js` (~2,200 lines) stays hand-editable — and the JSDoc + `tsc --checkJs` pass is the documented next move before any framework is considered | React/Vue/Svelte (a node_modules tree, a bundler, and a source/served split — all three violate constraint 4 for a single-window app) |
 | agent core | **shared harness modules** (`loop`, `tools`, `permissions`, `session`, `compact`, `skills`, `protocol`, `waf`) | constraint 2; the CLI tests (37) passing unchanged is the proof of the split | reimplementing in the backend (drift), porting to Rust (rewrites the working agent for no user-visible gain) |
 | agent–model protocol | **text markers in the message stream** (`protocol.mjs`) + a WAF-adaptation layer (`waf.mjs`) | the upstream offers no native tool calls and rejects system prompts and multi-message transcripts; markers ride the one channel that works, and `waf.mjs` is the single place that knows the filter's moods | native function-calling (does not exist upstream), a WebSocket to the page (the extension's SSE path already works and keeps credentials in the tab) |
 | sessions | **JSONL files with a tree** (`session.mjs`) | append-only, human-readable, diffable, forkable by copying lines; no daemon to corrupt them | SQLite (a native dep and a format you can't read in an editor, for queries we never run), a database server (absurd at this scale) |
@@ -71,9 +71,12 @@ Four programs, none of which share a runtime:
 
 Saying the quiet parts out loud, since a stack is a set of tradeoffs:
 
-- **Vanilla JS has a ceiling.** 743 lines in `app.js` is fine; 3,000 would
-  not be. The escape hatch (JSDoc types + `tsc --checkJs`, then esbuild if a
-  bundler ever earns its keep) costs an afternoon and violates nothing.
+- **Vanilla JS has a ceiling, and this app is near it.** `app.js` crossed
+  2,200 lines: still one file a person can hold in their head, but it is the
+  zone the JSDoc types + `tsc --checkJs` pass exists for — a
+  devDependency-only check (nothing ships with it; the runtime stays
+  dependency-free), run wherever there is a `node_modules`. esbuild after
+  that, and only if the type check is not enough.
 - **The sidecar must match the platform.** `fetch-node.ps1` pins a Node
   build per release; a macOS/Linux port needs the same for each target.
 - **The relay's reliability is Chrome's mood.** An extension page can be
@@ -91,7 +94,7 @@ Saying the quiet parts out loud, since a stack is a set of tradeoffs:
 
 | trigger | change |
 |---|---|
-| `app.js` passes ~2,000 lines or two people edit the UI in parallel | JSDoc types + `tsc --checkJs` first; a bundler only if the type check is not enough |
+| `app.js` passes ~2,000 lines (it has — 2,200+) or two people edit the UI in parallel | JSDoc types + `tsc --checkJs` first; a bundler only if the type check is not enough |
 | macOS/Linux users show up | cross-compile targets in `tauri.conf.json` + per-platform sidecar fetch; the harness needs nothing |
 | a real release channel exists | `tauri-plugin-updater` with signed artifacts |
 | the upstream ever offers native tool calls / system prompts | `protocol.mjs` and `waf.mjs` shrink or vanish; the harness gets simpler, not different |
