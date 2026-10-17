@@ -6,7 +6,42 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
-## 2026-10-17 — opencode — the memory audit: summaries paid for and never sent
+## 2026-10-17 — opencode — the context manager's newer two tiers: elision and memory
+
+- **Files**: `harness/compact.mjs` (the elision pass in the summarisation
+  transcript — `transcriptFor`, `elideStaleResults` off by default,
+  `AIPASS_ELIDE`; the memory tier — the prompt's `MEMORY:` ask plus
+  `splitSummary`/`memoryOf`/`mergeMemory`/`digest`, on by default,
+  `AIPASS_MEMORY=off`; `seed` pins the merged facts, and a seed without them
+  is byte-identical to before); `harness/loop.mjs` (the mid-run rotation
+  digests the reply and records `memory` on the compaction entry);
+  `harness/harness.mjs` (`compactNow` digests and returns `memory`;
+  `rememberSummary(summary, memory)` rides the next run as
+  `{summary, memory}`); `harness/rpc.mjs` (compact passes the facts on);
+  `harness/session.mjs` (the compaction shape comment); tests:
+  `compact.test.mjs` +10 (elision off/on and its exemptions, the env
+  switches, the split/merge/cap rules, digest's off-switch, the factless
+  seed staying byte-identical, facts through a mid-run rotation and through
+  a manual one). Docs: `HARNESS_DESIGN.md` (the compressor section; the env
+  list; the hook map row), `MATURITY.md` (elision row → experimental; the
+  new memory row), `DATA_FORMATS.md` (§Memory + the entry table),
+  `TEST_PLAN.md` (L3.6 arm line, new L3.7, the L4 rows),
+  `experiments/queue.json` (`memory-tier-carry`) + its test's id list,
+  `CHANGELOG.md`, `LOOP_DESIGN.md` (contract 11), `aipass-bridge/AGENTS.md`
+  (env block), `README.md` (badge).
+- **Tests**: `npm test` 568 pass / 0 fail / 2 skip (570); `npm run qa` 9 ok /
+  0 warn / 0 fail; `npm run agents:lint` ok (556 titles); `npm run evals:lint`
+  OK; `npm run experiments -- --check` OK (8 proposed).
+- **Deferred**: both queue records stay `proposed` — no live credits spent;
+  the elision default and the memory graduation are the records' to decide.
+  The checker's `done-unverified` question stays open with them.
+- **Risks**: the memory facts are model-authored — capped, deduped, marked
+  "re-check" in the seed, and measured by `memory-tier-carry`; until that
+  record ends, the tier is experimental by its own registry row. The tree is
+  shared with other sessions — keep this wave's commit split apart.
+- **Cleanup**: no temp files.
+
+## 2026-10-17 — opencode — the memory audit, and the session store made owner-only
 
 - **Files**: `harness/loop.mjs` (the seed is no longer gated on `first` —
   between-runs compaction fires on non-first runs by definition; rotate moved
@@ -14,18 +49,26 @@ suite.
   (`rememberSummary`/`#pendingSummary` — a manual rotation's seed is built at
   the next run, against that run's own task; `#stagedList()` shared by both
   seed paths; rotate-before-append); `harness/rpc.mjs` (`compact` records the
-  summary and refuses while a run is in flight); `harness/compact.mjs` (the
+  summary and refuses while a run is in flight; staged upload copies without
+  a path are 0o600 and copied files are tightened); `harness/compact.mjs` (the
   divisor samples the post-compaction window; dead `listing` param removed);
+  `harness/session.mjs` (the store, its per-project dirs and every session
+  file are created 0o700/0o600, an old file is tightened when opened);
+  `harness/settings.mjs` (the upload staging dir is owner-only when created);
+  `SECURITY.md` (the mode claim + the Windows ACL boundary);
   `compaction` entries now carry `lastSummarizedEntryId`;
-  `docs/DATA_FORMATS.md` §Memory updated with the compat note; tests:
+  `docs/DATA_FORMATS.md` §Memory + §Retention updated; tests:
   `compact.test.mjs` +5 (between-runs seed, manual seed consumed once,
   rotate-fail ledger, mid-run rotate-fail, divisor window — fail-before
   verified for the guard and the divisor), `harness-qa.test.mjs` (the manual
-  seed reaches the next run over RPC; compact refuses in flight). 553 → 559
+  seed reaches the next run over RPC; compact refuses in flight),
+  `data-integrity.test.mjs` +1 (POSIX-only mode assertions). 553 → 560
   tests.
-- **Tests**: `npm test` 558 pass / 0 fail / 1 skip (559); `npm run qa` 9 ok /
-  0 warn / 0 fail; `npm run agents:lint` ok (545 titles); `npm run evals:lint`
-  OK. Nothing committed.
+- **Tests**: `npm test` 558 pass / 0 fail / 2 skip (560 — the new skip is the
+  POSIX-only mode test on Windows, where it cannot mean anything; the CI
+  Linux/macOS lanes run it); `npm run qa` 9 ok / 0 warn / 0 fail;
+  `npm run agents:lint` ok (546 titles); `npm run evals:lint` OK. Nothing
+  committed.
 - **Deferred**: a small session reopened in a fresh process still hands the
   model only the new run's task (no compaction entry exists to seed from) —
   that is the `memory-cold-warm` probe's question, not a bug this round was

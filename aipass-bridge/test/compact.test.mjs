@@ -17,6 +17,17 @@ const agent = (dir, args = [], opts = {}) => run(AGENT, ['task text', '--root', 
 const sessionLike = (entries) => ({ entries });
 const user = (text) => ({ type: 'user', text, bytes: Buffer.byteLength(text) });
 const assistant = (text) => ({ type: 'assistant', text });
+// summarize() reads the transcript off session.sentMessages() — user
+// messages in send order, each with its own text.
+const sentLike = (entries) => ({
+  entries,
+  sentMessages: () => entries.filter((e) => e.type === 'user').map((e, i) => ({ id: e.id ?? `u${i}`, text: e.text, ts: 0 })),
+});
+// The summariser talks to the bridge; these tests read the prompt it sends.
+const captureBridge = (sent) => ({
+  model: 'test-model',
+  chat: async ({ message }) => { sent.push(String(message)); return { text: 'a summary' }; },
+});
 
 test('estimate counts the current conversation only — entries before the last compaction were rotated away', () => {
   const c = new Compactor({ keepRecentBytes: 0 });
@@ -304,4 +315,178 @@ test('a mid-run rotation that fails keeps the run alive and the ledger honest', 
   assert.ok(errors.some((m) => /compaction failed/.test(m)), 'the failure is announced, not swallowed');
   assert.equal(h.session.entries.some((e) => e.type === 'compaction'), false, 'and nothing is recorded');
   assert.match(handler.sent.at(-1), /Result of read big\.txt/, 'the step results still went out');
+});
+
+/* -------------------------- the elision and memory tiers (context management) */
+
+test('the elision tier is off unless asked; the memory tier is on unless switched off', () => {
+  const c = new Compactor();
+  assert.equal(c.elideStaleResults, false, 'the elision default stays with the queue record');
+  assert.equal(c.carryMemory, true);
+  assert.equal(new Compactor({ elideStaleResults: true }).elideStaleResults, true);
+  assert.equal(new Compactor({ carryMemory: false }).carryMemory, false);
+
+  process.env.AIPASS_ELIDE = '1';
+  process.env.AIPASS_MEMORY = 'off';
+  try {
+    const env = new Compactor();
+    assert.equal(env.elideStaleResults, true, 'AIPASS_ELIDE turns the tier on for a terminal run');
+    assert.equal(env.carryMemory, false, 'AIPASS_MEMORY=off switches the tier off');
+  } finally {
+    delete process.env.AIPASS_ELIDE;
+    delete process.env.AIPASS_MEMORY;
+  }
+});
+
+test('the summary transcript slices as before while the elision tier is off', async () => {
+  const sent = [];
+  const c = new Compactor({ bridge: captureBridge(sent) });
+  const entries = Array.from({ length: 12 }, (_, i) => user(`OLD-${i} ${'x'.repeat(3000)}`));
+  const res = await c.summarize(sentLike(entries), { task: 't' });
+  assert.equal(res, 'a summary', 'the reply is still the whole product');
+  assert.ok(sent[0].includes('x'.repeat(600)), 'old sends ride the plain 1200-char slice');
+  assert.doesNotMatch(sent[0], /elided \d+ chars/);
+});
+
+test('the elision tier cuts stale bulky sends to a counted head…tail stub', async () => {
+  const sent = [];
+  const c = new Compactor({ bridge: captureBridge(sent), elideStaleResults: true });
+  // One distinct filler per message, so a whole-slice assertion names exactly
+  // which message it is talking about. Twelve senders, the newest eight of
+  // which are inside the recency window.
+  const entries = Array.from({ length: 12 }, (_, i) => user(`OLD-${i}-HEAD ${String.fromCharCode(97 + i).repeat(3000)} OLD-${i}-TAIL`));
+  await c.summarize(sentLike(entries), { task: 't' });
+  const prompt = sent[0];
+  assert.match(prompt, /elided 2542 chars of a stale tool result/, 'the marker counts the chars it saved');
+  assert.ok(prompt.includes('OLD-2-HEAD') && prompt.includes('OLD-2-TAIL'), 'the head names what it was, the tail how it ended');
+  assert.ok(!prompt.includes('c'.repeat(600)), 'the stale bulk is gone, not merely sliced');
+  assert.ok(prompt.includes('e'.repeat(600)), 'the recency window keeps its slices whole');
+});
+
+test('the elision tier never touches short sends or the opening seed', async () => {
+  const sent = [];
+  const c = new Compactor({ bridge: captureBridge(sent), elideStaleResults: true });
+  const entries = [
+    user(`SEED-HEAD ${'s'.repeat(3000)} SEED-TAIL`), // the opening seed — stale, exempt
+    user('SMALL-STALE-MESSAGE'),                    // stale, under the cut — untouched
+    user(`BULK ${'z'.repeat(2000)}`),               // stale and bulky — the one elided
+    ...Array.from({ length: 8 }, (_, i) => user(`recent ${i}`)),
+  ];
+  await c.summarize(sentLike(entries), { task: 't' });
+  const prompt = sent[0];
+  assert.ok(prompt.includes('s'.repeat(600)), 'the opening seed is never elided');
+  assert.ok(prompt.includes('SMALL-STALE-MESSAGE'), 'short sends are never elided');
+  assert.match(prompt, /elided \d+ chars/, 'the stale bulk past the window still is');
+});
+
+test('the summary reply splits into narrative and facts, leniently', () => {
+  const c = new Compactor();
+  const split = c.splitSummary('The work went well.\n\n**MEMORY:**\n- decision: keep the flag\n* constraint: never push without a word\n1. file: a.txt — the fixture\n- \n');
+  assert.equal(split.summary, 'The work went well.');
+  assert.deepEqual(split.memory, ['decision: keep the flag', 'constraint: never push without a word', 'file: a.txt — the fixture']);
+  assert.deepEqual(c.splitSummary('no section here'), { summary: 'no section here', memory: [] }, 'no section, no facts — and nothing lost');
+  assert.deepEqual(c.splitSummary(''), { summary: '', memory: [] });
+});
+
+test('facts merge across rotations: deduped, clipped, newest survive the cap', () => {
+  const c = new Compactor();
+  assert.deepEqual(
+    c.mergeMemory(['decision: use the flag', 'file: a.txt — the fixture'], ['DECISION:   use the flag', 'constraint: no push without a word']),
+    ['decision: use the flag', 'file: a.txt — the fixture', 'constraint: no push without a word'],
+    'a restated fact rides once; case and spacing do not fork it',
+  );
+  const long = c.mergeMemory([], [`file: ${'p'.repeat(300)}`]);
+  assert.equal(long[0].length, 200, 'one runaway fact is clipped to the cap');
+  assert.ok(long[0].endsWith('…'));
+  const many = c.mergeMemory(Array.from({ length: 25 }, (_, i) => `fact ${i}`), []);
+  assert.equal(many.length, 20);
+  assert.equal(many[0], 'fact 5', 'an overflow drops the oldest, never the newest');
+  assert.equal(many.at(-1), 'fact 24');
+});
+
+test('digest merges against the session, and the off-switch means off', () => {
+  const raw = 'Summary here.\n\nMEMORY:\n- decision: one more\n';
+  const session = sessionLike([
+    user('x'),
+    { type: 'compaction', summary: 'older', memory: ['decision: from last time'] },
+    user('y'),
+  ]);
+  assert.deepEqual(new Compactor().digest(session, raw), {
+    summary: 'Summary here.',
+    memory: ['decision: from last time', 'decision: one more'],
+  });
+  assert.deepEqual(new Compactor({ carryMemory: false }).digest(session, raw), { summary: 'Summary here.', memory: [] },
+    'off means off, even with facts already on disk');
+});
+
+test('a seed carries the merged facts, and a seed without them is byte-identical to before', () => {
+  const c = new Compactor();
+  const plain = { summary: 'did things', task: 'the task', preambleText: 'PRE' };
+  const before = c.seed(plain);
+  assert.equal(c.seed({ ...plain, memory: [] }), before, 'no facts, no block — the old shape byte for byte');
+  const withFacts = c.seed({ ...plain, memory: ['decision: keep the flag', 'file: a.txt — the fixture'] });
+  assert.match(withFacts, /Facts carried from earlier rotations/);
+  assert.match(withFacts, /- decision: keep the flag/);
+  assert.match(withFacts, /- file: a\.txt — the fixture/);
+  assert.doesNotMatch(before, /Facts carried/);
+});
+
+// The seam the loop actually uses: one rotation, one record, one seed — with
+// the MEMORY: section the model writes riding from the summary reply onto the
+// compaction entry and into the fresh conversation.
+test('a mid-run rotation records the facts and seeds them into the fresh conversation', async (t) => {
+  const dir = tempDir({ 'big.txt': `${'z'.repeat(6000)}\nmarker-end\n` });
+  const handler = scripted([
+    'Reading it now.\n\nNEED file big.txt',
+    'a short summary of the work so far\n\nMEMORY:\n- decision: keep the elision flag off by default\n- file: big.txt — the fixture',
+    'DONE finished with facts',
+  ]);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const h = new Harness({
+    root: dir,
+    bridgeURL: bridge.base,
+    compaction: { contextTokens: 5000, keepRecentBytes: 200 },
+  });
+  await h.startSession({ title: 'facts-mid-run' });
+  const res = await h.run('read big.txt and finish');
+  assert.match(res.summary, /finished with facts/);
+  assert.equal(handler.sent.length, 3, 'task, summary request, seeded continuation');
+
+  const record = h.session.entries.filter((e) => e.type === 'compaction').at(-1);
+  assert.ok(record, 'the rotation is recorded');
+  assert.equal(record.summary, 'a short summary of the work so far', 'the narrative records without its MEMORY tail');
+  assert.deepEqual(record.memory, ['decision: keep the elision flag off by default', 'file: big.txt — the fixture']);
+
+  assert.match(handler.sent[2], /Facts carried from earlier rotations/, 'the fresh conversation carries them');
+  assert.match(handler.sent[2], /- file: big\.txt — the fixture/);
+  assert.doesNotMatch(handler.sent[2], /MEMORY:/, 'the label itself does not leak — the facts do');
+});
+
+test("a manual rotation's facts ride the next run, and only that run", async (t) => {
+  const dir = tempDir({ 'a.txt': 'x\n' });
+  const handler = scripted([
+    'DONE งานแรกเสร็จแล้ว',
+    'the manual summary\n\nMEMORY:\n- constraint: never push without a word',
+    'DONE งานที่สองเสร็จแล้ว',
+    'DONE งานที่สามเสร็จแล้ว',
+  ]);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const h = new Harness({ root: dir, bridgeURL: bridge.base });
+  await h.startSession({ title: 'manual-facts' });
+  await h.run('first task');
+  const { summary, memory } = await h.compactNow('keep going');
+  assert.deepEqual(memory, ['constraint: never push without a word']);
+  h.rememberSummary(summary, memory); // what rpc's compact() does
+  await h.run('second task');
+  await h.run('third task');
+
+  assert.equal(handler.sent.length, 4, 'task one, manual summary, seeded task two, plain task three');
+  assert.match(handler.sent[2], /Facts carried from earlier rotations/, 'the manual seed carries the facts');
+  assert.match(handler.sent[2], /- constraint: never push without a word/);
+  assert.match(handler.sent[2], /Task: second task/, "built against the run's own task");
+  assert.doesNotMatch(handler.sent[3], /Facts carried from earlier rotations/, 'consumed once — a second run must not repeat it');
 });

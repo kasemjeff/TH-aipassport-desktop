@@ -12,7 +12,7 @@
 //   {"type":"tool",    "id":"…","parentId":"…","kind":"read","arg":…,"out":…,"ok":true}
 //   {"type":"diff",    "id":"…","parentId":"…","file":…,"added":n,"removed":n,"decision":"pending|applied|rejected"}
 //   {"type":"todo",    "id":"…","parentId":"…,"items":[{text,done}]}
-//   {"type":"compaction","id":"…","parentId":…,"summary":…,"lastSummarizedEntryId":…}
+//   {"type":"compaction","id":"…","parentId":…,"summary":…,"memory":[…],"lastSummarizedEntryId":…}
 //   {"type":"note",    "id":"…","parentId":…,"text":…}
 import fs from 'node:fs';
 import os from 'node:os';

@@ -96,7 +96,10 @@ What each pass changed, briefly:
   to 3 or 2 as the text becomes Thai or another wide script, with a per-model
   budget map (F8); SEARCH/GLOB honour the root `.gitignore`, skip files over
   1 MB, and SEARCH takes `-i` (F9). `AIPASS_CONTEXT_TOKENS` /
-  `AIPASS_KEEP_RECENT_BYTES` tune a terminal run without a settings object.
+  `AIPASS_KEEP_RECENT_BYTES` tune a terminal run without a settings object,
+  and so do the context manager's two newer switches: `AIPASS_ELIDE` turns
+  the elision tier on (off by default) and `AIPASS_MEMORY=off` stops the
+  carried facts.
 - **Pass 3 (P2):** `ATTACH` queues an image or document onto the next message,
   behind the `--attach` preamble flag (A); permission rules and "always"
   grants persist per project in `~/.aipass/rules.json` and survive a restart,
@@ -312,10 +315,19 @@ no cap — a run goes until DONE, a guard stops it, or a budget is spent — whi
 `1..200` still caps and announces it on the last step; helpers stay bounded at 8
 and the checker at 6, so an uncapped parent never uncaps a child.
 
-**Still noted, not shipped:** the elision tier that replaces stale, bulky tool
-results with stubs before paying for summarisation — the summary transcript
-already slices each message to 1200 chars, so the tier's remaining win is
-small; it waits for a case where summarisation costs more than the slices do.
+**Edge-flagged (Oct 2026):** the elision tier — stale, bulky sends in the
+summarisation transcript are cut to a counted head…tail stub (what the output
+was, how it ended) instead of the plain 1200-char slice. It ships off by
+default: `elideStaleResults` / `AIPASS_ELIDE`, with the queue record
+`elision-tier` deciding whether the default flips. The same rotation now runs
+the memory tier, on by default: the summariser is asked for a trailing
+`MEMORY:` section of durable facts (decisions, constraints, files) on the same
+call; the facts merge across rotations (deduped, clipped, capped at 20),
+record on the compaction entry (`memory`), and pin into every later seed. A
+reply without the section costs nothing — the narrative is unchanged and the
+facts stay in prose — and `AIPASS_MEMORY=off` stops the carrying. The queue
+record `memory-tier-carry` is what measures whether the facts earn their
+place.
 
 ## The upstream edge, measured live (Oct 2026)
 
@@ -505,10 +517,12 @@ Block by block, against the code as it stands:
   "2–4 turns spent rediscovering the tree" is what these two messages buy back.
 - **Loop — done.** One user message per turn; the whole reply is parsed; every
   marker runs in order and all results return as ONE message.
-- **Observation compressor — done, two tiers.** A single tool result is clipped
-  at `maxResult` with a paging hint (`read` paginates properly); the
-  conversation itself is summarised and rotated at the budget line
-  (`compact.mjs`). The elision tier stays on the noted-not-shipped list.
+- **Observation compressor — done, three levers.** A single tool result is
+  clipped at `maxResult` with a paging hint (`read` paginates properly); the
+  summarisation transcript elides stale, bulky sends to head…tail stubs
+  (opt-in, `elideStaleResults`); the conversation itself is summarised and
+  rotated at the budget line, and the seed pins the merged memory facts
+  (`compact.mjs`).
 - **Action validator — done.** Fenced protocol text never executes (F1); a
   malformed marker comes back as `err: …` pointing at the fix (F5); a staged
   `.mjs`/`.cjs`/`.js` edit passes `node --check` (R2); REPLACE refuses an
@@ -554,7 +568,7 @@ The map, then what each gap is worth:
 |---|---|---|---|
 | SessionStart — inject a snapshot | Bootstrap | preamble + top-level listing on turn 1, the same listing after every rotation (`loop.mjs` the `again` message, `compact.mjs` re-seed); `--snapshot` (CLI) adds `git status --short` and the package scripts to turn 1 | partial — the listing is the only default snapshot; everything else still costs a NEED |
 | PreToolUse — validate the shape, deny with a reason | Action validator | per-tool checks returning `err: …` and the fix (F5); fenced protocol text never executes (F1); `node --check` on staged JS (R2); permission denials carry the rule name; a plugin marker that declared a `risk` rides the permission engine | done per tool — no single pre-dispatch layer; undeclared plugin markers keep the stated trust |
-| PostToolUse — compact an oversized result | Observation compressor | clip at `maxResult` + spill file with a `NEED` locator (`tools.mjs`) — reads keep the head, `RUN` keeps head+tail (ACI round); conversation summarise→rotate at the budget (`compact.mjs`) | done, three tiers; the elided middle of a command sits on disk, not lost |
+| PostToolUse — compact an oversized result | Observation compressor | clip at `maxResult` + spill file with a `NEED` locator (`tools.mjs`) — reads keep the head, `RUN` keeps head+tail (ACI round); the summary transcript elides stale bulk (opt-in) and the rotation's seed pins the memory facts; conversation summarise→rotate at the budget (`compact.mjs`) | done — clip + spill, elision (opt-in), rotate; the elided middle of a command sits on disk, not lost |
 | Stop — tests fail, keep working | Verify | R4's one soft nudge (`verifyPrompts`); the checker at DONE — a read-only child runs the project's own check, the verdict computed from what it ran, one continuation on fail (`loop.mjs`, `harness.mjs#makeChecker`) | done v1 — the verdict is advisory: a second DONE is accepted with `checks`/`checkVerdict` recorded |
 | PreToolUse — count calls, log every event | Budget + trace | one `run_stats` line per run + one session JSONL entry per tool call, 20 000-char result and all; `run_stats.tools` carries `{n, fail, ms}` per kind and `stats` prints the mean latency | done — a hard per-run cap is still not recorded (the budget stops a run with its reason instead) |
 | PreToolUse — destructive commands, config files, red-test commits | Safety gates | modes + the H9 rule engine: path rules outrank the mode, reads included; no listener means deny; `classifyRun` asks about hazardous `RUN` bodies in every mode, ahead of grants; `SAFETY_RULES` ask about config/lockfile mutations (`permissions.mjs`, `settings.mjs`); the declared check (`.aipass/check.txt`) arms the red-test commit gate: a `git commit` RUN is refused until it passed at the current tree state, and `run_stats.commitBlocks` counts the refusals | done — the gate is keyed off the declared check, no separate `verifyCommand` surface |

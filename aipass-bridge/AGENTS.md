@@ -85,6 +85,8 @@ Loopback auth: `AIPASS_TOKEN` (explicit — containers, tests),
 Harness and clients: `AIPASS_HOME` (state dir), `AIPASS_BRIDGE` (bridge URL),
 `AIPASS_SKILLS_DIR`, `AIPASS_FETCH_ALLOW_PRIVATE`, `AIPASS_FETCH_MAX_BYTES`,
 `AIPASS_SPILL_KEEP` (spill files kept per project, 200),
+`AIPASS_ELIDE` (elision tier on — off by default),
+`AIPASS_MEMORY` (`off` stops carrying facts across rotations),
 `AIPASS_LOG_MAX_BYTES` (log rotation cap, 5 MB), `AIPASS_LOG_FORMAT=json`.
 
 Desktop: `AIPASS_DESKTOP_PORT` (8790), `AIPASS_DESKTOP_NO_OPEN`.

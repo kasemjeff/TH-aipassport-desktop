@@ -852,13 +852,18 @@ export async function runTask(taskText, ctx = {}) {
     if (compactor && session && compactor.needsCompaction(session, { pending: next })) {
       try {
         events?.emit('note', { text: 'context is filling up — summarising this conversation and rotating to a fresh one' });
-        const note = await compactor.summarize(session, { task: taskText, model });
+        const raw = await compactor.summarize(session, { task: taskText, model });
+        // The reply is two products: the narrative and (when the tier is on)
+        // the trailing MEMORY: facts, merged across rotations. A reply
+        // without the section digests to the plain summary, so an older
+        // model's answer still lands.
+        const { summary: note, memory } = compactor.digest(session, raw);
         // Rotate first, record second: an append that lands while the rotation
         // fails would leave a compaction entry behind and reset the estimate
         // to a conversation the model never carried — a session claiming
         // memory it does not have. Failing this way only retries next step.
         await rotate?.(note);
-        session.append('compaction', { summary: note, lastSummarizedEntryId: session.entries.at(-1)?.id ?? null });
+        session.append('compaction', { summary: note, ...(memory.length ? { memory } : {}), lastSummarizedEntryId: session.entries.at(-1)?.id ?? null });
         events?.emit('compacted', { summary: note });
         // The fresh conversation keeps what a summary would drop: the files
         // staged so far (deletes marked) and the last check that has not
@@ -868,7 +873,7 @@ export async function runTask(taskText, ctx = {}) {
           return overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
         }).slice(0, 20);
         const lastCheck = checkResult && checkResult.verdict && checkResult.verdict !== 'pass' ? checkResult : null;
-        next = `${compactor.seed({ summary: note, task: taskText, preambleText: pre, results: results.join('\n\n'), staged: stagedNow, lastCheck })}\n\n${REMINDER}`;
+        next = `${compactor.seed({ summary: note, memory, task: taskText, preambleText: pre, results: results.join('\n\n'), staged: stagedNow, lastCheck })}\n\n${REMINDER}`;
       } catch (err) {
         events?.emit('error', { message: `compaction failed, sending the results without it: ${err.message}` });
       }

@@ -47,7 +47,8 @@ discharges all three.
 | subagents / parallel helpers | production | helper budgets capped in `HARNESS_DESIGN.md`, catalog tests | helper caps follow the parent's rules by construction | loop maintainer |
 | loadtest | production (advisory) | `scripts/loadtest.mjs`; deliberately not in CI | release-time strict run (`docs/RELEASE.md` acceptance) | loop maintainer |
 | test-time scaling (best-of-N) | not shipped | `HARNESS_DESIGN.md` "not shipped"; queue: `best-of-n-selection` | pass that experiment's gates, then a proposal — never a default | benchmark owner |
-| elision tier | not shipped | design note expects a small win; queue: `elision-tier` | a measured case ≥ 20% tokens/solved on the long-run slice | loop maintainer |
+| elision tier | experimental | implemented off by default: `elideStaleResults` / `AIPASS_ELIDE` (`compact.mjs` + the suite); queue: `elision-tier` | the queue's ≥ 20% tokens/solved case flips the default on; a failed case writes the record off | loop maintainer |
+| memory tier (facts carried across rotations) | experimental | `compact.mjs` `digest`/`mergeMemory`/`seed` + tests; `memory` on the compaction entry (`docs/DATA_FORMATS.md` §Memory); off-switch `AIPASS_MEMORY=off`; queue: `memory-tier-carry` | the queue's long-run case ends `done` with the effect pinned — or a failed case turns the carrying off; never widened silently | loop maintainer |
 | automatic model fallback | won't build | "no automatic fallback", `docs/TECH_STACK.md` + `SPEC_EVALS.md` | only a named failure that pauses/retries cannot cover, and a new policy note | policy owner |
 | signed installers / SLSA / `cargo vet` | not shipped | `docs/RELEASE.md` dependencies section | future work; unsigned installers are stated, not hidden | policy owner |
 | scripted upgrade/rollback drill | not shipped | `RELEASE.md` rollback is manual by admission | a drill script in the suite (install-old → upgrade → assert → rollback) | loop maintainer |

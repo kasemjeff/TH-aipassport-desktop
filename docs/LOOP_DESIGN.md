@@ -183,9 +183,10 @@ only silences the reminder — the exit check runs regardless.
 
 **11. Compaction.** Checked against the assembled message the way the server
 will receive it (after `outbound()` rewrites). Over budget: summarise in the
-conversation that still holds the history → rotate → `compacted`. If the
-compaction itself fails, the results still go out (`error` emitted) — losing a
-step to a summariser fault would be worse.
+conversation that still holds the history → rotate → `compacted`; the seed
+the loop sends next pins the staged files, the last failing check, and the
+merged memory facts. If the compaction itself fails, the results still go
+out (`error` emitted) — losing a step to a summariser fault would be worse.
 
 **12. Loop end.** `step_limit` when a set cap's last step runs; a spent budget becomes
 the stop reason; credits are diffed (`quota(true)`); `run_stats` and

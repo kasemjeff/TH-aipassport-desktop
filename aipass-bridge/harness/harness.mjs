@@ -32,7 +32,7 @@ export class Harness {
   #planResolve = null;
   /** The WEB scratch conversation id, created lazily and reused. */
   #scratch = null;
-  /** A manual rotation's summary, waiting for the next run to build its seed. */
+  /** A manual rotation's summary + facts, waiting for the next run's seed. */
   #pendingSummary = null;
 
   /**
@@ -253,16 +253,20 @@ export class Harness {
    * demand from the window's compact button - the same path, because a manual
    * rotation that behaved differently would be a surprise waiting to happen.
    *
-   * @returns {Promise<{summary: string, seedText: string}>}
+   * @returns {Promise<{summary: string, memory: string[], seedText: string}>}
    */
   async compactNow(task = '') {
     if (!this.session) throw new Error('no session to compact');
-    const summary = await this.compactor.summarize(this.session, { task, model: this.bridge.model });
+    const raw = await this.compactor.summarize(this.session, { task, model: this.bridge.model });
+    // The reply digests into the narrative and the merged facts — the facts
+    // accumulate across rotations (digest reads the session's compaction
+    // entries), so this rotation's seed carries everything earlier ones kept.
+    const { summary, memory } = this.compactor.digest(this.session, raw);
     // Rotate first, record second — the loop's rotation keeps the same order:
     // a compaction entry for a rotation that failed would reset the estimate
     // against a conversation the model never carried.
     await this.#rotate(summary, task);
-    this.session.append('compaction', { summary, lastSummarizedEntryId: this.session.entries.at(-1)?.id ?? null });
+    this.session.append('compaction', { summary, ...(memory.length ? { memory } : {}), lastSummarizedEntryId: this.session.entries.at(-1)?.id ?? null });
     this.events.emit('compacted', { summary });
     // The staged list rides along (deletes marked): a rotation is where a
     // pending edit gets forgotten, and the fresh conversation must know the
@@ -270,6 +274,7 @@ export class Harness {
     const staged = this.#stagedList();
     const seedText = this.compactor.seed({
       summary,
+      memory,
       task,
       // The same preamble the run would send, flags and all: a rotation that
       // silently dropped SEARCH -i, ATTACH or a plugin's markers was a
@@ -286,21 +291,23 @@ export class Harness {
       }),
       staged,
     });
-    return { summary, seedText };
+    return { summary, memory, seedText };
   }
 
   /**
    * Carry a manual rotation's summary into the next run. The window's
    * /compact has no run in flight, so without this the summary it just paid
    * for would never reach the fresh conversation — the next run would be
-   * told "the project is still open" with nothing remembered. The seed is
-   * built there, against that run's own task: at rotation time nobody knows
-   * what the next task will be, and losing it would be worse than the
-   * memory the seed restores. Consumed once, by run().
+   * told "the project is still open" with nothing remembered. The merged
+   * facts ride along or a long session's spine is cut at the rotation. The
+   * seed is built there, against that run's own task: at rotation time
+   * nobody knows what the next task will be, and losing it would be worse
+   * than the memory the seed restores. Consumed once, by run().
    */
-  rememberSummary(summary) {
-    this.#pendingSummary = String(summary ?? '').trim() || null;
-    return this.#pendingSummary;
+  rememberSummary(summary, memory = null) {
+    const s = String(summary ?? '').trim() || null;
+    this.#pendingSummary = s ? { summary: s, memory: Array.isArray(memory) ? memory : [] } : null;
+    return s;
   }
 
   /** How full the context budget is right now, for whoever is watching. */
@@ -343,10 +350,11 @@ export class Harness {
       // seed into a conversation that already carries it.
       let seedText = null;
       if (this.#pendingSummary) {
-        const summary = this.#pendingSummary;
+        const { summary, memory } = this.#pendingSummary;
         this.#pendingSummary = null;
         seedText = this.compactor.seed({
           summary,
+          memory,
           task,
           preambleText: buildPreamble({
             allowRun: Boolean(this.options.allowRun),

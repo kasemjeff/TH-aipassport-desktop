@@ -86,7 +86,7 @@ header rewrites by anything that does not know it. Entry types:
 | `tool` | `kind`, `arg`, `out`, `ok` |
 | `diff` | `file`, `added`, `removed`, `decision: pending \| applied \| rejected` |
 | `todo` | `items: [{text, done}]` |
-| `compaction` | `summary`, `lastSummarizedEntryId` |
+| `compaction` | `summary`, `lastSummarizedEntryId`, optional `memory` (durable facts carried across rotations) |
 | `note` | free text (helpers, bookkeeping) |
 
 The header is presentation state (`title`, `updated`, `entryCount`). It is
@@ -178,6 +178,12 @@ The agent has no memory store. "Memory" is exactly this, and nothing else:
   compactor replaces the oldest stretch with one `compaction` entry
   (`loop.mjs`); the summary is a rephrasing — a claim about the past, never
   state the harness trusts;
+- **carried facts** — the `memory` list on that same entry: the durable
+  facts a rotation extracted (decisions, constraints, files), merged across
+  rotations and pinned into every later seed (`compact.mjs` `digest`/`seed`).
+  Still claims about the past — clipped at 200 characters a fact and capped
+  at 20, and the seed tells the model to re-check anything stale;
+  `AIPASS_MEMORY=off` stops the carrying without deleting anything;
 - **everything in the working tree** — uploads, spill files, whatever the
   user put where the agent can read it.
 
@@ -224,9 +230,11 @@ and whatever you paste elsewhere is the only way it leaves the machine.
 Export: there is no exporter, deliberately — the files *are* the export.
 Sessions are JSONL (one conversation per file), `evals/results/` is JSONL,
 settings one JSON object: copy them anywhere, `jq` them, track them. Nothing
-is encrypted at rest, and moving `~/.aipass` whole moves the install's
-memory, logs and identity together — move that folder (including `.token`)
-only to a machine you trust as much as this one.
+is encrypted at rest — sessions and uploads are created owner-only
+(0o700/0o600) where the OS has modes, but a copy inherits the permissions of
+whatever copied it. Moving `~/.aipass` whole moves the install's memory, logs
+and identity together — move that folder (including `.token`) only to a
+machine you trust as much as this one.
 
 ## Recovery (RTO/RPO)
 

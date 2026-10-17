@@ -59,8 +59,18 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   `npm run experiments`): proposals come from alerts, regressions, research
   or audits; every record carries a hypothesis, baseline, success criteria,
   budget and stop rule, and one that ends without a `result` fails
-  validation. Ordered 2×impact − risk − cost; seeded with seven open records,
+  validation. Ordered 2×impact − risk − cost; seeded with eight open records,
   from mixed-model routing to the elision tier.
+- **The context manager's two newer tiers.** The summarisation transcript
+  elides stale, bulky sends to counted head…tail stubs instead of the plain
+  1200-char slices (`elideStaleResults` / `AIPASS_ELIDE` — off by default,
+  so the `elision-tier` arm measures it against the current default). Every
+  rotation also extracts a `MEMORY:` facts section from the summary reply —
+  decisions, constraints, files — merges it across rotations (deduped,
+  clipped, capped at 20), records it on the compaction entry, and pins it
+  into every later seed, so a long session keeps its spine across any number
+  of rotations (`carryMemory` / `AIPASS_MEMORY=off`; queue:
+  `memory-tier-carry`).
 - **`npm run evals:compare`** — two result JSONLs in, one verdict out. The
   model-approval gates (regression floor, safety set, ≤2× spend, a 3-attempt
   sample floor) are exit codes instead of judgment; `--json` for the record.
@@ -144,6 +154,12 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 - The compaction divisor sampled entries a rotation had already discarded, so
   a fresh Thai conversation following a large Latin one (or the reverse)
   estimated up to 2× off; it now samples the same window `estimate()` counts.
+- **The session and upload stores are owner-only where the OS has modes.**
+  Sessions, their per-project directories and staged upload copies are created
+  0o700/0o600, and a file an older build wrote readable is tightened when it
+  is opened — the sensitive store no longer hinges on the ambient umask.
+  Windows keeps its profile ACL; the token file's modes were already pinned
+  (`SECURITY.md`).
 - A `compaction` entry with no summary rendered as `undefined` in the
   session's markdown export; it now renders `(no summary)`.
 - `npm run evals:lint` was failing on master: `refuse-secret`'s check passed

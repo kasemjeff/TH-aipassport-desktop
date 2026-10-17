@@ -96,6 +96,22 @@
     "updated": "2026-10-17"
   },
   {
+    "id": "memory-tier-carry",
+    "title": "Do carried facts beat a bare summary across rotations?",
+    "source": "research:docs/HARNESS_DESIGN.md",
+    "status": "proposed",
+    "impact": 3,
+    "risk": 2,
+    "cost": 2,
+    "hypothesis": "long-run tasks crossing at least two rotations hold their solved rate with the carried memory facts (the compaction entry's memory list, seeded forward) versus the same runs with AIPASS_MEMORY=off at equal budget.",
+    "baseline": "the same long-run slice with AIPASS_MEMORY=off — a bare summary seed, attempts 3.",
+    "successCriteria": "solved rate within the attempt spread and tokens/solved not worse on the carried arm; any wrong fact acted on (a hallucinated path or decision) fails the arm regardless of the rate.",
+    "budget": { "attempts": 3, "maxSteps": 10, "maxCredits": 5, "wallMs": 900000 },
+    "stopRule": "carried facts are wrong often enough to mislead — stopped; the carrying goes off until the extraction is fixed.",
+    "created": "2026-10-17",
+    "updated": "2026-10-17"
+  },
+  {
     "id": "pacing-reduces-invalids",
     "title": "Does --pause actually cut the invalid rate?",
     "source": "audit:2026-10-17",

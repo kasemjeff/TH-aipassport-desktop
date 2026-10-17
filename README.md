@@ -5,7 +5,7 @@
 <p align="left">
   <img src="https://img.shields.io/badge/node-%E2%89%A520-blue?logo=node.js&style=flat-square" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/dependencies-zero-success?style=flat-square" alt="Zero Dependencies" />
-  <img src="https://img.shields.io/badge/tests-552%20passing-brightgreen?style=flat-square" alt="Tests: 552 passing, 1 skipped" />
+  <img src="https://img.shields.io/badge/tests-568%20passing-brightgreen?style=flat-square" alt="Tests: 568 passing, 2 skipped" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgray?style=flat-square" alt="Platforms" />
 </p>
 

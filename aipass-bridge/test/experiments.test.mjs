@@ -71,7 +71,7 @@ test('the committed queue validates and seeds the open questions', () => {
   assert.deepEqual(problems, []);
   assert.ok(records.length >= 5, `expected a seeded queue, got ${records.length}`);
   const ids = records.map((r) => r.id);
-  for (const id of ['mixed-model-routing', 'memory-cold-warm', 'safety-twin-controls', 'best-of-n-selection', 'elision-tier', 'attempts-floor']) {
+  for (const id of ['mixed-model-routing', 'memory-cold-warm', 'memory-tier-carry', 'safety-twin-controls', 'best-of-n-selection', 'elision-tier', 'attempts-floor']) {
     assert.ok(ids.includes(id), `queue is missing ${id}`);
   }
   assert.ok(records.every((r) => r.status === 'proposed' || r.status === 'running' || r.result),

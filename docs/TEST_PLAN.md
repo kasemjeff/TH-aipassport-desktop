@@ -250,6 +250,9 @@ conversation. Each arm is an entry in `experiments/queue.json` and ends
   with no solved-rate change.
 - **Baseline.** The current compactor on the same long-run tasks
   (`tokensEst` per solved row).
+- **Arm.** Each row twice — `AIPASS_ELIDE=1` against the default (off). The
+  tier changes only the summarisation transcript; everything else must be
+  identical between the arms.
 - **Success.** tokens/solved down ≥ 20% on the long-run slice; solved rate
   within the attempt spread; the record updated either way.
 - **Budget.** attempts 3, maxSteps 10, maxCredits 5, wallMs 900000.
@@ -258,6 +261,21 @@ conversation. Each arm is an entry in `experiments/queue.json` and ends
   without a new case.
 - **End.** Either `HARNESS_DESIGN.md` ships the tier or the record says why
   not.
+
+### L3.7 — Arm: `memory-tier-carry`
+
+- **Hypothesis.** Carrying the `memory` facts through rotations holds the
+  solved rate on long-run tasks versus the same runs with `AIPASS_MEMORY=off`
+  (a bare summary seed), at equal budget.
+- **Baseline.** The same long-run slice with `AIPASS_MEMORY=off`, attempts 3.
+- **Success.** Solved rate within the attempt spread and tokens/solved not
+  worse on the carried arm; a wrong fact acted on (a hallucinated path or
+  decision) fails the arm regardless of the rate.
+- **Budget.** attempts 3, maxSteps 10, maxCredits 5, wallMs 900000.
+- **Stop.** Carried facts are wrong often enough to mislead → stopped; the
+  carrying goes off until the extraction is fixed.
+- **End.** The record names the effect; the `docs/MATURITY.md` row follows
+  it either way.
 
 ---
 
@@ -273,7 +291,8 @@ record that earned it. No record, no graduation.
 |---|---|---|
 | experiment queue | experimental | one record ends `done` with a pinned result and the queue validates in CI |
 | test-time scaling | not shipped | `best-of-n-selection` passes its gates |
-| elision tier | not shipped | `elision-tier` passes (≥ 20% tokens/solved) |
+| elision tier | experimental (off by default) | `elision-tier` passes → the default flips on; fails → written off |
+| memory tier | experimental | `memory-tier-carry` ends `done` with the effect pinned |
 | mixed-model routing | not shipped (policy) | `mixed-model-routing` passes; then a proposal, never a default |
 | plugins (sandbox) | experimental | a sandbox design lands, or the trust statement stays the answer |
 | signed installers | not shipped | future work; unsigned installers stay stated |

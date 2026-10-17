@@ -707,8 +707,9 @@ export function createRpc({
       if (current.running) throw new Error('a run is in flight — compact when it ends');
       const done = await current.compactNow();
       // The summary has no run of its own yet: the next run builds its seed
-      // against that run's task and carries it.
-      current.rememberSummary(done.summary);
+      // against that run's task and carries it — facts included, or a long
+      // session's spine is cut at the rotation.
+      current.rememberSummary(done.summary, done.memory);
       return { summary: done.summary, context: current.contextUsage() };
     },
     async diff(params = {}) {
