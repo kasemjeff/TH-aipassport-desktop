@@ -4,7 +4,10 @@
 // The bridge is a drop-in OpenAI-compatible `/v1/chat/completions`, so the
 // harness only needs this one method — but the upstream has a firewall with
 // opinions, and file contents trip it. The failure modes are handled here so
-// no caller has to think about them.
+// no caller has to think about them: a refusal that heals by waiting (429, or
+// a pace-shaped 403) is waited out and the same message goes again; only a
+// refusal that survives the waits is content-shaped, and only that is rewritten
+// (redact → split → drop).
 import { outbound, inbound, RISKY_LINE } from './waf.mjs';
 
 export const MIN_SPLIT = 300;
@@ -85,12 +88,61 @@ export const SEND_RETRY_MS = 1000;
 // ten messages in four minutes was enough to draw one (docs/HARNESS_DESIGN.md
 // has the recording). Nothing about the payload is wrong: the same body goes
 // through a moment later, so a 429 is waited out, never rewritten or split.
-// The page waits one request out first, in place (extension/page.js
-// RETRY_WAITS_MS — 5s/15s/45s, retry-after honoured); this is the layer above
-// it, for a window longer than the page's budget. 503 rides along — the same
-// edge ships both.
+// Every probe is itself a request and counts against the window it is waiting
+// for — that is how a retry storm keeps its own limiter hot — so the waits
+// grow (10s/45s/120s in the page, 60s/180s here) and the rewrite chain
+// (redact → split) is never approved for a rate refusal: doubling the messages
+// the edge is refusing is exactly what the Oct 17 cascades were made of. The
+// page waits first, in place (extension/page.js RETRY_WAITS_MS, retry-after
+// honoured, and one tab-wide clock so parallel senders stack instead of
+// storming); this is the layer above it, for a window longer than the page's
+// budget. 503 rides along — the same edge ships both.
 export const RATE_REFUSED = /aipass returned (429|503)\b/;
-export const RATE_WAITS_MS = [20_000, 60_000];
+export const RATE_WAITS_MS = [60_000, 180_000];
+
+/** The waits above, from the environment or the default. */
+export function rateWaits(raw = process.env.AIPASS_RATE_WAITS_MS) {
+  if (raw === undefined || raw.trim() === '') return RATE_WAITS_MS;
+  const waits = raw.split(',').map((v) => Number(v.trim()));
+  if (waits.some((n) => !Number.isFinite(n) || n < 0)) return RATE_WAITS_MS;
+  return waits;
+}
+
+// A 403 is not always about the content. The edge that rate-limits with 429
+// also refuses by pace score: the message is rejected whole, and the identical
+// bytes go through a moment later. Recorded live, Oct 17 2026: a run's
+// 214-byte tool result was refused and then accepted unchanged; a 3.3 KB read
+// was refused whole while both of its halves passed on their own; and, under
+// the chain that rewrote every refusal, eighteen fragments of small tool
+// results were dropped outright — a 137-byte fragment had no split left, so
+// the model simply never saw it. So a refusal first gets the 429 treatment:
+// wait, then send the very same message again. Rewriting is the medicine for
+// what survives that — content-shaped refusals are deterministic (measured:
+// console.log and its siblings, equality inside an if) and they surface here
+// as refusals that outlast every wait.
+//
+// The page waits 403s out first, inside the request (extension/page.js
+// EDGE_WAITS_403_MS — 5s then 15s); these waits are the layer above it, for a
+// window longer than the page's budget, exactly as RATE_WAITS_MS is for 429.
+// Three rungs since the Oct 17 follow-up: a pace window that outlasts two
+// waits is still more likely to be pace than content, and the rewrite right
+// behind these waits (the split) doubles the messages the edge is refusing —
+// a wrong split is far costlier than one more silence, so the split is only
+// reached after 10s → 30s → 60s of identical resends have all been refused.
+// AIPASS_EDGE_WAITS_MS overrides them (milliseconds, comma-separated); empty
+// or nonsense keeps the default, '0' is retry-once-without-a-pause.
+export const EDGE_WAITS_MS = [10_000, 30_000, 60_000];
+
+/** The waits above, from the environment or the default. */
+export function edgeWaits(raw = process.env.AIPASS_EDGE_WAITS_MS) {
+  if (raw === undefined || raw.trim() === '') return EDGE_WAITS_MS;
+  const waits = raw.split(',').map((v) => Number(v.trim()));
+  if (waits.some((n) => !Number.isFinite(n) || n < 0)) return EDGE_WAITS_MS;
+  return waits;
+}
+
+/** A wait as a note reads it: seconds when it has any, milliseconds below. */
+export const waitLabel = (ms) => (ms >= 1000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms)}ms`);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -115,7 +167,12 @@ async function retrySend(what, { streamed = () => false, signal = null, rateWait
         && !streamed()
         && !signal?.aborted
         && err?.name !== 'AbortError';
-      if (!again) throw err;
+      if (!again) {
+        // The caller's rewrite chain (redact → split) must not resend over an
+        // answer that already streamed either — it would arrive twice.
+        if (streamed()) err.streamed = true;
+        throw err;
+      }
       if (rate) {
         const wait = rateWaits[rateTries++];
         note?.(`rate limited by the edge (429) — waiting ${Math.round(wait / 1000)}s, then sending again`);
@@ -202,10 +259,21 @@ export class BridgeClient {
         try { evt = JSON.parse(data); } catch { continue; }
         if (evt.error) throw new Error(evt.error.message);
         const delta = evt.choices?.[0]?.delta ?? {};
-        // A note is not the answer and never flips the resend gate by
-        // itself: a retry repeating a note is harmless, a retry repeating
-        // the answer is not.
-        if (typeof delta.note === 'string' && delta.note) this.onStreamNote?.(delta.note);
+        // A note is not the answer and never flips the resend gate: a retry
+        // repeating a note is harmless, a retry repeating an answer is not.
+        // This matters most exactly when the edge is refusing — the page's
+        // own waiting line arrives this way — so reading the note as "the
+        // answer started" would close the gate and turn a wait the layers
+        // below are handling into a fatal error.
+        if (typeof delta.note === 'string' && delta.note) {
+          this.onStreamNote?.(delta.note);
+          // The reasoning echo rides the same delta for clients that never
+          // learned the field (the chat console reads reasoning): it shows
+          // and records here too, it just does not count as answer content.
+          if (delta.reasoning_content) { reasoning += delta.reasoning_content; onReasoning(delta.reasoning_content); }
+          if (delta.content) onText(delta.content);
+          continue;
+        }
         if (delta.reasoning_content) { markStreamed(); reasoning += delta.reasoning_content; onReasoning(delta.reasoning_content); }
         if (delta.content) { markStreamed(); out += delta.content; onText(delta.content); }
       }
@@ -275,11 +343,25 @@ export class BridgeClient {
 /**
  * Send one message, surviving a 403 from the upstream edge.
  *
- * File contents are arbitrary: a README carries shell commands, URLs and code
- * fences, any of which can push a request past a filter. Splitting a rejected
- * message in half and sending the halves in sequence keeps the same
- * information flowing while lowering what any single request carries. The
- * server remembers each part, so the model still sees the whole thing.
+ * The refusal has two shapes, and they take opposite medicines. Content-shaped
+ * refusals are deterministic — file contents are arbitrary, and a README's
+ * shell commands or code fences can push a request past a filter — so those
+ * are rewritten until they pass: known-offender lines are dropped whole, then
+ * the structure itself is split. Pace-shaped refusals go through a moment
+ * later untouched (see EDGE_WAITS_MS), and rewriting for one of those is what
+ * fragments a run: the split itself doubles the messages the edge was
+ * refusing, the part prefixes stack on each other, and a small fragment that
+ * is refused again gets dropped because it has no split left.
+ *
+ * So the order is: fix what is known-wrong (redact), send the identical
+ * message again for what may be pace (wait), and rewrite the structure only
+ * for what survives both. A 429/503 (RATE_REFUSED) skips all of that — it is
+ * never rewritten or split, only waited out again here, above the client's
+ * own waits, because each retry probe counts against the very window it is
+ * waiting for. And a refusal that arrives after deltas already reached the
+ * client (retrySend marks `err.streamed`) is not resent at all: rewinding
+ * over a delivered answer would show it twice. When the rate waits are spent
+ * too, the refusal surfaces with both its forensics and the advice.
  *
  * `log(level, text)` is where progress notes go — stdout for the CLI, an event
  * for the desktop UI.
@@ -289,14 +371,51 @@ export async function resilientSay(say, text, log = () => {}, parts = null, dept
   try {
     return await say(text, parts);
   } catch (err) {
+    // A refusal that arrived after the answer started streaming must surface:
+    // resending would deliver that answer twice (retrySend marks these).
+    if (err?.streamed) throw err;
+
+    // Rate refusals are pace, never content. The identical message waits and
+    // goes again — nothing here is redacted or split for a 429/503, because
+    // the rewrite chain doubles the messages the edge is refusing and every
+    // probe counts against the window it is waiting for.
+    if (RATE_REFUSED.test(err.message)) {
+      let waited = 0;
+      for (const wait of rateWaits()) {
+        log('note', `rate limited by the edge — waiting ${waitLabel(wait)}, then sending the same message again`);
+        await sleep(wait);
+        waited += wait;
+        try { return await say(text, parts); } catch (err2) {
+          if (!RATE_REFUSED.test(err2.message)) throw err2;
+          err = err2;
+        }
+      }
+      err.message += ` — rate limited for ~${Math.round(waited / 1000)}s; the account is moving too fast. Pause a moment, then continue`;
+      throw err;
+    }
+
     const blocked = /\b40[39]\b/.test(err.message);
     if (!blocked) throw err;
 
-    // Fast-path: redact known risky patterns immediately rather than slow recursive splits
+    // Fast-path: redact known risky patterns immediately rather than waiting
+    // or splitting — this one is knowledge, not hope.
     const { out: redTxt, dropped } = redact(text);
     if (dropped && redTxt !== text) {
       log('note', `rejected at ${Buffer.byteLength(text)} bytes — omitting ${dropped} line(s) that cannot be sent`);
-      try { return await say(redTxt, parts); } catch { /* fall through to split */ }
+      try { return await say(redTxt, parts); } catch (err2) {
+        if (!/\b40[39]\b/.test(err2.message)) throw err2;
+      }
+    }
+
+    // Nothing known looked wrong, so this may be the edge's pace rather than
+    // the content: wait it out and send the same message again before
+    // touching it (the recording is on EDGE_WAITS_MS).
+    for (const wait of edgeWaits()) {
+      log('note', `refused at the edge — waiting ${waitLabel(wait)}, then sending the same message again`);
+      await sleep(wait);
+      try { return await say(text, parts); } catch (err2) {
+        if (!/\b40[39]\b/.test(err2.message)) throw err2;
+      }
     }
 
     if (depth > 2 || Buffer.byteLength(text) < MIN_SPLIT) {
@@ -313,9 +432,14 @@ export async function resilientSay(say, text, log = () => {}, parts = null, dept
     let last;
     for (let i = 0; i < halves.length; i++) {
       const final = i === halves.length - 1;
-      const prefix = final
-        ? 'Final part.\n\n'
-        : `Part ${i + 1}, more follows. Reply with just: ok\n\n`;
+      // Only the outermost split announces the part protocol. A chunk that has
+      // to be split again is already inside its "more follows", and a second
+      // prefix stacked on the first is what the model then reads as garble
+      // (recorded live: "Part 1, more follows" on top of "Part 1, more
+      // follows" on top of the actual tool result).
+      const prefix = depth === 0
+        ? (final ? 'Final part.\n\n' : `Part ${i + 1}, more follows. Reply with just: ok\n\n`)
+        : '';
       last = await resilientSay(say, prefix + halves[i], log, parts, depth + 1);
     }
     return last;

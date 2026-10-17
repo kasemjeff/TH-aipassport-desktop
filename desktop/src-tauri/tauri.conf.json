@@ -13,7 +13,17 @@
     "withGlobalTauri": true,
     "windows": [],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self' asset: customprotocol:",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' asset: http://asset.localhost blob: data:",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:*",
+        "object-src": "'none'",
+        "base-uri": "'self'",
+        "form-action": "'self'"
+      }
     },
     "trayIcon": {
       "id": "aipass-tray",
@@ -33,7 +43,6 @@
       "../../aipass-bridge/deploy": "aipass-bridge/deploy/",
       "../../aipass-bridge/extension": "aipass-bridge/extension/",
       "../../aipass-bridge/harness": "aipass-bridge/harness/",
-      "../../aipass-bridge/test": "aipass-bridge/test/",
       "../../aipass-bridge/.gitignore": "aipass-bridge/.gitignore",
       "../../aipass-bridge/README.md": "aipass-bridge/README.md",
       "../../aipass-bridge/agent.mjs": "aipass-bridge/agent.mjs",

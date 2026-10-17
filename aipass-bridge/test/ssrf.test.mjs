@@ -6,7 +6,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 
 process.env.AIPASS_PORT = '0'; // import starts the server; a random port collides with nothing
-const { isPrivateHost, fetchRemoteAsDataUri, server } = await import('../bridge/server.mjs');
+const { isPrivateHost, hostResolvesPrivate, fetchRemoteAsDataUri, server } = await import('../bridge/server.mjs');
 
 // The imported server holds the event loop open, which stalls the runner once
 // this file shares a process pool with the others — release it when done.
@@ -100,4 +100,16 @@ test('a redirect into a non-http scheme is refused', async () => {
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+// DNS rebinding / split-horizon DNS: a bare domain that resolves to a private
+// address is the classic way past a literal-IP guard. `localhost` is the one
+// private-resolving name every machine has without touching the network.
+test('a hostname that resolves private is refused; a DNS failure fails open', async () => {
+  assert.equal(await hostResolvesPrivate('localhost'), true, 'localhost resolves to loopback');
+  assert.equal(await hostResolvesPrivate('93.184.216.34'), false, 'a public literal is not private');
+  // RFC 2606 reserves .invalid — resolution must fail, and a failure means the
+  // literal-IP check stays the only guard (fails open by design: the literal
+  // check above already ran).
+  assert.equal(await hostResolvesPrivate('definitely-not-a-host.invalid'), false, 'DNS failure must not block a fetch');
 });

@@ -27,6 +27,9 @@ import { Emitter } from './events.mjs';
 // and with desktop/main.mjs's probe: an explicit bridgeURL wins, otherwise
 // AIPASS_BRIDGE decides, otherwise the loopback default.
 import { resolveBridgeURL } from './bridge.mjs';
+import { loadOrMintToken, authorized, authorizedQuery } from './authtoken.mjs';
+import { openLogFile } from './log-file.mjs';
+import { scrubSecrets } from '../bridge/log-scrub.mjs';
 
 // Re-exported for desktop/main.mjs, whose ensureBridge probe must resolve the
 // bridge exactly the way the harness's own client does.
@@ -99,6 +102,48 @@ const isLocalRequest = (req) => {
   return true;
 };
 
+/**
+ * Same-origin browser page, proven by the headers only a browser sends.
+ * Headerless tools (curl, node) fail this on purpose — they can read the token
+ * file directly, so the bootstrap endpoint below refuses them and stays a
+ * window-only path a CORS-enabled page from another origin cannot use.
+ */
+const isBrowserSameOrigin = (req) => {
+  if (process.env.AIPASS_ALLOW_REMOTE === '1') return false;
+  if (!loopbackHost(req.headers.host)) return false;
+  if (req.headers['sec-fetch-site'] === 'same-origin') return true;
+  const origin = req.headers['origin'];
+  if (origin) {
+    try { return loopbackHost(new URL(origin).host); } catch { return false; }
+  }
+  return false;
+};
+
+/**
+ * Open a URL in the platform browser. No shell, no interpolation: the URL is
+ * allowlisted, then passed as argv — this method is reachable from loopback
+ * without auth, so a string-built `cmd /c start "" "${url}"` would be RCE.
+ */
+export async function openBrowser(url) {
+  const target = String(url ?? '').trim();
+  if (!/^https?:\/\/[^\s"'<>\\^|&;`$]+$/i.test(target)) return false;
+  const { execFile } = await import('node:child_process');
+  const run = (cmd, args) => new Promise((resolve) => {
+    const child = execFile(cmd, args, { windowsHide: true }, () => resolve());
+    child.on('error', () => resolve());
+  });
+  try {
+    // '' becomes a bare "" on the command line — cmd's canonical empty title
+    // for `start`.
+    if (process.platform === 'win32') await run('cmd', ['/c', 'start', '', target]);
+    else if (process.platform === 'darwin') await run('open', [target]);
+    else await run('xdg-open', [target]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function createRpc({
   port = 8790,
   root = process.cwd(),
@@ -130,13 +175,28 @@ export function createRpc({
   //     the middle of a run or duplicating what it already rendered
   let seq = 0;
   const replay = [];
-  const REPLAY_LIMIT = 500;
+  let replayBytes = 0;
+  // Two bounds, not one count: 500 tiny delta frames covered only seconds of
+  // a long run (its middle went missing on reload), while a handful of huge
+  // tool results could crowd the same window. The byte bound keeps a
+  // reconnecting window's gap small in wall-clock terms; the count is the
+  // memory backstop.
+  const REPLAY_LIMIT = 5000;
+  const REPLAY_BYTES = 4 * 1024 * 1024;
   const emit = (type, payload) => {
     const body = { seq: ++seq, ...(payload ?? {}) };
-    replay.push({ event: type, seq: body.seq, body });
-    if (replay.length > REPLAY_LIMIT) replay.shift();
-    const frame = `event: ${type}\nid: ${seq}\ndata: ${JSON.stringify(body)}\n\n`;
-    for (const res of listeners) res.write(frame);
+    const data = JSON.stringify(body);
+    replay.push({ event: type, seq: body.seq, data });
+    replayBytes += data.length;
+    while (replay.length > REPLAY_LIMIT || (replayBytes > REPLAY_BYTES && replay.length > 1)) {
+      replayBytes -= replay.shift().data.length;
+    }
+    const frame = `event: ${type}\nid: ${seq}\ndata: ${data}\n\n`;
+    // A listener whose socket died between frames must be dropped, not written
+    // to — one dead window must not take down the backend for the live ones.
+    for (const res of [...listeners]) {
+      try { res.write(frame); } catch { listeners.delete(res); }
+    }
   };
 
   const appSettings = settings ?? new Settings();
@@ -167,9 +227,9 @@ export function createRpc({
     const script = bridgeScript();
     if (!script) return;
     try {
-      const logDir = path.join(aipassHome(), 'logs');
-      fs.mkdirSync(logDir, { recursive: true });
-      const log = fs.openSync(path.join(logDir, 'bridge.log'), 'a');
+      // Size-capped rotation (harness/log-file.mjs): a bridge left running for
+      // weeks used to grow bridge.log without bound.
+      const log = openLogFile(path.join(aipassHome(), 'logs', 'bridge.log'));
       const child = spawn(process.execPath, [script], { cwd: root, stdio: ['ignore', log, log], detached: true, env: process.env });
       child.unref();
       fs.closeSync(log);
@@ -255,14 +315,18 @@ export function createRpc({
     // Order: explicit folders from settings, then the project's own library,
     // then the user's, then the ones shipped with the CLI. First match wins.
     const repoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills');
+    const projectDir = path.join(abs, '.aipass', 'skills');
     const userDir = path.join(aipassHome(), 'skills');
     const dirs = [
       ...(appSettings.get('skillsDirs') ?? []),
-      path.join(abs, '.aipass', 'skills'),
+      projectDir,
       userDir,
       repoDir,
     ].filter(Boolean);
-    return new SkillLibrary(dirs);
+    // The generated index labels each library by its stated role; the two
+    // known folders are named, not inferred from position, so a missing
+    // project folder cannot mark the user's library as the project's.
+    return new SkillLibrary(dirs, { roles: { [projectDir]: 'project', [userDir]: 'user' } });
   };
 
   const pickRoot = () => {
@@ -289,19 +353,6 @@ export function createRpc({
 
   /* --------------------------------------------------------------- attachments */
 
-const openBrowser = async (url) => {
-  const cmd = process.platform === 'win32' ? `cmd /c start "" "${url}"`
-    : process.platform === 'darwin' ? `open ${url}`
-      : `xdg-open ${url}`;
-  try {
-    const { exec } = await import('node:child_process');
-    await new Promise((resolve) => exec(cmd, () => resolve()));
-    return true;
-  } catch {
-    return false;
-  }
-};
-
   const staged = new Map(); // id → {id, name, path, bytes, mime, at}
 
   /**
@@ -324,13 +375,20 @@ const openBrowser = async (url) => {
           ? path.resolve(typed)
           : path.resolve(root, typed);
       if (!fs.existsSync(abs)) throw new Error(`no such file: ${fromPath}`);
+      // The data-URL branch below enforces MAX_ATTACHMENT_BYTES; a path needs
+      // the same cap BEFORE the read, or staging a multi-GB file OOMs the
+      // backend (and base64-inflates it again per send in partsFor).
+      const size = fs.statSync(abs).size;
+      if (size > MAX_ATTACHMENT_BYTES) throw new Error(`attachment too large: ${Math.round(size / 1024 / 1024)} MB (cap ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB)`);
       bytes = fs.readFileSync(abs);
       base = path.basename(abs);
       const sameDir = path.dirname(abs) === dir;
       const target = path.join(dir, `${id}-${base}`);
       if (!sameDir) fs.copyFileSync(abs, target);
       // Keep the original readable path so the model can be told where it is.
-      staged.set(id, { id, name: base, path: sameDir ? abs : target, source: abs, bytes: bytes.length, mime: mimeOf(base), at: Date.now() });
+      // `owned` marks copies the backend may delete; the user's original is
+      // never unlinked by dropAttachment.
+      staged.set(id, { id, name: base, path: sameDir ? abs : target, source: abs, owned: !sameDir, bytes: bytes.length, mime: mimeOf(base), at: Date.now() });
       return staged.get(id);
     }
     base = path.basename(name ?? 'attachment');
@@ -340,7 +398,7 @@ const openBrowser = async (url) => {
     if (bytes.length > MAX_ATTACHMENT_BYTES) throw new Error(`attachment too large: ${Math.round(bytes.length / 1024 / 1024)} MB (cap ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB)`);
     const file = path.join(dir, `${id}-${base}`);
     fs.writeFileSync(file, bytes);
-    staged.set(id, { id, name: base, path: file, bytes: bytes.length, mime, at: Date.now() });
+    staged.set(id, { id, name: base, path: file, owned: true, bytes: bytes.length, mime, at: Date.now() });
     return staged.get(id);
   };
 
@@ -354,7 +412,9 @@ const openBrowser = async (url) => {
 
   const dropAttachment = (id) => {
     const item = staged.get(id);
-    if (item) fs.rmSync(item.path, { force: true });
+    // Only copies owned by the backend are unlinked; a sameDir stage points
+    // at the user's original file, and deleting it would eat their data.
+    if (item?.owned) fs.rmSync(item.path, { force: true });
     staged.delete(id);
   };
 
@@ -400,18 +460,24 @@ const openBrowser = async (url) => {
      * showing half a truth while the run it abandoned is still going.
      */
     async snapshot() {
+      const status = await methods.status();
       return {
-        status: await methods.status(),
+        status,
         session: current.session ? current.session.meta() : null,
         entries: current.session?.entries ?? [],
-        pending: current.pendingChanges(),
-        context: current.contextUsage(),
+        // status answered both of these already; asking again was a second
+        // diff of every staged file for a single reply.
+        pending: status.pending,
+        context: status.context,
         skills: current.skills.list(),
       };
     },
 
     async models() { return current.bridge.models(true); },
-    async credits() { return current.bridge.quota(true); },
+    // Forced by default — a caller that asks for credits wants a number, not
+    // a cache — but the window passes force:false while idle so the
+    // extension's tab is not poked upstream every 10 seconds forever.
+    async credits(params = {}) { return current.bridge.quota(params.force !== false); },
     async conversations() { return current.bridge.conversations(); },
 
     async 'config.set'(params = {}) {
@@ -587,6 +653,7 @@ const openBrowser = async (url) => {
         maxSteps: params.maxSteps ?? current.options.maxSteps,
         maxToolCalls: params.maxToolCalls ?? current.options.maxToolCalls,
         maxWallClockMs: params.maxWallClockMs ?? current.options.maxWallClockMs,
+        maxCredits: params.maxCredits ?? current.options.maxCredits,
         searchI: params.searchI ?? current.options.searchI,
         attach: params.attach ?? current.options.attach,
         webScratch: params.webScratch ?? current.options.webScratch,
@@ -642,7 +709,9 @@ const openBrowser = async (url) => {
     async diff(params = {}) {
       const abs = current.overlay.safe(params.file);
       if (!current.overlay.has(abs)) throw new Error('no pending change for that file');
-      return current.overlay.changes().find((c) => c.abs === abs) ?? null;
+      // One file's diff, not every staged file's diff searched for one: a
+      // diff is the expensive part and the panel asks a file at a time.
+      return current.overlay.changeFor(abs);
     },
     async apply(params = {}) { return current.apply(params.files ?? null); },
     async discard() { return { dropped: current.discard() }; },
@@ -681,14 +750,20 @@ const openBrowser = async (url) => {
     async 'fs.list'(params = {}) {
       const dir = current.overlay.trySafe(params.dir ?? '.');
       if (!dir) throw new Error(`outside project root: ${params.dir ?? '.'}`);
-      return fs.readdirSync(dir, { withFileTypes: true }).map((e) => ({ name: e.name, dir: e.isDirectory() }))
+      // A panel click on a directory with thousands of entries: the async read
+      // keeps the event loop free for the run's own stream while it fills.
+      const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      return entries.map((e) => ({ name: e.name, dir: e.isDirectory() }))
         .filter((e) => !['node_modules', '.git', '.next', 'dist', 'build', '.cache'].includes(e.name));
     },
     async 'fs.read'(params = {}) {
       const abs = current.overlay.trySafe(params.file);
       if (!abs) throw new Error(`outside project root: ${params.file}`);
       if (!current.overlay.existsAt(abs)) throw new Error('no such file');
-      return { file: params.file, text: current.overlay.readAt(abs) };
+      const text = current.overlay.has(abs)
+        ? current.overlay.readAt(abs)
+        : await fs.promises.readFile(abs, 'utf8');
+      return { file: params.file, text };
     },
   };
 
@@ -703,7 +778,23 @@ const openBrowser = async (url) => {
       return json(res, 403, { ok: false, error: 'local requests only — this port serves the machine it runs on' });
     }
 
+    // Window bootstrap: the desktop window loads over plain navigation, so it
+    // cannot present a bearer header until it holds the token. Same-origin
+    // browser pages fetch it here; headerless tools read the file instead
+    // (and a cross-origin page never passes isBrowserSameOrigin).
+    if (url.pathname === '/token' && req.method === 'GET') {
+      if (!isBrowserSameOrigin(req)) {
+        return json(res, 403, { ok: false, error: 'the token bootstrap is for same-origin browser pages; tools read the token file' });
+      }
+      return json(res, 200, { ok: true, token: loadOrMintToken() });
+    }
+
     if (url.pathname === '/events' && req.method === 'GET') {
+      // EventSource cannot set headers, so the window rides `?token=` (minted
+      // at boot via /token). Header bearers are accepted too.
+      if (!authorized(req) && !authorizedQuery(url)) {
+        return json(res, 401, { ok: false, error: 'unauthorized: missing or wrong loopback bearer token' });
+      }
       res.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
         'cache-control': 'no-cache, no-transform',
@@ -721,23 +812,35 @@ const openBrowser = async (url) => {
       );
       if (Number.isFinite(since) && since > 0) {
         for (const frame of replay) {
-          if (frame.seq > since) res.write(`event: ${frame.event}\nid: ${frame.seq}\ndata: ${JSON.stringify(frame.body)}\n\n`);
+          if (frame.seq > since) res.write(`event: ${frame.event}\nid: ${frame.seq}\ndata: ${frame.data}\n\n`);
         }
       }
       res.write(`event: hello\ndata: ${JSON.stringify({ seq })}\n\n`);
       listeners.add(res);
-      const ping = setInterval(() => res.write(': keepalive\n\n'), 15_000);
+      // A named frame, never a bare `: keepalive` comment: comments are
+      // invisible to EventSource, so the window's watchdog (no event for 20 s
+      // ⇒ run lost) fired on any long RUN or SEARCH while the backend was
+      // perfectly alive. It carries no id — a reconnect's Last-Event-ID still
+      // points at the last real frame.
+      const ping = setInterval(() => { try { res.write('event: ping\ndata: {}\n\n'); } catch { /* closed */ } }, 15_000);
       req.on('close', () => { clearInterval(ping); listeners.delete(res); });
       return;
     }
 
     if (url.pathname === '/rpc' && req.method === 'POST') {
-      let body = '';
-      req.on('data', (c) => { body += c; if (body.length > 32_000_000) req.destroy(); });
+      if (!authorized(req)) {
+        return json(res, 401, { ok: false, error: 'unauthorized: missing or wrong loopback bearer token' });
+      }
+      // Chunks collected, joined once: `body += c` re-flattens the whole body
+      // on every packet — O(n²) on a big attachments upload — and can split a
+      // UTF-8 sequence sitting across two chunks.
+      const chunks = [];
+      let size = 0;
+      req.on('data', (c) => { chunks.push(c); size += c.length; if (size > 32_000_000) req.destroy(); });
       req.on('end', async () => {
         let msg = {};
         try {
-          msg = JSON.parse(body || '{}');
+          msg = JSON.parse(chunks.length ? Buffer.concat(chunks).toString('utf8') : '{}');
         } catch (err) {
           // A body that does not parse is the caller's bug — say so, instead of
           // letting `msg = {}` fall through to "no such method: undefined",
@@ -788,8 +891,10 @@ const openBrowser = async (url) => {
   plugins.load().catch((err) => process.stderr.write(`plugin load failed: ${err.message}\n`));
 
   // A run that cannot proceed because no chat tab is open is a one-click fix, so
-  // the backend offers the click (and takes it when settings allow).
-  current.events.on('needs_tab', async ({ url }) => {
+  // the backend offers the click (and takes it when settings allow). This hangs
+  // off the shared bus, not the boot harness: every project's harness forwards
+  // its events there, so the auto-open keeps working after a project switch.
+  bus.on('needs_tab', async ({ url }) => {
     if (appSettings.get('autoOpenTab') === false) return;
     const opened = await openBrowser(url);
     emit('tab_opened', { url, opened });
@@ -807,8 +912,23 @@ const json = (res, code, body) => {
 // Run standalone: node aipass-bridge/harness/rpc.mjs [--port 8790] [--root DIR]
 const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invokedDirectly) {
+  // Crash visibility, entry point only: tests import createRpc in-process, and
+  // a handler that calls process.exit would take the test runner down with it.
+  // As the desktop backend, an unrecovered throw used to end the process with
+  // nothing but whatever faint line was mid-flight; one scrubbed line names it,
+  // and the non-zero exit is what the desktop shell's supervisor watches.
+  const fatal = (label, err) => {
+    console.error(formatLogLine({ level: 'error', msg: `[fatal] ${label}: ${scrubSecrets(err?.stack ?? String(err))}` }));
+    process.exit(1);
+  };
+  process.on('uncaughtException', (err) => fatal('uncaught exception', err));
+  process.on('unhandledRejection', (reason) => fatal('unhandled rejection', reason));
+
   const argv = process.argv.slice(2);
   const arg = (n, d) => { const i = argv.indexOf(`--${n}`); return i === -1 ? d : argv[i + 1]; };
   const rpc = createRpc({ port: Number(arg('port', 8790)), root: arg('root', process.cwd()) });
+  // The desktop probes the port before spawning, but a race is still possible;
+  // name the port instead of dying with a raw EADDRINUSE stack.
+  rpc.server.on('error', (err) => fatal('backend cannot bind', err));
   process.stdout.write(`aipass desktop backend on ${rpc.url}\n`);
 }

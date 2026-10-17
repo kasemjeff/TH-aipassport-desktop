@@ -2,8 +2,12 @@
 // (inner) attribute; on `fn main` it is silently ignored.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::Manager;
 use tauri::menu::{Menu, MenuItem};
 
@@ -117,6 +121,120 @@ fn stop_backend(pid: u32) {
     let _ = Command::new("kill").args(["-TERM", &format!("-{pid}")]).status();
 }
 
+/// The backend's log file, rotated past 5 MB the same way the JS side does
+/// (harness/log-file.mjs keeps the same number).
+///
+/// A release build is a GUI app with no console: an inherited stdout/stderr
+/// has nowhere to land, so a packaged crash used to leave nothing readable
+/// behind. The supervisor redirects the child's output here instead.
+fn backend_log_file() -> Option<std::fs::File> {
+    let dir = home_dir().join(".aipass").join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("desktop-backend.log");
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 5 * 1024 * 1024 {
+            let _ = std::fs::remove_file(dir.join("desktop-backend.log.1"));
+            let _ = std::fs::rename(&path, dir.join("desktop-backend.log.1"));
+        }
+    }
+    std::fs::OpenOptions::new().create(true).append(true).open(&path).ok()
+}
+
+/// One supervisor line, in the same log the child writes to: who restarted
+/// what, and when — the question a packaged crash otherwise leaves open.
+fn note(msg: &str) {
+    if let Some(mut file) = backend_log_file() {
+        let _ = writeln!(file, "[supervisor] {msg}");
+    }
+}
+
+/// The backend child, kept restartable.
+///
+/// The window outlives a backend crash — the page's EventSource redials and
+/// restores from the session snapshot — so the shell that spawned the backend
+/// should outlive it too. This holds the spawn recipe, watches the child, and
+/// replaces it with backoff. `quitting` flips on Destroyed, so a deliberate
+/// exit is not "a crash" the supervisor answers with a fresh child.
+struct Backend {
+    child: Mutex<Option<std::process::Child>>,
+    quitting: AtomicBool,
+    fails: Mutex<u32>,
+    next_try: Mutex<Instant>,
+    node: String,
+    entry: PathBuf,
+    port: u16,
+    cwd: PathBuf,
+}
+
+impl Backend {
+    fn spawn(&self) -> std::io::Result<std::process::Child> {
+        let mut command = Command::new(&self.node);
+        command
+            .arg(&self.entry)
+            .args(["--port", &self.port.to_string()])
+            .args(["--root", self.cwd.to_str().unwrap_or(".")])
+            .current_dir(&self.cwd);
+        if let Some(log) = backend_log_file() {
+            if let Ok(dup) = log.try_clone() {
+                command.stdout(log).stderr(dup);
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // Its own process group, so one signal on quit reaches the
+            // backend *and* the bridge it started — no orphans.
+            command.process_group(0);
+        }
+        command.spawn()
+    }
+
+    /// One watch tick: a dead child is replaced, a live one resets the backoff.
+    fn tick(&self) {
+        if self.quitting.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut guard = self.child.lock().unwrap();
+        let exited = match guard.as_mut() {
+            Some(kid) => matches!(kid.try_wait(), Ok(Some(_))),
+            None => false,
+        };
+        if !exited {
+            // A live child clears the episode: the next crash starts from the
+            // first backoff step, not from wherever the last one left off.
+            *self.fails.lock().unwrap() = 0;
+            *self.next_try.lock().unwrap() = Instant::now();
+            return;
+        }
+        let mut fails = self.fails.lock().unwrap();
+        let mut next = self.next_try.lock().unwrap();
+        if Instant::now() < *next {
+            return;
+        }
+        *fails += 1;
+        // 2s, doubling to half a minute: a backend that dies on start — a port
+        // grabbed by hand, a broken config — retries politely, and a crash
+        // loop cannot spin the CPU or flood the log.
+        let delay = Duration::from_secs((2u64 << (*fails - 1).min(4)).min(30));
+        *next = Instant::now() + delay;
+        note(&format!("backend exited — restart attempt {fails}"));
+        match self.spawn() {
+            Ok(kid) => *guard = Some(kid),
+            Err(err) => note(&format!("backend restart failed: {err}")),
+        }
+    }
+
+    /// The app is quitting: no more restarts, and the child goes down with us.
+    /// No window reload on restart, deliberately: the page redials on its own
+    /// and a forced reload would throw away whatever the composer holds.
+    fn shutdown(&self) {
+        self.quitting.store(true, Ordering::SeqCst);
+        if let Some(kid) = self.child.lock().unwrap().take() {
+            stop_backend(kid.id());
+        }
+    }
+}
+
 /// The backend port, shared with the JS side: `AIPASS_DESKTOP_PORT` wins, the
 /// loopback default is 8790. A value that is not a port is refused rather than
 /// guessed — the window must look at the same port the backend is on.
@@ -156,28 +274,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // beside a custom-port backend adopts it rather than spawning a
             // second one on a port nothing else is using.
             let backend_port = backend_port()?;
-            let mut child = if std::net::TcpStream::connect(("127.0.0.1", backend_port)).is_ok() {
-                None
-            } else {
-                let mut command = Command::new(node_path(&exe_dir));
-                command
-                    .arg(&entry)
-                    .args(["--port", &backend_port.to_string()])
-                    .args(["--root", project_root.to_str().unwrap_or(".")])
-                    .current_dir(&project_root);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::CommandExt;
-                    // Its own process group, so one signal on quit reaches the
-                    // backend *and* the bridge it started — no orphans.
-                    command.process_group(0);
-                }
-                Some(
-                    command
-                        .spawn()
-                        .expect("could not start the aipass backend — is Node installed?"),
-                )
-            };
+            let backend = Arc::new(Backend {
+                child: Mutex::new(None),
+                quitting: AtomicBool::new(false),
+                fails: Mutex::new(0),
+                next_try: Mutex::new(Instant::now()),
+                node: node_path(&exe_dir),
+                entry,
+                port: backend_port,
+                cwd: project_root.clone(),
+            });
+            // Adopt a backend that is already answering (a browser `aipass
+            // desktop`, say); otherwise start one. An adopted backend is not
+            // ours to respawn — the supervisor's child stays None.
+            if std::net::TcpStream::connect(("127.0.0.1", backend_port)).is_err() {
+                let kid = backend
+                    .spawn()
+                    .expect("could not start the aipass backend — is Node installed?");
+                *backend.child.lock().unwrap() = Some(kid);
+            }
+
+            // Watch the child for as long as the app lives. The window's
+            // EventSource redials after a crash and restores from the session
+            // snapshot, so a restart reads as a pause, not as a lost run.
+            {
+                let watched = backend.clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(Duration::from_secs(2));
+                    if watched.quitting.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    watched.tick();
+                });
+            }
 
             // The window opens only once the backend answers, so a cold start
             // never lands on a blank page.
@@ -201,10 +330,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .min_inner_size(900.0, 600.0)
             .build()?;
 
-            // The backend is part of the app, not a service, so quitting
-            // takes it down with it — but only if this window started it.
-            let spawned_pid = child.as_mut().map(|kid| kid.id());
+            // The backend is part of the app, not a service, so quitting takes
+            // it down with it — and stops the supervisor, so the exit reads as
+            // deliberate rather than as a crash to answer.
             let window_handle = window.clone();
+            let backend_handle = backend.clone();
             window.on_window_event(move |event| {
                 match event {
                     // Closing the window hides it instead of killing the app:
@@ -216,11 +346,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         api.prevent_close();
                         let _ = window_handle.hide();
                     }
-                    tauri::WindowEvent::Destroyed => {
-                        if let Some(pid) = spawned_pid {
-                            stop_backend(pid);
-                        }
-                    }
+                    tauri::WindowEvent::Destroyed => backend_handle.shutdown(),
                     _ => {}
                 }
             });
@@ -259,10 +385,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
 
             // A backend that died immediately is worth saying out loud rather
-            // than showing a blank window forever.
-            if let Some(ref mut kid) = child {
-                if let Ok(Some(status)) = kid.try_wait() {
-                    return Err(format!("the aipass backend exited at once ({status}) — run it by hand to see why").into());
+            // than showing a blank window forever. Its output — stderr
+            // included, now that spawn() redirects both — is in the log.
+            {
+                let mut guard = backend.child.lock().unwrap();
+                if let Some(ref mut kid) = *guard {
+                    if let Ok(Some(status)) = kid.try_wait() {
+                        return Err(format!(
+                            "the aipass backend exited at once ({status}) — see ~/.aipass/logs/desktop-backend.log"
+                        )
+                        .into());
+                    }
                 }
             }
             Ok(())

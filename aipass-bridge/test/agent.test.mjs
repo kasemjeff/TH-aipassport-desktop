@@ -9,7 +9,13 @@ let bridge;
 before(async () => { bridge = await startBridge(); });
 after(() => bridge.stop());
 
-const agent = (dir, args = [], opts = {}) => run(AGENT, ['task text', '--root', dir, '--bridge', bridge.base, ...args], opts);
+// Every agent test here passes through the 403 waits; shorten them to nothing
+// so a refusal test exercises the order of attempts, not the clock — a test
+// that cares about the pause itself passes its own AIPASS_EDGE_WAITS_MS.
+const agent = (dir, args = [], opts = {}) => run(AGENT, ['task text', '--root', dir, '--bridge', bridge.base, ...args], {
+  ...opts,
+  env: { AIPASS_EDGE_WAITS_MS: '0', ...opts.env },
+});
 
 test('reads files and reports a summary, touching nothing on disk', async (t) => {
   const dir = tempDir({ 'README.md': 'a starter project\n' });
@@ -300,6 +306,27 @@ test('splits and resends a turn the upstream rejects', async (t) => {
   assert.match(out, /✓ read it/);
 });
 
+// The pace-shaped 403, end to end: the edge refuses each message once and
+// accepts the identical bytes on the resend — no rewrite, no fragment lost.
+// The live recording behind this is in harness/bridge.mjs (EDGE_WAITS_MS).
+test('a flaky refusal is waited out whole, never split or dropped', async (t) => {
+  const dir = tempDir({ 'notes.txt': 'buy milk\n' });
+  const seen = new Set();
+  const handler = scripted(['NEED file notes.txt', 'DONE read it'], {
+    reject: (t) => { const first = !seen.has(t); seen.add(t); return first; },
+  });
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir, [], { env: { AIPASS_EDGE_WAITS_MS: '60,60' } });
+  assert.match(out, /refused at the edge — waiting/, 'the pause is explained');
+  assert.doesNotMatch(out, /splitting into/, 'a pace refusal is not the split path');
+  assert.doesNotMatch(out, /omitting/, 'and nothing is dropped for it');
+  assert.match(out, /✓ read it/, 'the run finishes');
+  assert.equal(handler.rejected.length, 2, 'each of the run’s two messages was refused once');
+  assert.ok(handler.sent.includes(handler.rejected[0]), 'the identical message is what was sent again');
+});
+
 test('drops a line that cannot be sent at any size, and keeps going', async (t) => {
   const dir = tempDir({ 'package.json': '{\n  "scripts": {\n    "x": "node -e \\"fetch()\\"",\n    "build": "next build"\n  }\n}\n' });
   const handler = scripted(['NEED file package.json', 'DONE inspected it'], {
@@ -569,17 +596,20 @@ test('the task text and preamble are encoded, so process.env never leaves raw', 
   assert.match(sent, /PROCESS-ENV/, 'it is encoded, not dropped');
 });
 
-test('the model can open a file whose name was encoded (.env → DOT-ENV)', async (t) => {
+test('a secret file stays local even when asked for by its encoded spelling (DOT-ENV)', async (t) => {
   const dir = tempDir({ '.env': 'TOKEN=abc\n' });
   // The model sees the encoded name in the listing and copies it back verbatim.
-  const handler = scripted(['NEED file DOT-ENV', 'DONE read the env file']);
+  const handler = scripted(['NEED file DOT-ENV', 'DONE left it local']);
   const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
   t.after(() => ext.disconnect());
 
-  await run(AGENT, ['read the env file', '--root', dir, '--bridge', bridge.base]);
-  // the decode step turns DOT-ENV back into .env, so the real file is read
+  const { out } = await run(AGENT, ['read the env file', '--root', dir, '--bridge', bridge.base]);
+  // the decode step turns DOT-ENV back into .env before the check, so the
+  // secret floor answers ahead of any read — obfuscation is not a bypass
   const result = handler.sent[1];
-  assert.match(result, /TOKEN=abc/, 'the real .env file was read and its contents returned (encoded)');
+  assert.match(result, /denies reading DOT-ENV/, 'the denial reaches the model, in the wire spelling');
+  assert.doesNotMatch(handler.sent.join('\n'), /TOKEN=abc/, 'the secret bytes never leave the machine');
+  assert.match(out, /left it local/, 'the run still finishes with the summary');
 });
 
 test('tag-shaped content passes a tag-blocking edge and restores byte-for-byte', async (t) => {
@@ -727,4 +757,24 @@ test('reasoning streams as its own dim line, apart from the step', async (t) => 
   assert.match(out, /⟡ Weighing the options/, 'thinking keeps its own gutter');
   assert.match(out, /⟡ the README looks like a starter/);
   assert.match(out, /✓ It is a starter project/, 'and the answer still reads as the answer');
+});
+
+// A DONE beside a gathering call is the same slip as a DONE beside a NEED:
+// its result only travels with the run's next message, so accepting the DONE
+// at once threw the result away unread. GLOB stands in for the family - GIT,
+// FETCH, WEB and a helper's summary follow the identical path.
+test('a DONE beside a GLOB is held back so the listing reaches the model', async (t) => {
+  const dir = tempDir({ 'a.txt': 'hello\n' });
+  const handler = scripted([
+    'GLOB **/*.txt\n\nDONE looked around',
+    'DONE looked around, nothing else to do',
+  ]);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir);
+
+  assert.equal(handler.sent.length, 2, 'the run stayed alive for one more turn');
+  assert.match(handler.sent[1], /Result of glob/, 'the listing rode back to the model');
+  assert.match(out, /looked around, nothing else to do/, 'the final closing line is the one kept');
 });

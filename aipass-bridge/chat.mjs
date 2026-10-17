@@ -15,6 +15,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execSync, spawnSync } from 'node:child_process';
+import { authHeaders } from './harness/authtoken.mjs';
+import { edgeWaits, rateWaits, waitLabel, RATE_REFUSED } from './harness/bridge.mjs';
+import { outbound, inbound } from './harness/waf.mjs';
 
 /**
  * @typedef {object} BridgeStatus
@@ -98,6 +101,13 @@ With a question, it answers and exits. Without one it stays interactive, where
 }
 
 const BRIDGE = (flag('bridge', 'http://127.0.0.1:8787') ?? '').replace(/\/+$/, '');
+// Every bridge-bound request carries the loopback bearer token; anything else
+// (upstream fetches) goes out untouched — the token must never leave the box.
+const bridgeFetch = (url, opts = {}) => (
+  String(url).startsWith(BRIDGE)
+    ? fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers ?? {}) } })
+    : fetch(url, opts)
+);
 const CONVERSATION = flag('conversation', null);
 const DEFAULT_OUT_DIR = path.join(process.cwd(), 'outputs');
 const OUT_DIR = path.resolve(flag('out', DEFAULT_OUT_DIR) ?? DEFAULT_OUT_DIR);
@@ -425,88 +435,16 @@ function renderTool(block) {
 
 /* =========================================================== agent loop */
 
-/* ---------------------------------------- WAF encoding (same as agent.mjs) */
+/* ---------------------------------------- WAF encoding (single source) */
 
-/** @type {Array<[RegExp, string]>} */
-const SUBSTITUTIONS = [
-  [/127\.0\.0\.1/g,          'LOOPBACK-IP'],
-  [/169\.254\.169\.254/g,    'METADATA-IP'],
-  [/0\.0\.0\.0/g,            'ANY-IP'],
-  [/localhost/gi,             'LCLHST'],
-  // URL schemes — https/http/ftp/chrome appear in READMEs and trigger URL-based rules
-  [/https:\/\//gi,            'HTTPS-URL'],
-  [/http:\/\//gi,             'HTTP-URL'],
-  [/chrome:\/\//gi,           'CHROME-URL'],
-  [/ftp:\/\//gi,              'FTP-URL'],
-  [/file:\/\//gi,             'FILE-URI'],
-  // HTML patterns
-  [/<!doctype/gi,             'DOCTYPE-DECL'],
-  [/<!--/g,                   'CMT-OPEN'],
-  [/-->/g,                    'CMT-CLOSE'],
-  [/<script/gi,               'TAG-SCRIPT-OPEN'],
-  [/<\/script>/gi,            'TAG-SCRIPT-CLOSE'],
-  [/javascript:/gi,           'JS-SCHEME'],
-  // Shell / secrets patterns
-  [/process\.env/gi,          'PROCESS-ENV'],
-  [/\.env\b/gi,               'DOT-ENV'],
-  [/node:child_process/gi,    'NODE-CHILD-PROC'],
-  [/child_process/gi,         'CHILD-PROC'],
-  [/process\.kill/gi,         'PROCESS-KILL'],
-  [/\/bin\//gi,               'SLASH-BIN-SLASH'],
-  [/\/etc\//gi,               'SLASH-ETC-SLASH'],
-  [/\bspawnSync\b/g,          'SPAWN-SYNC-CALL'],
-  [/\bspawn\b/g,              'SPAWN-CALL'],
-  [/\bexecSync\b/g,           'EXEC-SYNC-CALL'],
-  [/ExecutionPolicy/gi,       'EXEC-POLICY'],
-  [/Bypass\b/gi,              'BYPASS-ARG'],
-  [/powershell/gi,            'PSHELL'],
-  [/\.ps1\b/gi,               'DOT-PS1'],
-  [/\.sh\b/gi,                'DOT-SH'],
-  [/&&/g,                     'AND-AND'],
-  [/~(?=\/)/g,                'TILDE-PATH'],
-  // General tag opener (must be last so earlier specific patterns run first)
-  [/<(?=[a-zA-Z/!?])/g,      'TAG-LT'],
-];
-/** @type {Array<[RegExp, string]>} */
-const RESTORE = [
-  [/LOOPBACK-IP/g,       '127.0.0.1'],
-  [/METADATA-IP/g,       '169.254.169.254'],
-  [/ANY-IP/g,            '0.0.0.0'],
-  [/LCLHST/g,            'localhost'],
-  [/HTTPS-URL/g,         'https://'],
-  [/HTTP-URL/g,          'http://'],
-  [/CHROME-URL/g,        'chrome://'],
-  [/FTP-URL/g,           'ftp://'],
-  [/FILE-URI/g,          'file://'],
-  [/DOCTYPE-DECL/g,      '<!doctype'],
-  [/CMT-OPEN/g,          '<!--'],
-  [/CMT-CLOSE/g,         '-->'],
-  [/TAG-SCRIPT-OPEN/g,   '<script'],
-  [/TAG-SCRIPT-CLOSE/g,  '</script>'],
-  [/JS-SCHEME/g,         'javascript:'],
-  [/PROCESS-ENV/g,       'process.env'],
-  [/DOT-ENV/g,           '.env'],
-  [/NODE-CHILD-PROC/g,   'node:child_process'],
-  [/CHILD-PROC/g,        'child_process'],
-  [/PROCESS-KILL/g,      'process.kill'],
-  [/SLASH-BIN-SLASH/g,   '/bin/'],
-  [/SLASH-ETC-SLASH/g,   '/etc/'],
-  [/SPAWN-SYNC-CALL/g,   'spawnSync'],
-  [/SPAWN-CALL/g,        'spawn'],
-  [/EXEC-SYNC-CALL/g,    'execSync'],
-  [/EXEC-POLICY/g,       'ExecutionPolicy'],
-  [/BYPASS-ARG/g,        'Bypass'],
-  [/PSHELL/g,            'powershell'],
-  [/DOT-PS1/g,           '.ps1'],
-  [/DOT-SH/g,            '.sh'],
-  [/AND-AND/g,           '&&'],
-  [/TILDE-PATH/g,        '~'],
-  [/TAG-LT/g,            '<'],
-];
+// The substitution table lives in harness/waf.mjs - the same table the agent
+// harness and the bridge use. This file used to carry a fork that had already
+// diverged (missing the console.*/comparison families); a fork cannot happen
+// again because there is nothing left to fork.
 /** @param {string} text @returns {string} */
-const agentOutbound = (text) => SUBSTITUTIONS.reduce((acc, [re, to]) => acc.replace(re, to), text);
+const agentOutbound = outbound;
 /** @param {string} text @returns {string} */
-const agentInbound  = (text) => RESTORE.reduce((acc, [re, to]) => acc.replace(re, to), text);
+const agentInbound = inbound;
 
 /* ----------------------------------------- overlay filesystem */
 
@@ -518,7 +456,7 @@ let   agentAllowRun = false;
 // Mode state — toggled by /agent with no task
 let   agentMode        = false;  // true = agent mode, false = chat mode
 let   agentModeAllowRun = false; // persists across tasks while in agent mode
-let   agentModeMaxSteps = 10;
+let   agentModeMaxSteps = 0;  // 0 = no cap — the run goes until DONE, a guard, or a budget
 let   agentModeAutoApply = /** @type {boolean | null} */ (null);
 const AGENT_MAX_RESULT = 3000;
 const AGENT_READ_LINES = 200;
@@ -797,7 +735,7 @@ const AGENT_TOOLS = {
     const prompt = `Please search the web and provide detailed, up-to-date facts, answers, and sources for: ${q}`;
     let res;
     try {
-      res = await fetch(`${BRIDGE}/v1/chat/completions`, {
+      res = await bridgeFetch(`${BRIDGE}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model, stream: true, messages: [{ role: 'user', content: prompt }] }),
@@ -1393,7 +1331,7 @@ async function sayAgent(text, images = [], files = []) {
       ]
     : text;
 
-  const res = await fetch(`${BRIDGE}/v1/chat/completions`, /** @type {any} */ ({
+  const res = await bridgeFetch(`${BRIDGE}/v1/chat/completions`, /** @type {any} */ ({
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model, stream: true, messages: [{ role: 'user', content: messagesContent }] }),
@@ -1403,6 +1341,10 @@ async function sayAgent(text, images = [], files = []) {
 
   startSpin();
   let collected = '';
+  // Anything already rendered (reasoning included) must not be resent by the
+  // layers above: a refusal that lands after this mark surfaces instead
+  // (sayResilient reads `streamed` before it decides anything).
+  let streamedAny = false;
   const reader  = /** @type {ReadableStream<Uint8Array>} */ (res.body).getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -1428,14 +1370,20 @@ async function sayAgent(text, images = [], files = []) {
       if (!data || data === '[DONE]') continue;
       let evt;
       try { evt = JSON.parse(data); } catch { continue; }
-      if (evt.error) { stopSpin(); throw new Error(evt.error.message); }
+      if (evt.error) {
+        stopSpin();
+        const ref = /** @type {Error & { streamed?: boolean }} */ (new Error(evt.error.message));
+        if (streamedAny) ref.streamed = true;
+        throw ref;
+      }
       const delta = evt.choices?.[0]?.delta ?? {};
       if (delta.reasoning_content) {
         stopSpin();
+        streamedAny = true;
         renderTool(delta.reasoning_content);
         startSpin();
       }
-      if (delta.content) collected += delta.content;
+      if (delta.content) { collected += delta.content; streamedAny = true; }
     }
   }
   stopSpin();
@@ -1475,6 +1423,30 @@ async function sayResilient(text, depth = 0, images = [], files = []) {
   if (depth === 0) text = agentOutbound(text);
   try { return await sayAgent(text, depth === 0 ? images : [], depth === 0 ? files : []); }
   catch (err) {
+    // A refusal that arrived after something already rendered must surface —
+    // resending would print that part a second time (sayAgent marks these).
+    if (/** @type {any} */ (err)?.streamed) throw err;
+
+    // Rate refusals are pace, never content: the same message waits and goes
+    // again, and nothing below (redact → split) is ever reached for a 429/503
+    // — the rewrite chain doubles the messages the edge is refusing and every
+    // probe counts against the window. The sibling contract is spelled out in
+    // harness/bridge.mjs (resilientSay).
+    if (RATE_REFUSED.test(/** @type {Error} */ (err).message)) {
+      let waited = 0;
+      for (const wait of rateWaits()) {
+        out('  ' + dim(`  rate limited by the edge — waiting ${waitLabel(wait)}, then sending the same message again`));
+        await new Promise((r) => setTimeout(r, wait));
+        waited += wait;
+        try { return await sayAgent(text); } catch (err2) {
+          if (!RATE_REFUSED.test(/** @type {Error} */ (err2).message)) throw err2;
+          err = err2;
+        }
+      }
+      /** @type {Error} */ (err).message += ` — rate limited for ~${Math.round(waited / 1000)}s; the account is moving too fast. Pause a moment, then continue`;
+      throw err;
+    }
+
     const blocked = /\b40[39]\b/.test(/** @type {Error} */ (err).message);
     if (!blocked) throw err;
 
@@ -1483,7 +1455,21 @@ async function sayResilient(text, depth = 0, images = [], files = []) {
     const { redacted, dropped } = agentRedact(text);
     if (dropped && redacted !== text) {
       out('  ' + dim(`  rejected — omitting ${dropped} line(s) that cannot be sent`));
-      try { return await sayAgent(redacted); } catch { /* fall through to split */ }
+      try { return await sayAgent(redacted); } catch (err2) {
+        if (!/\b40[39]\b/.test(/** @type {Error} */ (err2).message)) throw err2;
+      }
+    }
+
+    // A 403 is not always about the content: the edge also refuses by pace
+    // score, and the identical bytes go through a moment later. Wait it out
+    // and send the same message again before rewriting anything — the styled
+    // console's sibling (harness/bridge.mjs) spells the whole contract out.
+    for (const wait of edgeWaits()) {
+      out('  ' + dim(`  refused at the edge — waiting ${waitLabel(wait)}, then sending the same message again`));
+      await new Promise((r) => setTimeout(r, wait));
+      try { return await sayAgent(text); } catch (err2) {
+        if (!/\b40[39]\b/.test(/** @type {Error} */ (err2).message)) throw err2;
+      }
     }
 
     if (depth > 2 || Buffer.byteLength(text) < AGENT_MIN_SPLIT) {
@@ -1497,7 +1483,12 @@ async function sayResilient(text, depth = 0, images = [], files = []) {
     let last = '';
     for (let i = 0; i < parts.length; i++) {
       const final  = i === parts.length - 1;
-      const prefix = final ? 'Final part.\n\n' : `Part ${i + 1}, more follows. Reply with just: ok\n\n`;
+      // Only the outermost split announces the part protocol; a fragment that
+      // gets split again is already inside its "more follows" (the styled
+      // console says the same thing about this console's sibling).
+      const prefix = depth === 0
+        ? (final ? 'Final part.\n\n' : `Part ${i + 1}, more follows. Reply with just: ok\n\n`)
+        : '';
       last = await sayResilient(prefix + parts[i], depth + 1);
     }
     return last;
@@ -1644,7 +1635,7 @@ function agentShowDiff() {
  * @param {string} taskText
  * @param {{ maxSteps?: number, allowRun?: boolean, autoApply?: boolean | null, attachedImages?: Array<{ tag: string, dataUri: string }>, attachedDocuments?: AttachedDocument[] }} [opts]
  */
-async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApply = null, attachedImages = [], attachedDocuments = [] } = {}) {
+async function runAgentTask(taskText, { maxSteps = 0, allowRun = false, autoApply = null, attachedImages = [], attachedDocuments = [] } = {}) {
   // autoApply: null = ask y/N, true = apply automatically, false = dry run
   overlay.clear();
   const prevAllowRun = agentAllowRun;
@@ -1672,7 +1663,8 @@ async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApp
 
   let nudges = 0;
   let toolsRun = 0;
-  for (let step = 1; step <= maxSteps; step++) {
+  const stepCap = maxSteps > 0 ? maxSteps : Infinity;   // 0 = no cap
+  for (let step = 1; step <= stepCap; step++) {
     const stepStart = Date.now();
     out('');
 
@@ -1682,7 +1674,7 @@ async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApp
     reply = reply != null ? agentInbound(reply) : '';
 
     const elapsed = ((Date.now() - stepStart) / 1000).toFixed(1);
-    out(cyan('○') + ' ' + bold(`agent step ${step}/${maxSteps}`) + ' ' + dim(`(${elapsed}s)`));
+    out(cyan('○') + ' ' + bold(maxSteps > 0 ? `agent step ${step}/${maxSteps}` : `agent step ${step}`) + ' ' + dim(`(${elapsed}s)`));
 
     const proseText = agentProse(reply);
     const calls = agentParse(reply);
@@ -1774,7 +1766,7 @@ async function runAgentTask(taskText, { maxSteps = 10, allowRun = false, autoApp
     }
     if (done) out(dim('  (ignoring DONE — it came alongside a tool request)'));
     next = `${results.join('\n\n')}\n\n${AGENT_REMINDER}`;
-    if (step === maxSteps) out(red('  reached the step limit'));
+    if (maxSteps > 0 && step === maxSteps) out(red('  reached the step limit'));
   }
 
   agentAllowRun = prevAllowRun;
@@ -1933,7 +1925,7 @@ async function ask(text, attachedImages = [], attachedFiles = []) {
   currentAbortController = new AbortController();
   isGenerating = true;
 
-  const res = await fetch(`${BRIDGE}/v1/chat/completions`, /** @type {any} */ ({
+  const res = await bridgeFetch(`${BRIDGE}/v1/chat/completions`, /** @type {any} */ ({
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -2047,38 +2039,46 @@ async function ask(text, attachedImages = [], attachedFiles = []) {
 
 /* ---------------------------------------------------------------- pre-flight */
 
+// A pre-flight failure ends the process the same way one-shot success does —
+// by draining the loop, not process.exit(). On Windows, exit() right after
+// network I/O races the loop teardown (libuv win/async.c:94 → 0xC0000409);
+// the exit code is kept and every block below is guarded instead of being
+// skipped by the exit itself (d1ce7bf; nodejs/node#56645).
+let stopped = false;
+
 // response.json() is `unknown` under @types/node — assert the shape at the edge.
 let status = /** @type {BridgeStatus | null} */ (
-  await fetch(`${BRIDGE}/status`).then((r) => r.json()).catch(() => null)
+  await bridgeFetch(`${BRIDGE}/status`).then((r) => r.json()).catch(() => null)
 );
 if (!status) {
   console.error(red(`No bridge at ${BRIDGE}. Start it with: npm run dev`));
-  process.exit(1);
+  stopped = true;
 }
-if (!status.extensions) {
+if (!stopped && !status.extensions) {
   // Grace period: wait up to 4s in case the extension is reconnecting
   const graceMs = process.env.NODE_TEST_CONTEXT ? 100 : 4000;
   const deadline = Date.now() + graceMs;
   while (Date.now() < deadline && !status?.extensions) {
     await new Promise((r) => setTimeout(r, 100));
-    status = /** @type {BridgeStatus | null} */ (await fetch(`${BRIDGE}/status`).then((r) => r.json()).catch(() => null));
+    status = /** @type {BridgeStatus | null} */ (await bridgeFetch(`${BRIDGE}/status`).then((r) => r.json()).catch(() => null));
+  }
+  if (!status?.extensions) {
+    console.error(red('The extension is not connected. Open a https://de.aipass.net/chat tab.'));
+    stopped = true;
   }
 }
-if (!status?.extensions) {
-  console.error(red('The extension is not connected. Open a https://de.aipass.net/chat tab.'));
-  process.exit(1);
-}
-model ||= status.defaultModel;
+if (stopped) process.exitCode = 1;
+if (!stopped) model ||= status.defaultModel;
 
-if (CONVERSATION) {
-  await fetch(`${BRIDGE}/config`, {
+if (!stopped && CONVERSATION) {
+  await bridgeFetch(`${BRIDGE}/config`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ conversation: CONVERSATION }),
   }).catch(() => {});
 }
 
-if (ASSISTANT) {
-  await fetch(`${BRIDGE}/config`, {
+if (!stopped && ASSISTANT) {
+  await bridgeFetch(`${BRIDGE}/config`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ assistant: ASSISTANT }),
   }).catch(() => {});
@@ -2094,7 +2094,7 @@ async function maybeStartNew(seed) {
   if (!pendingNew) return;
   pendingNew = false;
   const made = /** @type {{ id?: string } | null} */ (
-    await fetch(`${BRIDGE}/conversations/new`, {
+    await bridgeFetch(`${BRIDGE}/conversations/new`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         model,
@@ -2111,7 +2111,7 @@ async function maybeStartNew(seed) {
   }
 }
 
-if (question) {
+if (question && !stopped) {
   // One-shot: ask, print, leave. Attach failures set the exit code and skip
   // the round trip; success falls out of the module and the event loop drains
   // on its own. There is deliberately no process.exit() here — on Windows,
@@ -2155,7 +2155,7 @@ if (question) {
 
 // Everything below is the interactive session — one-shot mode must not touch
 // any of it, so each entry point is guarded rather than skipped by exiting.
-if (!question && FILES.length > 0) {
+if (!stopped && !question && FILES.length > 0) {
   for (const f of FILES) {
     const resolved = resolveDocumentPath(f);
     if (resolved) {
@@ -2227,15 +2227,15 @@ const HELP = [
   dim('  Drag-and-drop image files to automatically attach as [image1].'),
 ].map((l) => dim(l)).join('\n');
 
-if (!question) banner();
+if (!stopped && !question) banner();
 
-const rl = /** @type {any} */ (question ? null : readline.createInterface({ input: stdin, output: stdout }));
+const rl = /** @type {any} */ (stopped || question ? null : readline.createInterface({ input: stdin, output: stdout }));
 if (rl) rl.on('SIGINT', () => {
   if (rl.line.length > 0) setLine('');
   handleExit('Ctrl+C');
 });
 
-if (TTY && !question) {
+if (TTY && !stopped && !question) {
   // Enable bracketed paste mode in terminal so pasted text (Ctrl+V) doesn't auto-submit on newline
   stdout.write('\x1b[?2004h');
   const restorePasteMode = () => stdout.write('\x1b[?2004l');
@@ -2485,7 +2485,7 @@ function drawMenu({ keepSel = false } = {}) {
   menuOpen = true;
 }
 
-if (TTY && !question) {
+if (TTY && !stopped && !question) {
   // Wrap internal readline keypress listener so we can intercept Ctrl+D on empty prompt
   const [rlKeypressListener] = stdin.rawListeners('keypress');
   if (rlKeypressListener) stdin.removeListener('keypress', /** @type {(...args: any[]) => void} */ (rlKeypressListener));
@@ -2668,7 +2668,7 @@ const CLOSED = Symbol('closed');
 /** @type {Promise<typeof CLOSED>} */
 const closed = new Promise((resolve) => rl?.once('close', () => resolve(CLOSED)));
 
-while (!question) {
+while (!stopped && !question) {
   if (TTY) {
     out('');
     // Mode indicator — shown above the input box every loop
@@ -2676,7 +2676,7 @@ while (!question) {
       const flags = [
         agentModeAllowRun ? red('--allow-run') : '',
         agentModeAutoApply === true ? dim('--apply') : '',
-        dim(`max:${agentModeMaxSteps}`),
+        dim(`max:${agentModeMaxSteps || '∞'}`),
         dim(`root: ${agentRoot}`),
       ].filter(Boolean).join(dim(' · '));
       out('  ' + cyan('⬡') + ' ' + bold(cyan('agent mode')) + '  ' + flags);
@@ -2733,7 +2733,7 @@ while (!question) {
 
   if (line === '/models') {
     const r = /** @type {{ data?: ModelRow[] } | null} */ (
-      await fetch(`${BRIDGE}/v1/models`).then((x) => x.json()).catch(() => null)
+      await bridgeFetch(`${BRIDGE}/v1/models`).then((x) => x.json()).catch(() => null)
     );
     if (!r?.data) { console.log(red('  could not list models')); continue; }
     for (const m of r.data) {
@@ -2748,7 +2748,7 @@ while (!question) {
     let id = line === '/model' ? '' : line.slice(7).trim();
     if (!id) {
       const r = /** @type {{ data?: ModelRow[] } | null} */ (
-        await fetch(`${BRIDGE}/v1/models`).then((x) => x.json()).catch(() => null)
+        await bridgeFetch(`${BRIDGE}/v1/models`).then((x) => x.json()).catch(() => null)
       );
       const models = r?.data ?? [];
       if (!models.length) { console.log(red('  could not list models')); continue; }
@@ -2771,7 +2771,7 @@ while (!question) {
     }
     if (id === model) { console.log(dim('  already on that model')); continue; }
     model = id;
-    await fetch(`${BRIDGE}/config`, {
+    await bridgeFetch(`${BRIDGE}/config`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ defaultModel: model }),
     }).catch(() => {});
@@ -2781,7 +2781,7 @@ while (!question) {
 
   if (line === '/conversations' || line === '/switch') {
     const r = /** @type {{ current?: string, conversations?: ConvRow[] } | null} */ (
-      await fetch(`${BRIDGE}/conversations`).then((x) => x.json()).catch(() => null)
+      await bridgeFetch(`${BRIDGE}/conversations`).then((x) => x.json()).catch(() => null)
     );
     const all = r?.conversations ?? [];
     if (!all.length) { console.log(dim('  no conversations yet — send a message or /new')); continue; }
@@ -2800,7 +2800,7 @@ while (!question) {
     if (all.length > list.length) console.log(dim(`  (showing ${list.length} most recent of ${all.length})`));
     if (!chosen) { console.log(dim('  cancelled')); continue; }
     if (chosen.id === current) { console.log(dim('  already on that one')); continue; }
-    await fetch(`${BRIDGE}/config`, {
+    await bridgeFetch(`${BRIDGE}/config`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ conversation: chosen.id }),
     }).catch(() => {});
@@ -2982,7 +2982,7 @@ while (!question) {
     const rawVal = line === '/tone' ? '' : line.slice(5).trim().toLowerCase();
     if (!rawVal) {
       /** @type {any} */
-      const bridgeOpts = await fetch(`${BRIDGE}/style-options`).then((r) => r.json()).catch(() => null);
+      const bridgeOpts = await bridgeFetch(`${BRIDGE}/style-options`).then((r) => r.json()).catch(() => null);
       /** @type {Array<{ id: string, label?: string, note?: string }>} */
       const items = [
         { id: 'off', label: 'off', note: 'default AI tone' },
@@ -3029,7 +3029,7 @@ while (!question) {
     const rawVal = line === '/format' ? '' : line.slice(7).trim().toLowerCase();
     if (!rawVal) {
       /** @type {any} */
-      const bridgeOpts = await fetch(`${BRIDGE}/style-options`).then((r) => r.json()).catch(() => null);
+      const bridgeOpts = await bridgeFetch(`${BRIDGE}/style-options`).then((r) => r.json()).catch(() => null);
       /** @type {Array<{ id: string, label?: string, note?: string }>} */
       const items = [
         { id: 'off', label: 'off', note: 'standard free-form output' },
@@ -3073,9 +3073,9 @@ while (!question) {
   // `/styles` prints current style status and available preset options
   if (line === '/styles') {
     /** @type {any} */
-    const styleRes = await fetch(`${BRIDGE}/style-options`).then((r) => r.json()).catch(() => null);
+    const styleRes = await bridgeFetch(`${BRIDGE}/style-options`).then((r) => r.json()).catch(() => null);
     /** @type {any} */
-    const videoRes = await fetch(`${BRIDGE}/video-options`).then((r) => r.json()).catch(() => null);
+    const videoRes = await bridgeFetch(`${BRIDGE}/video-options`).then((r) => r.json()).catch(() => null);
 
     console.log(bold('\n  Current Active Styles:'));
     console.log(`    Tone:        ${activeTone ? magenta(activeTone) : dim('off')}   ${dim('(/tone <name|off>)')}`);
@@ -3108,7 +3108,7 @@ while (!question) {
     const rawVal = line === '/image-style' ? '' : line.slice(12).trim();
     if (!rawVal) {
       /** @type {any} */
-      const bridgeOpts = await fetch(`${BRIDGE}/style-options`).then((r) => r.json()).catch(() => null);
+      const bridgeOpts = await bridgeFetch(`${BRIDGE}/style-options`).then((r) => r.json()).catch(() => null);
       /** @type {Array<{ id: string, label?: string, note?: string }>} */
       const items = [
         { id: 'off', label: 'off', note: 'default prompt (no style preset)' },
@@ -3157,7 +3157,7 @@ while (!question) {
     const rawVal = line === '/video-style' ? '' : line.slice(12).trim();
     if (!rawVal) {
       /** @type {any} */
-      const bridgeOpts = await fetch(`${BRIDGE}/video-options`).then((r) => r.json()).catch(() => null);
+      const bridgeOpts = await bridgeFetch(`${BRIDGE}/video-options`).then((r) => r.json()).catch(() => null);
       /** @type {Array<{ id: string, label?: string, note?: string }>} */
       const items = [
         { id: 'off', label: 'off', note: 'no style preprompt' },
@@ -3201,7 +3201,7 @@ while (!question) {
   // `/credits` or `/quota` displays an aesthetic credit and quota meter card
   if (line === '/credits' || line === '/quota') {
     /** @type {any} */
-    const quota = await fetch(`${BRIDGE}/quota`).then((r) => r.json()).catch(() => null);
+    const quota = await bridgeFetch(`${BRIDGE}/quota`).then((r) => r.json()).catch(() => null);
     if (!quota || quota.error || typeof quota.available !== 'number') {
       console.log(red('  ✗ could not fetch credit figures from bridge'));
       console.log(dim('    make sure the bridge is running and a https://de.aipass.net/chat tab is open'));
@@ -3244,7 +3244,7 @@ while (!question) {
   if (line === '/doctor') {
     console.log(bold('\n  🩺 Running inline diagnostics…\n'));
     const getEndpoint = (/** @type {string} */ p) =>
-      fetch(`${BRIDGE}${p}`).then(async (r) => ({ ok: r.ok, status: r.status, body: /** @type {any} */ (await r.json().catch(() => null)) })).catch(() => ({ ok: false, status: 0, body: /** @type {any} */ (null) }));
+      bridgeFetch(`${BRIDGE}${p}`).then(async (r) => ({ ok: r.ok, status: r.status, body: /** @type {any} */ (await r.json().catch(() => null)) })).catch(() => ({ ok: false, status: 0, body: /** @type {any} */ (null) }));
 
     // 1. Bridge check
     const stRes = await getEndpoint('/status');
@@ -3304,7 +3304,7 @@ while (!question) {
     const rawVal = line === '/assistant' ? '' : line.slice(10).trim();
     if (rawVal.toLowerCase() === 'off' || rawVal.toLowerCase() === 'none') {
       activeAssistant = null;
-      await fetch(`${BRIDGE}/config`, {
+      await bridgeFetch(`${BRIDGE}/config`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ assistant: '' }),
       }).catch(() => {});
@@ -3314,7 +3314,7 @@ while (!question) {
 
     if (!rawVal) {
       const r = /** @type {{ assistants?: Array<{ id: string, name: string, model?: string }> } | null} */ (
-        await fetch(`${BRIDGE}/assistants`).then((x) => x.json()).catch(() => null)
+        await bridgeFetch(`${BRIDGE}/assistants`).then((x) => x.json()).catch(() => null)
       );
       const all = r?.assistants ?? [];
       /** @type {Array<{ id: string, name?: string, note?: string }>} */
@@ -3347,7 +3347,7 @@ while (!question) {
       if (!chosen) { console.log(dim('  cancelled')); continue; }
       if (chosen.id === 'off') {
         activeAssistant = null;
-        await fetch(`${BRIDGE}/config`, {
+        await bridgeFetch(`${BRIDGE}/config`, {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ assistant: '' }),
         }).catch(() => {});
@@ -3356,7 +3356,7 @@ while (!question) {
       }
 
       /** @type {any} */
-      const bindRes = await fetch(`${BRIDGE}/assistants/${encodeURIComponent(chosen.id)}/chat`, { method: 'POST' })
+      const bindRes = await bridgeFetch(`${BRIDGE}/assistants/${encodeURIComponent(chosen.id)}/chat`, { method: 'POST' })
         .then((x) => x.json()).catch(() => null);
       if (bindRes?.conversation) {
         if (status) status.conversation = bindRes.conversation;
@@ -3365,7 +3365,7 @@ while (!question) {
         console.log(green(`  assistant attached → ${activeAssistant.name}`) + dim(` (${chosen.id})`));
         console.log(dim(`  conversation → ${bindRes.conversation}`));
       } else {
-        await fetch(`${BRIDGE}/config`, {
+        await bridgeFetch(`${BRIDGE}/config`, {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ assistant: chosen.id }),
         }).catch(() => {});
@@ -3376,7 +3376,7 @@ while (!question) {
     }
 
     /** @type {any} */
-    const bindRes = await fetch(`${BRIDGE}/assistants/${encodeURIComponent(rawVal)}/chat`, { method: 'POST' })
+    const bindRes = await bridgeFetch(`${BRIDGE}/assistants/${encodeURIComponent(rawVal)}/chat`, { method: 'POST' })
       .then((x) => x.json()).catch(() => null);
     if (bindRes?.conversation) {
       if (status) status.conversation = bindRes.conversation;
@@ -3384,7 +3384,7 @@ while (!question) {
       activeAssistant = { id: rawVal, name: rawVal };
       console.log(green(`  assistant attached → ${rawVal}`) + dim(` (session: ${bindRes.conversation})`));
     } else {
-      await fetch(`${BRIDGE}/config`, {
+      await bridgeFetch(`${BRIDGE}/config`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ assistant: rawVal }),
       }).catch(() => {});
@@ -3415,12 +3415,16 @@ while (!question) {
     const parts = raw.split(/\s+/).filter(Boolean);
     const hasFlags = parts.some((p) => p.startsWith('--'));
     const taskParts = [];
-    let tAllowRun = false, tAutoApply = /** @type {boolean | null} */ (null), tMaxSteps = 10;
+    let tAllowRun = false, tAutoApply = /** @type {boolean | null} */ (null), tMaxSteps = /** @type {number | null} */ (null);
     for (let pi = 0; pi < parts.length; pi++) {
       if (parts[pi] === '--allow-run') { tAllowRun = true; continue; }
       if (parts[pi] === '--apply') { tAutoApply = true; continue; }
       if (parts[pi] === '--no-apply') { tAutoApply = false; continue; }
-      if (parts[pi] === '--max') { tMaxSteps = Math.max(1, Number(parts[++pi]) || 10); continue; }
+      if (parts[pi] === '--max') {
+        const n = Number(parts[++pi]);
+        tMaxSteps = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;   // 0 = no cap
+        continue;
+      }
       taskParts.push(parts[pi]);
     }
     const taskText = taskParts.join(' ').trim();
@@ -3443,15 +3447,15 @@ while (!question) {
     if (!taskText && hasFlags) {
       if (tAllowRun)           agentModeAllowRun  = !agentModeAllowRun; // toggle
       if (tAutoApply !== null) agentModeAutoApply = tAutoApply;
-      if (tMaxSteps !== 10)    agentModeMaxSteps  = tMaxSteps;
-      out(dim(`  agent mode settings: allow-run=${agentModeAllowRun}  max=${agentModeMaxSteps}  auto-apply=${agentModeAutoApply ?? 'ask'}`));
+      if (tMaxSteps !== null)  agentModeMaxSteps  = tMaxSteps;   // --max 0 = no cap
+      out(dim(`  agent mode settings: allow-run=${agentModeAllowRun}  max=${agentModeMaxSteps || '∞'}  auto-apply=${agentModeAutoApply ?? 'ask'}`));
       continue;
     }
 
     // Has task text → run once (use per-task flags if given, else fall back to mode settings)
     const runAllowRun  = tAllowRun  || agentModeAllowRun;
     const runAutoApply = tAutoApply !== null ? tAutoApply : (taskText ? null : agentModeAutoApply);
-    const runMaxSteps  = tMaxSteps !== 10 ? tMaxSteps : agentModeMaxSteps;
+    const runMaxSteps  = tMaxSteps !== null ? tMaxSteps : agentModeMaxSteps;
     out('');
     out(bold(`  🤖 agent  root: ${agentRoot}`) + (runAllowRun ? red('  --allow-run') : ''));
     const matched = getAttachedImagesForLine(taskText);

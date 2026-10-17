@@ -21,6 +21,28 @@ const BROKEN_MATH = 'export const add = (a, b) => a - b;\n';
 const FIXED_MATH = 'export const add = (a, b) => a + b;\n';
 const CHECK = "import { add } from './math.mjs';\nif (add(2, 3) !== 5) { console.log('FAIL'); process.exit(1); }\nconsole.log('PASS');\n";
 
+test('a staged file shows up in listings (issue #32)', () => {
+  const dir = tempDir({ 'real.txt': 'on disk\n' });
+  const overlay = new Overlay(dir);
+  overlay.set(path.join(dir, 'staged.txt'), 'staged, not yet applied\n');
+  overlay.set(path.join(dir, 'sub', 'nested.txt'), 'nested staged\n');
+  const names = new Set(['real.txt']);
+  overlay.mergeIntoListing(dir, names);
+  assert.ok(names.has('staged.txt'), 'staged top-level file is listed');
+  assert.ok(names.has('sub/'), 'staged nested file surfaces its directory');
+  assert.ok(names.has('real.txt'), 'on-disk files are untouched');
+  // A file outside the listed directory never leaks in.
+  const other = new Set();
+  overlay.mergeIntoListing(path.join(dir, 'sub'), other);
+  assert.ok(!other.has('staged.txt'), 'sibling staged file stays out of a sub-listing');
+  assert.ok(other.has('nested.txt'), 'nested staged file lists under its own dir');
+  // Deleted entries agree with exists(): gone from the listing too.
+  overlay.markDeleted(path.join(dir, 'staged.txt'));
+  const after = new Set(['real.txt']);
+  overlay.mergeIntoListing(dir, after);
+  assert.ok(!after.has('staged.txt'), 'staged delete is hidden from the listing');
+});
+
 test('a staged edit is what a RUN sees, and the disk stays untouched', async () => {
   const dir = tempDir({ 'math.mjs': BROKEN_MATH, 'check.mjs': CHECK });
   const overlay = new Overlay(dir);
@@ -67,7 +89,7 @@ test('deleting the sandbox never follows a junction into the project', () => {
   assert.ok(fs.existsSync(path.join(dir, 'keep.txt')), 'the project survives sandbox cleanup');
 });
 
-test('a heavy directory is linked, not copied, and staged files sit beside it', () => {
+test('a heavy directory is linked, not copied, and staged files sit beside it', async () => {
   const dir = tempDir({ 'src/app.js': 'x\n' });
   fs.mkdirSync(path.join(dir, 'node_modules', 'dep'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'node_modules', 'dep', 'index.js'), 'module.exports = 1;\n');
@@ -75,7 +97,7 @@ test('a heavy directory is linked, not copied, and staged files sit beside it', 
   overlay.set(path.join(dir, 'src', 'app.js'), 'x changed\n');
   const sandbox = createSandbox(dir);
   try {
-    materializeTree(dir, overlay, sandbox);
+    await materializeTree(dir, overlay, sandbox);
 
     assert.ok(fs.lstatSync(path.join(sandbox, 'node_modules')).isSymbolicLink(), 'node_modules is a junction');
     assert.equal(fs.readFileSync(path.join(sandbox, 'src', 'app.js'), 'utf8'), 'x changed\n', 'the staged content is in the projection');

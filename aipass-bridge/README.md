@@ -67,6 +67,11 @@ or the `npm run …` scripts from the repo directory.
 Log in at `https://de.aipass.net/chat` and leave the tab open. The extension
 popup should read **connected**.
 
+If the popup instead says the bridge needs a token, copy the contents of
+`~/.aipass/.token` (the bridge prints the path when it starts) into popup →
+**Advanced** → **Loopback token**, once per browser. The bridge requires it
+for everything except the health probes; `AIPASS_REQUIRE_AUTH=0` disables it.
+
 > **Running on a server?** There's an optional headless Docker deployment in
 > [`deploy/`](deploy/README.md) — the same bridge and extension in a container
 > with a noVNC desktop, so it stays up 24/7 without your laptop. The core here
@@ -294,7 +299,7 @@ and pastes the result back. This is the whole tool set:
 
 | Action | What it does |
 |---|---|
-| `NEED dir <path>` | list a directory (`.` for the project root) |
+| `NEED dir <path>` (also `NEED list` / `NEED ls`) | list a directory (`.` for the project root) |
 | `NEED file <path>` | read a file, with line numbers; add a range like `NEED file src/app.ts 200-320` for a slice of a long one |
 | `SEARCH <text>` | grep the whole project, returning `file:line: excerpt` matches — find a symbol without reading every file |
 | `EDIT <path>` → `FIND` … `NEW` … `END` | replace an exact snippet; the `FIND` text must match **one** place or the edit is refused |
@@ -362,7 +367,9 @@ This works within the constraints above rather than against them:
   and `.env` / `process.env` (the classic secrets-probe pattern). They go out as `LCLHST`, `CMT-OPEN`, `DOT-ENV` and so
   on, and are restored before anything is written — the bytes on disk are exactly
   what the file had. A file whose *name* is encoded (a real `.env` shown as
-  `DOT-ENV`) still opens, because the decode runs on the model's actions too.
+  `DOT-ENV`) is decoded before the permission check, so the rules always see the
+  real path — and the secret floor (`SECRET_RULES`, `harness/settings.mjs`)
+  denies `.env*` reads and writes in every mode, obfuscated spelling included.
 
 - **Lines that cannot be sent at all are dropped.** Real source contains
   code-execution shapes — `node -e`, `curl`, `rm -rf`, `/bin/sh`, `../../` —
@@ -484,6 +491,9 @@ most recent.
 | env | default | |
 |---|---|---|
 | `AIPASS_PORT` | `8787` | |
+| `AIPASS_HOST` | `127.0.0.1` | any other bind exits unless `AIPASS_ALLOW_REMOTE=1` |
+| `AIPASS_TOKEN` | `~/.aipass/.token` | loopback bearer; `AIPASS_REQUIRE_AUTH=0` disables |
+| `AIPASS_CORS_ORIGIN` | *(unset)* | allow one browser origin; off by default |
 | `AIPASS_MODEL` | `gemini-3.1-flash-lite` | used when no model is given |
 | `AIPASS_MODELS` | two known ids | fallback list when no extension is attached |
 | `AIPASS_MODEL_FILTER` | `chat` | `all` keeps image/video/audio models |

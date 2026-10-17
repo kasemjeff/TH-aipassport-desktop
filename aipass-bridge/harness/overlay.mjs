@@ -90,6 +90,13 @@ export class Overlay {
     this.root = path.resolve(root);
     this.map = new Map();
     this.clip = clip;
+    // The window polls pending diffs after every step and on a timer, and each
+    // poll used to re-read every staged file's disk copy and re-run the diff.
+    // Two memos fix that: diskText keyed by the file's mtime+size, and the
+    // change record keyed by (staged value, disk stamp). Staged strings are
+    // immutable, so reference identity is a sound cache key for them.
+    this.diskMemo = new Map();    // abs → { stamp, text }
+    this.changeMemo = new Map();  // abs → { next, stamp, record }
   }
 
   get size() { return this.map.size; }
@@ -115,7 +122,13 @@ export class Overlay {
   set(abs, content) { this.map.set(abs, content); }
   markDeleted(abs) { this.map.set(abs, DELETED); }
   discard(abs) { this.map.delete(abs); }
-  clear() { this.map.clear(); }
+  clear() {
+    this.map.clear();
+    // The memos describe the map/disk as they were; a clear is the one moment
+    // both definitely change together.
+    this.changeMemo.clear();
+    this.diskMemo.clear();
+  }
 
   readAt(abs) {
     if (this.map.has(abs)) {
@@ -132,17 +145,31 @@ export class Overlay {
   }
 
   /** Bytes currently on disk, ignoring the overlay. */
-  diskText(abs) { return fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : ''; }
+  diskText(abs) {
+    let stamp = 'gone';
+    try { const st = fs.statSync(abs); stamp = `${st.mtimeMs}:${st.size}`; } catch { /* missing */ }
+    const hit = this.diskMemo.get(abs);
+    if (hit && hit.stamp === stamp) return hit.text;
+    const text = stamp === 'gone' ? '' : fs.readFileSync(abs, 'utf8');
+    this.diskMemo.set(abs, { stamp, text });
+    return text;
+  }
 
   // A file the agent has written this run is readable by `read` and reported by
   // `exists`, so a listing that omits it tells the model its own write failed.
   // It then re-creates the file, doubts the tools, and eventually concludes it
   // cannot reach the filesystem at all — issue #32.
+  //
+  // Merges every pending path under the listed directory: deleted entries are
+  // skipped (exists() reports them gone, so the listing must agree).
   mergeIntoListing(abs, names) {
-    const rel = path.relative(abs, this.root);
-    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return;
-    const [first, ...rest] = rel.split(path.sep);
-    names.add(rest.length ? `${first}/` : first);
+    for (const [key, value] of this.map) {
+      if (value === DELETED) continue;
+      const rel = path.relative(abs, key);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue;
+      const [first, ...rest] = rel.split(path.sep);
+      names.add(rest.length ? `${first}/` : first);
+    }
   }
 
   /**
@@ -152,30 +179,44 @@ export class Overlay {
    */
   changes() {
     const out = [];
-    for (const [abs, next] of this.map) {
-      const before = this.diskText(abs);
-      const deleted = next === DELETED;
-      const after = deleted ? '' : next;
-      const diff = unifiedDiff(before, after) + (deleted && !before ? '' : '');
-      let added = 0;
-      let removed = 0;
-      for (const line of diff.split('\n')) {
-        if (line.startsWith('+') && !line.startsWith('+++')) added++;
-        else if (line.startsWith('-') && !line.startsWith('---')) removed++;
-      }
-      out.push({
-        file: posix(path.relative(this.root, abs)),
-        abs,
-        before,
-        after,
-        deleted,
-        isNew: !before,
-        added,
-        removed,
-        diff,
-      });
-    }
+    for (const abs of this.map.keys()) out.push(this.changeFor(abs));
     return out;
+  }
+
+  /**
+   * One pending path's record, the shape changes() lists — so asking for a
+   * single file's diff does not diff every other staged file on the way.
+   */
+  changeFor(abs) {
+    const next = this.map.get(abs);
+    if (next === undefined) return null;
+    let stamp = 'gone';
+    try { const st = fs.statSync(abs); stamp = `${st.mtimeMs}:${st.size}`; } catch { /* missing */ }
+    const hit = this.changeMemo.get(abs);
+    if (hit && hit.next === next && hit.stamp === stamp) return hit.record;
+    const before = this.diskText(abs);
+    const deleted = next === DELETED;
+    const after = deleted ? '' : next;
+    const diff = unifiedDiff(before, after) + (deleted && !before ? '' : '');
+    let added = 0;
+    let removed = 0;
+    for (const line of diff.split('\n')) {
+      if (line.startsWith('+') && !line.startsWith('+++')) added++;
+      else if (line.startsWith('-') && !line.startsWith('---')) removed++;
+    }
+    const record = {
+      file: posix(path.relative(this.root, abs)),
+      abs,
+      before,
+      after,
+      deleted,
+      isNew: !before,
+      added,
+      removed,
+      diff,
+    };
+    this.changeMemo.set(abs, { next, stamp, record });
+    return record;
   }
 
   /** Write the accepted subset to disk. Returns what was written. */

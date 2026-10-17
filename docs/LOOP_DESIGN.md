@@ -35,7 +35,7 @@ runTask(task):
   overlay.clear()                    ← writes land here, never on disk
   say(preamble + task)               ← turn 1 only
   │
-  ▼  repeat, at most maxSteps (default 10)
+  ▼  repeat, at most maxSteps (default: no cap — until DONE, a guard, a budget)
   ┌──────────────────────────────────────────────────────────────┐
   │ say(results of the last reply)   ← ONE message, whatever the  │
   │                                    reply carried              │
@@ -71,7 +71,8 @@ factories live. The context that matters:
 | `compactor` / `rotate` | always | checked against the message about to go out |
 | `permissions` | always | `ask` / `auto` / `yolo`, persisted rules and "always" grants; nobody listening means deny |
 
-Defaults come from `settings.mjs`: `maxSteps: 10` (clamped 1–200),
+Defaults come from `settings.mjs`: `maxSteps: 0` (no cap — a cap is 1–200 and
+the last step says so),
 `maxToolCalls: 300`, `maxWallClockMs: 30 min`, `repeatGuardMax: 4`,
 `minThaiRatio: 0.4` (the recorded closings split at a wide gap: English at 0,
 Thai at 0.57+). `requirePlanApproval` is a saved setting — a run call
@@ -88,9 +89,11 @@ waiting on a slow model is as real a spend as running a command. Stops:
 
 **2. The send.** `saySafe` → `resilientSay`: a message the edge rejects is
 retried once in a halved/rewritten form (`firewall_note` goes out). A 429 is
-not rewritten — it is waited out, first in the page (5s/15s/45s) and then by
-the client (20s/60s, `RATE_WAITS_MS`), so a busy edge pauses a run instead of
-ending it. The user
+not rewritten — it is waited out, first in the page (10s/45s/120s, on a clock
+the whole tab shares) and then by the client and the message layer
+(`RATE_WAITS_MS` — 60s/180s — twice over), so a busy edge pauses a run
+instead of ending it; the rewrite chain never sees a rate refusal, and a
+refusal that arrives after deltas streamed is never resent at all. The user
 pressing stop surfaces as `AbortError` — an ending, not a failure — and the
 transcript must not read "error" for it: `cancelled`. An error naming a missing
 chat tab emits `needs_tab` so the window can offer the fix in one click.
@@ -179,7 +182,7 @@ conversation that still holds the history → rotate → `compacted`. If the
 compaction itself fails, the results still go out (`error` emitted) — losing a
 step to a summariser fault would be worse.
 
-**12. Loop end.** `step_limit` when the last step runs; a spent budget becomes
+**12. Loop end.** `step_limit` when a set cap's last step runs; a spent budget becomes
 the stop reason; credits are diffed (`quota(true)`); `run_stats` and
 `finished` go out; the loop returns.
 
@@ -192,7 +195,7 @@ the stop reason; credits are diffed (`quota(true)`); `run_stats` and
 | err loop | the same failure (kind + masked error line) on calls in a row | correction on the third result, `errLoops` | streak > `repeatGuardMax` → `stalled` |
 | chain guard | a failed change, mid-reply | the reply's later changes/RUNs skipped and stated, `chainSkips`; reads still run | — |
 | stagnation | same step ×3, or two trading places ×2 | `stagnation` warn + "do something different" | `stagnation` |
-| budgets | tool count (300) and wall clock (30 min) | `budget` event | `tools-limited` / `time-limited` |
+| budgets | tool count (300) and wall clock (30 min) — the only bound when no step cap is set; plus credits, only when set (`maxCredits`, 0 = off, checked against the cached quota) | `budget` event | `tools-limited` / `time-limited` / `credit-limited` |
 | plan gate | `PLAN` and no approval yet | `plan_request`, wait however long | decline → `plan-rejected` |
 | checker | DONE (or a stalled step) with staged code | read-only verifier runs it; a self-run does not stand it down; a re-check only when the tree moved | fail → a correcting step; pass → `done`; two verdicts a run, the last recorded |
 | verify nudge | staged code, nothing verified since the change | `verify_prompt` (once per run) | — |
@@ -210,7 +213,7 @@ them correct *evidence*, never intent: a call runs as written first.
 |---|---|
 | `done` | DONE accepted (possibly after the checker or a language rewrite) |
 | `ask` | the model paused on a question (ASK) — the next message answers it |
-| `steps` | the step limit ran out — the default |
+| `steps` | a set step cap ran out (no cap is the default) |
 | `stalled` | hollow replies ×3, repeat refusals past the cap, or a same-failure streak past it |
 | `stagnation` | the same step, or two trading places, with identical results |
 | `cancelled` | the user pressed stop |
@@ -218,6 +221,7 @@ them correct *evidence*, never intent: a call runs as written first.
 | `plan-rejected` | the human declined the plan |
 | `tools-limited` | the tool-call budget was spent |
 | `time-limited` | the wall-clock budget was spent |
+| `credit-limited` | the optional credit cap (`maxCredits`) was reached — observed spend against the cached quota |
 
 ## The contracts the loop holds
 
@@ -242,6 +246,23 @@ them correct *evidence*, never intent: a call runs as written first.
    proposals that wait for the parent's approval; a named role
    (`SUBAGENT_ROLES`: `verifier`, `reviewer`, `summariser`) is read-only, and
    only the verifier may RUN — its report is the deliverable.
+8. **Helpers report; the parent decides.** Results come back in the order
+   their markers ran, as ordinary tool results — no vote, no merge, no
+   last-writer-wins. A role's verdict (`pass` / `fail` / `not-checkable`) is
+   evidence the parent must read like any other result. When the run declares
+   a check, that check's verdict is the one automatic verdict in play — and
+   even it only reports; nothing is applied without the same human approval
+   as any other edit. Two helpers that disagree leave both claims on the
+   table, and the disagreement surfaces as prose to the model and as the
+   diff list to the person — never as a tie broken by arrival order or size.
+9. **Uncertainty escalates to a person, never sideways.** A model that is
+   unsure asks (`ASK`) or says so in prose — the loop surfaces it and waits.
+   Conflicting evidence (two helpers, a failed check, a staged change nobody
+   approved) is *presented*, never resolved by the loop: the diff list, the
+   check verdict and the notes are the escalation, and the only paths to a
+   real write are human (Apply, `--apply`, a granted rule). A run that
+   cannot say what it is unsure about stops through a guard (`stalled` /
+   `stagnation` / `steps`) with the reason recorded.
 
 ## The event stream
 
@@ -274,4 +295,5 @@ the helper keeps its original behaviour.
 | `test/compact.test.mjs` | rotation mid-run; the estimate's script-aware divisor |
 | `test/protocol.test.mjs` | markers, fences, the preamble |
 | `test/stats.test.mjs` | `run_stats` and its aggregation |
+| `test/secret-screen.test.mjs` | the secret screen past the file tools — RUN bodies, GIT args, SEARCH walks |
 | `test/desktop-window.test.mjs` · `test/ui.test.mjs` | the whole run through the backend — plan gate, permissions, todos — and the window's handlers |

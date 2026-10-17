@@ -14,6 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PermissionEngine, globMatch } from '../harness/permissions.mjs';
 import { Settings } from '../harness/settings.mjs';
+import { RulesStore } from '../harness/rules.mjs';
 import { createRpc } from '../harness/rpc.mjs';
 import { freePort, tempDir } from './harness.mjs';
 
@@ -167,4 +168,28 @@ test('a harness built later inherits the rules from settings', async (t) => {
   assert.ok(other.id);
   const fresh = env.rpc.current;
   assert.equal(fresh.permissions.evaluate({ kind: 'write', arg: 'tmp/x' }).decision, 'allow');
+});
+
+/* 4 — the file on disk ------------------------------------------------------ */
+
+test('a corrupt project record is repaired on the next write, not thrown at', () => {
+  // The reader skips a record that is not an object; the writer must hold the
+  // same line, or the "always" button crashes on the very file the reader
+  // just declared unreadable.
+  const file = path.join(tempDir(), 'rules.json');
+  const root = tempDir();
+  fs.writeFileSync(file, JSON.stringify({ projects: { [path.resolve(root)]: 'oops' } }));
+  const store = new RulesStore(file);
+
+  assert.deepEqual(store.forRoot(root), { rules: [], grants: [] });
+  store.addGrant(root, 'write', 'x.txt');
+  assert.deepEqual(store.forRoot(root), { rules: [], grants: [{ kind: 'write', arg: 'x.txt' }] });
+  store.setRules(root, [{ pattern: 'docs/**', decision: 'allow' }]);
+  assert.deepEqual(store.forRoot(root).rules, [{ pattern: 'docs/**', decision: 'allow' }]);
+
+  // The file-level shape too: `projects` itself, not just the record.
+  fs.writeFileSync(file, JSON.stringify({ projects: 'oops' }));
+  assert.deepEqual(store.forRoot(root), { rules: [], grants: [] });
+  store.addGrant(root, 'write', 'y.txt');
+  assert.deepEqual(store.forRoot(root).grants, [{ kind: 'write', arg: 'y.txt' }]);
 });

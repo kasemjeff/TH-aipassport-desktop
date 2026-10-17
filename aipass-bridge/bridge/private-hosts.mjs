@@ -8,6 +8,7 @@
 // their own. A bare domain name is not classified here — that would need DNS
 // resolution — so this blocks the literal-IP SSRF attempts, which is what a
 // URL in a chat message looks like.
+import { lookup as dnsLookup } from 'node:dns/promises';
 const privateV4 = (a, b) =>
   a === 0 || a === 127 || a === 10                     // this-host, loopback, private
   || (a === 169 && b === 254)                          // link-local incl. cloud metadata
@@ -34,4 +35,28 @@ export function isPrivateHost(host) {
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
   if (!m) return false;
   return privateV4(Number(m[1]), Number(m[2]));
+}
+
+// A bare domain can resolve to a private address (DNS rebinding / split-horizon
+// DNS) — the literal-IP check above cannot see it. Resolve and refuse when ANY
+// answer is loopback / RFC1918 / link-local. DNS failure fails open (the
+// literal check already ran); a private answer fails closed. Shared by the
+// bridge attachment path and the harness FETCH tool so neither drifts.
+// Answers are cached briefly per process: one run can fetch the same host on
+// every hop of a redirect chain, and a resolver round trip per hop is pure
+// latency. The TTL is short on purpose — a long-lived backend must eventually
+// see a rebinding flip — and failures are never cached (they fail open).
+const DNS_TTL_MS = 60_000;
+const dnsCache = new Map(); // host → { at, value }
+
+export async function hostResolvesPrivate(host) {
+  const key = String(host).toLowerCase();
+  const hit = dnsCache.get(key);
+  if (hit && Date.now() - hit.at < DNS_TTL_MS) return hit.value;
+  try {
+    const answers = await dnsLookup(key, { all: true });
+    const value = (answers ?? []).some((a) => isPrivateHost(a.address));
+    dnsCache.set(key, { at: Date.now(), value });
+    return value;
+  } catch { return false; }
 }

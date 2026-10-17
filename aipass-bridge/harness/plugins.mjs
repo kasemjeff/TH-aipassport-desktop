@@ -13,12 +13,21 @@
 // Everything runs in this process, with the same access the harness has —
 // including the filesystem. That is the deal: plugins are code you chose to
 // install, not sandboxed. Load only what you have read.
+//
+// Compatibility: the ctx surface above is `PLUGIN_API` 1. Within one major
+// the harness only ever grows ctx — new helpers, never new required fields —
+// and a plugin marker can never shadow a built-in one. A plugin may declare
+// `apiVersion`; one that needs a newer harness than this build is refused at
+// load before setup() runs, and one that declares nothing loads as
+// `apiVersion: null` (read: 1). `details()` carries whichever it was.
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { aipassHome } from './settings.mjs';
 import { pathToFileURL } from 'node:url';
+
+export const PLUGIN_API = 1;
 
 export class PluginManager {
   constructor({ dir = path.join(aipassHome(), 'plugins'), settings = null, events = null, log = () => {} } = {}) {
@@ -58,6 +67,24 @@ export class PluginManager {
     return !Array.isArray(list) || list.length === 0 || list.includes(name);
   }
 
+  /** The four registration tables, copied for a rollback. */
+  #snapshot() {
+    return {
+      methods: new Map(this._methods),
+      tools: new Map(this._tools),
+      panels: [...this._panels],
+      settingDefs: [...this._settingDefs],
+    };
+  }
+
+  /** Put the tables back exactly as the snapshot found them. */
+  #rollback(tables) {
+    this._methods = tables.methods;
+    this._tools = tables.tools;
+    this._panels = tables.panels;
+    this._settingDefs = tables.settingDefs;
+  }
+
   async load() {
     this.loaded = [];
     this.failed = [];
@@ -67,6 +94,12 @@ export class PluginManager {
     this._settingDefs = [];
 
     for (const file of this.discover()) {
+      // Registrations are live the moment setup() makes them, so a failure
+      // anywhere in this iteration must put the four tables back: the window
+      // lists the plugin as failed, and "failed" may not leave half a plugin
+      // answering the next run. Rollback also restores a marker an earlier
+      // plugin owned and this one overwrote before it died.
+      const tables = this.#snapshot();
       try {
         // Provenance, not security: a plugin is code the user installed, and
         // the record of what was actually loaded — content hash, size, mtime —
@@ -87,18 +120,27 @@ export class PluginManager {
           this.log(`plugin ${name} is disabled in settings — not registering it`);
           continue;
         }
+        // A plugin that needs a newer API must not run setup at all: half a
+        // plugin registered against a harness it does not understand is
+        // worse than a named refusal. Silence means API 1 (the only one).
+        const api = plugin.apiVersion ?? null;
+        if (api !== null && (!Number.isInteger(api) || api < 1 || api > PLUGIN_API)) {
+          throw new Error(`plugin apiVersion ${api} needs a newer harness (this build speaks ${PLUGIN_API})`);
+        }
         const ctx = this.#context(plugin);
         await plugin.setup(ctx);
         this.loaded.push({
           name,
           version: plugin.version ?? '0.0.0',
           description: plugin.description ?? '',
+          apiVersion: api,
           file,
           sha256: crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16),
           bytes: stat.size,
           modified: Math.round(stat.mtimeMs),
         });
       } catch (err) {
+        this.#rollback(tables);
         this.failed.push({ file, error: String(err.message ?? err) });
         this.log(`plugin ${path.basename(file)} failed to load: ${err.message}`);
       }

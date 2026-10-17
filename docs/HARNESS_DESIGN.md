@@ -16,7 +16,7 @@ run(task)
   │                        conversation, seed it with the summary
   ├─ ensure conversation  (create a temporary one unless told otherwise)
   │
-  ▼  repeat, at most maxSteps times
+  ▼  repeat, at most maxSteps (no cap by default)
   ┌──────────────────────────────────────────────────────────────────┐
   │ send ONE user message                                            │
   │   turn 1: preamble + listing + task                              │
@@ -60,7 +60,7 @@ event — is in [`LOOP_DESIGN.md`](LOOP_DESIGN.md).
 | `harness.mjs` | the facade a CLI, the window and tests all drive | the one-conversation resource is managed nowhere else; helpers propose into the parent overlay |
 | `session.mjs` | JSONL append with a forkable tree | a session opened next week reads as one continuous piece of work |
 | `skills.mjs` | plain markdown, project → user → repo | the library grows without code changes |
-| `plugins.mjs` | `setup(ctx)` in-process: markers, rpc, panels, settings | plugins are code you chose to install — not sandboxed, and it says so |
+| `plugins.mjs` | `setup(ctx)` in-process: markers, rpc, panels, settings; `apiVersion` checked against `PLUGIN_API` (1) | plugins are code you chose to install — not sandboxed, and it says so |
 
 What is already right and should not be "improved" away: unique-match REPLACE
 (refuses when FIND matches twice), binary detection by magic signature before
@@ -298,13 +298,19 @@ its first live firing was the smoke re-run below.
 
 **Shipped since (Oct 2026):** per-run tool-call and wall-clock budgets
 (`maxToolCalls` / `maxWallClockMs` — checked between tools, at every step and
-before a helper fan-out; a spent budget stops the run like the step limit and
-records `tools-limited` / `time-limited` in `run_stats`); task-specific helper
+before a helper fan-out; a spent budget stops the run and
+records `tools-limited` / `time-limited` in `run_stats`); the optional credit
+cap (`maxCredits`, 0 = off — observed spend against the cached quota, records
+`credit-limited`); task-specific helper
 instructions (a `role:` line on SUBAGENT — `verifier` may RUN checks, `reviewer`
 and `summariser` only read; all three are read-only by construction, their
 write markers answer `err:` before anything is staged); spill reads return the
 asked-for range verbatim (no second gutter over the numbered copy, no spill of
-a spill); every write answers with a first/last line read-back.
+a spill); every write answers with a first/last line read-back. Later the same
+month, the step cap turned opt-in: `maxSteps: 0` (now the shipped default) means
+no cap — a run goes until DONE, a guard stops it, or a budget is spent — while
+`1..200` still caps and announces it on the last step; helpers stay bounded at 8
+and the checker at 6, so an uncapped parent never uncaps a child.
 
 **Still noted, not shipped:** the elision tier that replaces stale, bulky tool
 results with stubs before paying for summarisation — the summary transcript
@@ -350,15 +356,83 @@ greeting is refused. The block is time-boxed rather than sticky: the last
 blocked probe drew a 403 at 20:26, and the same probe passed in full about
 twenty minutes later. Its smaller sibling is quicker to draw: a three-probe
 check followed immediately by one live run — ten messages in four minutes —
-collected a **429 Too Many Requests** mid-run — and the cure is layered now:
-the page waits the request out in place (5s/15s/45s, retry-after honoured —
-`extension/page.js`), and `BridgeClient` retries the message itself at
-20s/60s (`RATE_WAITS_MS`, `harness/bridge.mjs`), each only before any delta
-streamed, so a busy edge pauses a run instead of ending it. The suspected third rule is
+collected a **429 Too Many Requests** mid-run — and the cure is layered (its
+waits were lengthened in the second follow-up below): the page waits the
+request out in place (`extension/page.js`), and `BridgeClient` retries the
+message itself (`RATE_WAITS_MS`, `harness/bridge.mjs`), each only before any
+delta streamed, so a busy edge pauses a run instead of ending it. The suspected third rule is
 closed too: a bare relative path (`./math.mjs`) was never a rule, it only
 403'd while the block was up. With the edge quiet, `h1` carrying
 `import … from './math.mjs';` was accepted, and every read result in the
 re-run below carried `./` unencoded with zero rejects, so it stays as it is.
+
+**Follow-up, Oct 17 — the cure had a gate of its own.** A live run died of a
+429 exactly like the one above, during a firewall rejection's recovery: the
+page's waiting line (`[429] rate limited by the edge — waiting 5s…`) rode tool
+status — a `reasoning_content` delta — and `BridgeClient` counts any reasoning
+delta as "the answer started": the one condition its resend gate refuses to
+cross. The note arrived first, the gate closed before the refusal did, and
+neither wait above ever engaged. The waiting line now rides the `note` kind
+(`extension/page.js`); the note field is the client's signal that a delta is
+not the answer — its reasoning echo still shows in consoles that never learned
+the field — so the refusal behind it is waited out, not fatal.
+`run-resilience.test.mjs` plays the sequence — note, then 429 — and pins the
+retry.
+
+**Follow-up, Oct 17 — the 403 was not always about the content.** A live
+desktop run kept printing `rejected — splitting into 2 parts and resending`:
+the day's sessions hold 33 split entries, 13 of them with a second "Part 1,
+more follows" stacked on the first, and 18 fragments dropped outright after
+splitting — 137 bytes at the smallest. Under a pace refusal that is all cost
+and no cure, and the drops cost content: a 137-byte fragment has no split
+left, so the model never saw it. The edge refuses by pace score as well as by
+content, and those bytes pass a moment later: a 214-byte `Result of skill
+list` was refused whole and then accepted with no rewrite; a read was refused
+whole while both of its halves passed on their own. So the chain now
+distinguishes before it acts. Known offenders are still dropped at once (the
+deterministic families above), then the identical message is sent again after
+a short wait — 5s/15s in the page (`EDGE_WAITS_403_MS`), 10s/30s above it
+(`EDGE_WAITS_MS`, `AIPASS_EDGE_WAITS_MS` overrides) — and only a refusal that
+survives every wait is treated as content and split, with the part protocol
+announced by the outermost split alone (a chunk split again used to carry its
+prefix stacked on the outer one). The wait is the right medicine for pace and
+the wrong one for content, and the reverse holds for the split: splitting a
+pace refusal doubles the messages the edge is refusing, which is exactly what
+the day's cascades were made of.
+
+**Follow-up, Oct 17 — the split ran while the edge was still pacing.** The
+report that opened this round: `rejected — splitting into 2 parts and
+resending` immediately followed by a fatal
+`aipass returned 429 … {server=cloudflare …}`. The chain's own reading of the
+sequence: a pace-shaped 403 outlived the waits above (page 5s/15s + client
+10s/30s), the split the 403 contract allows then doubled the messages at the
+worst moment, the part sends drew 429s, and the top of the chain had no rate
+branch at all — the raw 429 ended the run. Three changes close it, each aimed
+at the same physics: every probe is itself a request and counts against the
+window it is waiting for, so a retry storm keeps its own limiter hot.
+
+1. The waits grow instead of tightening — 10s/45s/120s in the page
+   (`RETRY_WAITS_MS`, retry-after capped at 120s) and 60s/180s above it
+   (`RATE_WAITS_MS`, `AIPASS_RATE_WAITS_MS` overrides), and `EDGE_WAITS_MS`
+   gained a third rung (10s/30s/60s) so the split is only reached after two
+   minutes of identical resends were all refused.
+2. The page's rate clock is tab-wide and outlives the request: a 429 sets
+   `rateQuietUntil` and every later send in any job waits on it, so parallel
+   senders stack behind one pause instead of storming; for five minutes after
+   any refusal (`RATE_MEMORY_MS`) sends are also paced 3s apart
+   (`RATE_PACE_GAP_MS`), so the burst that drew the 429 cannot immediately
+   draw another.
+3. `resilientSay` (and the styled console's `sayResilient`) grew the branch it
+   was missing: a 429/503 is waited again at the message layer — the same
+   message, never a rewrite or a split — and only then surfaces, with its
+   forensics plus the advice ("the account is moving too fast. Pause a moment,
+   then continue"). And the rewrite chain now honours `err.streamed`
+   (retrySend marks a refusal that arrives after deltas reached the client):
+   no redact, no split, no resend over a delivered answer.
+
+`run-resilience.test.mjs` pins the layer (a 429 waited again, never split; the
+advice on the final surface; the `streamed` mark) and `page.test.mjs` pins the
+tab-wide clock and the post-incident pacing.
 
 ## The re-run that passed, and the gap it stepped on (Oct 2026)
 
@@ -739,3 +813,25 @@ are pinned by `test/lang.test.mjs`; the loop wiring is pinned by
    rolls them up, and the compaction prompt now demands that proper nouns,
    names, numbers, dates, filenames and quoted strings stay byte-identical —
    Thai stays Thai.
+8. **The marker-attempt guard (H10), and `NEED list`.** A recorded desktop
+   run (session `f5acb222`) carried both halves of one failure. First the
+   model asked for a folder with `NEED list desktop` — a shape `parse()` did
+   not know, so the request vanished. Then, because a reply that parses to
+   nothing after real work had happened was read as "the model answered",
+   the implicit-done path ended the run 633ms later with `nudges: 0` — the
+   nudge that teaches the shapes never got its turn. Two fixes: `NEED list
+   <path>` (also `NEED ls`, and bare `NEED list` for the project root) is now
+   the dir call everywhere `NEED dir` is; and a reply whose line starts with
+   an uppercase marker keyword (`attemptedMarker()` in `protocol.mjs`) no
+   longer counts as prose-after-work — the nudge fires and the run gets its
+   chance to ask properly. Case matters: "Need to check the logs" is prose,
+   and a fenced example is a quotation, as everywhere else in the wire.
+
+   The window grew the same split for the reader: when a run ends with an
+   answer (done, or a question), its working trail — tool rows, step notes,
+   folded reasoning, interim prose — collapses into one `✻ ระหว่างทำงาน`
+   line and the closing bubble is labelled **ผลลัพธ์**, so the answer is
+   what stands out. A run that stopped short (steps, error, stall) keeps
+   the whole trail open, and rows with live buttons (the step-limit
+   "carry on", the no-chat-tab banner) are never folded in — hiding the
+   only click that unblocks the run would be its own failure.

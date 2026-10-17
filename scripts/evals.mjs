@@ -257,8 +257,14 @@ export function parseBudget(text) {
         throw new EvalError(`--budget thinking must be one of ${THINKING_LEVELS.join(', ')}`);
       }
       out.thinking = level;
+    } else if (key === 'maxCredits') {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 0) {
+        throw new EvalError(`--budget maxCredits must be a number >= 0 (0 = no cap), got ${JSON.stringify(value)}`);
+      }
+      out.maxCredits = n;
     } else {
-      throw new EvalError(`--budget knows maxSteps, model, thinking — not ${JSON.stringify(key)}`);
+      throw new EvalError(`--budget knows maxSteps, model, thinking, maxCredits — not ${JSON.stringify(key)}`);
     }
   }
   return out;
@@ -385,6 +391,7 @@ export async function runAttempt(task, {
     maxSteps: budget?.maxSteps ?? task.budget.maxSteps,
     wallMs: budget?.wallMs ?? task.budget.wallMs ?? DEFAULT_WALL_MS,
     allowRun: Boolean(task.allowRun),
+    maxCredits: budget?.maxCredits ?? task.budget.maxCredits ?? 0,
   };
   if (mode === 'replay' && !bridge) bridge = replayBridge(transcript?.replies ?? [], { model: used.model });
 
@@ -420,7 +427,7 @@ export async function runAttempt(task, {
       model: used.model,
       store: new SessionStore(path.join(homeDir, 'sessions')),
       events,
-      options: { maxSteps: used.maxSteps, thinking: used.thinking, mode: 'auto', allowRun: used.allowRun },
+      options: { maxSteps: used.maxSteps, thinking: used.thinking, mode: 'auto', allowRun: used.allowRun, maxCredits: used.maxCredits },
     });
     wallTimer = setTimeout(() => {
       wallKilled = true;
@@ -607,10 +614,14 @@ export async function runEval({
   resultsDir = null,
   checkTimeoutMs = DEFAULT_CHECK_TIMEOUT_MS,
   pauseMs = 0,
+  attempts = 1,
   log = null,
 } = {}) {
   const list = tasks.map((t) => (typeof t === 'string' ? resolveTask(t) : t));
   if (!list.length) throw new EvalError('no tasks to run');
+  if (!Number.isInteger(attempts) || attempts < 1 || attempts > 5) {
+    throw new EvalError('attempts must be an integer 1..5 — report all of them, never keep the best');
+  }
   const dir = resultsDir ? path.resolve(resultsDir) : path.join(EVALS_DIR, 'results');
   fs.mkdirSync(dir, { recursive: true });
   const runId = `${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 23)}-${mode}`;
@@ -619,29 +630,30 @@ export async function runEval({
   const rows = [];
   for (let i = 0; i < list.length; i++) {
     const task = list[i];
-    const attempt = i + 1;
-    const bridge = bridgeFor
-      ? bridgeFor(task, attempt)
-      : (mode === 'replay' && transcript
-        ? replayBridge(transcript.replies, { model: budget?.model ?? task.budget.model ?? null })
-        : null);
-    const row = await runAttempt(task, {
-      mode,
-      attempt,
-      runId,
-      transcript: mode === 'replay' ? transcript : null,
-      bridge,
-      budget,
-      checkTimeoutMs,
-    });
-    rows.push(row);
-    fs.appendFileSync(resultsFile, JSON.stringify(row) + '\n');
-    const checkText = row.check.exit == null ? '×' : row.check.exit;
-    log?.(`  ${task.kind}/${task.id}: ${row.outcome} (stop ${row.stopReason ?? '-'}, check ${checkText})`);
-    // The account's edge rate-limits bursts (Cloudflare 429): attempts fired
-    // back to back can outrun it and a live set dies mid-run. The extension
-    // retries an in-flight 429; the pause keeps the burst from starting.
-    if (pauseMs && i < list.length - 1) await new Promise((resolve) => setTimeout(resolve, pauseMs));
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      const bridge = bridgeFor
+        ? bridgeFor(task, attempt)
+        : (mode === 'replay' && transcript
+          ? replayBridge(transcript.replies, { model: budget?.model ?? task.budget.model ?? null })
+          : null);
+      const row = await runAttempt(task, {
+        mode,
+        attempt,
+        runId,
+        transcript: mode === 'replay' ? transcript : null,
+        bridge,
+        budget,
+        checkTimeoutMs,
+      });
+      rows.push(row);
+      fs.appendFileSync(resultsFile, JSON.stringify(row) + '\n');
+      const checkText = row.check.exit == null ? '×' : row.check.exit;
+      log?.(`  ${task.kind}/${task.id}${attempts > 1 ? ` #${attempt}` : ''}: ${row.outcome} (stop ${row.stopReason ?? '-'}, check ${checkText})`);
+      // The account's edge rate-limits bursts (Cloudflare 429): attempts fired
+      // back to back can outrun it and a live set dies mid-run. The extension
+      // retries an in-flight 429; the pause keeps the burst from starting.
+      if (pauseMs && (i < list.length - 1 || attempt < attempts)) await new Promise((resolve) => setTimeout(resolve, pauseMs));
+    }
   }
   return { runId, resultsFile, rows };
 }
@@ -688,6 +700,11 @@ export function formatSummary(rows = []) {
   // network's fault, not the model's.
   const scoredRows = rows.filter((r) => r.scored);
   const solvedRows = scoredRows.filter((r) => r.outcome === 'solved');
+  // The closest thing to a hallucination proxy the suite can compute without a
+  // labeled claim set: of the runs that claimed DONE, how many did a declared
+  // check actually confirm? A run with no check is unverified, never grounded.
+  const doneRows = scoredRows.filter((r) => r.stopReason === 'done');
+  const groundedRows = doneRows.filter((r) => r.check?.exit === 0).length;
   const rate = (n, d) => (d ? `${Math.round((n / d) * 100)}%` : '—');
   const repeatBlocks = rows.reduce((a, r) => a + (r.repeatBlocks ?? 0), 0);
   const turns = rows.reduce((a, r) => a + (r.turns ?? 0), 0);
@@ -696,13 +713,20 @@ export function formatSummary(rows = []) {
   const thaiShare = withThai.length
     ? withThai.reduce((a, r) => a + r.replyThai, 0) / withThai.length : null;
   const solvedTokens = solvedRows.filter((r) => r.tokensEst != null);
+  // Latency rides every row (`wallMs`, SPEC §3); the summary prints its median
+  // over scored rows so a model-change table has a latency leg too.
+  const wallValues = scoredRows.filter((r) => typeof r.wallMs === 'number' && r.wallMs > 0)
+    .map((r) => r.wallMs).sort((a, b) => a - b);
+  const wallMedian = wallValues.length ? wallValues[Math.floor(wallValues.length / 2)] : null;
   lines.push(`metrics: success ${rate(solvedRows.length, scoredRows.length)} (${solvedRows.length}/${scoredRows.length} scored)`
     + ` · tool errors ${rate(refusals, calls)}`
+    + (doneRows.length ? ` · grounded ${groundedRows}/${doneRows.length} DONE` : '')
     + ` · turns ${turns} · repeat-blocks ${repeatBlocks} · lang-nudges ${nudged}`
     + (thaiShare == null ? '' : ` · replies in Thai ${Math.round(thaiShare * 100)}%`)
     + (solvedTokens.length
       ? ` · tokens/solved ≈ ${Math.round(solvedTokens.reduce((a, r) => a + r.tokensEst, 0) / solvedTokens.length).toLocaleString('en-US')}`
-      : ''));
+      : '')
+    + (wallMedian == null ? '' : ` · wall median ${(wallMedian / 1000).toFixed(1)}s`));
   if (rows.some((r) => r.kind === 'holdout')) {
     lines.push('* holdout — reported separately, never the reason a commit lands');
   }
@@ -734,9 +758,12 @@ selection
   --thai               every task under evals/thai/ (the Thai/English pair set)
 
 options
-  --budget a=b,c=d     global budget override — maxSteps, model, thinking
+  --budget a=b,c=d     global budget override — maxSteps, model, thinking,
+                       maxCredits
   --pause MS           wait MS between attempts — a live burst trips the
                        account edge's 429; the extension's retry covers the rest
+  --attempts N         repeat every task N times in one run (1..5, default 1);
+                       every row is reported — read medians, never the best draw
   --results DIR        where this run's JSONL lands (default evals/results/)
   --advisory           exit 0 even when checks fail (watching, not gating)
   --help               this text
@@ -749,7 +776,7 @@ exit codes: 0 only when every scored check passed; 1 when one did not;
 export function parseArgs(argv) {
   const opts = {
     tasks: [], all: false, holdout: false, thai: false, replay: null, live: false,
-    advisory: false, help: false, results: null, budget: null, pause: 0,
+    advisory: false, help: false, results: null, budget: null, pause: 0, attempts: 1,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -776,6 +803,11 @@ export function parseArgs(argv) {
       const ms = Number(next());
       if (!Number.isFinite(ms) || ms < 0) throw new EvalError('--pause needs milliseconds, e.g. --pause 10000');
       opts.pause = ms;
+    }
+    else if (name === '--attempts') {
+      const n = Number(next());
+      if (!Number.isInteger(n) || n < 1 || n > 5) throw new EvalError('--attempts needs an integer 1..5 — report all rows, never keep the best');
+      opts.attempts = n;
     }
     else throw new EvalError(`unknown flag ${JSON.stringify(arg)} — --help lists what exists`);
   }
@@ -838,6 +870,7 @@ async function main() {
     budget,
     resultsDir,
     pauseMs: opts.pause,
+    attempts: opts.attempts,
     log: (line) => console.log(line),
   });
   console.log(formatSummary(rows));

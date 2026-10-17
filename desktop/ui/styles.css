@@ -578,6 +578,25 @@ details.think summary:hover { color: var(--fg); }
 details.think summary::-webkit-details-marker { display: none; }
 details.think pre { color: var(--dim); font: 12px/1.45 var(--mono); white-space: pre-wrap; margin: 4px 0 8px; }
 
+/* The working trail folds under one line when the run ends, so the closing
+   bubble reads as the answer with the steps one click away. Rows with a live
+   button (carry-on, no-chat-tab) are never folded in. */
+details.run { margin: 0 0 10px; border-left: 2px solid var(--line); padding-left: 10px; max-width: 860px; }
+details.run > summary { color: var(--dim); font: 12px/1.5 var(--mono); cursor: pointer; list-style: none; }
+details.run > summary:hover { color: var(--fg); }
+details.run > summary::-webkit-details-marker { display: none; }
+details.run[open] { border-left-color: var(--accent); }
+details.run > *:not(summary) { margin-left: 2px; }
+/* …and the bubble that follows says what it is. */
+.msg.assistant.result::before {
+  content: "ผลลัพธ์";
+  display: block;
+  color: var(--dim);
+  font: 11px/1.6 var(--mono);
+  letter-spacing: .06em;
+  margin: 0 0 2px;
+}
+
 /* ------------------------------------------------------- plan / todo panel */
 
 .panel {

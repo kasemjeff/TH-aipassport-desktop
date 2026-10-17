@@ -1,8 +1,10 @@
 name: test
 
 on:
+  # master, not main — this repo's default is master, and the old filter meant
+  # a push to it never ran the suite at all.
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 jobs:
@@ -13,14 +15,16 @@ jobs:
       fail-fast: false
       matrix:
         # Windows is in the matrix deliberately: the path bugs fixed in #3/#4
-        # only showed up there.
+        # only showed up there. Node 20 left the matrix with its EOL — the
+        # runner image dropped it in September 2026; 22 and 24 are the support
+        # floor now (the repo's engines still say >=20).
         os: [ubuntu-latest, windows-latest]
-        node: [20, 22, 24]
+        node: [22, 24]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
 
@@ -28,6 +32,12 @@ jobs:
       # install — the suite spawns the real server and a fake extension.
       - name: Run tests
         run: npm test
+
+      # Trust the eval set before anyone spends a live run on it: every check
+      # must fail on its untouched tree, Thai pairs must be symmetric, and no
+      # file under evals/ may carry a CR byte.
+      - name: Lint the eval set
+        run: npm run evals:lint
 
       - name: Check every entry point parses
         shell: bash
@@ -42,6 +52,6 @@ jobs:
     name: deploy scripts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Syntax-check the deployment scripts
         run: for f in aipass-bridge/deploy/*.sh; do bash -n "$f"; done

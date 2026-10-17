@@ -2,7 +2,7 @@
 // and the preamble's honesty about what a helper actually does.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parse, prose, preamble } from '../harness/protocol.mjs';
+import { parse, prose, preamble, attemptedMarker, MARKER_LINE } from '../harness/protocol.mjs';
 
 test('markers inside a fenced block are a quotation, not a request', () => {
   const reply = [
@@ -63,6 +63,39 @@ test('English prose that starts with NEED stays prose', () => {
   const reply = 'NEED to see the logs before deciding.\nDONE decided';
   assert.deepEqual(parse(reply).map((c) => c.kind), ['done'], 'a sentence is not a call');
   assert.match(prose(reply), /NEED to see the logs/, 'and it survives the prose filter');
+});
+
+test('NEED list and NEED ls are the dir call — the spellings weak models write', () => {
+  // Recorded live: `NEED list desktop` came back as a marker that parsed to
+  // nothing, so the run sat on a request the harness never saw.
+  const calls = parse('NEED list desktop\nNEED ls src\nNEED file a.txt\nDONE looked');
+  assert.deepEqual(calls.map((c) => [c.kind, c.arg]), [
+    ['list', 'desktop'],
+    ['list', 'src'],
+    ['read', 'a.txt'],
+    ['done', 'looked'],
+  ]);
+  assert.ok(MARKER_LINE.test('NEED list desktop'), 'and it counts as a marker line, not prose');
+  assert.ok(MARKER_LINE.test('NEED ls src'));
+});
+
+test('a bare NEED list or NEED dir means the project root', () => {
+  const calls = parse('NEED list\nNEED dir\nNEED ls\nDONE saw it');
+  assert.deepEqual(calls.map((c) => [c.kind, c.arg]), [
+    ['list', '.'], ['list', '.'], ['list', '.'],
+    ['done', 'saw it'],
+  ]);
+  // `NEED file` with no path is not the listing form — it stays the bare
+  // single-token read, so a file literally named "file" is still readable.
+  assert.deepEqual(parse('NEED file').map((c) => [c.kind, c.arg]), [['read', 'file']]);
+});
+
+test('attemptedMarker sees a broken marker line, but not prose or fences', () => {
+  assert.equal(attemptedMarker('NEED\n'), true, 'a keyword with nothing after it is an attempt');
+  assert.equal(attemptedMarker('Alright.\n**CREATE** the file next\n'), true, 'bolded keywords count');
+  assert.equal(attemptedMarker('Need to check the logs first.'), false, 'sentence case is prose');
+  assert.equal(attemptedMarker('```\nNEED file x\n```'), false, 'a quoted marker is a quotation');
+  assert.equal(attemptedMarker('The capital of France is Paris.'), false, 'an answer is not an attempt');
 });
 
 test('a bare NEED is stripped from prose like any marker', () => {

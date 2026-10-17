@@ -142,14 +142,41 @@ export const PREAMBLE = preamble();
 // the run. Both parse() and prose() toggle on the same shape.
 const FENCE_LINE = /^\s*(```|~~~)/;
 
+// Marker sets are stable per run (plugins load once) and the parser runs line
+// by line over every reply — so every compiled alternation is cached instead
+// of rebuilt per call, the way a literal would be.
+const PROSE_RES = new Map();
+const proseRe = (plugins) => {
+  const key = plugins.map((t) => t.marker).join('\u0000');
+  let re = PROSE_RES.get(key);
+  if (!re) {
+    const extra = plugins.length
+      ? '|' + plugins.map((t) => `${t.marker}\\b`).join('|')
+      : '';
+    re = new RegExp(MARKER_LINE.source + extra, 'i');
+    PROSE_RES.set(key, re);
+  }
+  return re;
+};
+const STOP_RES = new Map();
+const stopRe = (stops) => {
+  const key = stops.join('\u0000');
+  let re = STOP_RES.get(key);
+  if (!re) { re = new RegExp(`^\\s*(?:${stops.join('|')})\\s*$`, 'i'); STOP_RES.set(key, re); }
+  return re;
+};
+const MARKER_RES = new Map();
+const markerRe = (marker) => {
+  let re = MARKER_RES.get(marker);
+  if (!re) { re = new RegExp(`^\\s*${marker}\\b\\s*(.*)$`, 'i'); MARKER_RES.set(marker, re); }
+  return re;
+};
+
 // The model usually writes its answer as prose and then a bare DONE, so fall
 // back to that prose rather than reporting an empty result.
-export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|file)\b|[^\s]+(?: [\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+)?\s*$)|SEARCH\b|GLOB\b|SKILL\b|GIT\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|ASK\b|(?:\*{1,3}|#{1,6}\s*)?DONE\b)/i;
+export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|list|ls|file)\b|[^\s]+(?: [\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+)?\s*$)|SEARCH\b|GLOB\b|SKILL\b|GIT\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|ASK\b|(?:\*{1,3}|#{1,6}\s*)?DONE\b)/i;
 export const prose = (reply, plugins = []) => {
-  const extra = plugins.length
-    ? '|' + plugins.map((t) => `${t.marker}\\b`).join('|')
-    : '';
-  const re = new RegExp(MARKER_LINE.source + extra, 'i');
+  const re = proseRe(plugins);
   let inFence = false;
   return reply.split('\n').filter((l) => {
     if (FENCE_LINE.test(l)) { inFence = !inFence; return true; }
@@ -157,10 +184,36 @@ export const prose = (reply, plugins = []) => {
   }).join('\n').trim();
 };
 
+// A marker keyword in caps at the start of a line. Case is the whole point:
+// recorded replies wrote "NEED list desktop" and bare "RUN" as broken markers,
+// while prose that merely starts with the word ("Need to check the logs") must
+// never count as an attempt.
+const MARKER_ATTEMPT = /^\s*(?:\*{1,3}|#{1,6}\s*)?(?:NEED|SEARCH|GLOB|SKILL|GIT|FETCH|WEB|DELETE|MOVE|EDIT|CREATE|ATTACH|FIND|NEW|END|RUN|PLAN|TODO|SUBAGENT|TASK|ASK|DONE)\b/;
+
+/**
+ * Did the reply try to speak the protocol — even in a shape parse() cannot
+ * read? The loop uses this to tell "the model answered" apart from "the model
+ * tried and missed": a marker-shaped line that parses to nothing earns the
+ * nudge that teaches the shape, instead of being read as a silent finish.
+ * Fenced lines are quotations and do not count, same as everywhere else.
+ */
+export function attemptedMarker(reply) {
+  let inFence = false;
+  for (const line of String(reply ?? '').split('\n')) {
+    if (FENCE_LINE.test(line)) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    if (MARKER_ATTEMPT.test(line)) return true;
+  }
+  return false;
+}
+
 /** Tool kinds that mean "the model is still gathering", never a stopping point.
  *  ATTACH is here because a queued attachment only rides the NEXT message —
- *  a DONE in the same reply would silently drop it. */
-export const READING = new Set(['list', 'read', 'search', 'skill', 'attach']);
+ *  a DONE in the same reply would silently drop it. GLOB, GIT, FETCH, WEB and
+ *  SUBAGENT are reads in the same sense: their result travels with the NEXT
+ *  message too, so a DONE beside one of them used to end the run and throw
+ *  the payoff away unread (a listing, a fetched page, a helper's summary). */
+export const READING = new Set(['list', 'read', 'search', 'glob', 'skill', 'attach', 'git', 'fetch', 'web', 'subagent']);
 
 export function parse(reply, { plugins = [] } = {}) {
   const lines = reply.split('\n');
@@ -169,7 +222,8 @@ export function parse(reply, { plugins = [] } = {}) {
   let inFence = false;
   const readUntil = (stops) => {
     const body = [];
-    while (i < lines.length && !stops.some((st) => new RegExp(`^\\s*${st}\\s*$`, 'i').test(lines[i]))) body.push(lines[i++]);
+    const stop = stopRe(stops);
+    while (i < lines.length && !stop.test(lines[i])) body.push(lines[i++]);
     return body.join('\n');
   };
 
@@ -182,8 +236,17 @@ export function parse(reply, { plugins = [] } = {}) {
     if (FENCE_LINE.test(line)) { inFence = !inFence; i++; continue; }
     if (inFence) { i++; continue; }
 
-    let m = /^\s*NEED\s+(dir|file)\s+(.+?)\s*$/i.exec(line);
-    if (m) { i++; calls.push({ kind: m[1].toLowerCase() === 'dir' ? 'list' : 'read', arg: m[2].trim() }); continue; }
+    // `list` and `ls` are the spellings weaker models reach for when they mean
+    // "show me this folder" — recorded live, where `NEED list desktop` came
+    // back as a marker that parsed to nothing. Same call as `NEED dir`.
+    let m = /^\s*NEED\s+(dir|list|ls|file)\s+(.+?)\s*$/i.exec(line);
+    if (m) { i++; calls.push({ kind: m[1].toLowerCase() === 'file' ? 'read' : 'list', arg: m[2].trim() }); continue; }
+
+    // The bare form — `NEED list` with the path forgotten. Only the listing
+    // words qualify: `NEED file` alone still means a file literally named
+    // "file", which the bare-NEED rule below handles.
+    m = /^\s*NEED\s+(?:dir|list|ls)\s*$/i.exec(line);
+    if (m) { i++; calls.push({ kind: 'list', arg: '.' }); continue; }
 
     // The bare shape — `NEED events.mjs` — is what weaker models reach for
     // when the keyword slips. It can only mean the file form, so read it the
@@ -289,8 +352,7 @@ export function parse(reply, { plugins = [] } = {}) {
     // Plugin markers come last: a built-in name is never shadowed by one.
     let matchedPlugin = false;
     for (const tool of plugins) {
-      const re = new RegExp(`^\\s*${tool.marker}\\b\\s*(.*)$`, 'i');
-      const hit = re.exec(line);
+      const hit = markerRe(tool.marker).exec(line);
       if (!hit) continue;
       i++;
       let body = '';

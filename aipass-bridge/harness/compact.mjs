@@ -18,6 +18,11 @@ import { outbound } from './waf.mjs';
 // project exists for Thai users; a flat bytes/4 made the budget about 2x too
 // generous for exactly the people it is for.
 const WIDE_SCRIPT = /[\u0590-\u05FF\u0600-\u06FF\u0900-\u097F\u0E00-\u0E7F\u0E80-\u0EFF\u1000-\u109F\u1780-\u17FF\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF]/;
+// A global clone for counting: one scan per entry instead of a .test() per
+// character, on a function the context meter calls on every tick. No /u — the
+// class is all BMP and the count stays per UTF-16 unit, exactly what the
+// per-character loop did.
+const WIDE_SCRIPT_G = new RegExp(WIDE_SCRIPT.source, 'g');
 
 const envPositive = (name, fallback) => {
   const n = Number(process.env[name]);
@@ -114,10 +119,8 @@ export class Compactor {
       const t = entries[i].text;
       if (typeof t !== 'string' || !t) continue;
       seen += t.length;
-      for (let j = 0; j < t.length; j++) {
-        total++;
-        if (WIDE_SCRIPT.test(t[j])) wide++;
-      }
+      total += t.length;
+      wide += t.match(WIDE_SCRIPT_G)?.length ?? 0;
     }
     const share = total ? wide / total : 0;
     return share > 0.3 ? 2 : share > 0.08 ? 3 : 4;

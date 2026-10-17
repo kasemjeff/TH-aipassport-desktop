@@ -47,22 +47,22 @@ const setup = (files = {}) => {
 
 /* R2 — deterministic edit diagnostics ------------------------------------ */
 
-test('a staged .mjs write is syntax-checked, and the verdict rides the result (R2)', () => {
+test('a staged .mjs write is syntax-checked, and the verdict rides the result (R2)', async () => {
   const { tools } = setup();
-  const bad = tools.write('bad.mjs', 'const = broken\n');
+  const bad = await tools.write('bad.mjs', 'const = broken\n');
   assert.match(bad, /syntax check failed/i);
   assert.match(bad, /SyntaxError/);
-  const good = tools.write('good.mjs', 'export const a = 1;\n');
+  const good = await tools.write('good.mjs', 'export const a = 1;\n');
   assert.match(good, /syntax check ok/);
-  const py = tools.write('note.py', 'def broken(:\n');
+  const py = await tools.write('note.py', 'def broken(:\n');
   assert.ok(!/syntax check/.test(py), 'only JavaScript grammar is checked');
-  const huge = tools.write('huge.mjs', `export const b = 1; // ${'x'.repeat(600 * 1024)}\n`);
+  const huge = await tools.write('huge.mjs', `export const b = 1; // ${'x'.repeat(600 * 1024)}\n`);
   assert.ok(!/syntax check/.test(huge), 'a file past the cap is left alone');
 });
 
-test('an EDIT that breaks the syntax is reported on the spot (R2)', () => {
+test('an EDIT that breaks the syntax is reported on the spot (R2)', async () => {
   const { tools } = setup({ 'cfg.mjs': 'export const a = 1;\n' });
-  const res = tools.replace('cfg.mjs', ['export const a = 1;', 'export const a = ;']);
+  const res = await tools.replace('cfg.mjs', ['export const a = 1;', 'export const a = ;']);
   assert.match(res, /updated cfg\.mjs/);
   assert.match(res, /syntax check failed/i);
 });

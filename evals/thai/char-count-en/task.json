@@ -1,0 +1,11 @@
+{
+  "check": "node check.mjs",
+  "budget": {
+    "model": "gemini-3.5-flash-lite",
+    "thinking": "low",
+    "maxSteps": 10
+  },
+  "allowRun": true,
+  "lang": "en",
+  "pair": "char-count"
+}

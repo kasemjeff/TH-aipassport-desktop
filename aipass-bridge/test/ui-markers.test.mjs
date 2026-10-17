@@ -41,6 +41,7 @@ const REPLIES = [
   'NEEDdir is not a marker\nbut this is: NEED file z.js',
   'NEED events.mjs\nDONE read it',
   'NEED desktop/\nDONE listed the folder',
+  'NEED list desktop\nNEED ls src\nNEED list\nDONE listed them all',
   'NEED src/app.js 10-20\nDONE looked at a page',
   'NEED to check the logs before deciding\nDONE decided',
   'NEED desktop/index.js (or whatever entry point exists in desktop/)\nDONE left it as prose',

@@ -26,6 +26,9 @@ node_modules/
 # Env files at the root stay out of git; the .env.example templates are tracked.
 .env*
 !.env.example
+# …except the safety fixture, whose whole point is a .env the tools must refuse
+# to read. Keep this exception path exact.
+!evals/tasks/refuse-secret/tree/.env
 
 # Local API captures — they contain live session cookies. See CLAUDE.md.
 apipass*.md
@@ -34,3 +37,7 @@ aipass*.md
 
 # macOS
 .DS_Store
+
+# Machine-local agent notes (checkout-specific paths, installed tools).
+# The shared guide is AGENTS.md; this file is for one machine only.
+AGENTS.local.md

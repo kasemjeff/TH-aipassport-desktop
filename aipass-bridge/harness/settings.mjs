@@ -25,7 +25,9 @@ export const DEFAULTS = {
   // 'yolo' (writes and shell both go through)
   mode: 'ask',
   allowRun: false,
-  maxSteps: 10,
+  // The step cap one run may spend, or 0 for no cap: the run goes until DONE,
+  // a guard stops it, or a budget below is spent. A positive cap is 1..200.
+  maxSteps: 0,
   // Per-run budgets, checked by the loop and recorded as stop reasons in
   // run_stats: the most tool calls one run may execute, and its wall-clock
   // ceiling in ms. Generous by design — they catch a runaway reply (a hundred
@@ -33,6 +35,11 @@ export const DEFAULTS = {
   // nonsense value falls back to the default; there is no off switch.
   maxToolCalls: 300,
   maxWallClockMs: 1_800_000,
+  // The optional credit cap: stop a run once observed spend reaches this many
+  // credits. 0 (the default) means no cap — the one budget with an off switch.
+  // Checked against the bridge's cached quota, which upstream refreshes at
+  // most every 30s, so it bounds a runaway run without a request per step.
+  maxCredits: 0,
   // plan mode: the model writes a PLAN/TODO first, and (optionally) waits for
   // the human to approve before it touches anything
   plan: false,
@@ -116,6 +123,36 @@ export const SAFETY_RULES = [
   asks('pnpm-lock.yaml'), asks('**/pnpm-lock.yaml'),
 ];
 
+/**
+ * The secret floor: files that must never reach the model without an explicit
+ * human override, in ANY mode including yolo. Unlike SAFETY_RULES (mutation
+ * kinds only) these carry no `kinds`, so they match reads too — NEED/CREATE
+ * with a .env path is denied before the mode is consulted.
+ *
+ * Each name appears twice (top-level plus a nested `**`-prefixed spelling)
+ * because globMatch has no implicit prefix. Sources: OWASP Logging Cheat
+ * Sheet (never log secrets) + common secret-file layouts (.env, cloud creds,
+ * private keys).
+ */
+const denys = (pattern) => ({ pattern, decision: 'deny' });
+export const SECRET_RULES = [
+  denys('.env*'), denys('**/.env*'),
+  denys('*.pem'), denys('**/*.pem'),
+  denys('*.key'), denys('**/*.key'),
+  denys('*.p12'), denys('**/*.p12'),
+  denys('*.pfx'), denys('**/*.pfx'),
+  denys('id_rsa*'), denys('**/id_rsa*'),
+  denys('id_ed25519*'), denys('**/id_ed25519*'),
+  denys('*.jks'), denys('**/*.jks'),
+  denys('credentials.json'), denys('**/credentials.json'),
+  denys('secrets.json'), denys('**/secrets.json'),
+  denys('.aws/**'), denys('**/.aws/**'),
+  denys('.gnupg/**'), denys('**/.gnupg/**'),
+  denys('**/*.har'),
+  denys('apipass*.md'), denys('**/apipass*.md'),
+  denys('aipass*.md'), denys('**/aipass*.md'),
+];
+
 export class Settings {
   /** @param {string} [dir] where the file lives; defaults to `aipassHome()` */
   constructor(dir = aipassHome(), file = 'settings.json') {
@@ -155,11 +192,12 @@ export class Settings {
   /**
    * Clamp the values that can silently break a run.
    *
-   * `maxSteps: 0` is the case that justifies this: the loop exits before its
-   * first step, the window accepts the message and answers nothing, and no error
-   * appears anywhere. Rather than trusting every caller, the numbers that govern
-   * a run are clamped here — the one place the CLI, the window and any future
-   * surface all write through.
+   * A negative or unparsable step count is the case that justifies this: it
+   * used to reach the loop and stop a run before its first step — the window
+   * accepted the message and answered nothing, no error anywhere. Zero no
+   * longer belongs in that family (it means "no cap" by design), so only the
+   * values that break a run are clamped here — the one place the CLI, the
+   * window and any future surface all write through.
    */
   static sane(values) {
     const next = structuredClone(values);
@@ -168,7 +206,13 @@ export class Settings {
       if (!Number.isFinite(n)) return fallback;
       return Math.min(max, Math.max(min, Math.round(n)));
     };
-    next.maxSteps = num(next.maxSteps, 1, 200, 10);
+    // 0 is the deliberate escape the step cap has: no cap at all, with the
+    // budgets below as the only bound. A positive count is a cap within 1..200;
+    // a negative or unparsable one falls back to the default (no cap).
+    const steps = Number(next.maxSteps);
+    next.maxSteps = Number.isFinite(steps) && steps >= 0
+      ? Math.min(200, Math.round(steps))
+      : DEFAULTS.maxSteps;
     // The per-run budgets follow the step limit's rule; a zero or nonsense
     // value means "use the default" rather than "instantly stop the run".
     const toolCalls = Number(next.maxToolCalls);
@@ -177,6 +221,11 @@ export class Settings {
     const wallClock = Number(next.maxWallClockMs);
     next.maxWallClockMs = Number.isFinite(wallClock) && wallClock > 0
       ? Math.min(86_400_000, Math.max(10_000, Math.round(wallClock))) : DEFAULTS.maxWallClockMs;
+    // The credit cap's rule differs on purpose: 0 is a real value (no cap),
+    // not a value to replace with a default.
+    const creditCap = Number(next.maxCredits);
+    next.maxCredits = Number.isFinite(creditCap) && creditCap > 0
+      ? Math.min(10_000_000, Math.round(creditCap)) : 0;
     // An unknown thinking level would reach the bridge and come back stripped,
     // which reads as "thinking is on" in the form and "off" in the run. The
     // one place every surface writes keeps the two equal.
@@ -204,6 +253,28 @@ export class Settings {
           ...(Array.isArray(r.kinds) && r.kinds.length ? { kinds: r.kinds.map(String) } : {}),
         }))
         .slice(0, 100)
+      : [];
+    // Path-shaped keys are resolved by whoever reads them first — the window's
+    // project list, the backend's root pick, the uploads staging folder, the
+    // skill library's dirs — so a wrong-shaped value is not state, it is a
+    // crash waiting for the next call. Dropped here, like every other value
+    // that cannot work.
+    next.root = typeof next.root === 'string' && next.root.trim() ? next.root : null;
+    next.projects = Array.isArray(next.projects)
+      ? next.projects
+        .filter((p) => p && typeof p.path === 'string' && p.path.trim())
+        .map((p) => ({
+          ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}),
+          path: p.path,
+        }))
+        .slice(0, 40)
+      : [];
+    next.uploads = typeof next.uploads === 'string' && next.uploads.trim() ? next.uploads : null;
+    next.skillsDirs = Array.isArray(next.skillsDirs)
+      ? next.skillsDirs.filter((d) => typeof d === 'string' && d.trim())
+      : [];
+    next.plugins = Array.isArray(next.plugins)
+      ? next.plugins.filter((n) => typeof n === 'string' && n.trim())
       : [];
     if (next.compaction) {
       const budget = num(next.compaction.contextTokens, 1000, 4_000_000, 24_000);

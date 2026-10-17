@@ -6,12 +6,19 @@
 // Private Network Access checks; an extension request with host_permissions
 // does not.
 const DEFAULT_BRIDGE = 'http://127.0.0.1:8787';
+// The stream is deliberately aborted every four minutes (Chrome's long-request
+// ceiling — the cycle below), so the reconnect delay backs off instead of
+// being flat: almost at once right after a drop that may just be the cycle,
+// and toward the ceiling only while the bridge itself is away. A flat 3 s left
+// the bridge showing no extension for seconds, four times an hour.
+const RECONNECT_FIRST_MS = 300;
 const RECONNECT_MS = 3000;
 const CYCLE_MS = 4 * 60 * 1000; // reconnect before Chrome's long-request ceiling
 
 let controller = null;
 let connected = false;
 let lastError = '';
+let retryMs = RECONNECT_FIRST_MS;
 const jobTabs = new Map();
 
 // The content script's keepalive port only exists while a de.aipass.net tab is
@@ -60,11 +67,24 @@ const bridgeUrl = async () => {
   }
 };
 
+const bridgeToken = async () => {
+  try {
+    const res = await chrome.storage.local.get('bridgeToken');
+    return res?.bridgeToken || '';
+  } catch {
+    return '';
+  }
+};
+
 async function post(path, body) {
   try {
+    const token = await bridgeToken();
     const res = await fetch(`${await bridgeUrl()}${path}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
       body: JSON.stringify(body),
     });
     // Retrying would duplicate deltas, so a refused post is surfaced, not
@@ -163,14 +183,23 @@ async function connect() {
   ensureOffscreenDocument();
 
   try {
+    const token = await bridgeToken();
     const res = await fetch(`${await bridgeUrl()}/ext/events`, {
-      headers: { accept: 'text/event-stream' },
+      headers: {
+        accept: 'text/event-stream',
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
       signal,
     });
+    if (res.status === 401) {
+      lastError = 'bridge needs the loopback token — paste it in the popup settings once';
+      console.warn('[aipass-bg] bridge requires a token; set it in the popup');
+    }
     if (!res.ok || !res.body) throw new Error(`bridge responded ${res.status}`);
 
     connected = true;
     lastError = '';
+    retryMs = RECONNECT_FIRST_MS; // a live stream earns the fast retry again
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let pending = '';
@@ -201,7 +230,8 @@ async function connect() {
     clearTimeout(cycle);
     connected = false;
     controller = null;
-    setTimeout(connect, RECONNECT_MS);
+    setTimeout(connect, retryMs);
+    retryMs = Math.min(RECONNECT_MS, retryMs * 2);
   }
 }
 

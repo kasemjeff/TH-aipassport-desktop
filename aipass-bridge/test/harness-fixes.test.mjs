@@ -16,6 +16,9 @@
 //      was bypassed by every helper run
 //   H9 the same `.env* → deny` rule stopped writes but not reads — `NEED file
 //      .env` still sent the secrets upstream; reads consult the rules now
+//   H10 a reply that tried to speak the protocol and mangled it parsed to
+//      nothing, and the implicit-done path read that as an answer — a
+//      marker-shaped line now earns the shape-teaching nudge instead
 // (H6, the compaction estimate measuring the message before the WAF rewrites
 // it, lives in compact.test.mjs with the rest of the compactor's tests.)
 import { test, after } from 'node:test';
@@ -38,6 +41,9 @@ import { runTask } from '../harness/loop.mjs';
 // Nothing here may touch the real ~/.aipass.
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-fixes-home-'));
 process.env.AIPASS_HOME = HOME;
+// The 403 waits are pinned by their own tests; here H5 only needs the retry
+// order, not the clock.
+process.env.AIPASS_EDGE_WAITS_MS = '0';
 after(() => fs.rmSync(HOME, { recursive: true, force: true }));
 
 /** Tools over a plain directory, the way the CLI and the harness build them. */
@@ -53,7 +59,7 @@ function toolsIn(dir) {
 
 /* H1 — the project's own spill directory ---------------------------------- */
 
-test('the spill directory is out of every listing, but still readable', () => {
+test('the spill directory is out of every listing, but still readable', async () => {
   const dir = tempDir({
     'a.ts': 'export const needle = 1;\n',
     // What spill() leaves behind after a long tool result: the same "needle",
@@ -62,7 +68,7 @@ test('the spill directory is out of every listing, but still readable', () => {
   });
   const tools = toolsIn(dir);
 
-  const search = tools.search('needle');
+  const search = await tools.search('needle');
   assert.ok(search.includes('a.ts'), 'the real file is still found');
   assert.ok(!search.includes('.aipass'), `an earlier run's spill is not searchable:\n${search}`);
 
@@ -161,18 +167,29 @@ test('append batches the header rewrite, and rename still fixes it at once', (t)
   const store = new SessionStore(tempDir());
   const session = store.create({ root: tempDir(), title: 'batch me' });
 
-  // rewriteHeader() is the only thing that rewrites an existing session file,
-  // so counting the writeFileSync calls it makes counts exactly the rewrites.
-  // appendFileSync has to be told apart from it: on Node 24 an append is
-  // implemented as a writeFileSync, so the caller is the only thing that
-  // separates "one entry appended" from "the whole file rewritten".
-  const real = fs.writeFileSync;
+  // rewriteHeader() is the only thing that rewrites an existing session file.
+  // Since headers are padded to a fixed width, a rewrite is normally one
+  // writeSync at offset 0 (the atomic writeFileSync swap remains the fallback
+  // for unpadded files) — so both write paths count as one rewrite. That also
+  // tells appendFileSync apart from it: on Node 24 an append is implemented as
+  // a writeFileSync, and the caller in the stack is what separates "one entry
+  // appended" from "the header rewritten".
+  const realWrite = fs.writeFileSync;
+  const realWriteSync = fs.writeSync;
   const rewrites = [];
-  fs.writeFileSync = function spied(file, ...rest) {
-    if (String(file) === session.file && /rewriteHeader/.test(new Error().stack)) rewrites.push(String(file));
-    return real.call(this, file, ...rest);
+  const count = (file) => {
+    const target = String(file) === session.file || String(file) === `${session.file}.tmp`;
+    if (target && /rewriteHeader/.test(new Error().stack)) rewrites.push(String(file));
   };
-  t.after(() => { fs.writeFileSync = real; });
+  fs.writeFileSync = function spied(file, ...rest) {
+    count(file);
+    return realWrite.call(this, file, ...rest);
+  };
+  fs.writeSync = function spiedSync(fd, ...rest) {
+    if (typeof fd === 'number') count(session.file);
+    return realWriteSync.call(this, fd, ...rest);
+  };
+  t.after(() => { fs.writeFileSync = realWrite; fs.writeSync = realWriteSync; });
 
   for (let i = 0; i < 60; i++) session.append('note', { text: `note ${i}` });
 
@@ -419,6 +436,53 @@ test('one repeat earns a correction, and a different move clears the guard (H7)'
   assert.equal(result.stopReason, 'done');
   assert.deepEqual(seen.map((p) => p.action), ['warn'], 'warned once, never stopped');
   assert.match(bridge.received[2], /repeating it moves nothing/, 'the correction reached the model');
+});
+
+/* H10 — a broken marker is an attempt, not an answer ------------------------ */
+
+test('a marker-shaped line that parses to nothing earns the nudge, not a silent done (H10)', async () => {
+  // Recorded live (session f5acb222): the model asked for a folder with a line
+  // that parsed to nothing, and the run was marked done 633ms later with zero
+  // nudges — the implicit-done path treats "prose after real work" as an
+  // answer, and a mangled marker is not an answer.
+  const dir = tempDir({ 'a.txt': 'hello\n' });
+  const store = new SessionStore(path.join(dir, 'sessions'));
+  const session = store.create({ root: dir });
+  const events = new Emitter();
+  const nudged = [];
+  events.on('nudge', (p) => nudged.push(p));
+
+  const bridge = scriptedLoop(['NEED file a.txt', 'NEED\n\nHere is what I have so far.', 'DONE finished']);
+  const result = await runTask('read the file', {
+    bridge, tools: toolsIn(dir), overlay: new Overlay(dir), session, events,
+    options: { maxSteps: 8 }, first: true,
+  });
+
+  assert.equal(result.stopReason, 'done', 'the run still finishes — after the nudge');
+  assert.deepEqual(nudged.map((p) => p.n), [1], 'the broken marker earned exactly one nudge');
+  assert.match(bridge.received[2], /no marker I could act on/, 'the nudge teaches the shape instead of ending the run');
+  assert.equal(session.entries.find((e) => e.type === 'run_stats').nudges, 1);
+});
+
+test('a plain answer after real work still ends the run, un-nudged (H10)', async () => {
+  // The guard above must not turn every prose ending into a nudge. A run that
+  // did real work and closes with a sentence — no marker lookalike — is done.
+  const dir = tempDir({ 'a.txt': 'hello\n' });
+  const store = new SessionStore(path.join(dir, 'sessions'));
+  const session = store.create({ root: dir });
+  const events = new Emitter();
+  const nudged = [];
+  events.on('nudge', (p) => nudged.push(p));
+
+  const bridge = scriptedLoop(['NEED file a.txt', 'The file says hello, nothing else to do.']);
+  const result = await runTask('read the file', {
+    bridge, tools: toolsIn(dir), overlay: new Overlay(dir), session, events,
+    options: { maxSteps: 8 }, first: true,
+  });
+
+  assert.equal(result.stopReason, 'done', 'a closing sentence is still an answer');
+  assert.deepEqual(nudged, [], 'and it is not nudged');
+  assert.equal(result.steps, 1);
 });
 
 /* A RUN's label is its command --------------------------------------------- */

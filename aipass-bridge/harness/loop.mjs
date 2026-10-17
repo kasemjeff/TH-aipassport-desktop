@@ -15,7 +15,7 @@
 import path from 'node:path';
 import { outbound } from './waf.mjs';
 import {
-  REMINDER, prose, parse, parseTodo, mergeTodo, READING,
+  REMINDER, prose, parse, parseTodo, mergeTodo, READING, attemptedMarker,
   preamble as buildPreamble,
 } from './protocol.mjs';
 import { resilientSay, decode } from './bridge.mjs';
@@ -59,7 +59,7 @@ const previewOf = (call) => {
 };
 
 /**
- * Drive one task to a DONE (or the step limit).
+ * Drive one task to a DONE — or to whatever ends it first: a guard, a cap, a budget.
  *
  * @param {string} taskText
  * @param {object} ctx
@@ -82,13 +82,24 @@ export async function runTask(taskText, ctx = {}) {
     subagent = null, check = null, approvePlan = null, options = {}, first = true,
     runPluginTool = null, compactor = null, rotate = null,
     conversation = null, conversationTemporary = null,
-  } = ctx;  const maxSteps = Number(options.maxSteps ?? 10);
+  } = ctx;  // The step cap, or no cap at all: 0 (the shipped default) means the
+  // run goes until it is DONE, a guard stops it, or a budget below is spent. A
+  // positive number caps the run, and the last step says so (step_limit).
+  const rawCap = Number(options.maxSteps ?? 0);
+  const maxSteps = Number.isFinite(rawCap) && rawCap > 0 ? Math.floor(rawCap) : Infinity;
+  // 0 on the wire means "no cap" — Infinity does not survive JSON, so events
+  // carry the option as the surfaces know it.
+  const maxStepsWire = Number.isFinite(maxSteps) ? maxSteps : 0;
   // Per-run budgets — the same defaults the settings file ships. A reply full
   // of markers used to execute every one of them, and a yolo RUN can hold one
-  // step open for minutes; either budget spent stops the run the way the step
-  // limit does, with its own stop reason in run_stats.
+  // step open for minutes; either budget spent stops the run with its own stop
+  // reason in run_stats — the real bound once the step cap is off.
   const maxToolCalls = Number(options.maxToolCalls) > 0 ? Math.floor(Number(options.maxToolCalls)) : 300;
   const maxWallClockMs = Number(options.maxWallClockMs) > 0 ? Math.floor(Number(options.maxWallClockMs)) : 1_800_000;
+  // (credit cap) Optional ceiling on observed spend, in credits. 0 = no cap.
+  // The check rides the bridge's cached quota (its own 30s TTL), so it bounds
+  // a runaway run without turning into an upstream request per step.
+  const maxCredits = Number(options.maxCredits) > 0 ? Number(options.maxCredits) : 0;
   const runStart = Date.now();
   const model = options.model ?? null;
   // How hard the model thinks before each reply. 'off' (or nothing) means the
@@ -120,9 +131,23 @@ export async function runTask(taskText, ctx = {}) {
   let planApproved = !options.requirePlanApproval;
 
   session?.append('task', { text: taskText });
-  events?.emit('task_start', { task: taskText, maxSteps });
+  events?.emit('task_start', { task: taskText, maxSteps: maxStepsWire });
 
   const creditsBefore = await bridge.quota().catch(() => null);
+  // Spent-so-far, for the optional credit cap: the pre-run reading is the
+  // baseline, and when that was unavailable the first successful reading
+  // becomes one. null until a reading lands — an unknown spend never stops a
+  // run on its own.
+  let creditBaseline = creditsBefore?.available ?? null;
+  let creditObserved = null;
+  const creditSpent = async () => {
+    if (!maxCredits) return null;
+    const q = await bridge.quota().catch(() => null);
+    if (!q || q.available == null) return null;
+    if (creditBaseline == null) creditBaseline = q.available;
+    creditObserved = creditBaseline - q.available;
+    return creditObserved;
+  };
 
   // Per-run metrics (P2-D): the session already records every tool call and
   // the run records credits; these counters are what turns that into rates.
@@ -236,13 +261,15 @@ export async function runTask(taskText, ctx = {}) {
 
   // A spent budget is an ending, and it is recorded like one: the session
   // keeps the note, the window keeps the event, run_stats keeps the reason.
-  let budgetHit = null;      // 'tools-limited' | 'time-limited'
+  let budgetHit = null;      // 'tools-limited' | 'time-limited' | 'credit-limited'
   const spendBudget = (reason) => {
     budgetHit = reason;
     const used = reason === 'tools-limited'
       ? `${toolsRun}/${maxToolCalls} tool calls`
-      : `${Math.round((Date.now() - runStart) / 1000)}s of ${Math.round(maxWallClockMs / 1000)}s`;
-    session?.append('note', { text: `budget guard: the run has spent its ${reason === 'tools-limited' ? 'tool-call' : 'wall-clock'} budget (${used}) — stopping the run` });
+      : reason === 'credit-limited'
+        ? `≈${creditObserved ?? 0} of ${maxCredits} credits`
+        : `${Math.round((Date.now() - runStart) / 1000)}s of ${Math.round(maxWallClockMs / 1000)}s`;
+    session?.append('note', { text: `budget guard: the run has spent its ${reason === 'tools-limited' ? 'tool-call' : reason === 'credit-limited' ? 'credit' : 'wall-clock'} budget (${used}) — stopping the run` });
     events?.emit('budget', { reason, used });
   };
 
@@ -348,6 +375,7 @@ export async function runTask(taskText, ctx = {}) {
     // The wall clock is checked before every reply too, not only between
     // tools: waiting on a slow model is as real a spend as running a command.
     if (Date.now() - runStart > maxWallClockMs) { spendBudget('time-limited'); break; }
+    if (maxCredits && (await creditSpent()) >= maxCredits) { spendBudget('credit-limited'); break; }
     const stepStart = Date.now();
     let reply;
     try { reply = await saySafe(next, partsForSend()); sends++; }
@@ -373,7 +401,7 @@ export async function runTask(taskText, ctx = {}) {
 
     const elapsed = ((Date.now() - stepStart) / 1000).toFixed(1);
     stepMs.push(Math.round((Date.now() - stepStart)));
-    events?.emit('step', { step, maxSteps, elapsed });
+    events?.emit('step', { step, maxSteps: maxStepsWire, elapsed });
 
     const proseText = prose(reply, pluginTools);
     const calls = parse(reply, { plugins: pluginTools });
@@ -395,7 +423,13 @@ export async function runTask(taskText, ctx = {}) {
         pauseForAsk(askCall.arg);
         break;
       }
-      const effectiveDone = done || (toolsRun > 0 && proseText ? { kind: 'done', arg: 'done' } : null);
+      // A reply with no readable call ends the run as done once real work has
+      // happened — a closing sentence is an answer. But not when the reply was
+      // trying to speak the protocol and mangled it: recorded live, a reply of
+      // `NEED list desktop` followed by prose parsed to nothing, and the run
+      // was marked done 633ms later with the nudges never sent. A marker-shaped
+      // line earns the nudge that teaches the shape instead.
+      const effectiveDone = done || (toolsRun > 0 && proseText && !attemptedMarker(reply) ? { kind: 'done', arg: 'done' } : null);
       if (effectiveDone) {
         const cleanArg = (effectiveDone.arg || proseText || 'done').replace(/^[-—–:]\s*/, '').trim();
         summary = cleanArg || 'done';
@@ -439,7 +473,7 @@ export async function runTask(taskText, ctx = {}) {
         events?.emit('give_up', {}); stopReason = 'stalled'; break;
       }
       events?.emit('nudge', { n: nudgeStreak });
-      next = `That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it. I will paste back exactly what you ask for. ${REMINDER}`;
+      next = `That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it. I will paste back exactly what you ask for. ${REMINDER}`;
       continue;
     }
     nudgeStreak = 0;
@@ -456,6 +490,7 @@ export async function runTask(taskText, ctx = {}) {
       const helpers = work.filter((c) => c.kind === 'subagent').length;
       if (toolsRun + helpers > maxToolCalls) spendBudget('tools-limited');
       else if (Date.now() - runStart > maxWallClockMs) spendBudget('time-limited');
+      else if (maxCredits && (await creditSpent()) >= maxCredits) spendBudget('credit-limited');
       else {
         helperResults = await Promise.all(work.map((c) => c.kind === 'subagent'
           ? execute(c, execCtx).catch((err) => `err: ${err.message}`)
@@ -515,6 +550,7 @@ export async function runTask(taskText, ctx = {}) {
       // both budgets before it executes.
       if (toolsRun >= maxToolCalls) { spendBudget('tools-limited'); break; }
       if (Date.now() - runStart > maxWallClockMs) { spendBudget('time-limited'); break; }
+      if (maxCredits && (await creditSpent()) >= maxCredits) { spendBudget('credit-limited'); break; }
       const call = work[i];
       // A RUN's label is its command: the parser puts the command in the body,
       // so `arg` alone leaves a row that says "run" and nothing else — in the
@@ -752,6 +788,9 @@ export async function runTask(taskText, ctx = {}) {
   // protocol drift shows up before it is guessed at.
   const runStats = {
     stopReason,
+    // The model that produced this run — `stats` groups by it (`byModel`), so
+    // "which model drifts" is a field, not a guess. Null on a bridge without one.
+    model: bridge.model ?? null,
     steps: toolsRun,
     tools: Object.fromEntries(toolStats),
     nudges,

@@ -34,6 +34,22 @@ export function createSandbox(root) {
   return fs.mkdtempSync(path.join(runRoot, 'run-'));
 }
 
+// Copies run a bounded number in flight: a big tree should saturate the disk,
+// not the file-descriptor table.
+const COPY_GATE = 16;
+let activeCopies = 0;
+const copyWaiters = [];
+async function gatedCopy(src, dst) {
+  if (activeCopies >= COPY_GATE) await new Promise((r) => copyWaiters.push(r));
+  activeCopies++;
+  try {
+    await fs.promises.copyFile(src, dst);
+  } finally {
+    activeCopies--;
+    copyWaiters.shift()?.();
+  }
+}
+
 /**
  * Project the tree at `root` into `dest`, overlay applied:
  *   - every staged path (except deletes) is written as its staged content
@@ -41,8 +57,14 @@ export function createSandbox(root) {
  *     unless a staged edit lives inside them
  *   - `.aipass` never enters the projection, and neither does `.git` — a
  *     projected run sees a tree with no repository (the marker below explains)
+ *
+ * Async and parallel on purpose: this used to be a synchronous walk that froze
+ * the backend's event loop — the window's stream, its pings, every other call —
+ * for the length of the copy. The bytes on disk are the same, copied through a
+ * fixed-width gate, and a command's in-place writes still land in the throwaway
+ * copy rather than the project.
  */
-export function materializeTree(root, overlay, dest) {
+export async function materializeTree(root, overlay, dest) {
   const staged = overlay.keys();
   const underStaged = (abs) => staged.some((p) => p.startsWith(abs + path.sep));
 
@@ -54,15 +76,16 @@ export function materializeTree(root, overlay, dest) {
     if (rel.split(path.sep)[0] === '.git') continue; // never projected: see below
     const target = path.join(dest, rel);
     if (overlay.isDeleted(abs)) continue; // deleted for this run: not projected
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, overlay.readAt(abs));
+    await fs.promises.mkdir(path.dirname(target), { recursive: true });
+    await fs.promises.writeFile(target, overlay.readAt(abs));
   }
 
   const skip = new Set(staged);
-  const walk = (srcDir, dstDir) => {
-    fs.mkdirSync(dstDir, { recursive: true });
+  const walk = async (srcDir, dstDir) => {
+    await fs.promises.mkdir(dstDir, { recursive: true });
     let entries;
-    try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
+    try { entries = await fs.promises.readdir(srcDir, { withFileTypes: true }); } catch { return; }
+    const jobs = [];
     for (const e of entries) {
       if (e.name === '.aipass' || e.name === '.git') continue;
       const src = path.join(srcDir, e.name);
@@ -72,20 +95,21 @@ export function materializeTree(root, overlay, dest) {
         if (HEAVY.has(e.name) && !underStaged(src)) {
           try { fs.symlinkSync(src, dst, 'junction'); continue; } catch { /* copy instead */ }
         }
-        walk(src, dst);
+        jobs.push(walk(src, dst));
         continue;
       }
-      if (e.isFile()) { fs.copyFileSync(src, dst); continue; }
+      if (e.isFile()) { jobs.push(gatedCopy(src, dst)); continue; }
       // Symlinks and anything exotic: recreate what it points at, the cheapest
       // honest shape. A broken link is left out.
       try {
         const target = path.resolve(srcDir, fs.readlinkSync(src));
         if (fs.statSync(target).isDirectory()) fs.symlinkSync(target, dst, 'junction');
-        else fs.copyFileSync(target, dst);
+        else jobs.push(gatedCopy(target, dst));
       } catch { /* left out */ }
     }
+    await Promise.all(jobs);
   };
-  walk(root, dest);
+  await walk(root, dest);
 
   // Git discovers a repository by walking UP from the cwd, and this sandbox
   // sits under the project root — so dropping `.git` from the projection is
@@ -94,7 +118,9 @@ export function materializeTree(root, overlay, dest) {
   // there writes the real repository; an empty `.git` DIRECTORY does not stop
   // it either (git shrugs at the invalid directory and keeps climbing). A
   // `.git` FILE whose `gitdir:` goes nowhere is what halts the search: git
-  // reports "not a git repository" and exits. Written only when a repository
+  // reports no repository and exits (the exact wording varies by build — "not
+  // a git repository", or "gitfile does not point to a valid repository" on
+  // the CI runners). Written only when a repository
   // is actually reachable, so a project with none keeps today's sandbox,
   // `git init` included.
   if (repositoryAbove(root)) {

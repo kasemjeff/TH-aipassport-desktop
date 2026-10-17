@@ -46,12 +46,25 @@ class El {
   get textContent() { return `${this._text ?? ''}${this.children.map((c) => c.textContent ?? '').join('')}`; }
   set innerHTML(v) { this._html = String(v); }
   get innerHTML() { return this._html; }
-  // append() takes nodes and strings alike, exactly like the DOM.
+  // append() takes nodes and strings alike, exactly like the DOM — and moves a
+  // node that already lives somewhere, exactly like the DOM.
   append(...kids) {
     for (const k of kids) {
-      if (k && typeof k === 'object') k._parent = this;
+      if (k && typeof k === 'object') {
+        if (k._parent && k._parent !== this) k._parent.children = k._parent.children.filter((c) => c !== k);
+        k._parent = this;
+      }
       this.children.push(k);
     }
+  }
+  insertBefore(node, ref) {
+    if (node && typeof node === 'object') {
+      if (node._parent && node._parent !== this) node._parent.children = node._parent.children.filter((c) => c !== node);
+      node._parent = this;
+    }
+    const at = ref ? this.children.indexOf(ref) : -1;
+    if (at < 0) this.children.push(node);
+    else this.children.splice(at, 0, node);
   }
   addEventListener(type, fn) { (this.handlers[type] ??= []).push(fn); }
   setAttribute(k, v) { this.attrs[k] = String(v); }
@@ -115,7 +128,7 @@ let boots = 0;
  * settings, sessions, plugins — must land in this test's scratch directory, not
  * in the real ~/.aipass of whoever is running the suite.
  */
-async function bootApp(backend) {
+async function bootApp(backend, { token = null } = {}) {
   process.env.AIPASS_HOME = fs.mkdtempSync(path.join(tmpdir(), 'aipass-ui-'));
 
   const nodes = new Map();
@@ -148,10 +161,15 @@ async function bootApp(backend) {
   close() {}
 };
   globalThis.setInterval = () => 0; // the header refresher must not keep the process alive
+  const shots = []; // { url, headers } — what the token wiring rides on
   globalThis.fetch = async (_url, init = {}) => {
+    if (String(_url).endsWith('/token')) {
+      return token ? { ok: true, json: async () => ({ ok: true, token }) } : { json: async () => ({}) };
+    }
     const { method, params } = JSON.parse(init.body ?? '{}');
     calls.push(method);
     sent.push({ method, params });
+    shots.push({ url: String(_url), headers: { ...(init.headers ?? {}) } });
     const result = backend[method]?.(params) ?? { ok: true };
     return { json: async () => ({ ok: true, result }) };
   };
@@ -163,6 +181,8 @@ async function bootApp(backend) {
     node,
     calls,
     sent,
+    shots,
+    streamUrl: () => globalThis.__stream?.url,
     tick,
     dispatch: (type, ev) => globalThis.document.dispatch(type, ev),
     /** The built screen, for everything app.js creates with an id at runtime. */
@@ -221,6 +241,20 @@ test('typing "/" opens the palette and filters it as you type', async (t) => {
   const shown = node('slash-list').children.map((li) => li.children[0].textContent);
   assert.deepEqual(shown, ['/model', '/models', '/mode'], 'commands sharing a prefix all show');
   assert.equal(node('slash').classList.contains('hidden'), false, 'palette stays visible while a command is typed');
+});
+
+test('the window carries the loopback token on both transports', async () => {
+  // SECURITY.md's claim: the window asks the backend it was served from for
+  // the loopback token and attaches it everywhere a browser can — the
+  // EventSource as ?token=, /rpc as a bearer. The regression pinned here:
+  // /rpc went out bare, so a REQUIRED-auth backend 403ed every panel call.
+  const { tick, shots, streamUrl } = await bootApp(BACKEND, { token: 'tok-123' });
+  await tick();
+  assert.equal(streamUrl(), '/events?token=tok-123', 'the stream carries the token');
+  assert.ok(
+    shots.some((s) => s.url.endsWith('/rpc') && s.headers.authorization === 'Bearer tok-123'),
+    'rpc carries the bearer'
+  );
 });
 
 test('a slash that matches nothing says so instead of vanishing', async () => {
@@ -400,6 +434,23 @@ test('a run that stops for want of steps offers the next move', async () => {
   assert.equal(node('log').children.some((c) => /continue-row/.test(c.className)), false, 'and the row is gone');
 });
 
+test('a spent budget offers the same carry-on button as the step limit', async () => {
+  // With no step cap set, a budget stop is what ends a long run — the dead end
+  // the step limit used to be. It gets the same one-click way out.
+  const { node, calls, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('budget', { reason: 'time-limited', used: '1800s of 1800s' });
+  await tick();
+  const note = node('log').children.find((c) => /budget spent/.test(c.textContent));
+  assert.ok(note, 'the stop is named');
+  const row = node('log').children.find((c) => /continue-row/.test(c.className));
+  assert.ok(row, 'and the row carries a way out');
+  const on = row.children.find((c) => c.tagName === 'BUTTON');
+  on.dispatch('click');
+  await tick();
+  assert.ok(calls.includes('run'), 'clicking it starts a run');
+  assert.equal(node('log').children.some((c) => /continue-row/.test(c.className)), false, 'and the row is gone');
+});
+
 test('a compaction shows what the model carried over', async () => {
   const { node, tick } = await bootApp(BACKEND);
   globalThis.__stream.emit('compacted', { summary: 'read the bridge, changed nothing, still to do: tests' });
@@ -425,6 +476,76 @@ test('thinking streams into an open fold that closes when the turn ends', async 
   await tick();
   assert.equal(box.open, false, 'folded away when the turn ends');
   assert.match(box.textContent, /reasoning · \d+s/, 'and the summary says it happened');
+});
+
+test('a finished run folds its working trail and leaves the result open', async () => {
+  // The run used to leave every step on screen — the answer sat at the bottom
+  // of a wall of rows. On done/ask the trail folds under one line and the
+  // closing bubble is labelled as the result. (Reported after live use.)
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('task_start', { task: 'ช่วยอ่าน README หน่อย' });
+  globalThis.__stream.emit('assistant_delta', { text: 'Let me look.\n' });
+  globalThis.__stream.emit('tool', { kind: 'read', arg: 'README.md', ok: true, head: '12 lines' });
+  globalThis.__stream.emit('step', { step: 1, maxSteps: 10, elapsed: '1.2' });
+  globalThis.__stream.emit('assistant_delta', { text: 'อ่านแล้วนะ\n' });
+  globalThis.__stream.emit('done_line', { text: 'อ่าน README แล้ว สรุปสั้น ๆ ได้ว่าเป็นโปรเจกต์ตัวอย่าง' });
+  globalThis.__stream.emit('finished', { summary: 'อ่านแล้ว', stopReason: 'done', spent: 1, credits: { available: 9, limit: 10 } });
+  await tick(); await tick();
+
+  const log = node('log');
+  const isFold = (c) => c.tagName === 'DETAILS' && /(^|\s)run(\s|$)/.test(c.className ?? '');
+  const fold = log.children.find(isFold);
+  assert.ok(fold, 'the working trail folds into one details row');
+  assert.equal(fold.open, false, 'collapsed by default');
+  assert.match(fold.textContent, /ระหว่างทำงาน · \d+ รายการ/, 'the summary says how much is inside');
+  assert.ok(fold.children.some((c) => c.className === 'tool'), 'the tool row is inside the fold');
+  assert.ok(fold.children.some((c) => /note/.test(c.className ?? '') && /step 1\/10/.test(c.textContent)), 'the step note too');
+
+  const result = log.children.find((c) => /(^|\s)result(\s|$)/.test(c.className ?? ''));
+  assert.ok(result, 'the closing bubble is marked as the result');
+  // The closing summary is painted as markdown into the bubble's body; the
+  // fake DOM keeps innerHTML as a string, so the text is asserted there.
+  assert.match(result.children[0].innerHTML, /อ่าน README แล้ว/, 'and carries the closing text');
+  assert.equal(fold.children.includes(result), false, 'the result is not inside the fold');
+  assert.ok(log.children.indexOf(fold) < log.children.indexOf(result), 'the fold sits above the result');
+});
+
+test('a step-limit stop keeps the trail flat, carry-on button included', async () => {
+  // The fold is for runs that reached an answer. A stop short of one — steps,
+  // error, stall — is told by its trail, so nothing is hidden, and the
+  // carry-on button keeps working.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('task_start', { task: 'long task' });
+  globalThis.__stream.emit('tool', { kind: 'read', arg: 'a.txt', ok: true });
+  globalThis.__stream.emit('step_limit', {});
+  globalThis.__stream.emit('finished', { summary: 'steps', stopReason: 'steps', spent: 1 });
+  await tick(); await tick();
+
+  const log = node('log');
+  const isFold = (c) => c.tagName === 'DETAILS' && /(^|\s)run(\s|$)/.test(c.className ?? '');
+  assert.equal(log.children.some(isFold), false, 'a non-done ending stays flat');
+  const row = log.children.find((c) => /continue-row/.test(c.className));
+  assert.ok(row, 'and the carry-on row is still in the open');
+  assert.equal(row.children.some((c) => c.tagName === 'BUTTON'), true, 'its button is reachable');
+});
+
+test('a no-chat-tab banner is never swallowed by the fold', async () => {
+  // The banner carries the one-click fix; folding it away would hide the only
+  // click that unblocks the run.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('task_start', { task: 'x' });
+  globalThis.__stream.emit('needs_tab', { url: 'https://de.aipass.net/chat' });
+  globalThis.__stream.emit('tool', { kind: 'read', arg: 'a.txt', ok: true });
+  globalThis.__stream.emit('done_line', { text: 'ทำต่อไม่ได้จนกว่าจะมี tab' });
+  globalThis.__stream.emit('finished', { summary: 'x', stopReason: 'done', spent: 1 });
+  await tick(); await tick();
+
+  const log = node('log');
+  const bar = log.children.find((c) => /needs-tab/.test(c.className ?? ''));
+  assert.ok(bar, 'the banner stays visible');
+  const fold = log.children.find((c) => c.tagName === 'DETAILS' && /(^|\s)run(\s|$)/.test(c.className ?? ''));
+  assert.ok(fold, 'the trail still folds');
+  assert.equal(fold.children.includes(bar), false, 'the banner is not inside');
 });
 
 test('a run with no chat tab gets a banner with a one-click fix', async () => {
@@ -733,7 +854,8 @@ test('the settings sheet shows its categories and saves once', async () => {
   await tick(); await tick();
   assert.equal(calls.filter((c) => c === 'settings.set').length, 1, 'one write for one save');
 
-  // A step limit of zero is refused, with the reason on screen and no write.
+  // A negative step limit is refused, with the reason on screen and no write.
+  // (Zero is a real value now: "no cap".)
   node('settings-btn').dispatch('click');
   await tick(); await tick();
   // The control is on whichever page owns it, however deep that page nests
@@ -744,15 +866,17 @@ test('the settings sheet shows its categories and saves once', async () => {
     for (const c of n.children ?? []) walk(c);
   };
   walk(node('modal-body'));
-  const zeros = inputs.filter((n) => n.type === 'number' && String(n.value) === '10');
-  assert.ok(zeros.length, 'the step limit control is found by its value');
-  zeros[0].value = '0';
-  zeros[0].onchange({ target: zeros[0] });
+  const stepField = inputs.filter((n) => n.type === 'number' && String(n.value) === '10');
+  assert.ok(stepField.length, 'the step limit control is found by its value');
+  stepField[0].value = '-1';
+  stepField[0].onchange({ target: stepField[0] });
   const saveAgain = node('modal-actions').children.find((b) => /save|บันทึก/.test(b.textContent));
   saveAgain.dispatch('click');
   await tick(); await tick();
   assert.equal(calls.filter((c) => c === 'settings.set').length, 1, 'the bad edit never reaches disk');
-  const error = node('modal-body').children.find((c) => /settings-error/.test(c.className));
+  // The error row is built with the body but the actions row takes it in the
+  // end (append moves a node) — that is where it lives and where it must show.
+  const error = node('modal-actions').children.find((c) => /settings-error/.test(c.className));
   assert.ok(error && !error.classList.contains('hidden'), 'and the sheet explains why');
   assert.match(error.textContent, /step/, 'naming the field');
 });

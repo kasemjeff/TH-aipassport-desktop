@@ -126,7 +126,7 @@ aipass-bridge/
 └── test/
     ├── harness.mjs      spawns the real bridge + a scriptable fake extension
     ├── bridge.test.mjs  HTTP surface, conversation rotation, loopback round-trip
-    ├── agent.test.mjs   action protocol, 403 splitting, line dropping, dry run
+    ├── agent.test.mjs   action protocol, 403 waits and splitting, line dropping, dry run
     └── chat.test.mjs    one-shot output, tool/sources rendering, error messages
 ```
 
@@ -212,7 +212,11 @@ where objects address their keys and values by index, and negative numbers are
 request body is ignored. Stream mode emits OpenAI-shaped
 `chat.completion.chunk` frames; `status` parts from the extension become
 `reasoning_content` deltas unless `AIPASS_TOOL_VISIBILITY` says otherwise
-(`text` inlines them into `content`, `off` drops them).
+(`text` inlines them into `content`, `off` drops them). `note` parts — lines
+that are neither the answer nor tool activity, like a mid-reply model switch
+or the page waiting a 429 out — become a `note` delta with the same
+`reasoning_content` echo, so readers that never learned the field lose
+nothing and the harness can tell a pause from an answer.
 
 ### CORS
 
@@ -243,8 +247,10 @@ MV3, three script contexts, loaded unpacked.
 
 - **`connect()`** opens `GET {bridgeUrl}/ext/events` and reads the SSE stream,
   parsing `event:` / `data:` frames into `handleJob` / `abort`. It self-cycles
-  every **4 min** (`CYCLE_MS`, under Chrome's long-request ceiling) and retries
-  **3 s** after any drop. `chrome.alarms` (`keepalive`, every 30 s),
+  every **4 min** (`CYCLE_MS`, under Chrome's long-request ceiling); the first
+  retry after a drop waits **300 ms**, doubling to a **3 s** ceiling while the
+  bridge itself is away — the self-cycle costs a blink, not seconds.
+  `chrome.alarms` (`keepalive`, every minute),
   `onStartup`, `onInstalled`, and a `keepalive` port connection all call
   `connect()`; a guard makes duplicate calls harmless.
 - **`handleJob(job)`** → `findChatTab()` (a non-discarded `de.aipass.net` tab,
@@ -264,7 +270,7 @@ Two jobs:
    re-posted as a `window.postMessage`. Page → worker:
    `window.addEventListener('message')` results are sent via
    `chrome.runtime.sendMessage`, retried up to 5× because the target worker may
-   be mid-eviction.
+   be mid-eviction — but only while this copy is still the extension's.
 2. **Keep the worker alive.** `keepAlive()` opens a long-lived
    `chrome.runtime.connect({ name: 'keepalive' })` port, beats it every 20 s,
    and cycles it every 4 min. Chrome evicts an idle MV3 worker after ~30 s and
@@ -274,7 +280,9 @@ Two jobs:
 
 Both scripts carry a **generation guard** (`window.__aipassBridge*Gen`): each
 injection claims a higher number, older copies stand down. This is how a
-re-loaded extension replaces stale code in a tab that was already open.
+re-loaded extension replaces stale code in a tab that was already open. A copy
+orphaned by a reload (`chrome.runtime.id` is gone) stops its retry loops —
+the replacement that a re-injection installs owns the relay and keepalive.
 
 ### `page.js` — MAIN world
 
@@ -306,9 +314,12 @@ do three narrow things:
 ### `popup.js`
 
 Polls `chrome.runtime.sendMessage({ type: 'status' })` and `GET /status` every
-1.5 s. Shows connected/not, the chat tab's path, active job count, a
+2 s. Shows connected/not, the chat tab's path, active job count, a
 default-model `<select>` (writes `POST /config`), and a bridge-URL field
-(writes `chrome.storage.local` + triggers a reconnect).
+(writes `chrome.storage.local` + triggers a reconnect). An Advanced row
+carries **Reload extension** (`chrome.runtime.reload()` — it refuses while a
+run is active, since the worker holds live jobs) and **Reload chat tab**: the
+two steps that put changed extension files into effect.
 
 ---
 
@@ -404,7 +415,7 @@ lines, no dependencies.
 
 | line | effect |
 |---|---|
-| `NEED dir <path>` | list a directory |
+| `NEED dir <path>` (or `NEED list` / `NEED ls`) | list a directory |
 | `NEED file <path> [a-b]` | read a file with a line-number gutter; optional range |
 | `SEARCH <text>` | grep the tree → `file:line: excerpt` (max 50 hits) |
 | `EDIT <p>` / `FIND` … / `NEW` … / `END` | replace an exact snippet — refused unless `FIND` matches **one** place |
@@ -572,9 +583,9 @@ All on `http://127.0.0.1:8787` by default. Every response has
    posting each batch back via `content.js` → `background.js` →
    `POST /ext/chunk`.
 6. **bridge** `extPost` → `job.delta(part)` for each part → `onDelta` →
-   `emit({ content })` (or `{ reasoning_content }` for `status`) as a
-   `chat.completion.chunk` on the CLI's still-open response. `touch()` re-arms
-   the idle timer on every delta.
+   `emit({ content })` (or `{ reasoning_content }` for `status`/`note` — a note
+   also sends its own `note` field) as a `chat.completion.chunk` on the CLI's
+   still-open response. `touch()` re-arms the idle timer on every delta.
 7. Upstream `finish` → `page.js` posts `POST /ext/done` → `job.done()` → the
    bridge emits the final chunk + `data: [DONE]` and ends the response.
 8. **`chat.mjs`** has been streaming the whole time (dim live echo); on

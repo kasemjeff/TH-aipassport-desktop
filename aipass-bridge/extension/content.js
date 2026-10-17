@@ -14,7 +14,10 @@ async function toWorker(payload, attempt = 0) {
   try {
     await chrome.runtime.sendMessage({ type: 'from-page', payload });
   } catch {
-    if (attempt >= 5) return;
+    // A reloaded extension invalidates this context outright — the copy a
+    // re-injection installs relays from here on, and retrying can only fail.
+    // Retry only while this copy is still the extension's.
+    if (attempt >= 5 || !chrome.runtime?.id) return;
     setTimeout(() => toWorker(payload, attempt + 1), 200 * (attempt + 1));
   }
 }
@@ -40,6 +43,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 // cycle every half minute, and any job landing in that window fails. An open
 // port does count, so hold one and cycle it before Chrome's 5-minute ceiling.
 function keepAlive() {
+  // Orphaned by an extension reload: the replacement that a re-injection
+  // installs owns keepalive, and connect() from here could only ever fail.
+  if (!chrome.runtime?.id) return;
   let port;
   try { port = chrome.runtime.connect({ name: 'keepalive' }); }
   catch { setTimeout(keepAlive, 1000); return; }

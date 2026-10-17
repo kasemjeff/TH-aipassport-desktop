@@ -12,12 +12,41 @@ const log = $('log');
 
 /* ------------------------------------------------------------------- rpc */
 
+// When the backend asks for one — AIPASS_REQUIRE_AUTH, the default — every
+// /rpc and /events call needs the loopback token. The window is a same-origin
+// page served by that same backend, so it asks /token for it once at boot
+// instead of anyone pasting a file; when auth is off the endpoint refuses and
+// authToken stays null, which is exactly the bare-request shape used before.
+let authToken = null;
+
+async function fetchToken() {
+  try {
+    const res = await fetch('/token');
+    if (!res.ok) return null;
+    const body = await res.json();
+    return typeof body.token === 'string' && body.token ? body.token : null;
+  } catch {
+    return null;
+  }
+}
+
 async function rpc(method, params = {}) {
-  const res = await fetch('/rpc', {
+  const send = () => fetch('/rpc', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+    },
     body: JSON.stringify({ method, params }),
   });
+  let res = await send();
+  // A 401 on a token-less call means the boot fetch lost a race (or the
+  // backend restarted between page load and now): fetch once more and retry,
+  // but only when that actually changes what we would send.
+  if (res.status === 401) {
+    const fresh = await fetchToken();
+    if (fresh && fresh !== authToken) { authToken = fresh; res = await send(); }
+  }
   const body = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
   if (!body.ok) throw new Error(body.error ?? 'rpc failed');
   return body.result;
@@ -51,6 +80,7 @@ const state = {
   pluginTools: [],      // {marker, takesBody} — what the transcript must hide
   needsTab: false,      // the last run could not proceed for want of a chat tab
   needsCompaction: false, // the budget is close to full and a rotation is coming
+  runCursor: null,      // where in the log the live run's rows begin
 };
 
 /* -------------------------------------------------------------- transcript */
@@ -102,10 +132,42 @@ function paintAssistant(a) {
   scrollDown();
 }
 
+/**
+ * Paints at most once per frame. The stream delivers dozens of deltas a
+ * second and each one used to re-render the whole reply — a long answer spent
+ * most of its time re-rendering its own prefix. Text accumulates as it
+ * arrives; the queued frame paints the latest state once, and the queue holds
+ * bubble objects, so a step that closed one bubble and opened the next still
+ * paints both. With no frame clock (the test window) a 0 ms timeout stands in
+ * — still a task later, so a burst inside one turn coalesces there too.
+ */
+const paintQueue = new Set();
+let thinkingDirty = false;
+let paintQueued = false;
+const nextFrame = typeof requestAnimationFrame === 'function'
+  ? requestAnimationFrame
+  : (fn) => setTimeout(fn, 0);
+function flushPaints() {
+  paintQueued = false;
+  const due = [...paintQueue];
+  paintQueue.clear();
+  for (const b of due) paintAssistant(b);
+  if (thinkingDirty) {
+    thinkingDirty = false;
+    if (state.thinking) { state.thinking.el.textContent = state.thinking.text; scrollDown(); }
+  }
+}
+function queuePaint(bubble = null) {
+  if (bubble) paintQueue.add(bubble); else thinkingDirty = true;
+  if (paintQueued) return;
+  paintQueued = true;
+  nextFrame(flushPaints);
+}
+
 function assistantText(delta) {
   const a = ensureAssistant();
   a.text += delta;
-  paintAssistant(a);
+  queuePaint(a);
 }
 
 /**
@@ -148,8 +210,7 @@ function thinkingText(delta) {
     state.thinking = { el: pre, text: '', box, summary, since: Date.now() };
   }
   state.thinking.text += delta;
-  state.thinking.el.textContent = state.thinking.text;
-  scrollDown();
+  queuePaint();
 }
 
 /** Like the terminal's steps: when the turn ends the reasoning folds away,
@@ -168,6 +229,40 @@ function foldThinking() {
 function endTurn() {
   foldThinking();
   state.assistant = null;
+}
+
+/**
+ * The run is over: fold its working trail — tool rows, step notes, folded
+ * reasoning, the intermediate prose — into one collapsed line, so the closing
+ * bubble is the answer and nothing else competes with it. Two kinds of row
+ * stay in the open, because their buttons have to stay reachable when the run
+ * stopped short: a step-limit "carry on" row and a no-chat-tab banner. Only a
+ * run that ended with something to say (done or a question) folds; an error or
+ * a stall keeps the whole trail visible — what went wrong is the result then.
+ */
+function foldRun(stopReason) {
+  const start = state.runCursor;
+  state.runCursor = null;
+  if (start == null) return;
+  if (!['done', 'ask'].includes(stopReason)) return;
+  const kids = [...log.children].slice(start);
+  if (!kids.length) return;
+
+  // The closing bubble — the last assistant reply of the run — is the result.
+  let result = null;
+  for (let i = kids.length - 1; i >= 0; i--) {
+    if (/\bassistant\b/.test(kids[i].className ?? '')) { result = kids[i]; break; }
+  }
+  const foldable = kids.filter((k) => k !== result && !/continue-row|needs-tab/.test(k.className ?? ''));
+  if (!result || !foldable.length) return; // a plain Q&A turn has nothing to fold
+
+  const wrap = el('details', 'run');
+  wrap.open = false;
+  wrap.append(el('summary', null, `✻ ระหว่างทำงาน · ${foldable.length} รายการ`));
+  for (const k of foldable) wrap.append(k); // append moves the node
+  log.insertBefore(wrap, result);
+  result.classList.add('result');
+  scrollDown();
 }
 
 /**
@@ -331,7 +426,11 @@ function askPlan() {
 
 /* ------------------------------------------------------------------ events */
 
-const stream = new EventSource('/events');
+// EventSource cannot set headers, so the token (when there is one) rides the
+// URL — rpc.mjs accepts `?token=` on /events. This resolves before the stream
+// opens: a window under auth never starts in a 401 reconnect loop.
+authToken = authToken ?? (await fetchToken());
+const stream = new EventSource(authToken ? `/events?token=${encodeURIComponent(authToken)}` : '/events');
 
 // The transport, not the run. When the backend process goes away the stream
 // drops and the window used to sit there with a live spinner on a run that no
@@ -340,6 +439,10 @@ const stream = new EventSource('/events');
 let lastEventAt = Date.now();
 stream.addEventListener('open', () => { lastEventAt = Date.now(); void restoreFromSnapshot(); });
 stream.addEventListener('message', () => { lastEventAt = Date.now(); });
+// rpc.mjs sends a named ping every 15 s precisely so this watchdog reads
+// "the backend died", not "the model went quiet": a long RUN or SEARCH streams
+// no other frames for a while, and nothing else here refreshes the clock.
+stream.addEventListener('ping', () => { lastEventAt = Date.now(); });
 
 /**
  * Put the window back where it was after a reload or a reconnect.
@@ -396,6 +499,9 @@ setInterval(() => {
 stream.addEventListener('task_start', (e) => {
   addTask(JSON.parse(e.data).task);
   hideWelcome();
+  // Everything appended from here until `finished` is this run's working
+  // trail; foldRun() picks it up by this mark so an earlier turn is untouched.
+  state.runCursor = log.children.length;
   refreshMeter();
   lastEventAt = Date.now();
 });
@@ -429,7 +535,7 @@ stream.addEventListener('step', (e) => {
   // rows trail prose that was written after them.
   foldThinking();
   state.assistant = null;
-  addNote(`step ${step}/${maxSteps} · ${elapsed}s`);
+  addNote(maxSteps > 0 ? `step ${step}/${maxSteps} · ${elapsed}s` : `step ${step} · ${elapsed}s`);
 });
 stream.addEventListener('thinking', (e) => {
   const { text } = JSON.parse(e.data);
@@ -457,12 +563,11 @@ stream.addEventListener('check_end', (e) => {
         : 'ตรวจแล้ว ไม่มีคำสั่งให้รัน';
   addNote(what);
 });
-stream.addEventListener('step_limit', () => {
-  addNote('reached the step limit');
-  // A run that stops for want of steps is a dead end unless the next move is
-  // offered: "carry on" is one click instead of retyping what to do next.
+/** A stopped run is a dead end unless the next move is offered: "carry on" is
+ *  one click instead of retyping what to do next. */
+function offerCarryOn(what) {
   const row = el('div', 'note continue-row');
-  row.append(el('span', null, 'หยุดเพราะใช้ครบ step — '));
+  row.append(el('span', null, what));
   const on = el('button', 'mini', 'ให้ทำต่อ');
   on.onclick = () => {
     row.remove();
@@ -471,6 +576,17 @@ stream.addEventListener('step_limit', () => {
   row.append(on);
   log.append(row);
   scrollDown();
+}
+stream.addEventListener('step_limit', () => {
+  addNote('reached the step limit');
+  offerCarryOn('หยุดเพราะใช้ครบ step — ');
+});
+// With no step cap set, a spent budget is what ends a long run — the same dead
+// end the step limit used to be, so it gets the same way out.
+stream.addEventListener('budget', (e) => {
+  const { used } = JSON.parse(e.data);
+  addNote(`budget spent (${used}) — stopping`);
+  offerCarryOn(`หยุดเพราะครบ budget (${used}) — `);
 });
 stream.addEventListener('error', (e) => addNote(`error: ${JSON.parse(e.data).message}`));
 stream.addEventListener('todo', (e) => renderTodo(JSON.parse(e.data).items));
@@ -512,6 +628,7 @@ stream.addEventListener('finished', async (e) => {
   // list says whether Apply is about to write something a check passed.
   state.lastCheck = check ?? null;
   endTurn();
+  foldRun(stopReason);
   state.running = false;
   $('send').textContent = 'ส่ง';
   $('hint').textContent = '';
@@ -1059,9 +1176,10 @@ const SETTINGS_SECTIONS = [
       { key: 'defaultModel', label: 'โมเดลเริ่มต้น', type: 'text', note: 'id ของโมเดล — ดูรายการได้ที่ /models หรือกดที่หัวหน้าต่าง' },
       { key: 'mode', label: 'สิทธิ์แก้ไฟล์', type: 'select', options: [['ask', 'ถามก่อนเขียนทุกไฟล์'], ['auto', 'เขียนเลยไม่ถาม'], ['yolo', 'เขียน + รันคำสั่ง shell']] },
       { key: 'allowRun', label: 'อนุญาตให้รันคำสั่ง shell', type: 'checkbox', note: 'ปิด = โมเดลแก้ไฟล์ได้อย่างอื่นไม่ได้' },
-      { key: 'maxSteps', label: 'สูงสุดกี่ Step ต่อคำสั่ง', type: 'number', note: 'กันเรื่องราวยาวไม่จบ — ตัวเลขสูง = เสียเครดิตรัวกว่า' },
+      { key: 'maxSteps', label: 'สูงสุดกี่ Step ต่อคำสั่ง', type: 'number', note: '0 = ไม่จำกัด — งานยาวไปจนจบ; เบรกจริงคือ budget ด้านล่าง (tool calls / เวลา)' },
       { key: 'maxToolCalls', label: 'สูงสุดกี่ tool call ต่อคำสั่ง', type: 'number', note: 'เพดานกันหลุด — คำตอบเดียวที่สั่งเครื่องมือร้อยครั้งจะหยุดเมื่อถึงตัวเลขนี้ (ค่าเริ่มต้น 300)' },
       { key: 'maxWallClockMin', label: 'เวลาสูงสุดต่อคำสั่ง (นาที)', type: 'number', note: 'เพดานเวลา — งานที่ค้างจะหยุดเอง (ค่าเริ่มต้น 30)' },
+      { key: 'maxCredits', label: 'เพดานเครดิตต่อคำสั่ง', type: 'number', note: '0 = ไม่จำกัด — หยุดงานเมื่อใช้เครดิตถึงเพดาน (เช็คกับยอดที่แคชไว้ ~30 วิ ต่อครั้ง)' },
       { key: 'plan', label: 'plan mode', type: 'checkbox', note: 'โมเดลร่างแผนก่อนลงมือ' },
       { key: 'requirePlanApproval', label: 'รอให้อนุมัติแผนก่อนทำ', type: 'checkbox', note: 'ใช้ได้ก็ต่อเมื่อ plan mode เปิด' },
       { key: 'subagent', label: 'ให้เรียก helper ย่อย', type: 'checkbox', note: 'งานยาวถูกแบ่งให้ตัวช่วย แล้วรีพอร์ตกลับ' },
@@ -1385,16 +1503,20 @@ async function openSettings() {
 
   const save = el('button', 'primary', 'บันทึก');
   save.onclick = async () => {
-    // Check before writing: a budget under its reserve, or a step limit of
-    // zero, is a mistake the person should hear about — not a setting that
-    // quietly misbehaves on the next run.
+    // Check before writing: a budget under its reserve is a mistake the person
+    // should hear about — not a setting that quietly misbehaves on the next
+    // run. Zero steps is no mistake: it is the deliberate "no cap".
     const problems = [];
     const maxSteps = Number(draft.maxSteps);
-    if (!Number.isFinite(maxSteps) || maxSteps < 1) problems.push('สูงสุดกี่ step ต้องเป็นตัวเลขอย่างน้อย 1');
+    if (!Number.isFinite(maxSteps) || maxSteps < 0) problems.push('สูงสุดกี่ step ต้องเป็น 0 ขึ้นไป (0 = ไม่จำกัด)');
     const maxToolCalls = Number(draft.maxToolCalls);
     if (!Number.isFinite(maxToolCalls) || maxToolCalls < 1) problems.push('สูงสุดกี่ tool call ต้องเป็นตัวเลขอย่างน้อย 1');
     const maxWallClockMin = Number(draft.maxWallClockMin);
     if (!Number.isFinite(maxWallClockMin) || maxWallClockMin < 1) problems.push('เวลาสูงสุดต่อคำสั่ง ต้องเป็นตัวเลขอย่างน้อย 1 นาที');
+    if (draft.maxCredits != null) {
+      const creditCap = Number(draft.maxCredits);
+      if (!Number.isFinite(creditCap) || creditCap < 0) problems.push('เพดานเครดิตต้องเป็น 0 (ไม่จำกัด) หรือตัวเลขบวก');
+    }
     // The language keys are checked only when the payload carries them: a
     // window talking to a backend that predates them must still save (the
     // server's own sane() fills the defaults), and an absent key is not an
@@ -1547,7 +1669,9 @@ async function refreshHeader() {
   $('status').append(dot(st.bridge, 'bridge'), dot(st.extensions > 0, `extension ×${st.extensions}`));
   refreshMeter();
   if (st.model) {
-    const credits = await rpc('credits').catch(() => null);
+    // Live while a run spends credits; idle windows ride the bridge's cache
+    // instead of poking the de.aipass.net tab every ten seconds.
+    const credits = await rpc('credits', { force: Boolean(state.running) }).catch(() => null);
     if (credits) $('status').append(el('span', null, `credits ${credits.available?.toLocaleString?.() ?? credits.available} / ${credits.limit?.toLocaleString?.() ?? credits.limit}`));
   }
   if (st.model && !$('model').options.length) await fillModels(st.model);

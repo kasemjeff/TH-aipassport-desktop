@@ -27,6 +27,11 @@ const isRule = (r) => r && typeof r === 'object'
 const isGrant = (g) => g && typeof g === 'object'
   && typeof g.kind === 'string' && typeof g.arg === 'string';
 
+/** The per-project record, replaced when the file holds something else there. */
+const entryOf = (data, key) => (data.projects[key] && typeof data.projects[key] === 'object' && !Array.isArray(data.projects[key])
+  ? data.projects[key]
+  : (data.projects[key] = {}));
+
 export class RulesStore {
   // The default honours AIPASS_HOME like every other surface: a test run must
   // not read - let alone write - the configuration of whoever is using the app
@@ -38,7 +43,16 @@ export class RulesStore {
   load() {
     try {
       const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      return parsed && typeof parsed === 'object' && parsed.projects ? parsed : { projects: {} };
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { projects: {} };
+      // `projects` must be a plain object: a hand-edited file with a string
+      // there used to crash the writer below (cannot create a property on a
+      // primitive) the moment the next "always" answer tried to save. The
+      // reader already refused to trust it; the shape is repaired once, for
+      // both.
+      const projects = parsed.projects && typeof parsed.projects === 'object' && !Array.isArray(parsed.projects)
+        ? parsed.projects
+        : {};
+      return { ...parsed, projects };
     } catch {
       return { projects: {} }; // missing or unreadable is the normal first-run case
     }
@@ -63,7 +77,7 @@ export class RulesStore {
     if (!isGrant({ kind, arg })) return;
     const data = this.load();
     const key = path.resolve(root);
-    const entry = data.projects[key] ?? (data.projects[key] = {});
+    const entry = entryOf(data, key);
     entry.grants = Array.isArray(entry.grants) ? entry.grants.filter(isGrant) : [];
     if (entry.grants.some((g) => g.kind === kind && g.arg === arg)) return;
     entry.grants.push({ kind, arg });
@@ -74,7 +88,7 @@ export class RulesStore {
   setRules(root, rules) {
     const data = this.load();
     const key = path.resolve(root);
-    const entry = data.projects[key] ?? (data.projects[key] = {});
+    const entry = entryOf(data, key);
     entry.rules = (Array.isArray(rules) ? rules : []).filter(isRule);
     if (!entry.rules.length && !entry.grants?.length) delete data.projects[key];
     this.save(data);

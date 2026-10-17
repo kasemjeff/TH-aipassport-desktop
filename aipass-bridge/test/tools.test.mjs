@@ -85,13 +85,13 @@ test('GIT is async, and shell punctuation cannot ride behind an allowed subcomma
   assert.match(out, /On branch|No commits yet/, 'a real read-only subcommand still works');
 });
 
-test('failures carry the err: prefix the loop keys on', () => {
+test('failures carry the err: prefix the loop keys on', async () => {
   const dir = mkTracked({ 'a.txt': 'hello\n' });
   const tools = toolsIn(dir, { skills: new SkillLibrary([]) });
   assert.match(tools.read('missing.txt'), /^err: no such file/);
-  assert.match(tools.replace('a.txt', ['', 'x']), /^err: the text to change was empty/);
-  assert.match(tools.replace('a.txt', ['not there at all', 'x']), /^err: the text to change was not found/);
-  assert.match(tools.search('   '), /^err: give me some text/);
+  assert.match(await tools.replace('a.txt', ['', 'x']), /^err: the text to change was empty/);
+  assert.match(await tools.replace('a.txt', ['not there at all', 'x']), /^err: the text to change was not found/);
+  assert.match(await tools.search('   '), /^err: give me some text/);
   assert.match(tools.glob(''), /^err: give me a glob/);
   assert.match(tools.delete(''), /^err: give me a file path/);
   assert.match(tools.delete('nope.txt'), /^err: no such file/);
@@ -101,14 +101,14 @@ test('failures carry the err: prefix the loop keys on', () => {
   assert.match(tools.read('a.txt'), /^1 \| hello/);
 });
 
-test('SEARCH -i matches without letter case; plain SEARCH stays exact', () => {
+test('SEARCH -i matches without letter case; plain SEARCH stays exact', async () => {
   const dir = mkTracked({ 'case.txt': 'Hello World\nbye\n' });
   const tools = toolsIn(dir);
-  assert.match(tools.search('hello world'), /no matches/);
-  assert.match(tools.search('-i hello world'), /case\.txt:1: Hello World/);
+  assert.match(await tools.search('hello world'), /no matches/);
+  assert.match(await tools.search('-i hello world'), /case\.txt:1: Hello World/);
 });
 
-test('SEARCH and GLOB honour .gitignore, and the SKIP suspects are out even without one', () => {
+test('SEARCH and GLOB honour .gitignore, and the SKIP suspects are out even without one', async () => {
   const dir = mkTracked({
     '.gitignore': '*.log\nbuild-out/\n/root-only.txt\n!keep.log\n',
     'app.log': 'needle in a log\n',
@@ -122,7 +122,7 @@ test('SEARCH and GLOB honour .gitignore, and the SKIP suspects are out even with
     'coverage/lcov.info': 'needle in coverage\n',
   });
   const tools = toolsIn(dir);
-  const hits = tools.search('needle');
+  const hits = await tools.search('needle');
   assert.match(hits, /src\/code\.js/);
   assert.match(hits, /keep\.log/, 'a negation re-includes the file');
   assert.match(hits, /nested\/root-only\.txt/, 'a rooted rule ignores the root copy only');
@@ -134,13 +134,13 @@ test('SEARCH and GLOB honour .gitignore, and the SKIP suspects are out even with
   assert.deepEqual(tools.glob('**/*.log').split('\n'), ['keep.log']);
 });
 
-test('SEARCH skips files over the 1 MB cap instead of reading them line by line', () => {
+test('SEARCH skips files over the 1 MB cap instead of reading them line by line', async () => {
   const dir = mkTracked({
     'big.txt': `${'x'.repeat(1_100_000)}\nneedle\n`,
     'small.txt': 'needle here\n',
   });
   const tools = toolsIn(dir);
-  const hits = tools.search('needle');
+  const hits = await tools.search('needle');
   assert.match(hits, /small\.txt/);
   assert.doesNotMatch(hits, /big\.txt/);
 });
@@ -172,44 +172,44 @@ test('ATTACH queues a part the loop can send, and refuses what cannot ride a cha
   assert.equal(tools.pendingParts.length, 0);
 });
 
-test('ATTACH serves a file the run wrote itself, from the overlay', () => {
+test('ATTACH serves a file the run wrote itself, from the overlay', async () => {
   const dir = mkTracked({});
   const tools = toolsIn(dir);
-  tools.write('made.txt', 'freshly written\n');
+  await tools.write('made.txt', 'freshly written\n');
   assert.match(tools.attach('made.txt'), /queued made\.txt/);
   assert.equal(tools.pendingParts[0].type, 'file');
   assert.match(tools.pendingParts[0].file.file_data, /^data:text\/plain;base64,/);
 });
 
-test('a write answers with a read-back of what it staged', () => {
+test('a write answers with a read-back of what it staged', async () => {
   const dir = mkTracked({});
   const tools = toolsIn(dir);
-  const out = tools.write('notes.txt', 'first line\nmiddle\nlast line');
+  const out = await tools.write('notes.txt', 'first line\nmiddle\nlast line');
   assert.match(out, /^wrote notes\.txt, 3 lines/);
   assert.match(out, /read-back: 1: first line/);
   assert.match(out, / \| 3: last line/, 'and the last line, so a body cut short shows');
 });
 
-test('CREATE over an existing file requires a read first', () => {
+test('CREATE over an existing file requires a read first', async () => {
   const dir = mkTracked({ 'notes.txt': 'original text\n' });
   const tools = toolsIn(dir);
-  const refused = tools.write('notes.txt', 'replacement\n');
+  const refused = await tools.write('notes.txt', 'replacement\n');
   assert.match(refused, /^err: notes\.txt already exists on disk and has not been read/);
   assert.match(refused, /NEED file notes\.txt/, 'the way out is named');
   assert.equal(fs.readFileSync(`${dir}/notes.txt`, 'utf8'), 'original text\n', 'the disk was never touched');
   assert.match(tools.read('notes.txt'), /original text/, 'reading clears the gate');
-  assert.match(tools.write('notes.txt', 'replacement\n'), /^wrote notes\.txt/);
+  assert.match(await tools.write('notes.txt', 'replacement\n'), /^wrote notes\.txt/);
   // A file the run staged itself can be rewritten — it is the run's own work.
-  assert.match(tools.write('fresh.txt', 'one\n'), /^wrote fresh\.txt/);
-  assert.match(tools.write('fresh.txt', 'two\n'), /^wrote fresh\.txt/);
+  assert.match(await tools.write('fresh.txt', 'one\n'), /^wrote fresh\.txt/);
+  assert.match(await tools.write('fresh.txt', 'two\n'), /^wrote fresh\.txt/);
 });
 
-test('a missed FIND answers with the closest line, a repeated one with its places', () => {
+test('a missed FIND answers with the closest line, a repeated one with its places', async () => {
   const dir = mkTracked({ 'a.txt': 'const total = price * qty;\nconst label = "Total";\n' });
   const tools = toolsIn(dir);
-  const missed = tools.replace('a.txt', ['const total = price * quantity;', 'x']);
+  const missed = await tools.replace('a.txt', ['const total = price * quantity;', 'x']);
   assert.match(missed, /^err: the text to change was not found/);
   assert.match(missed, /closest line in the file: 1: "const total = price \* qty;"/);
-  const twice = tools.replace('a.txt', ['const ', 'let ']);
+  const twice = await tools.replace('a.txt', ['const ', 'let ']);
   assert.match(twice, /appears 2 times in a\.txt \(lines 1, 2\)/);
 });
