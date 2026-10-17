@@ -1,5 +1,5 @@
 {
-  "//": "Type-check only. Editors pick this up automatically for files with a `// @ts-check` pragma. To check from the CLI: `npm i -D typescript` then `npx tsc -p aipass-bridge/jsconfig.json`. No build step, no runtime dependency, no output.",
+  "//": "Type-check only. Editors pick this up automatically for files with a `// @ts-check` pragma. To check from the CLI: `npm run typecheck` (runs `tsc -p aipass-bridge/jsconfig.json`). No build step, no runtime dependency, no output. checkJs stays false so un-annotated files are not checked; files opt in with `// @ts-check`.",
   "compilerOptions": {
     "checkJs": false,
     "allowJs": true,
@@ -10,7 +10,8 @@
     "lib": ["es2023"],
     "strict": true,
     "skipLibCheck": true,
+    "types": ["node"],
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["chat.mjs"]
+  "include": ["harness/log-line.mjs"]
 }
