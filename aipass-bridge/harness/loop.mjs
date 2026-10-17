@@ -231,6 +231,7 @@ export async function runTask(taskText, ctx = {}) {
   let verifySent = false;
   let codeTouched = false;   // a code file was staged this run
   let verifiedSinceChange = false;
+  let sendError = null;      // the message that ended the run, when stopReason is 'error'
   let summary = null;
   let stopReason = 'steps';
 
@@ -385,6 +386,10 @@ export async function runTask(taskText, ctx = {}) {
       // not read "error" for something the user did on purpose.
       if (err?.name === 'AbortError') { stopReason = 'cancelled'; break; }
       events?.emit('error', { message: err.message });
+      // Keep the reason a run died: the UI event is ephemeral, and 40% of runs
+      // end this way — without a note the session keeps no trace of why.
+      session?.append('note', { text: `the send failed: ${err.message}` });
+      sendError = String(err.message ?? err);
       // The one failure with an obvious cause and an obvious fix: the bridge is
       // up and the extension is connected, but no logged-in chat tab is open, so
       // there is nowhere for the request to run. Say so on its own event, and
@@ -473,7 +478,11 @@ export async function runTask(taskText, ctx = {}) {
         events?.emit('give_up', {}); stopReason = 'stalled'; break;
       }
       events?.emit('nudge', { n: nudgeStreak });
-      next = `That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it. I will paste back exactly what you ask for. ${REMINDER}`;
+      const attempted = attemptedMarker(reply);
+      const shapeHint = attempted
+        ? `That reply looked like it was trying to act — something in it had the shape of a marker — but it did not parse as one. A marker must sit at the start of its own line, with no indentation, bold or code fence, and use an exact keyword: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it, and so on. One call per line. `
+        : '';
+      next = `${shapeHint}That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it. I will paste back exactly what you ask for. ${REMINDER}`;
       continue;
     }
     nudgeStreak = 0;
@@ -788,6 +797,7 @@ export async function runTask(taskText, ctx = {}) {
   // protocol drift shows up before it is guessed at.
   const runStats = {
     stopReason,
+    sendError,
     // The model that produced this run — `stats` groups by it (`byModel`), so
     // "which model drifts" is a field, not a guess. Null on a bridge without one.
     model: bridge.model ?? null,

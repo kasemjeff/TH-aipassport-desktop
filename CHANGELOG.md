@@ -7,6 +7,10 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Added
 
+- **A failed send leaves a trace.** A run that stops because a send threw
+  now records the cause in the session (a `note` entry and
+  `run_stats.sendError`) instead of losing it, so the next failure names its
+  shape (`test/harness-fixes.test.mjs`).
 - **`maxCredits` — a spend cap per run.** The loop counts observed spend
   against the bridge's cached quota (0 = off, the default) and stops a run at
   the ceiling with the stop reason `credit-limited`. Set it in Settings, in
@@ -67,6 +71,14 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **GLOB speaks shell globs again.** Brace alternation (`*.{js,css,html}`)
+  and `?` are expanded and matched the way the shells do; the braces were
+  escaped before, so a tree full of matching files answered "no files matched"
+  (`test/tools.test.mjs`).
+- **The nudge names a broken marker.** When a reply contained marker-shaped
+  text that did not parse, the correction now says so and lists the shape
+  rules (start of its own line, no indentation, bold or code fence, exact
+  keyword) instead of the generic "no marker" line.
 - `RUN type .env`, `SEARCH` over `server.pem`, and `git show HEAD:.env` were
   three ways around the secret floor; all three are refused now
   (`test/secret-screen.test.mjs`).

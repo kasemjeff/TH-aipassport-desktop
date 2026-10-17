@@ -134,6 +134,26 @@ test('SEARCH and GLOB honour .gitignore, and the SKIP suspects are out even with
   assert.deepEqual(tools.glob('**/*.log').split('\n'), ['keep.log']);
 });
 
+test('GLOB expands brace alternation and single-char ? like the shells do', () => {
+  const dir = mkTracked({
+    'index.html': 'x\n',
+    'about.html': 'x\n',
+    'app.js': 'x\n',
+    'app.css': 'x\n',
+    'README.md': 'x\n',
+  });
+  const tools = toolsIn(dir);
+  assert.deepEqual(
+    tools.glob('**/*.{js,css,html}').split('\n').sort(),
+    ['about.html', 'app.css', 'app.js', 'index.html'],
+  );
+  assert.deepEqual(
+    tools.glob('index.?tml').split('\n').sort(),
+    ['index.html'],
+  );
+  assert.match(tools.glob('**/*.{ts,tsx}'), /^no files matched/);
+});
+
 test('SEARCH skips files over the 1 MB cap instead of reading them line by line', async () => {
   const dir = mkTracked({
     'big.txt': `${'x'.repeat(1_100_000)}\nneedle\n`,

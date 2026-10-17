@@ -380,6 +380,28 @@ test('a firewall rejection is not logged, and each accepted retry exactly once (
   assert.deepEqual(users.map((u) => u.text), received.slice(1));
 });
 
+test('a send that failed outright records why it died (note + run_stats.sendError)', async () => {
+  const dir = tempDir({ 'a.txt': 'hello\n' });
+  const store = new SessionStore(path.join(dir, 'sessions'));
+  const session = store.create({ root: dir });
+  const tools = createTools({ root: dir, overlay: new Overlay(dir) });
+
+  const result = await runTask('read the project', {
+    bridge: {
+      async chat() { throw new Error('bridge is unreachable'); },
+      async quota() { return { available: 1 }; },
+    },
+    tools, overlay: new Overlay(dir), session,
+    options: { maxSteps: 2 }, first: true,
+  });
+
+  assert.equal(result.stopReason, 'error');
+  const note = session.entries.find((e) => e.type === 'note' && /the send failed: bridge is unreachable/.test(e.text));
+  assert.ok(note, 'the failure was written to the session, not just emitted');
+  const stats = session.entries.find((e) => e.type === 'run_stats');
+  assert.equal(stats.sendError, 'bridge is unreachable', 'run_stats carries the cause');
+});
+
 /* H7 — the stagnation guard ------------------------------------------------ */
 
 /** A bridge that answers a fixed list of turns and records what was sent. */

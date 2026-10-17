@@ -178,6 +178,48 @@ function gitAllowed(sub) {
   return !args.some((a) => GIT_FLAGS.has(a) || GIT_FLAGS.has(flagOf(a)));
 }
 
+/**
+ * Expand glob brace alternation ({a,b}, including nested) into a list of
+ * patterns. Standard glob shells and the libraries models mimic do this; the
+ * old implementation escaped the braces, so a pattern like `*.{js,css,html}` answered
+ * "no files matched" for a tree full of them. A file is a hit when any of the
+ * expanded patterns matches. Unbalanced braces stay literal (as before).
+ */
+function splitTopCommas(body) {
+  const parts = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of body) {
+    if (ch === '{') depth++;
+    if (ch === '}') depth--;
+    if (ch === ',' && depth === 0) { parts.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  parts.push(cur);
+  return parts;
+}
+export function expandBraces(pattern) {
+  const out = [];
+  const walk = (p) => {
+    if (out.length >= 32) return;
+    const open = p.indexOf('{');
+    if (open === -1) { out.push(p); return; }
+    let depth = 0;
+    let close = -1;
+    for (let i = open; i < p.length; i++) {
+      if (p[i] === '{') depth++;
+      else if (p[i] === '}') { depth--; if (depth === 0) { close = i; break; } }
+    }
+    if (close === -1) { out.push(p); return; } // unbalanced: literal, as before
+    const head = p.slice(0, open);
+    const body = p.slice(open + 1, close);
+    const tail = p.slice(close + 1);
+    for (const alt of splitTopCommas(body)) walk(head + alt + tail);
+  };
+  walk(pattern);
+  return out.length ? out : [pattern];
+}
+
 export function createTools(ctx) {
   const {
     root,
@@ -516,13 +558,18 @@ export function createTools(ctx) {
     },
     glob(pattern) {
       if (!pattern) return 'err: give me a glob pattern, e.g. **/*.ts';
-      const patParts = String(pattern).split('/').filter(Boolean);
+      // Models commonly write brace alternation (public/**/*.{js,css,html});
+      // the old code escaped the braces and answered "no files matched" for a
+      // tree full of them. Expand here, before matching: a file is a hit when
+      // any of the expanded patterns matches.
+      const patterns = expandBraces(String(pattern));
+      const patPartsList = patterns.map((p) => p.split('/').filter(Boolean));
       // Segment-wise: every pattern part matches one path segment, except `**`
       // which spans any number of them. Matching only the last part when `**`
       // was present (the old shape) made `src/**/*.ts` answer with every .ts
       // in the project — and the model then trusted that and edited the wrong
       // tree. Case folded, as before, for Windows-shaped listings.
-      const segRe = (pat) => new RegExp('^' + pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*') + '$', 'i');
+      const segRe = (pat) => new RegExp('^' + pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$', 'i');
       const matchFrom = (segs, pats) => {
         if (!pats.length) return segs.length === 0;
         if (pats[0] === '**') {
@@ -547,7 +594,7 @@ export function createTools(ctx) {
           const full = path.join(dir, e.name);
           const rel = posix(path.relative(root, full));
           if (ign.ignored(rel, e.isDirectory())) continue;
-          if (!e.isDirectory() && matchFrom(rel.split('/'), patParts)) {
+          if (!e.isDirectory() && patPartsList.some((parts) => matchFrom(rel.split('/'), parts))) {
             hits.push(rel);
             if (hits.length >= MAX) return;
           }
