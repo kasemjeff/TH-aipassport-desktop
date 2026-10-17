@@ -107,7 +107,7 @@ export async function runTask(taskText, ctx = {}) {
   const replyLanguage = options.replyLanguage === 'en' ? 'en' : 'th';
   const langCheck = Boolean(options.langCheck);
   const minThaiRatio = Number.isFinite(Number(options.minThaiRatio))
-    ? Math.min(1, Math.max(0, Number(options.minThaiRatio))) : 0.25;
+    ? Math.min(1, Math.max(0, Number(options.minThaiRatio))) : 0.4;
   // (Thai pack) The pre-tool guard. repeatGuard refuses an identical call
   // (same kind, argument and body) already made twice with nothing staged in
   // between — a loop, not a step; repeatGuardMax is how many such refusals
@@ -291,9 +291,16 @@ export async function runTask(taskText, ctx = {}) {
   // — once. A short closing never triggers it (a dozen letters is a glance,
   // not a message), and code, commands and URLs do not count toward the
   // ratio. `closing` is the line the window will keep as the run's summary.
-  const replyLangMsg = (proseText, closing) => {
+  //
+  // `plain` says the closing reply was prose only. A reply that also carried
+  // calls shows their bodies in `proseText` — a CREATE's file body, a plan
+  // block — and a body is content, not a message: only the closing line is
+  // judged then, so a run that ends by writing its file is not re-prompted
+  // over the file's language. What is measured is the user-facing text.
+  const replyLangMsg = (proseText, closing, plain = true) => {
     if (!langCheck || langSent) return null;
-    const { ratio, letters } = thaiRatio(`${proseText ?? ''}\n${closing ?? ''}`);
+    const judged = plain ? `${proseText ?? ''}\n${closing ?? ''}` : `${closing ?? ''}`;
+    const { ratio, letters } = thaiRatio(judged);
     if (letters < 12 || ratio >= minThaiRatio) return null;
     langSent = true;
     langPrompts += 1;
@@ -360,7 +367,7 @@ export async function runTask(taskText, ctx = {}) {
       // ASK is the one ending that wants an answer, not a verdict: the
       // question rides the finished turn and the next message resumes.
       if (askCall) {
-        const langMsg = replyLangMsg(proseText, askCall.arg);
+        const langMsg = replyLangMsg(proseText, askCall.arg, work.length === 0);
         if (langMsg && step < maxSteps) { next = `${langMsg}\n\n${REMINDER}`; continue; }
         pauseForAsk(askCall.arg);
         break;
@@ -378,7 +385,7 @@ export async function runTask(taskText, ctx = {}) {
           next = `${checkMsg}\n\n${REMINDER}`;
           continue;
         }
-        const langMsg = replyLangMsg(proseText, cleanArg);
+        const langMsg = replyLangMsg(proseText, cleanArg, work.length === 0);
         if (langMsg && step < maxSteps) {
           next = `${langMsg}\n\n${REMINDER}`;
           continue;
@@ -602,7 +609,7 @@ export async function runTask(taskText, ctx = {}) {
     // (a NEED beside the ASK) skips it: the preamble says the two do not mix,
     // and running the read first beats stranding its result.
     if (askCall && !stillLooking) {
-      const langMsg = replyLangMsg(proseText, askCall.arg);
+      const langMsg = replyLangMsg(proseText, askCall.arg, work.length === 0);
       if (langMsg && step < maxSteps) { next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${langMsg}`; continue; }
       pauseForAsk(askCall.arg);
       break;
@@ -615,7 +622,7 @@ export async function runTask(taskText, ctx = {}) {
       // through the stagnation guard and the compaction estimate like any
       // other step, so the correction is a step the run actually took.
       const checkMsg = await finishCheck();
-      const langMsg = checkMsg && step < maxSteps ? null : replyLangMsg(proseText, summary);
+      const langMsg = checkMsg && step < maxSteps ? null : replyLangMsg(proseText, summary, work.length === 0);
       if (checkMsg && step < maxSteps) {
         next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${checkMsg}`;
       } else if (langMsg && step < maxSteps) {

@@ -693,9 +693,14 @@ are pinned by `test/lang.test.mjs`; the loop wiring is pinned by
 2. **The reply-language stop hook.** `langCheck` (default on) measures the
    closing message's share of Thai letters — code fences, URLs and commands
    excluded (`thaiRatio`) — and asks for one Thai rewrite when the share
-   misses `minThaiRatio` (default 0.25; closings under 12 letters are never
-   measured). One rewrite per run; `run_stats.langPrompts` and the
-   `lang_prompt` event record it.
+   misses `minThaiRatio` (default 0.4: of the 23 recorded finishes the Thai
+   closings sat at 0.57+ and the English ones at 0, so the default clears the
+   gap; closings under 12 letters are never measured). What is measured is
+   the user-facing text: a closing reply that also carried calls is judged on
+   its closing line alone, because a CREATE body or a plan block is content,
+   not a message — the false trigger the recorded sessions showed. One
+   rewrite per run; `run_stats.langPrompts` and the `lang_prompt` event
+   record it.
 3. **The repeat guard.** An identical call (kind + argument + body) made a
    third time with nothing staged in between is refused with an `err:` that
    says why and what to change first; `run_stats.repeatBlocks` counts it.

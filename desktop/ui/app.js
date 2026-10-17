@@ -1067,7 +1067,7 @@ const SETTINGS_SECTIONS = [
       { key: 'subagent', label: 'ให้เรียก helper ย่อย', type: 'checkbox', note: 'งานยาวถูกแบ่งให้ตัวช่วย แล้วรีพอร์ตกลับ' },
       { key: 'replyLanguage', label: 'ภาษาที่ตอบผู้ใช้', type: 'select', options: [['th', 'ไทย — ค่าเริ่มต้น'], ['en', 'English']], note: 'โค้ด คำสั่ง และพาธเป็นอังกฤษเสมอ ไม่ว่าตัวนี้จะตั้งไว้อย่างไร' },
       { key: 'langCheck', label: 'เตือนเมื่อลืมตอบไทย', type: 'checkbox', note: 'ตรวจสัดส่วนอักษรไทยของข้อความปิดงานก่อนรับ DONE — เตือนหนึ่งครั้ง' },
-      { key: 'minThaiRatio', label: 'สัดส่วนอักษรไทยขั้นต่ำ', type: 'number', note: '0-1 (ค่าเริ่มต้น 0.25) — ไม่นับบล็อกโค้ด/ลิงก์' },
+      { key: 'minThaiRatio', label: 'สัดส่วนอักษรไทยขั้นต่ำ', type: 'number', note: '0-1 (ค่าเริ่มต้น 0.4) — ไม่นับบล็อกโค้ด/ลิงก์' },
       { key: 'repeatGuard', label: 'กันเรียกซ้ำซาก', type: 'checkbox', note: 'เรียก tool เดิม + อาร์กิวเมนต์เดิมครั้งที่สามโดยไม่มีอะไรเปลี่ยน = ถูกบล็อกพร้อมคำแนะนำ' },
       { key: 'repeatGuardMax', label: 'เพดานการบล็อกซ้ำต่อรอบ', type: 'number', note: 'เกินแล้วหยุดรอบเป็น stalled (ค่าเริ่มต้น 4)' },
       { key: 'attempts', label: 'รอบลองสูงสุดต่อคำสั่ง', type: 'number', note: 'ลองซ้ำเมื่อ checker ไม่ผ่าน (1 = ไม่ลอง; ทุกรอบคิดเครดิตเต็ม)' },

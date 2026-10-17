@@ -73,7 +73,8 @@ factories live. The context that matters:
 
 Defaults come from `settings.mjs`: `maxSteps: 10` (clamped 1–200),
 `maxToolCalls: 300`, `maxWallClockMs: 30 min`, `repeatGuardMax: 4`,
-`minThaiRatio: 0.25`. `requirePlanApproval` is a saved setting — a run call
+`minThaiRatio: 0.4` (the recorded closings split at a wide gap: English at 0,
+Thai at 0.57+). `requirePlanApproval` is a saved setting — a run call
 may override it, but the saved value is what the window flips and relies on.
 
 ## Anatomy of one step
@@ -195,7 +196,7 @@ the stop reason; credits are diffed (`quota(true)`); `run_stats` and
 | plan gate | `PLAN` and no approval yet | `plan_request`, wait however long | decline → `plan-rejected` |
 | checker | DONE (or a stalled step) with staged code | read-only verifier runs it; a self-run does not stand it down; a re-check only when the tree moved | fail → a correcting step; pass → `done`; two verdicts a run, the last recorded |
 | verify nudge | staged code, nothing verified since the change | `verify_prompt` (once per run) | — |
-| language check | closing message under `minThaiRatio` Thai | `lang_prompt`, one rewrite | — |
+| language check | closing message under `minThaiRatio` (0.4) Thai — a reply with calls is judged on its closing line alone | `lang_prompt`, one rewrite | — |
 | compaction | assembled message over the context budget | summarise + rotate | — |
 
 The mechanical guards (repeat, err loop, stagnation, budgets) stop a run that
