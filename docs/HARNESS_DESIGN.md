@@ -552,20 +552,20 @@ The map, then what each gap is worth:
 
 | hook | spine stage | mechanism today | status |
 |---|---|---|---|
-| SessionStart — inject a snapshot | Bootstrap | preamble + top-level listing on turn 1, the same listing after every rotation (`loop.mjs` the `again` message, `compact.mjs` re-seed) | partial — the listing is the only snapshot; everything else costs a NEED |
-| PreToolUse — validate the shape, deny with a reason | Action validator | per-tool checks returning `err: …` and the fix (F5); fenced protocol text never executes (F1); `node --check` on staged JS (R2); permission denials carry the rule name | done per tool — no single pre-dispatch layer, and plugin markers skip the gate entirely |
+| SessionStart — inject a snapshot | Bootstrap | preamble + top-level listing on turn 1, the same listing after every rotation (`loop.mjs` the `again` message, `compact.mjs` re-seed); `--snapshot` (CLI) adds `git status --short` and the package scripts to turn 1 | partial — the listing is the only default snapshot; everything else still costs a NEED |
+| PreToolUse — validate the shape, deny with a reason | Action validator | per-tool checks returning `err: …` and the fix (F5); fenced protocol text never executes (F1); `node --check` on staged JS (R2); permission denials carry the rule name; a plugin marker that declared a `risk` rides the permission engine | done per tool — no single pre-dispatch layer; undeclared plugin markers keep the stated trust |
 | PostToolUse — compact an oversized result | Observation compressor | clip at `maxResult` + spill file with a `NEED` locator (`tools.mjs`) — reads keep the head, `RUN` keeps head+tail (ACI round); conversation summarise→rotate at the budget (`compact.mjs`) | done, three tiers; the elided middle of a command sits on disk, not lost |
 | Stop — tests fail, keep working | Verify | R4's one soft nudge (`verifyPrompts`); the checker at DONE — a read-only child runs the project's own check, the verdict computed from what it ran, one continuation on fail (`loop.mjs`, `harness.mjs#makeChecker`) | done v1 — the verdict is advisory: a second DONE is accepted with `checks`/`checkVerdict` recorded |
-| PreToolUse — count calls, log every event | Budget + trace | one `run_stats` line per run + one session JSONL entry per tool call, 20 000-char result and all | done; per-tool latency and a hard per-run cap are still not recorded |
-| PreToolUse — destructive commands, config files, red-test commits | Safety gates | modes + the H9 rule engine: path rules outrank the mode, reads included; no listener means deny; `classifyRun` asks about hazardous `RUN` bodies in every mode, ahead of grants; `SAFETY_RULES` ask about config/lockfile mutations (`permissions.mjs`, `settings.mjs`) | done v1 — a red-test commit gate still needs a declared check command (`verifyCommand`) |
+| PreToolUse — count calls, log every event | Budget + trace | one `run_stats` line per run + one session JSONL entry per tool call, 20 000-char result and all; `run_stats.tools` carries `{n, fail, ms}` per kind and `stats` prints the mean latency | done — a hard per-run cap is still not recorded (the budget stops a run with its reason instead) |
+| PreToolUse — destructive commands, config files, red-test commits | Safety gates | modes + the H9 rule engine: path rules outrank the mode, reads included; no listener means deny; `classifyRun` asks about hazardous `RUN` bodies in every mode, ahead of grants; `SAFETY_RULES` ask about config/lockfile mutations (`permissions.mjs`, `settings.mjs`); the declared check (`.aipass/check.txt`) arms the red-test commit gate: a `git commit` RUN is refused until it passed at the current tree state, and `run_stats.commitBlocks` counts the refusals | done — the gate is keyed off the declared check, no separate `verifyCommand` surface |
 
 Worth closing, in roughly the order the table reads:
 
 1. **A verdict behind DONE — shipped 2026-10-15** as the checker
    ([`SPEC_CHECKER.md`](SPEC_CHECKER.md), tests `checker.test.mjs`). The
    remaining edge of it: a declared check command (`verifyCommand`) would make
-   verdicts comparable across runs, and it is also what a red-test commit gate
-   needs.
+   verdicts comparable across runs, and it is also what armed the red-test
+   commit gate (shipped 2026-10-17, keyed off `.aipass/check.txt`).
 2. **The safety set — shipped 2026-10-15** (`gates.test.mjs`). The floor is
    `SAFETY_RULES` in `settings.mjs`: mutating `package.json`, `tsconfig*.json`,
    `.*rc*` or a lockfile asks even in yolo, while reads stay ordinary; it is
@@ -594,11 +594,13 @@ Worth closing, in roughly the order the table reads:
    with an unresolvable `gitdir:` — the one shape that halts the climb, since
    an empty `.git` directory does not. A repo-less project keeps today's
    sandbox, `git init` included.
-4. **Bootstrap snapshot** — git presence, `git status --short` and the package
-   scripts quoted into turn 1, behind a `--snapshot` flag so the CLI's tuned
-   bytes stay identical. Nice to have; the listing plus NEED covers the basics.
-5. **Per-tool latency** — the loop already walks per call; one `ms` field in
-   `toolStats` and its line in `stats.mjs`.
+4. **Bootstrap snapshot — shipped 2026-10-17** behind `--snapshot`: git
+   status and the package scripts quoted into turn 1, off by default so the
+   CLI's tuned bytes stay identical (`loop.mjs`, `agent.test.mjs`).
+5. **Per-tool latency — shipped 2026-10-17**: one `ms` field in `toolStats`,
+   aggregated in `stats.mjs` and printed per kind (`stats.test.mjs`). A hard
+   per-run cap is still not recorded: the soft budget stops a run with a
+   reason, which the recorded end already names.
 
 On the architecture question the vocabulary invites: keep the gate-class checks
 core. Their invariant — "a run cannot be unsafe because a plugin is absent" —
@@ -625,9 +627,9 @@ The queue, in dependency order:
    an explicit `--live` and budgets on the free-credit `gemini-3.1-flash-lite`
    unless `--budget model=…` says otherwise.
 4. **The hook-review leftovers — the safety set and both bugs done
-   2026-10-15** (`gates.test.mjs`). What remains is the red-test commit gate,
-   which falls out of (2): it needs the declared check command
-   (`verifyCommand`) the checker section names.
+   2026-10-15** (`gates.test.mjs`); the red-test commit gate shipped
+   2026-10-17, keyed off the declared check (`.aipass/check.txt`) the checker
+   section names.
 
 ## The tool ACI round (Oct 2026): the contracts, tightened
 

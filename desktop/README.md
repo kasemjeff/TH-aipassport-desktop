@@ -316,6 +316,9 @@ macOS and Linux builds are wired and compile per-branch, but the verified end
 to end on this machine is the Windows one: the packaged app has been run and
 quit there, and the tray behaviour was exercised by hand. Treat the other two
 as ready-to-try, not as ready-to-ship, until somebody runs them and says so.
+The Node-side suite now takes a macOS lane in `.github/workflows/test.yml`, so
+a darwin branch bug shows up on push; the packaged window and tray are still
+the hand-run part.
 
 Toolchain on this machine: Rust 1.99 (`D:\rust`), MSVC Build Tools (`D:\VS`),
 cargo target `D:\aipass-build`. The Node sidecar is a copy of the local
@@ -398,6 +401,7 @@ A plugin is one `.mjs` file in `~/.aipass/plugins` (or a folder with a
 ```js
 setup(ctx) {
   ctx.tools.register('NOTE', handler, { description: '…' });  // a marker the model can call
+  ctx.tools.register('SEND', handler, { risk: 'shell' });      // …routed through the permission gate
   ctx.panel({ id: 'notes', title: 'scratchpad', render });     // a sidebar section
   ctx.rpc.method('plugin.notes.clear', handler);               // a /rpc method
   ctx.settings.define({ key: 'notes.file', label: '…' });      // a setting
@@ -408,7 +412,11 @@ setup(ctx) {
 Tools the model can call arrive as `MARKER rest-of-line` — or as a block ending
 in `END` when `takesBody` is true — and their result comes back exactly like a
 NEED or SEARCH result. The preamble grows one paragraph listing them while a
-run is in flight.
+run is in flight. A tool that declares `risk: 'write' | 'shell'` rides the same
+permission gate a built-in of that kind does (asked in `ask`/`auto` modes,
+per the path rules); without it the tool keeps the stated trust and runs
+directly — the choice is the plugin author's, made where the tool is
+registered.
 
 Panels are rendered across the process boundary, so a plugin returns markup
 (`render: async () => ({ html })`) rather than DOM nodes. Plugins run in the

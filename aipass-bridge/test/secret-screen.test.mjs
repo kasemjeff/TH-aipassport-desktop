@@ -37,9 +37,27 @@ test('secretHit catches the spellings a command can carry, and leaves normal wor
   assert.ok(secretHit('cat id_rsa'), 'a key name without a dot');
   assert.ok(secretHit('copy certs/server.pem out.txt'), 'a certificate');
   assert.ok(secretHit('cat ~/.aws/credentials'), 'a cloud credential path');
+  assert.ok(secretHit('type .ENV'), 'globMatch is case-insensitive, and so is the screen');
+  assert.ok(secretHit('cat ID_RSA'), 'a key name in any casing');
   assert.equal(secretHit('npm test'), null);
   assert.equal(secretHit('node scripts/build.mjs --env production'), null, '--env is a flag, not a file');
   assert.equal(secretHit('git log --oneline -5'), null);
+});
+
+test('a secret spelling through a pipe, and a path composed onto it, are still refused', async () => {
+  // Channel spellings, not just bare ones: the splitter treats `|`, `&`, `;`
+  // and quotes as word separators, so a command wrapped in a pipe reads the
+  // same words to the screen. And a path that walks back onto the secret
+  // (`a/.env/../.env`) composes to a token the nested rule still matches.
+  assert.ok(secretHit('echo x | type .env'), 'a piped spelling splits to the secret token');
+  assert.ok(secretHit('type .env/../.env'), 'a composed path onto the secret is a match');
+  // Stated residual, the same class as runtime-built names (SECURITY.md): a
+  // bare trailing slash (`type .env/`) is no token any rule matches — the
+  // filesystem rejects it as a read, so it is a miss with no reachable file.
+
+  const tools = toolsIn(mkTracked({}), { allowRun: true });
+  const refused = await tools.run('', 'echo x | type .env');
+  assert.match(refused, /secret files stay on this machine/);
 });
 
 test('a RUN whose command names a secret file is refused before anything spawns', async () => {
@@ -82,7 +100,46 @@ test('a git patch touching a secret file is withheld, the clean chunk stays', ()
   ].join('\n');
   const scrubbed = scrubSecretDiff(sample);
   assert.match(scrubbed, /app\.js/, 'the clean diff survives');
+  assert.match(scrubbed, /diff --git a\/app\.js b\/app\.js/, "the clean chunk's header line survives whole");
+  assert.match(scrubbed, /\+\+\+ b\/app\.js/, 'and so does its file header');
   assert.doesNotMatch(scrubbed, /SECRET=1/, 'the secret bytes are gone');
   assert.match(scrubbed, /withheld/);
   assert.equal(scrubSecretDiff('nothing to see'), 'nothing to see');
+});
+
+test('the error rates are countable: 5 clean spellings run, 5 secret spellings refuse', async () => {
+  // The FP/FN instrument SPEC_EVALS.md names for the safety set: a false
+  // positive is a clean command the floor refused; a false negative is a
+  // secret spelling it let through. Both directions are asserted, and the
+  // counts are the criterion (0 FP, 0 FN).
+  const tools = toolsIn(mkTracked({ 'a.txt': 'x' }), { allowRun: true });
+  const clean = [
+    'echo hello',
+    'npm --version',
+    'node -e "console.log(4 + 4)"',
+    'git log --oneline -5',
+    'node scripts/build.mjs --env production',
+  ];
+  const secret = [
+    'type .env',
+    'cat C:\\proj\\.env',
+    'git show HEAD:.env',
+    'cat id_rsa',
+    'cat ~/.aws/credentials',
+  ];
+
+  let allowed = 0;
+  for (const command of clean) {
+    const out = await tools.run('', command);
+    assert.doesNotMatch(out, /secret files stay on this machine/, `FP: clean command refused: ${command}`);
+    allowed += 1;
+  }
+  let refused = 0;
+  for (const command of secret) {
+    const out = await tools.run('', command);
+    assert.match(out, /secret files stay on this machine/, `FN: secret spelling allowed: ${command}`);
+    refused += 1;
+  }
+  assert.equal(allowed, clean.length, 'FP count');
+  assert.equal(refused, secret.length, 'FN count');
 });

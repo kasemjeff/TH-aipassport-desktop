@@ -11,6 +11,12 @@
 //      handler, and ctx.events.emit still reaches the same surface
 //   4. the sandbox never junctions `.git` — a projected git command fails
 //      safely and the real repository does not move
+//   5. the red-test commit gate — a `git commit` RUN is refused until the
+//      declared check (.aipass/check.txt) has passed at the current state,
+//      and any later change re-arms it
+//   6. the plugin risk gate — a marker that declared write/shell at
+//      registration rides the permission engine; an undeclared one keeps the
+//      trust the plugin model states
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -19,12 +25,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { Emitter } from '../harness/events.mjs';
-import { PermissionEngine } from '../harness/permissions.mjs';
+import { PermissionEngine, isGitCommit } from '../harness/permissions.mjs';
 import { Settings } from '../harness/settings.mjs';
 import { createRpc } from '../harness/rpc.mjs';
 import { runTask } from '../harness/loop.mjs';
 import { Overlay } from '../harness/overlay.mjs';
 import { SkillLibrary } from '../harness/skills.mjs';
+import { SessionStore } from '../harness/session.mjs';
 import { createTools } from '../harness/tools.mjs';
 import { createSandbox, materializeTree } from '../harness/sandbox.mjs';
 import { freePort, tempDir, waitFor } from './harness.mjs';
@@ -348,4 +355,133 @@ test('a normal projected run still works (control)', async () => {
   const out = await tools.run('', 'node check.mjs');
   assert.match(out, /PASS/, `the staged fix still runs in the projection, got: ${out}`);
   assert.equal(fs.readFileSync(path.join(dir, 'math.mjs'), 'utf8'), BROKEN_MATH, 'the disk file is untouched');
+});
+
+/* 5 — the red-test commit gate ----------------------------------------------- */
+
+test('isGitCommit sees commits wherever they hide, and only commits', () => {
+  const yes = [
+    'git commit -m wip',
+    'git -C /somewhere commit -m wip',
+    'git -c user.name=x commit -m wip',
+    'git status && git commit -m x',
+    'cd repo; git commit --amend --no-edit',
+  ];
+  const no = ['git status --short', 'git log --oneline', 'git diff HEAD', 'git push origin main', 'npm test'];
+  for (const body of yes) assert.equal(isGitCommit(body), true, `must count as a commit: ${body}`);
+  for (const body of no) assert.equal(isGitCommit(body), false, `must not count as a commit: ${body}`);
+});
+
+test('a commit is refused until the declared check passes at the current tree', async () => {
+  const dir = tempDir({ 'check.mjs': "console.log('PASS');\n" });
+  fs.mkdirSync(path.join(dir, '.aipass'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.aipass', 'check.txt'), '# declared by the project\nnode check.mjs\n');
+
+  const overlay = new Overlay(dir);
+  const replies = [
+    'RUN\ngit commit -m one\nEND\n',          // 1 — the check never ran: refused
+    'RUN\nnode check.mjs\nEND\n',             // 2 — the declared check passes
+    'RUN\ngit commit -m one\nEND\n',          // 3 — un-barred now; git itself refuses (no repo)
+    'RUN\nnode -e "console.log(1)"\nEND\n',   // 4 — an ordinary run moves the clock
+    'RUN\ngit commit -m two\nEND\n',          // 5 — re-armed: refused again
+    'DONE tried to commit\n',
+  ];
+  let turn = 0;
+  const prompts = [];
+  const bridge = {
+    async quota() { return null; },
+    async chat({ message }) {
+      prompts.push(message);
+      return { text: replies[Math.min(turn++, replies.length - 1)], reasoning: '' };
+    },
+  };
+  const tools = createTools({ root: dir, overlay, skills: new SkillLibrary([]), allowRun: true });
+  const permissions = new PermissionEngine({ mode: 'yolo', allowRun: true, askFn: async () => 'allow', events: new Emitter() });
+  const session = new SessionStore(path.join(dir, 'sessions')).create({ root: dir, model: 'test-model' });
+
+  await runTask('try to commit', {
+    bridge, tools, overlay, permissions, session,
+    options: { mode: 'yolo', allowRun: true, maxSteps: 8 },
+    first: true,
+  });
+
+  // 1 — before any check, the gate refuses and names the exact command that un-bars it.
+  assert.match(prompts[1], /check \(\.aipass\/check\.txt: node check\.mjs\)/i, 'the refusal names the declared command');
+  // 3 — the check passed at an unchanged tree, so the commit reached git itself.
+  assert.match(prompts[3], /not a git repository|gitfile does not point/i, 'the allowed commit actually ran and git answered');
+  assert.doesNotMatch(prompts[3], /red-test gate|check \(\.aipass/i, 'the gate did not refuse this one');
+  // 5 — one ordinary run later the tree moved, and the gate is armed again.
+  assert.match(prompts[5], /check \(\.aipass\/check\.txt: node check\.mjs\)/i, 'the gate re-arms after any change');
+  const stat = session.entries.find((e) => e.type === 'run_stats');
+  assert.equal(stat.commitBlocks, 2, 'both refusals are counted in run_stats');
+});
+
+test('without a declared check the commit gate stays out of the way', async () => {
+  const dir = tempDir({ 'notes.txt': 'kept\n' });
+  const overlay = new Overlay(dir);
+  let turn = 0;
+  const prompts = [];
+  const bridge = {
+    async quota() { return null; },
+    async chat({ message }) {
+      prompts.push(message);
+      return { text: ['RUN\ngit commit -m x\nEND\n', 'DONE done\n'][Math.min(turn++, 1)], reasoning: '' };
+    },
+  };
+  const tools = createTools({ root: dir, overlay, skills: new SkillLibrary([]), allowRun: true });
+  const permissions = new PermissionEngine({ mode: 'yolo', allowRun: true, askFn: async () => 'allow', events: new Emitter() });
+
+  await runTask('try to commit', {
+    bridge, tools, overlay, permissions,
+    options: { mode: 'yolo', allowRun: true, maxSteps: 4 },
+    first: true,
+  });
+
+  assert.match(prompts[1], /not a git repository|gitfile does not point/i, 'the command itself ran; no gate invented a check');
+  assert.doesNotMatch(prompts[1], /red-test gate|declared check/i);
+});
+
+/* 6 — the plugin risk gate ---------------------------------------------------- */
+
+const NOTE_TOOLS = (risk) => [{ marker: 'NOTE', takesBody: false, description: '', plugin: 'note-plugin', risk }];
+
+test('a plugin tool that declared write risk is asked; an undeclared one keeps its trust', async () => {
+  const dir = tempDir({ 'a.txt': 'x\n' });
+  const run = async (risk, answer) => {
+    const overlay = new Overlay(dir);
+    const replies = ['NOTE hello\n', 'DONE noted\n'];
+    let turn = 0;
+    const prompts = [];
+    const bridge = {
+      async quota() { return null; },
+      async chat({ message }) {
+        prompts.push(message);
+        return { text: replies[Math.min(turn++, 1)], reasoning: '' };
+      },
+    };
+    const tools = createTools({ root: dir, overlay, skills: new SkillLibrary([]) });
+    const permissions = new PermissionEngine({ mode: 'ask', allowRun: false, askFn: async () => answer, events: new Emitter() });
+    const calls = [];
+    await runTask('note it', {
+      bridge, tools, overlay, permissions,
+      runPluginTool: async (_name, { arg }) => { calls.push(arg); return `plugin ran: ${arg}`; },
+      options: { mode: 'ask', allowRun: false, maxSteps: 4, pluginTools: NOTE_TOOLS(risk) },
+      first: true,
+    });
+    return { prompts, calls };
+  };
+
+  // Declared write risk, ask mode, the person declines: the marker never runs.
+  const denied = await run('write', 'deny');
+  assert.deepEqual(denied.calls, [], 'the plugin implementation was not called');
+  assert.match(denied.prompts[1], /declined plugin marker NOTE/i, 'the refusal is named in the result');
+
+  // Declared write risk, the person allows: it runs.
+  const allowed = await run('write', 'allow');
+  assert.deepEqual(allowed.calls, ['hello']);
+  assert.match(allowed.prompts[1], /plugin ran: hello/);
+
+  // No risk declared: the old trust — nothing is asked at all.
+  const legacy = await run(null, 'deny');
+  assert.deepEqual(legacy.calls, ['hello'], 'an undeclared tool runs without a question');
 });

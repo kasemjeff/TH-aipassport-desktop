@@ -12,6 +12,7 @@
 //   - writes pass a permission gate (ask / auto / yolo) before they land in the
 //     overlay, rather than all-or-nothing at the end of the run
 //   - PLAN / TODO / SUBAGENT markers exist on top of the original set
+import fs from 'node:fs';
 import path from 'node:path';
 import { outbound } from './waf.mjs';
 import {
@@ -19,7 +20,7 @@ import {
   preamble as buildPreamble,
 } from './protocol.mjs';
 import { resilientSay, decode } from './bridge.mjs';
-import { classify } from './permissions.mjs';
+import { classify, isGitCommit } from './permissions.mjs';
 import { posix } from './overlay.mjs';
 import { thaiRatio } from './lang.mjs';
 import { PATHY, pathVariants, beYearNote } from './argguard.mjs';
@@ -57,6 +58,34 @@ const previewOf = (call) => {
   if (call.body) return String(call.body).slice(0, 4000);
   return '';
 };
+
+/**
+ * (bootstrap snapshot, `--snapshot`) What a run otherwise learns one round trip
+ * at a time: the git working-tree state (read-only, through the same GIT tool
+ * the model has) and the package.json scripts. Both reads are bounded and both
+ * failures are silent — a head start, never a blocker — and the caller places
+ * the result in turn 1 only.
+ */
+async function bootstrapSnapshot(tools, root) {
+  const parts = [];
+  try {
+    const status = String(await tools.git('status --short')).trim();
+    if (status && !/^err:/i.test(status)) {
+      const lines = status.split('\n');
+      const shown = lines.slice(0, 15).map((l) => `  ${l}`).join('\n');
+      parts.push(`git status:\n${shown}${lines.length > 15 ? `\n  … ${lines.length - 15} more file(s)` : ''}`);
+    } else if (!status) {
+      parts.push('git status: clean — nothing uncommitted');
+    }
+  } catch { /* not a repository, or git is absent — the snapshot skips it */ }
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    const scripts = Object.entries(pkg.scripts ?? {}).filter(([, v]) => typeof v === 'string').slice(0, 12);
+    if (scripts.length) parts.push(`package scripts:\n${scripts.map(([k, v]) => `  ${k}: ${v}`).join('\n')}`);
+  } catch { /* no package.json — the snapshot skips it */ }
+  const text = parts.join('\n');
+  return text.length > 1500 ? `${text.slice(0, 1500)}…` : text;
+}
 
 /**
  * Drive one task to a DONE — or to whatever ends it first: a guard, a cap, a budget.
@@ -150,8 +179,10 @@ export async function runTask(taskText, ctx = {}) {
   };
 
   // Per-run metrics (P2-D): the session already records every tool call and
-  // the run records credits; these counters are what turns that into rates.
-  const toolStats = new Map(); // kind → { n, fail }
+  // the run records credits; these counters are what turns that into rates —
+  // and, since per-tool latency landed, `ms` carries the wall time each kind
+  // spent in total, so stats can print where a slow run actually went.
+  const toolStats = new Map(); // kind → { n, fail, ms }
   let firewallNotes = 0;
   const stepMs = [];
 
@@ -185,6 +216,18 @@ export async function runTask(taskText, ctx = {}) {
   let listing = '';
   try { listing = outbound(tools.list('.')); } catch { /* ignore */ }
 
+  // (bootstrap snapshot, opt-in via `--snapshot`) The head start a fresh run
+  // otherwise spends round trips discovering: whether the project is a repo
+  // and what is uncommitted, and which scripts package.json carries. It rides
+  // the turn-1 listing slot — before the task, only on the first message, only
+  // when asked for — so the tuned bytes stay identical while the flag is off.
+  const snapshot = first && !seedText && options.snapshot
+    ? await bootstrapSnapshot(tools, overlay.root)
+    : '';
+  const listingBlock = snapshot
+    ? `${listing}\n\nSnapshot of where this project stands right now (asked for with --snapshot):\n${snapshot}`
+    : listing;
+
   const again = `The project is still open in front of me and I will paste you whatever you ask for.`
     + `\nTop level right now:\n${listing}`;
 
@@ -199,14 +242,17 @@ export async function runTask(taskText, ctx = {}) {
   });
 
   let next = useSlim
-    ? `${first ? `Top level of the project: ${listing}\n\n` : ''}Task: ${taskText}\n\nWhat should I open first?`
+    ? `${first ? `Top level of the project: ${listingBlock}\n\n` : ''}Task: ${taskText}\n\nWhat should I open first?`
     : first
-      ? `${pre}\n\nTo save you a step, here is what is at the top level already:\n${listing}\n\nHere is what I want to know: ${taskText}\n\nWhat should I open first?`
+      ? `${pre}\n\nTo save you a step, here is what is at the top level already:\n${listingBlock}\n\nHere is what I want to know: ${taskText}\n\nWhat should I open first?`
       : `${again}\n\nNew task: ${taskText}\n\nWhat should I open first?`;
 
   // A rotated conversation (after compaction) starts from the summary seed
   // instead of a bare task: the fresh conversation has no memory of anything.
-  if (first && seedText) next = seedText;
+  // Not gated on `first`: between-runs compaction fires once the context has
+  // grown — on the second run of a session or later — so the run that needs
+  // the seed most is exactly the one that is not the first.
+  if (seedText) next = seedText;
 
   let nudges = 0;            // (stats) every "no marker" nudge the run needed
   let nudgeStreak = 0;       // consecutive ones — the third stops the run
@@ -241,6 +287,23 @@ export async function runTask(taskText, ctx = {}) {
   let repeatTrip = false;    // the refusal ceiling was hit — stop after this step
   const repeatSeen = new Map(); // call signature → { count, mark }
   let mutations = 0;         // staged changes this run — the guard's clock
+  // (red-test gate) The project's declared check (.aipass/check.txt,
+  // docs/SPEC_CHECKER.md): the first non-comment line, read lazily once. The
+  // gate bars a `git commit` RUN until that exact command has *passed* at the
+  // current mutation count — a commit of a tree nobody verified is how a red
+  // test lands in history. Any later change moves the clock and re-arms it;
+  // no declared check, no gate.
+  let declaredCheck = null;   // null = not read yet; '' = absent (or unreadable)
+  let declaredPassAt = -1;    // the mutation count the declared check passed at
+  let commitBlocks = 0;       // (stats) git commits the gate refused
+  const declaredCheckCommand = () => {
+    if (declaredCheck !== null) return declaredCheck;
+    try {
+      const raw = fs.readFileSync(path.join(overlay.root, '.aipass', 'check.txt'), 'utf8');
+      declaredCheck = raw.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#')) ?? '';
+    } catch { declaredCheck = ''; }
+    return declaredCheck;
+  };
   let langPrompts = 0;       // reply-language nudges sent (at most one per run)
   let langSent = false;
   let novelResults = 0;      // tool results that said something new
@@ -486,15 +549,23 @@ export async function runTask(taskText, ctx = {}) {
     // helper runs, not after.
     const execCtx = { tools, permissions, events, subagent, todoState, session, approvePlan, options, runPluginTool };
     let helperResults = null;
+    // Parallel SUBAGENTs fan out before the serial loop, so their wall time is
+    // measured here — keyed by the call — and added to the stats when the
+    // serial loop walks past that call.
+    const helperMs = new Map();
     if (options.parallelHelpers && work.some((c) => c.kind === 'subagent')) {
       const helpers = work.filter((c) => c.kind === 'subagent').length;
       if (toolsRun + helpers > maxToolCalls) spendBudget('tools-limited');
       else if (Date.now() - runStart > maxWallClockMs) spendBudget('time-limited');
       else if (maxCredits && (await creditSpent()) >= maxCredits) spendBudget('credit-limited');
       else {
-        helperResults = await Promise.all(work.map((c) => c.kind === 'subagent'
-          ? execute(c, execCtx).catch((err) => `err: ${err.message}`)
-          : null));
+        helperResults = await Promise.all(work.map(async (c) => {
+          if (c.kind !== 'subagent') return null;
+          const t0 = Date.now();
+          const out = await execute(c, execCtx).catch((err) => `err: ${err.message}`);
+          helperMs.set(c, Date.now() - t0);
+          return out;
+        }));
       }
     }
     if (budgetHit) break;
@@ -508,6 +579,19 @@ export async function runTask(taskText, ctx = {}) {
     //     characters stripped and Thai digits swapped, and the result says so;
     //   - a machine-facing year in the 2400s gets an advisory CE note.
     const guarded = async (call) => {
+      // (red-test gate) A `git commit` RUN is refused while the declared check
+      // has not passed at the current tree state. The gate sits ahead of the
+      // permission ask on purpose: this is not a question to override, it is
+      // "run the check first" — the command that un-bars it is named in full.
+      if (options.allowRun && call.kind === 'run' && isGitCommit(call.body)) {
+        const declared = declaredCheckCommand();
+        if (declared && declaredPassAt !== mutations) {
+          commitBlocks += 1;
+          session?.append('note', { text: `red-test gate: refused a git commit — the declared check (${declared}) has not passed since the last change in this run` });
+          events?.emit('note', { text: 'red-test gate: a git commit was refused — run the declared check (.aipass/check.txt) first, then commit' });
+          return `err: a git commit was requested, but this project declares a check (.aipass/check.txt: ${declared}) and it has not passed since the last change in this run. Run it first (RUN\n${declared}\nEND) and commit once it passes — a commit of an unverified tree is exactly what the gate exists to stop.`;
+        }
+      }
       const sig = `${call.kind}\u0000${String(call.arg ?? '')}\u0000${call.kind === 'run' ? String(call.body ?? '') : ''}`;
       if (repeatGuard && !['plan', 'todo', 'subagent', 'done'].includes(call.kind)) {
         const seen = repeatSeen.get(sig) ?? { count: 0, mark: -1 };
@@ -576,9 +660,15 @@ export async function runTask(taskText, ctx = {}) {
         continue;
       }
       toolsRun++;
+      const callStartedAt = Date.now();
       const result = helperResults && call.kind === 'subagent'
         ? helperResults[i]
         : await guarded(call);
+      // A serial call is timed where it ran; a parallel SUBAGENT carries the
+      // wall time measured at its fan-out (its `await` already happened).
+      const callMs = helperResults && call.kind === 'subagent'
+        ? (helperMs.get(call) ?? 0)
+        : Date.now() - callStartedAt;
       const text = String(result);
       const [head, ...rest] = text.split('\n');
       // Tools answer with an `err: …` prefix when they failed (the tool
@@ -619,8 +709,15 @@ export async function runTask(taskText, ctx = {}) {
       }
       // The repeat guard's clock: only staged changes move it.
       if (!refused && (MUTATING.has(call.kind) || call.kind === 'run')) mutations += 1;
-      const stat = toolStats.get(call.kind) ?? { n: 0, fail: 0 };
+      // (red-test gate) A declared check that just passed un-bars commits at
+      // exactly this tree state; any later change moves the clock and re-arms.
+      if (!refused && call.kind === 'run' && declaredCheckCommand()
+          && String(call.body ?? '').trim() === declaredCheckCommand()) {
+        declaredPassAt = mutations;
+      }
+      const stat = toolStats.get(call.kind) ?? { n: 0, fail: 0, ms: 0 };
       stat.n += 1;
+      stat.ms += callMs;
       if (refused) stat.fail += 1;
       toolStats.set(call.kind, stat);
       const isLast = i === work.length - 1 && !done;
@@ -756,8 +853,12 @@ export async function runTask(taskText, ctx = {}) {
       try {
         events?.emit('note', { text: 'context is filling up — summarising this conversation and rotating to a fresh one' });
         const note = await compactor.summarize(session, { task: taskText, model });
-        session.append('compaction', { summary: note, firstKeptEntryId: session.entries.at(-1)?.id ?? null });
+        // Rotate first, record second: an append that lands while the rotation
+        // fails would leave a compaction entry behind and reset the estimate
+        // to a conversation the model never carried — a session claiming
+        // memory it does not have. Failing this way only retries next step.
         await rotate?.(note);
+        session.append('compaction', { summary: note, lastSummarizedEntryId: session.entries.at(-1)?.id ?? null });
         events?.emit('compacted', { summary: note });
         // The fresh conversation keeps what a summary would drop: the files
         // staged so far (deletes marked) and the last check that has not
@@ -767,7 +868,7 @@ export async function runTask(taskText, ctx = {}) {
           return overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
         }).slice(0, 20);
         const lastCheck = checkResult && checkResult.verdict && checkResult.verdict !== 'pass' ? checkResult : null;
-        next = `${compactor.seed({ summary: note, task: taskText, listing: '', preambleText: pre, results: results.join('\n\n'), staged: stagedNow, lastCheck })}\n\n${REMINDER}`;
+        next = `${compactor.seed({ summary: note, task: taskText, preambleText: pre, results: results.join('\n\n'), staged: stagedNow, lastCheck })}\n\n${REMINDER}`;
       } catch (err) {
         events?.emit('error', { message: `compaction failed, sending the results without it: ${err.message}` });
       }
@@ -791,7 +892,11 @@ export async function runTask(taskText, ctx = {}) {
     // The model that produced this run — `stats` groups by it (`byModel`), so
     // "which model drifts" is a field, not a guess. Null on a bridge without one.
     model: bridge.model ?? null,
+    // `steps` is executed marker calls (the name the evals rows already read);
+    // `turns` is the replies it took — the two denominators were one ambiguous
+    // word before, and both are cheap to carry.
     steps: toolsRun,
+    turns: stepMs.length,
     tools: Object.fromEntries(toolStats),
     nudges,
     stagnations: stagnationWarns,
@@ -800,6 +905,7 @@ export async function runTask(taskText, ctx = {}) {
     checks,
     checkVerdict: checkResult?.verdict ?? null,
     repeatBlocks,
+    commitBlocks,
     errLoops,
     chainSkips,
     langPrompts,
@@ -890,9 +996,23 @@ async function execute(call, ctx) {
 
   // A marker a plugin registered. It is the plugin's own code, so it is also
   // the plugin's own responsibility: the result is a string, or an error
-  // string, and nothing here interprets it.
+  // string, and nothing here interprets it. A plugin tool that declared a
+  // `risk` at registration rides the same permission gate a built-in of that
+  // kind would; an undeclared tool keeps the trust the plugin model states —
+  // it runs, and its side effects are the plugin's to own.
   if (call.kind === 'plugin') {
     if (!runPluginTool) return `err: no plugin tool named ${call.name} is installed`;
+    const declaredRisk = (options.pluginTools ?? []).find((t) => t?.marker === call.name)?.risk ?? null;
+    if (permissions && declaredRisk && declaredRisk !== 'read') {
+      const verdict = permissions.evaluate({ kind: 'plugin', arg: call.name, body: call.body, risk: declaredRisk });
+      if (verdict.decision !== 'allow') {
+        const decision = await permissions.request({
+          kind: 'plugin', arg: call.name, preview: previewOf(call), body: call.body, risk: declaredRisk,
+        });
+        if (decision === 'deny') return `err: the person watching declined plugin marker ${call.name}`;
+        if (decision === 'always') permissions.grant('plugin', call.name);
+      }
+    }
     events?.emit('plugin_call', { marker: call.name, arg: call.arg });
     try {
       return String(await runPluginTool(call.name, { arg: call.arg, body: call.body ?? '' }) ?? '');

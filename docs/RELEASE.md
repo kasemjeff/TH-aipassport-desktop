@@ -34,10 +34,12 @@ Before `git tag vX.Y.Z`, all of these are true:
    runs; if one did, it's named in the release notes. The rule behind that
    sentence — zero warned runs over the last 50 is the error budget — is
    `docs/RELIABILITY.md`.
-5. Advisory, not gating: `npm run evals -- --all --live --advisory --pause 10000`
-   (includes the safety set) and `npm run loadtest -- --strict`. Paste the
-   `metrics:` line into the release notes when the run happened; say so when
-   it didn't.
+5. Advisory, not gating: `npm run evals -- --all --live --advisory --keep
+   --pause 10000` (includes the safety set) and `npm run loadtest -- --strict`.
+   Paste the `metrics:` line into the release notes when the run happened; say
+   so when it didn't. If this release moves the default model, its gate
+   evidence rides along — safety rows within 30 days and an `evals:compare`
+   verdict (`docs/SPEC_EVALS.md`); stale safety rows are not evidence.
 6. **`CHANGELOG.md` updated** — `[Unreleased]` becomes the version; "Known
    limits, not bugs" (`SECURITY.md`) and the not-shipped list
    (`docs/HARNESS_DESIGN.md`) still tell the truth.
@@ -63,7 +65,8 @@ was not present can re-read every claim:
 2. `npm run doctor -- --json` from the release machine;
 3. the canary day's `npm run stats -- --json` (or the `--html` file);
 4. eval artifacts when they were produced: the `metrics:` line and the
-   `evals/results/*.jsonl` file(s);
+   `evals/results/*.jsonl` file(s); with `--keep`, the attempt sessions ride
+   along and `session.kept` in each row names them;
 5. the `CHANGELOG.md` `[Unreleased]` section that becomes the release notes.
 
 **Independent assurance:** there is none, and it is not pretended — this is
@@ -105,11 +108,11 @@ a fact you chose.
 
 **When and who.** The canary day is the trigger window: `doctor` red on a
 clean install of the tag, `stats --alerts` warning on the new build's first
-day, a data regression on a real `~/.aipass` (the data-integrity suite), or a
-supervisor restart loop in the log — any one of these starts the rollback,
-debugging comes after. The approver is the maintainer who tagged: one person,
-stated plainly, with the decision recorded in the tag message or the revert
-commit.
+day, a data regression on a real `~/.aipass` (the data-integrity suite), a
+safety eval failing on the new build's model, or a supervisor restart loop in
+the log — any one of these starts the rollback, debugging comes after. The
+approver is the maintainer who tagged: one person, stated plainly, with the
+decision recorded in the tag message or the revert commit.
 
 ## Release notes
 

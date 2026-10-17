@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execSync } from 'node:child_process';
 import { startBridge, FakeExtension, scripted, tempDir, run, AGENT } from './harness.mjs';
 import { outbound, inbound } from '../harness/waf.mjs';
 
@@ -84,6 +85,46 @@ test('later turns carry only results, never the instructions again', async (t) =
   assert.ok(handler.sent.length >= 2);
   assert.doesNotMatch(handler.sent[1], /NEED file README\.md/, 'preamble must not be resent');
   assert.ok(Buffer.byteLength(handler.sent[1]) < Buffer.byteLength(handler.sent[0]) / 2);
+});
+
+test('--snapshot quotes git status and package.json scripts into turn 1', async (t) => {
+  const dir = tempDir({
+    'package.json': JSON.stringify({ scripts: { test: 'node --test', build: 'node build.mjs' } }, null, 2),
+    'wip.txt': 'half done\n',
+  });
+  // The git half is exercised where git exists; the scripts half everywhere.
+  let repo = false;
+  try {
+    execSync('git init -q', { cwd: dir, stdio: 'ignore', windowsHide: true });
+    repo = fs.existsSync(path.join(dir, '.git'));
+  } catch { /* git absent — the scripts half still runs */ }
+
+  const handler = scripted(['DONE looked around']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  await agent(dir, ['--snapshot']);
+  const first = handler.sent[0];
+  assert.match(first, /Snapshot of where this project stands right now/, 'the snapshot rides turn 1');
+  assert.match(first, /package scripts:/, 'the scripts section is there');
+  assert.match(first, /test: node --test/, 'a script line is quoted verbatim');
+  if (repo) {
+    assert.match(first, /git status:/, 'the repository is a git repository');
+    assert.match(first, /wip\.txt/, 'an uncommitted file is named');
+  } else {
+    assert.doesNotMatch(first, /git status:/, 'no repository, no git line');
+  }
+});
+
+test('without --snapshot turn 1 carries no snapshot bytes', async (t) => {
+  const dir = tempDir({ 'package.json': JSON.stringify({ scripts: { test: 'x' } }) });
+  const handler = scripted(['DONE done']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  await agent(dir);
+  assert.doesNotMatch(handler.sent[0], /Snapshot of where this project stands|package scripts:/,
+    'the flag is the only way the snapshot appears');
 });
 
 test('dry run shows a diff but writes nothing; --apply writes', async (t) => {

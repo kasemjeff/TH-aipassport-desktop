@@ -12,7 +12,7 @@
 //   {"type":"tool",    "id":"…","parentId":"…","kind":"read","arg":…,"out":…,"ok":true}
 //   {"type":"diff",    "id":"…","parentId":"…","file":…,"added":n,"removed":n,"decision":"pending|applied|rejected"}
 //   {"type":"todo",    "id":"…","parentId":"…,"items":[{text,done}]}
-//   {"type":"compaction","id":"…","parentId":…,"summary":…,"firstKeptEntryId":…}
+//   {"type":"compaction","id":"…","parentId":…,"summary":…,"lastSummarizedEntryId":…}
 //   {"type":"note",    "id":"…","parentId":…,"text":…}
 import fs from 'node:fs';
 import os from 'node:os';
@@ -23,7 +23,7 @@ import path from 'node:path';
 // version did this transcript come from?" is a field, not a memory. A read
 // that fails (a package layout without package.json beside it) costs the
 // field, never the session.
-const APP_VERSION = (() => {
+export const APP_VERSION = (() => {
   try { return JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version ?? null; }
   catch { return null; }
 })();
@@ -179,7 +179,7 @@ export class Session {
       else if (e.type === 'assistant') lines.push(`## assistant`, '', e.text ?? '', e.reasoning ? `\n_${e.reasoning}_` : '', '');
       else if (e.type === 'tool') lines.push(`**${e.kind} ${e.arg}**`, '', '```', String(e.out ?? '').slice(0, 4000), '```', '');
       else if (e.type === 'diff') lines.push(`**${e.file}** — +${e.added} −${e.removed} (${e.decision})`, '');
-      else if (e.type === 'compaction') lines.push(`> compacted: ${e.summary}`, '');
+      else if (e.type === 'compaction') lines.push(`> compacted: ${e.summary ?? '(no summary)'}`, '');
       else if (e.type === 'todo') lines.push('**todo**', '', ...e.items.map((i) => `- [${i.done ? 'x' : ' '}] ${i.text}`), '');
       else if (e.type === 'note') lines.push(`_${e.text}_`, '');
     }

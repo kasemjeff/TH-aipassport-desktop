@@ -15,10 +15,13 @@ jobs:
       fail-fast: false
       matrix:
         # Windows is in the matrix deliberately: the path bugs fixed in #3/#4
-        # only showed up there. Node 20 left the matrix with its EOL — the
-        # runner image dropped it in September 2026; 22 and 24 are the support
-        # floor now (the repo's engines still say >=20).
-        os: [ubuntu-latest, windows-latest]
+        # only showed up there. macOS ships the second packaged bundle
+        # (`tauri:build:mac`) and its branches are the ones a Windows dev
+        # machine cannot run — the lane is the Node-side half of that proof;
+        # the window bundle still needs real hardware. Node 20 left the matrix
+        # with its EOL — the runner image dropped it in September 2026; 22
+        # and 24 are the support floor now (the repo's engines still say >=20).
+        os: [ubuntu-latest, macos-latest, windows-latest]
         node: [22, 24]
 
     steps:

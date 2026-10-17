@@ -33,7 +33,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Harness } from '../aipass-bridge/harness/harness.mjs';
 import { BridgeClient } from '../aipass-bridge/harness/bridge.mjs';
-import { SessionStore } from '../aipass-bridge/harness/session.mjs';
+import { SessionStore, APP_VERSION } from '../aipass-bridge/harness/session.mjs';
 import { Emitter } from '../aipass-bridge/harness/events.mjs';
 import { preamble } from '../aipass-bridge/harness/protocol.mjs';
 import { thaiRatio } from '../aipass-bridge/harness/lang.mjs';
@@ -138,11 +138,14 @@ function readTask(dir, id, kind) {
     taskText,
     check: spec.check.trim(),
     allowRun: spec.allowRun === true,
-    // Extra keys are the suite's business, not the runner's: the Thai set
-    // ships `lang` (th|en) and `pair` (the pair id) and the runner passes
-    // them to the row for the report, without ever validating them.
+    // Extra keys are the suite's business, not the runner's: `lang` (th|en),
+    // `pair` (the pair id), `category` (the report's group-by) and `liveOnly`
+    // (a task a transcript cannot score) ride along without the runner ever
+    // validating their values.
     lang: typeof spec.lang === 'string' ? spec.lang : null,
     pair: typeof spec.pair === 'string' ? spec.pair : null,
+    category: typeof spec.category === 'string' && spec.category.trim() ? spec.category.trim() : null,
+    liveOnly: spec.liveOnly === true,
     budget: readBudget(spec.budget, id),
   };
 }
@@ -289,6 +292,34 @@ export function fingerprintOf({ taskText = '', preambleText = '', replyCount = 0
   return { taskBytes, preambleBytes, replies, digest };
 }
 
+/* --------------------------------------------------------------- digests */
+
+/** sha256 (16 hex — the fingerprint width) of one text: a task's dataset version. */
+export function digestOf(text) {
+  return createHash('sha256').update(lf(text), 'utf8').digest('hex').slice(0, 16);
+}
+
+/**
+ * One digest over a whole fixture tree: every file's name and bytes, in name
+ * order (binary-safe). Rows carry it so "the set changed under us" is a fact
+ * on disk — two runs' tree digests compare before their metrics do.
+ */
+export function treeDigestOf(dir) {
+  const hash = createHash('sha256');
+  const walk = (d, rel) => {
+    const entries = fs.readdirSync(d, { withFileTypes: true })
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const e of entries) {
+      const p = path.join(d, e.name);
+      const key = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(p, key);
+      else hash.update(key).update('\0').update(fs.readFileSync(p)).update('\0');
+    }
+  };
+  walk(dir, '');
+  return hash.digest('hex').slice(0, 16);
+}
+
 /* ------------------------------------------------------------- stub bridge */
 
 /**
@@ -384,6 +415,7 @@ export async function runAttempt(task, {
   bridge = null,
   budget = null,
   checkTimeoutMs = DEFAULT_CHECK_TIMEOUT_MS,
+  keepDir = null,
 } = {}) {
   const used = {
     model: budget?.model ?? task.budget.model ?? null,
@@ -455,6 +487,15 @@ export async function runAttempt(task, {
   }
   const wallMs = Date.now() - started;
   const sessionFile = harness?.session?.file ?? null;
+
+  // --keep: the attempt dir is temp, and a temp sweep erases the evidence;
+  // the copy lands beside the run's JSONL instead (SPEC §2).
+  let keptSession = null;
+  if (keepDir && sessionFile && fs.existsSync(sessionFile)) {
+    fs.mkdirSync(keepDir, { recursive: true });
+    keptSession = path.join(keepDir, `${task.id}-${attempt}.jsonl`);
+    fs.copyFileSync(sessionFile, keptSession);
+  }
 
   const check = await checkCommand(task.check, treeDir, {
     timeoutMs: checkTimeoutMs,
@@ -553,9 +594,18 @@ export async function runAttempt(task, {
     runId,
     taskId: task.id,
     kind: task.kind,
+    category: task.category ?? null,
     attempt,
     mode,
     budget: used,
+    // Dataset versions + prompt version + execution environment (SPEC §3):
+    // metrics compare honestly only when the same task bytes, the same
+    // preamble and the same app ran them. The prompt digest mirrors exactly
+    // what the replay fingerprint hashes for staleness.
+    taskDigest: digestOf(task.taskText),
+    treeDigest: treeDigestOf(path.join(task.dir, 'tree')),
+    promptDigest: digestOf(preamble({ allowRun: used.allowRun })),
+    env: { app: APP_VERSION, node: process.version, platform: process.platform },
     outcome,
     scored,
     invalidReason,
@@ -582,7 +632,7 @@ export async function runAttempt(task, {
     spent: stats?.spent ?? null,
     wallMs,
     check: { command: check.command, exit: check.exit, ms: check.ms, tail: check.tail, timedOut: check.timedOut },
-    session: { id: sessionId, file: sessionFile },
+    session: { id: sessionId, file: sessionFile, kept: keptSession },
     conversations: [...new Set(seen.conversations.concat(harness?.conversation ? [harness.conversation] : []))],
     compactions,
     applied: applied?.files?.length ?? 0,
@@ -615,10 +665,20 @@ export async function runEval({
   checkTimeoutMs = DEFAULT_CHECK_TIMEOUT_MS,
   pauseMs = 0,
   attempts = 1,
+  keep = false,
   log = null,
 } = {}) {
   const list = tasks.map((t) => (typeof t === 'string' ? resolveTask(t) : t));
   if (!list.length) throw new EvalError('no tasks to run');
+  // liveOnly tasks (the safety set) are scored only by a live run: a
+  // transcript can prove what one recorded run did, not what the model does.
+  const scoreable = mode === 'replay' ? list.filter((t) => !t.liveOnly) : list;
+  if (mode === 'replay' && !scoreable.length) {
+    throw new EvalError(`every selected task is live-only (${list.map((t) => t.id).join(', ')}) — a transcript cannot score them; run --live`);
+  }
+  if (scoreable.length < list.length) {
+    log?.(`  skipped live-only: ${list.filter((t) => t.liveOnly).map((t) => t.id).join(', ')}`);
+  }
   if (!Number.isInteger(attempts) || attempts < 1 || attempts > 5) {
     throw new EvalError('attempts must be an integer 1..5 — report all of them, never keep the best');
   }
@@ -626,10 +686,11 @@ export async function runEval({
   fs.mkdirSync(dir, { recursive: true });
   const runId = `${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 23)}-${mode}`;
   const resultsFile = path.join(dir, `${runId}.jsonl`);
+  const keepDir = keep ? path.join(dir, `${runId}-sessions`) : null;
 
   const rows = [];
-  for (let i = 0; i < list.length; i++) {
-    const task = list[i];
+  for (let i = 0; i < scoreable.length; i++) {
+    const task = scoreable[i];
     for (let attempt = 1; attempt <= attempts; attempt++) {
       const bridge = bridgeFor
         ? bridgeFor(task, attempt)
@@ -644,6 +705,7 @@ export async function runEval({
         bridge,
         budget,
         checkTimeoutMs,
+        keepDir,
       });
       rows.push(row);
       fs.appendFileSync(resultsFile, JSON.stringify(row) + '\n');
@@ -652,10 +714,10 @@ export async function runEval({
       // The account's edge rate-limits bursts (Cloudflare 429): attempts fired
       // back to back can outrun it and a live set dies mid-run. The extension
       // retries an in-flight 429; the pause keeps the burst from starting.
-      if (pauseMs && (i < list.length - 1 || attempt < attempts)) await new Promise((resolve) => setTimeout(resolve, pauseMs));
+      if (pauseMs && (i < scoreable.length - 1 || attempt < attempts)) await new Promise((resolve) => setTimeout(resolve, pauseMs));
     }
   }
-  return { runId, resultsFile, rows };
+  return { runId, resultsFile, rows, keepDir };
 }
 
 /* ---------------------------------------------------------------- summary */
@@ -730,6 +792,52 @@ export function formatSummary(rows = []) {
   if (rows.some((r) => r.kind === 'holdout')) {
     lines.push('* holdout — reported separately, never the reason a commit lands');
   }
+  // The task's own `category` key is the "type of task" slice (SPEC §3): the
+  // robustness twins and the safety set stay visible in a `--all` run instead
+  // of dissolving into one success rate.
+  const categories = new Map();
+  for (const r of scoredRows) {
+    const label = r.category ?? (r.lang ? 'thai' : 'uncategorized');
+    const g = categories.get(label) ?? { solved: 0, scored: 0 };
+    g.scored += 1;
+    if (r.outcome === 'solved') g.solved += 1;
+    categories.set(label, g);
+  }
+  if (rows.some((r) => r.category)) {
+    lines.push(`by category: ${[...categories.keys()].sort()
+      .map((k) => `${k} ${categories.get(k).solved}/${categories.get(k).scored}`).join(' · ')}`);
+  }
+  // Stochastic runs are read as a distribution, not a draw: a task that went
+  // both ways across attempts is named here — an admission gate must list it.
+  const perTask = new Map();
+  for (const r of scoredRows) {
+    const os = perTask.get(r.taskId) ?? [];
+    os.push(r.outcome);
+    perTask.set(r.taskId, os);
+  }
+  const mixed = [...perTask.entries()]
+    .filter(([, os]) => os.includes('solved') && os.includes('unsolved'))
+    .map(([id, os]) => `${id} ${os.filter((o) => o === 'solved').length}/${os.length}`);
+  if (mixed.length) lines.push(`mixed outcomes: ${mixed.join(' · ')}`);
+  // Pair drift (SPEC §4): one twin passed while the other never did — the
+  // phrase-robustness signal the twin tasks exist for.
+  const perPair = new Map();
+  for (const r of scoredRows) {
+    if (!r.pair) continue;
+    const twins = perPair.get(r.pair) ?? new Map();
+    const os = twins.get(r.taskId) ?? [];
+    os.push(r.outcome);
+    twins.set(r.taskId, os);
+    perPair.set(r.pair, twins);
+  }
+  const drift = [];
+  for (const [pair, twins] of perPair) {
+    const shares = [...twins.values()].map((os) => os.filter((o) => o === 'solved').length / os.length);
+    if (shares.some((s) => s > 0) && shares.some((s) => s === 0)) {
+      drift.push(`${pair} ${shares.filter((s) => s > 0).length}/${shares.length}`);
+    }
+  }
+  if (drift.length) lines.push(`pair drift: ${drift.join(' · ')} (one twin solved, the other never)`);
   return lines.join('\n');
 }
 
@@ -765,6 +873,8 @@ options
   --attempts N         repeat every task N times in one run (1..5, default 1);
                        every row is reported — read medians, never the best draw
   --results DIR        where this run's JSONL lands (default evals/results/)
+  --keep               copy each attempt's session JSONL beside the results
+                       (<runId>-sessions/) — evidence outlives %TEMP%
   --advisory           exit 0 even when checks fail (watching, not gating)
   --help               this text
 
@@ -776,7 +886,7 @@ exit codes: 0 only when every scored check passed; 1 when one did not;
 export function parseArgs(argv) {
   const opts = {
     tasks: [], all: false, holdout: false, thai: false, replay: null, live: false,
-    advisory: false, help: false, results: null, budget: null, pause: 0, attempts: 1,
+    advisory: false, help: false, results: null, budget: null, pause: 0, attempts: 1, keep: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -796,6 +906,7 @@ export function parseArgs(argv) {
     else if (name === '--thai') opts.thai = true;
     else if (name === '--replay') opts.replay = next();
     else if (name === '--live') opts.live = true;
+    else if (name === '--keep') opts.keep = true;
     else if (name === '--advisory') opts.advisory = true;
     else if (name === '--results') opts.results = next();
     else if (name === '--budget') opts.budget = next();
@@ -871,6 +982,7 @@ async function main() {
     resultsDir,
     pauseMs: opts.pause,
     attempts: opts.attempts,
+    keep: opts.keep,
     log: (line) => console.log(line),
   });
   console.log(formatSummary(rows));

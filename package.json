@@ -26,6 +26,8 @@
     "loadtest": "node scripts/loadtest.mjs",
     "evals": "node scripts/evals.mjs",
     "evals:lint": "node scripts/evals-lint.mjs",
+    "evals:compare": "node scripts/evals-compare.mjs",
+    "experiments": "node scripts/experiments.mjs",
     "setup-assistant": "node aipass-bridge/setup-assistant.mjs",
     "desktop": "node desktop/main.mjs",
     "desktop:sidecar": "node desktop/sidecar/fetch-node.mjs",

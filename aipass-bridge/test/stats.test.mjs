@@ -46,7 +46,11 @@ test('a finished run leaves one run_stats line with per-tool refusals', async ()
   assert.ok(stat, 'the run_stats line is in the session');
   assert.equal(stat.stopReason, 'done');
   assert.equal(stat.steps, 2);
-  assert.deepEqual(stat.tools.read, { n: 2, fail: 1 }, 'one read refused, one succeeded');
+  assert.equal(stat.turns, 2, 'two replies produced those two calls');
+  assert.equal(stat.tools.read.n, 2, 'two reads');
+  assert.equal(stat.tools.read.fail, 1, 'one read refused, one succeeded');
+  assert.ok(stat.tools.read.ms >= 0, 'the reads carry their wall time');
+  assert.equal(stat.commitBlocks, 0, 'no commit was attempted');
   assert.equal(stat.nudges, 0);
   assert.equal(stat.stagnations, 0, 'the run never repeated a step');
   assert.equal(stat.firewallNotes, 0);
@@ -93,21 +97,22 @@ test('collectRuns and summarize aggregate sessions the reader can print', () => 
   const store = new SessionStore(path.join(dir, 'sessions'));
   const one = store.create({ root: dir, title: 'one' });
   one.append('run_stats', {
-    stopReason: 'done', steps: 3, model: 'm-a',
-    tools: { read: { n: 4, fail: 1 }, replace: { n: 1, fail: 0 } },
-    nudges: 1, stagnations: 1, firewallNotes: 2, stepMs: [100, 200], spent: 5,
+    stopReason: 'done', steps: 3, turns: 4, model: 'm-a',
+    tools: { read: { n: 4, fail: 1, ms: 400 }, replace: { n: 1, fail: 0, ms: 200 } },
+    nudges: 1, stagnations: 1, firewallNotes: 2, commitBlocks: 2, stepMs: [100, 200], spent: 5,
   });
   const otherRoot = tempDir({ 'b.txt': 'other project\n' });
   const two = store.create({ root: otherRoot, title: 'two' });
   two.append('run_stats', {
-    stopReason: 'steps', steps: 10, model: 'm-b',
-    tools: { read: { n: 9, fail: 0 } },
+    stopReason: 'steps', steps: 10, turns: 3, model: 'm-b',
+    tools: { read: { n: 9, fail: 0, ms: 900 } },
     nudges: 0, firewallNotes: 0, stepMs: [300], spent: 2,
   });
 
   const rows = [...collectRuns(one), ...collectRuns(two)];
   assert.equal(rows.length, 2);
   assert.equal(rows[0].refusalRate.toFixed(2), '0.20');
+  assert.equal(rows[0].turns, 4, 'turns is read back from the line');
 
   const totals = summarize(rows);
   assert.equal(totals.runs, 2);
@@ -116,9 +121,11 @@ test('collectRuns and summarize aggregate sessions the reader can print', () => 
   assert.equal(totals.nudges, 1);
   assert.equal(totals.stagnations, 1);
   assert.equal(totals.firewallNotes, 2);
+  assert.equal(totals.commitBlocks, 2, 'red-test gate refusals aggregate');
   assert.equal(totals.spent, 7);
   assert.equal(totals.byTool.read.n, 13);
   assert.equal(totals.byTool.read.fail, 1);
+  assert.equal(totals.byTool.read.ms, 1300, 'per-tool latency sums across runs');
   assert.equal(totals.byStop.done, 1);
   assert.equal(totals.byStop.steps, 1);
   // The reliability report groups by the model and the project — one line per

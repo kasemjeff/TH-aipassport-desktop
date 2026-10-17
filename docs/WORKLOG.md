@@ -6,6 +6,146 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-17 — opencode — the memory audit: summaries paid for and never sent
+
+- **Files**: `harness/loop.mjs` (the seed is no longer gated on `first` —
+  between-runs compaction fires on non-first runs by definition; rotate moved
+  before the compaction append); `harness/harness.mjs`
+  (`rememberSummary`/`#pendingSummary` — a manual rotation's seed is built at
+  the next run, against that run's own task; `#stagedList()` shared by both
+  seed paths; rotate-before-append); `harness/rpc.mjs` (`compact` records the
+  summary and refuses while a run is in flight); `harness/compact.mjs` (the
+  divisor samples the post-compaction window; dead `listing` param removed);
+  `compaction` entries now carry `lastSummarizedEntryId`;
+  `docs/DATA_FORMATS.md` §Memory updated with the compat note; tests:
+  `compact.test.mjs` +5 (between-runs seed, manual seed consumed once,
+  rotate-fail ledger, mid-run rotate-fail, divisor window — fail-before
+  verified for the guard and the divisor), `harness-qa.test.mjs` (the manual
+  seed reaches the next run over RPC; compact refuses in flight). 553 → 559
+  tests.
+- **Tests**: `npm test` 558 pass / 0 fail / 1 skip (559); `npm run qa` 9 ok /
+  0 warn / 0 fail; `npm run agents:lint` ok (545 titles); `npm run evals:lint`
+  OK. Nothing committed.
+- **Deferred**: a small session reopened in a fresh process still hands the
+  model only the new run's task (no compaction entry exists to seed from) —
+  that is the `memory-cold-warm` probe's question, not a bug this round was
+  allowed to answer.
+- **Risks**: reused-session eval rows measured before this change saw less
+  summary than the design intends; re-baseline before comparing rows across
+  the change. The tree is shared with other sessions (loop guards, plugin
+  risk) — commit splits must keep the waves apart.
+- **Cleanup**: no temp files; the sidecar artifact is in place (gitignored).
+
+## 2026-10-17 — opencode — the hook leftovers closed: latency, the commit gate, the snapshot
+
+- **Files**: `harness/loop.mjs` (per-kind `ms` in `toolStats` — parallel
+  SUBAGENTs timed at their fan-out; the red-test gate in `guarded()` ahead of
+  the repeat guard; `turns` + `commitBlocks` in `run_stats`; the
+  `--snapshot` builder appended to the turn-1 listing; plugin markers with a
+  declared risk routed through the permission engine);
+  `harness/permissions.mjs` (new `isGitCommit` export; `evaluate`/`request`
+  take an explicit `risk` override); `harness/plugins.mjs` (`register`'s
+  optional `risk`, validated at load, carried in `toolTable()`);
+  `aipass-bridge/stats.mjs` (per-kind `ms` aggregate + `commit-gate` line);
+  `agent.mjs` (`--snapshot` flag + help); tests: `gates.test.mjs` §5–6
+  (commit gate: refuse → check → commit runs → re-arm; no-check control;
+  plugin risk asked/denied/allowed/undeclared), `stats.test.mjs`,
+  `lang-guard.test.mjs`, `agent.test.mjs` (snapshot on/off), `plugins.test.mjs`;
+  docs: `HARNESS_DESIGN` (hook rows + worth-closing list — all closed),
+  `LOOP_DESIGN` (execute order + guards table + the one hard bar),
+  `SPEC_CHECKER` §As shipped 4, `SPEC_EVALS` metrics row, `desktop/README`
+  (plugin risk), CHANGELOG, README badge (403 → 552 passing). 546 → 553 tests.
+- **Tests**: `npm test` 552 pass / 0 fail / 1 skip (553); focused runs green
+  (gates, stats, lang-guard, plugins, agent) before the full one; `npm run
+  agents:lint` ok (539 titles); `npm run evals:lint` OK (111 fail-before, 50
+  pairs); `npm run qa` 9 ok / 0 warn / 0 fail.
+- **Deferred**: the checker's `done-unverified` decision (open question 2) and
+  the elision tier stay deferred on purpose — both wait on their experiments'
+  data (`MATURITY.md`, `EXPERIMENTS.md`); building them now would be the guess
+  the data gate exists to stop. The seven live experiments remain `proposed`
+  (no tab/account this session — qa's live line says 0 extensions).
+- **Risks**: the commit gate changes behavior for every project carrying
+  `.aipass/check.txt` — a `git commit` RUN now requires the declared check to
+  have passed at the current tree state (loud refusal naming the command;
+  delete/rename the file to opt out). `run_stats.tools` grew `ms` and
+  `run_stats` grew `turns`/`commitBlocks` — readers pinning the old shape
+  need field-aware checks (`stats.test.mjs` is the example).
+- **Cleanup**: nothing outside the repo; suite temp dirs only. Went into the
+  batch commit covering the sessions' pending work, once the whole tree went
+  green (559 tests, `qa` 9 ok); personal untracked pages (desktop research
+  notes, fortune/snake) left out on purpose; nothing pushed. If a history
+  split is wanted later, the waves are separable at hunk level — `loop.mjs`'s
+  regions and the doc bullets (see the memory audit's risk note).
+
+## 2026-10-17 — opencode — macOS: the CI lane, and the branches made testable
+
+- **Files**: `.github/workflows/test.yml` (`macos-latest` × Node 22/24);
+  new `harness/open-command.mjs` + its callers (`harness/rpc.mjs`
+  `openBrowser`, `desktop/main.mjs` `openWindow` — the duplicated platform
+  branch is one rule now); `desktop/sidecar/fetch-node.mjs` (exports
+  `targetTriple(platform, arch)`, runs its copy only when invoked);
+  new `test/platform.test.mjs` (3 cases: argv shapes, allowlist-before-spawn,
+  mac triples); `desktop/README.md` (the lane note). 543 → 546 tests.
+- **Tests**: `npm test` 545 pass / 0 fail / 1 skip (546); `npm run qa` 9 ok /
+  0 warn / 0 fail; `npm run agents:lint` ok (532 titles); `npm run evals:lint`
+  OK. `npm run desktop:sidecar` ran end to end after the refactor (same
+  output, 93 MB, node v24.18.0). Nothing committed.
+- **Deferred**: the clipboard reader's darwin branch (`pngpaste`/`osascript`
+  in `chat.mjs`) stays unpinned — it needs a real clipboard, which CI does
+  not have; the packaged window/tray still needs a hand on a Mac.
+- **Risks**: the macOS lane is unverified until the first push — CI has never
+  run on darwin, so a red mac job is a finding, not a surprise.
+- **Cleanup**: sidecar artifact refreshed in place (gitignored); no temp
+  files left.
+
+## 2026-10-17 — opencode — the test plan landed: L1 cases, the absence gate
+
+- **Files**: the six suite files named in `docs/TEST_PLAN.md` L1 —
+  `aipass-bridge/test/{evals,secret-screen,ssrf,data-integrity,experiments,evals-compare}.test.mjs`
+  (11 new cases: digest stability + a moved fixture byte, the 429-storm
+  `invalid` row, quiet summary slices, piped/composed secret spellings,
+  literal private hosts, bare-compaction rendering, unknown entries through
+  a rewrite, the queue's `--json` order, new/absent/wall/old-shape
+  comparator cases); `scripts/evals-compare.mjs` (absence gate);
+  `harness/session.mjs` (`(no summary)` placeholder); `docs/SPEC_EVALS.md`
+  (the gate text says absence counts as 0); CHANGELOG. 532 → 543 tests.
+- **Tests**: `npm test` 542 pass / 0 fail / 1 skip (543); `npm run qa` 9 ok /
+  0 warn / 0 fail; `npm run agents:lint` ok (529 titles); `npm run evals:lint`
+  OK; `npm run experiments -- --check` OK (7 records). Nothing committed.
+- **Deferred**: the L1 cases that need code or a network the suite cannot
+  touch — a public host resolving private (would need a DNS round trip; the
+  literal-resolve path is pinned instead).
+- **Risks**: the comparator now fails when a candidate run omitted a baseline
+  task, so a `--task`-only candidate no longer compares green against a full
+  baseline — intended, but the PR moving a default should say it.
+- **Cleanup**: test temp dirs only; a debug script in `%TEMP%\opencode`.
+
+## 2026-10-17 — opencode — audit round 5 closed: experiments, comparison, safety twins, maturity
+
+- **Files**: the G16–G22 wave — `docs/EXPERIMENTS.md` + `experiments/queue.json`
+  + `scripts/experiments.mjs` (the experiment system, seeded from the audit);
+  `scripts/evals-compare.mjs` (candidate-vs-baseline gates as exit codes);
+  `docs/MATURITY.md` (capability status + owner roles); `scripts/evals.mjs`
+  (row `category`/`taskDigest`/`treeDigest`/`promptDigest`/`env`, `--keep`,
+  `liveOnly` skipped in replay, `by category:`/`mixed outcomes:`/`pair drift:`
+  summary lines); `harness/session.mjs` exports `APP_VERSION`; new eval tasks
+  `sum-numbers(-twin)`, `count-lines(-twin)`, `refuse-run-leak`,
+  `allow-clean-run`; `refuse-secret`'s check now demands the `denied` ending
+  (it passed on an untouched tree — `evals:lint` was red on master);
+  `SPEC_EVALS.md` (gates, routing, safety error rates + expiry),
+  `DATA_FORMATS.md` (memory), `RELEASE.md` (safety freshness), README, AGENTS,
+  CHANGELOG, `package.json` (`evals:compare`, `experiments`).
+- **Tests**: `npm test` 531 pass / 0 fail / 1 skip; `npm run qa` 9 ok / 0
+  warn / 0 fail; `npm run agents:lint` ok; `npm run evals:lint` green — 111
+  checks fail-before (was failing on master over `refuse-secret`).
+- **Deferred**: the queue's six records are all `proposed` — they need live
+  runs to end. Heads of the queue: `safety-twin-controls`, `attempts-floor`.
+- **Risks**: `SPEC_EVALS.md` grew several sections; audits that cite line
+  numbers must anchor on section names. Safety rows from before this change
+  are not comparable (live-only is now enforced; `refuse-secret` scores
+  differently). Nothing was committed — the working tree carries the wave.
+- **Cleanup**: temp dirs from lint/tests only; nothing left in the repo.
+
 ## 2026-10-17 — opencode — CI revived: the runners' git phrasing, then the sessions' batch
 
 - **Files**: `aipass-bridge/test/gates.test.mjs` + `aipass-bridge/harness/tools.mjs`

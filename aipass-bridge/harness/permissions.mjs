@@ -125,6 +125,30 @@ export function classifyRun(body) {
   return 'shell';
 }
 
+/**
+ * True when a RUN body asks git to commit. The same shallow parse classifyRun
+ * uses: any segment counts (`git status && git commit` still commits), global
+ * `-c`/`-C` values are skipped, and the first bare word after `git` is the
+ * subcommand. The red-test commit gate (loop.mjs) keys off this one function,
+ * so the gate and the risk classifier cannot drift apart.
+ */
+export function isGitCommit(body) {
+  const text = String(body ?? '').toLowerCase();
+  if (!text.trim()) return false;
+  for (const segment of text.split(RUN_SPLIT).map((s) => s.trim()).filter(Boolean)) {
+    if (commandWord(segment) !== 'git') continue;
+    const words = wordsOf(segment);
+    for (let i = 1; i < words.length; i++) {
+      const w = words[i];
+      if (w === '-c' || w === '-C') { i++; continue; }
+      if (w.startsWith('-')) continue;
+      if (w === 'commit') return true;
+      break; // the first bare word is the subcommand; anything else is not a commit
+    }
+  }
+  return false;
+}
+
 /** Minimal glob: `**` spans path separators, `*` does not. */
 export function globMatch(pattern, text) {
   const re = new RegExp('^' + String(pattern)
@@ -218,9 +242,14 @@ export class PermissionEngine {
     this.pending = new Map(); // id → {resolve, kind, arg}
   }
 
-  /** What the policy says, before any question is asked. */
-  evaluate({ kind, arg = '', body = '' }) {
-    const risk = classify(kind, body);
+  /** What the policy says, before any question is asked.
+   *
+   *  `risk` overrides the kind's own classification for callers that carry
+   *  one of their own (a plugin marker with a risk declared at registration);
+   *  everything below reads the same verdict either way.
+   */
+  evaluate({ kind, arg = '', body = '', risk: riskOverride = null }) {
+    const risk = riskOverride ?? classify(kind, body);
     // A hazardous RUN body is a question no mode pre-answers — yolo included.
     // It sits ahead of the grants check too: a grant is keyed `${kind}:${arg}`
     // and every RUN carries `arg: ''`, so one "always" would otherwise blanket
@@ -286,9 +315,9 @@ export class PermissionEngine {
    * waits for `answer()`. If nobody is listening there is no one to ask, so the
    * call is refused rather than hanging the run forever.
    */
-  async request({ kind, arg = '', preview = '', body = '' } = {}) {
-    const risk = classify(kind, body);
-    const verdict = this.evaluate({ kind, arg, body });
+  async request({ kind, arg = '', preview = '', body = '', risk: riskOverride = null } = {}) {
+    const risk = riskOverride ?? classify(kind, body);
+    const verdict = this.evaluate({ kind, arg, body, risk: riskOverride });
     if (verdict.decision !== 'ask') return verdict.decision;
 
     if (this.askFn) return verdictFnAnswer(await this.askFn({ id: 'direct', kind, arg, preview, risk }));

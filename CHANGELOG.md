@@ -55,18 +55,101 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   dependency review), `.github/dependabot.yml`, and tests for data integrity
   (torn/duplicated/wrong-typed lines, settings forward-compatibility) and
   concurrent RPC bursts.
+- **The experiment queue** (`docs/EXPERIMENTS.md`, `experiments/queue.json`,
+  `npm run experiments`): proposals come from alerts, regressions, research
+  or audits; every record carries a hypothesis, baseline, success criteria,
+  budget and stop rule, and one that ends without a `result` fails
+  validation. Ordered 2×impact − risk − cost; seeded with seven open records,
+  from mixed-model routing to the elision tier.
+- **`npm run evals:compare`** — two result JSONLs in, one verdict out. The
+  model-approval gates (regression floor, safety set, ≤2× spend, a 3-attempt
+  sample floor) are exit codes instead of judgment; `--json` for the record.
+- **Eval rows carry their dataset versions** — `taskDigest`, `treeDigest`,
+  an `env` stamp (`app`, `node`, `platform`) — plus the task's `category`;
+  the summary gains `by category:`, `mixed outcomes:` and `pair drift:`
+  lines. The set gains two phrase-robustness twin pairs (`sum-numbers`,
+  `count-lines`), and `--keep` copies every attempt's session JSONL beside
+  the run results, so evidence outlives `%TEMP%`.
+- **The safety set doubles and gets twins**: `refuse-run-leak` (an embedded
+  "ops step" that would stage the token through RUN) and `allow-clean-run`
+  (the false-positive twin — a clean RUN that must go through). All four
+  safety tasks are `liveOnly` (replay skips them); FP/FN criteria and the
+  30-day expiry of safety evidence live in `docs/SPEC_EVALS.md`.
+- **`docs/MATURITY.md`** — the capability map: production vs experimental vs
+  not shipped (and one "won't build"), each with the criteria that would
+  change its status and an owner role.
+- **The test plan's L1 cases are implemented** (`docs/TEST_PLAN.md`): digests
+  pinned stable across runs and moving with a fixture byte, a dead bridge
+  marked `invalid` (never `unsolved`), the summary's empty slices staying
+  quiet, piped/composed secret spellings refused, literal metadata hosts
+  resolving private without a network round trip, a summary-less `compaction`
+  marker loading, unknown entries surviving a rewrite, the queue's `--json`
+  order — and the comparator's new-task/wall/old-shape cases.
+- **The suite runs on macOS in CI** — `macos-latest` joined the matrix
+  (Node 22/24), so the second platform the app ships for is exercised on
+  every push. The platform→argv rule (`open` / `cmd start` / `xdg-open`)
+  moved to `harness/open-command.mjs` and the sidecar triple table became
+  injectable (`targetTriple()`), so a Windows dev machine pins the darwin
+  branches in `platform.test.mjs`: the argv shape on all three OSes, the
+  `browser.open` allowlist refusing before any spawn, and the mac sidecar
+  names (`x86_64-apple-darwin` / `aarch64-apple-darwin`).
+- **Per-tool latency in `run_stats`.** Each tool kind's entry gains `ms` (its
+  wall time; parallel SUBAGENTs are timed at their fan-out) and `npm run
+  stats` prints the per-kind mean next to the refusal count; `run_stats.turns`
+  records the reply count that `steps` (executed calls) never named.
+- **The red-test commit gate.** A `git commit` RUN is refused while the
+  project's declared check (`.aipass/check.txt`, `docs/SPEC_CHECKER.md`) has
+  not passed at the current tree state — any change re-arms it, the refusal
+  names the exact command that un-bars it, and `run_stats.commitBlocks` counts
+  the refusals. Projects without a declared check are untouched.
+- **`--snapshot`** quotes `git status --short` and the `package.json` scripts
+  into turn 1 — off by default, so the CLI's tuned turn-1 bytes stay identical
+  (`agent.test.mjs` pins both sides).
+- **Plugin tools can declare a risk** — `ctx.tools.register(marker, fn,
+  {risk: 'write'|'shell'})` routes the marker through the same permission
+  gate a built-in of that kind rides; undeclared tools keep the trust the
+  plugin model states (`plugins.test.mjs`, `gates.test.mjs`).
 
 ### Changed
 
+- `evals:compare` no longer passes by absence: a baseline task the candidate
+  never ran counts as 0 rows and fails as insufficient sample, the same way a
+  missing safety task already did (`docs/SPEC_EVALS.md` says it in the gate
+  text too).
 - Session load is explicit about bad data: a duplicated entry id loads once,
   lines that parse to the wrong type are skipped, and only an object with a
   string `id` counts as a header.
 - `docs/SPEC_EVALS.md` no longer claims the loop lacks wall-clock caps (it
   does not lack them; the credit cap was the missing one, and now ships
   opt-in). Open question 2 (attempt policy) is resolved as built.
+- `compaction` entries record the newest entry their summary folds away as
+  `lastSummarizedEntryId` — the old `firstKeptEntryId` named the wrong end of
+  the boundary (`docs/DATA_FORMATS.md` notes the old spelling). The `seed()`
+  helper's never-read `listing` parameter is gone.
 
 ### Fixed
 
+- **A rotated conversation is seeded even when the run is not the session's
+  first.** Between-runs compaction fires on exactly the runs that are not
+  first, and the seed was gated on `first`: the fresh conversation restarted
+  from a bare "the project is still open" message with the paid-for summary
+  never sent. A manual `/compact` had the same hole from the other side — its
+  summary had no run to ride in; the next run now builds the seed against its
+  own task (`rememberSummary`), once.
+- **A rotation that fails is no longer recorded as done.** The compaction
+  entry is appended after `rotate()` succeeds (both the loop's mid-run path
+  and `compactNow`), so the estimate can never reset against memory the model
+  never carried, and a mid-run failure retries on the next step. `/compact`
+  also refuses while a run is in flight rather than rotating under it.
+- The compaction divisor sampled entries a rotation had already discarded, so
+  a fresh Thai conversation following a large Latin one (or the reverse)
+  estimated up to 2× off; it now samples the same window `estimate()` counts.
+- A `compaction` entry with no summary rendered as `undefined` in the
+  session's markdown export; it now renders `(no summary)`.
+- `npm run evals:lint` was failing on master: `refuse-secret`'s check passed
+  on its untouched tree (a no-leak-only check scores nothing). The check now
+  requires the explicit `denied` ending, so fail-before holds for every one
+  of the 111 checks and CI's lint is green again.
 - `RUN type .env`, `SEARCH` over `server.pem`, and `git show HEAD:.env` were
   three ways around the secret floor; all three are refused now
   (`test/secret-screen.test.mjs`).

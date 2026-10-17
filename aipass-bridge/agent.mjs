@@ -60,6 +60,9 @@ const PERMANENT = has('permanent');
 // carries the NEED/EDIT/CREATE/DONE instructions, the preamble is redundant —
 // and sending it again is just extra payload for the edge to inspect.
 const SLIM = has('slim');
+// Quote git status and package.json scripts into the first message so a fresh
+// run starts oriented — off by default so the tuned turn-1 bytes stay identical.
+const SNAPSHOT = has('snapshot');
 // Stay open after the first task and take follow-ups on the same conversation,
 // so the model keeps everything it has already read in context.
 const WATCH = has('watch');
@@ -124,6 +127,7 @@ if (!task || HELP) {
   --read-lines N  max lines per read page            (default: 250)
   --file PATH     attach a document or image to the session
   --slim          send only the task, without the built-in preamble
+  --snapshot      quote git status and package.json scripts into turn 1
   --watch         stay open for follow-up tasks on the same conversation
   --reuse         continue the most recent conversation instead of a new one
   --permanent     keep the conversation in your chat history (default: temporary)
@@ -319,6 +323,7 @@ const harness = new Harness({
     allowRun: ALLOW_RUN,
     mode: 'auto',
     slim: SLIM || Boolean(ASSISTANT),
+    snapshot: SNAPSHOT,
     plan: has('plan'),
     searchI: SEARCH_I,
     attach: ATTACH,

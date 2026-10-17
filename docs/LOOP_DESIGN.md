@@ -124,6 +124,11 @@ then `Promise.all`; results re-assemble in marker order.
 
 **6. Execute, in order.** Every call goes through `guarded()`:
 
+- **red-test gate** — a `git commit` RUN while the project's declared check
+  (`.aipass/check.txt`) has not passed at the current tree state is refused
+  with the exact command that un-bars it (`commitBlocks`); a declared check
+  that passes records the state, and any later change re-arms the gate. No
+  declared check, no gate — the file is the project's own opt-in;
 - **repeat guard** — the identical call (kind + arg + body) for the third
   time, with no staged change in between, is refused as a loop, not a step
   (`repeat_block`); control markers (`plan`, `todo`, `subagent`) are exempt.
@@ -194,6 +199,7 @@ the stop reason; credits are diffed (`quota(true)`); `run_stats` and
 | repeat guard | identical call, 3rd time, nothing staged in between | refusal text as the result, `repeat_block` | > `repeatGuardMax` (4) refusals → `stalled` |
 | err loop | the same failure (kind + masked error line) on calls in a row | correction on the third result, `errLoops` | streak > `repeatGuardMax` → `stalled` |
 | chain guard | a failed change, mid-reply | the reply's later changes/RUNs skipped and stated, `chainSkips`; reads still run | — |
+| red-test gate | a `git commit` RUN while the declared check (`.aipass/check.txt`) has not passed at the current state | refusal naming the exact command to run, `commitBlocks`; any later change re-arms | — (run the check first; a commit is never the way around it) |
 | stagnation | same step ×3, or two trading places ×2 | `stagnation` warn + "do something different" | `stagnation` |
 | budgets | tool count (300) and wall clock (30 min) — the only bound when no step cap is set; plus credits, only when set (`maxCredits`, 0 = off, checked against the cached quota) | `budget` event | `tools-limited` / `time-limited` / `credit-limited` |
 | plan gate | `PLAN` and no approval yet | `plan_request`, wait however long | decline → `plan-rejected` |
@@ -205,7 +211,9 @@ the stop reason; credits are diffed (`quota(true)`); `run_stats` and
 The mechanical guards (repeat, err loop, stagnation, budgets) stop a run that
 cannot move; the chain guard narrows one step after a failed change; the
 advisory ones (verify, language) ask once and let the model finish. All of
-them correct *evidence*, never intent: a call runs as written first.
+them correct *evidence*, never intent: a call runs as written first — with one
+deliberate exception, the red-test gate, which is a hard bar and only exists
+where the project declared its check.
 
 ## Stop reasons
 

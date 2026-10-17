@@ -27,6 +27,7 @@ import { Emitter } from './events.mjs';
 // and with desktop/main.mjs's probe: an explicit bridgeURL wins, otherwise
 // AIPASS_BRIDGE decides, otherwise the loopback default.
 import { resolveBridgeURL } from './bridge.mjs';
+import { openCommandFor } from './open-command.mjs';
 import { loadOrMintToken, authorized, authorizedQuery } from './authtoken.mjs';
 import { openLogFile } from './log-file.mjs';
 import { scrubSecrets } from '../bridge/log-scrub.mjs';
@@ -133,11 +134,9 @@ export async function openBrowser(url) {
     child.on('error', () => resolve());
   });
   try {
-    // '' becomes a bare "" on the command line — cmd's canonical empty title
-    // for `start`.
-    if (process.platform === 'win32') await run('cmd', ['/c', 'start', '', target]);
-    else if (process.platform === 'darwin') await run('open', [target]);
-    else await run('xdg-open', [target]);
+    // The platform→argv rule lives in one place (open-command.mjs), shared
+    // with the desktop launcher — and testable from any OS.
+    await run(...openCommandFor(process.platform, target));
     return true;
   } catch {
     return false;
@@ -703,7 +702,13 @@ export function createRpc({
     async pending() { return current.pendingChanges(); },
     async compact() {
       if (!current.session) throw new Error('no session yet — send something first');
+      // A rotation replaces the conversation a running loop is sending into —
+      // its next message would land in a context that never carried the run.
+      if (current.running) throw new Error('a run is in flight — compact when it ends');
       const done = await current.compactNow();
+      // The summary has no run of its own yet: the next run builds its seed
+      // against that run's task and carries it.
+      current.rememberSummary(done.summary);
       return { summary: done.summary, context: current.contextUsage() };
     },
     async diff(params = {}) {

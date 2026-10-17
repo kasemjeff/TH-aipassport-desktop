@@ -86,7 +86,7 @@ header rewrites by anything that does not know it. Entry types:
 | `tool` | `kind`, `arg`, `out`, `ok` |
 | `diff` | `file`, `added`, `removed`, `decision: pending \| applied \| rejected` |
 | `todo` | `items: [{text, done}]` |
-| `compaction` | `summary`, `firstKeptEntryId` |
+| `compaction` | `summary`, `lastSummarizedEntryId` |
 | `note` | free text (helpers, bookkeeping) |
 
 The header is presentation state (`title`, `updated`, `entryCount`). It is
@@ -165,6 +165,43 @@ write was interrupted — the promises below are pinned by
   the format pretends to solve. Inside a file, an `EDIT` whose match is
   ambiguous is refused rather than guessed — the refusal is the conflict
   answer.
+
+## Memory — what the model carries
+
+The agent has no memory store. "Memory" is exactly this, and nothing else:
+
+- **the session transcript** — every user turn, assistant reply and tool
+  exchange in the file above, appended as the run goes (`LOOP_DESIGN.md`
+  contract 5); a fresh conversation starts from nothing but its preamble and
+  the task;
+- **compaction summaries** — when a conversation outgrows its window, the
+  compactor replaces the oldest stretch with one `compaction` entry
+  (`loop.mjs`); the summary is a rephrasing — a claim about the past, never
+  state the harness trusts;
+- **everything in the working tree** — uploads, spill files, whatever the
+  user put where the agent can read it.
+
+**Provenance and trust.** Everything the model can remember was written on
+this machine, by this user's own runs: there is no ingestion path, no shared
+or server-side memory, and the session file is the only copy (Retention
+below). The memory is data, not instructions — a poisoned summary rephrases,
+it cannot resurrect removed items — and torn or wrong-typed lines are skipped
+on load (`aipass-bridge/test/data-integrity.test.mjs` pins all of it).
+
+**Staleness and versioning.** A replay fingerprint that no longer matches
+marks the row stale instead of scoring it (`SPEC_EVALS.md` §5); a compaction
+entry records the newest entry its summary folds away
+(`lastSummarizedEntryId`; files written before the rename spell it
+`firstKeptEntryId`), so the boundary between what was summarised and what
+stayed live is a fact on disk; the session header's `app` stamp says which
+build wrote the file, and an old file under a newer build reads with the same
+merge rules.
+
+**Measuring value, cold vs warm.** The only honest instrument is the eval
+probe (`SPEC_EVALS.md` §4: `--reuse` vs fresh conversations, attempts ≥ 3) —
+run it as the `memory-cold-warm` experiment record (`docs/EXPERIMENTS.md`),
+never as a vibe. If the warm arm turns out worthless, the record says so and
+the probe stops being rerun.
 
 ## Retention
 

@@ -70,6 +70,19 @@ test('Latin text divides by four, a mixed conversation by three, Thai by two', (
   assert.equal(c.estimate(sessionLike([user(thai)])), 3300, 'Thai costs about twice the tokens per byte');
 });
 
+test('the divisor samples the current conversation, not what a rotation left behind', () => {
+  const c = new Compactor({ keepRecentBytes: 0 });
+  const thai = 'กขคงจฉชซญฎฑ'.repeat(400);   // 4400 chars, 13200 bytes
+  const eng = 'a'.repeat(4000);
+  // The rotated-away Thai must not drag the fresh Latin section's divisor
+  // down: the estimate would read double the tokens and keep compacting early
+  // for a conversation that is no longer what the divisor was measured on.
+  const entries = [user(thai), { type: 'compaction', summary: 'old work' }, user(eng)];
+  assert.equal(c.estimate(sessionLike(entries)), 1000);
+  const flipped = [user(eng), { type: 'compaction', summary: 'old work' }, user(thai)];
+  assert.equal(c.estimate(sessionLike(flipped)), 6600, 'fresh Thai still divides by two');
+});
+
 test('needsCompaction fires against the budget of the model in use', () => {
   const c = new Compactor({ contextTokens: 1000, reserveTokens: 100, keepRecentBytes: 0 });
   assert.equal(c.needsCompaction(sessionLike([user('a'.repeat(4000))])), true, '1000 tokens > 900');
@@ -92,12 +105,12 @@ test('AIPASS_CONTEXT_TOKENS overrides the budget for a terminal run', () => {
 
 test('seed keeps its between-runs shape, and pastes the step results on a mid-run rotation', () => {
   const c = new Compactor();
-  const between = c.seed({ summary: 'did things', task: 'the task', listing: '', preambleText: 'PRE' });
+  const between = c.seed({ summary: 'did things', task: 'the task', preambleText: 'PRE' });
   assert.match(between, /Earlier work, already done/);
   assert.match(between, /What should I open first\?/);
 
   const mid = c.seed({
-    summary: 'did things', task: 'the task', listing: '', preambleText: 'PRE',
+    summary: 'did things', task: 'the task', preambleText: 'PRE',
     results: 'Result of read big.txt:\n…contents…',
   });
   assert.match(mid, /Earlier work, already done/);
@@ -107,7 +120,7 @@ test('seed keeps its between-runs shape, and pastes the step results on a mid-ru
   // The two pins a rotation must not drop: the staged list (with deletes
   // marked) and the last check that has not passed, verbatim enough to act on.
   const pinned = c.seed({
-    summary: 'did things', task: 'the task', listing: '', preambleText: 'PRE',
+    summary: 'did things', task: 'the task', preambleText: 'PRE',
     staged: ['math.mjs', 'old.txt (deleted)'],
     lastCheck: { verdict: 'fail', text: 'FAIL: add(2,3) = 0' },
   });
@@ -174,4 +187,121 @@ test('a manual compaction re-seeds with every marker the run has', async (t) => 
   assert.match(seedText, /-i first/, 'the SEARCH -i hint survives a manual compaction');
   assert.match(seedText, /ATTACH/, 'the ATTACH marker survives a manual compaction');
   assert.match(seedText, /ECHO/, "a plugin's marker survives a manual compaction");
+});
+
+// The between-runs rotation fires precisely when the session has grown — on
+// the second run or later. The seed used to be gated on `first`, so the fresh
+// conversation was left with a bare "the project is still open" message: the
+// summary was paid for, recorded, and never sent, and the model restarted
+// from nothing.
+test('a between-runs rotation seeds the fresh conversation, first run or not', async (t) => {
+  const dir = tempDir({ 'a.txt': 'x\n' });
+  const handler = scripted([
+    'DONE งานแรกเสร็จแล้ว',
+    'the summary the second run carries',
+    'DONE งานที่สองเสร็จแล้ว',
+  ]);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const h = new Harness({
+    root: dir,
+    bridgeURL: bridge.base,
+    // Tiny budget: run two must compact before it starts, which is exactly
+    // the moment this test is about.
+    compaction: { contextTokens: 60, reserveTokens: 0, keepRecentBytes: 0 },
+  });
+  await h.startSession({ title: 'between-runs' });
+  await h.run('first task');
+  await h.run('second task');
+
+  assert.equal(handler.sent.length, 3, 'task one, the summary request, task two');
+  assert.match(handler.sent[2], /Earlier work, already done/, 'the rotated conversation is seeded, not left empty');
+  assert.match(handler.sent[2], /the summary the second run carries/, 'and the summary it paid for rides it');
+  assert.match(handler.sent[2], /Task: second task/, "seeded with the run's own task");
+  assert.ok(h.session.entries.some((e) => e.type === 'compaction'), 'the session records the boundary');
+});
+
+// /compact has no run in flight, so its summary has nowhere to ride until the
+// next one — and that seed must be built against the next run's OWN task,
+// which nobody knew at rotation time.
+test('a manual /compact hands its summary to the next run, and to that run only', async (t) => {
+  const dir = tempDir({ 'a.txt': 'x\n' });
+  const handler = scripted([
+    'DONE งานแรกเสร็จแล้ว',
+    'the manual summary',
+    'DONE งานที่สองเสร็จแล้ว',
+    'DONE งานที่สามเสร็จแล้ว',
+  ]);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const h = new Harness({ root: dir, bridgeURL: bridge.base });
+  await h.startSession({ title: 'manual-seed' });
+  await h.run('first task');
+  const { summary } = await h.compactNow('keep going');
+  h.rememberSummary(summary);   // what rpc's compact() does
+  await h.run('second task');
+  await h.run('third task');
+
+  assert.equal(handler.sent.length, 4, 'task one, manual summary, seeded task two, plain task three');
+  assert.match(handler.sent[2], /Earlier work, already done/, 'the manual rotation seeds the next run');
+  assert.match(handler.sent[2], /the manual summary/);
+  assert.match(handler.sent[2], /Task: second task/, "built against the run's own task, not the empty one at rotation time");
+  assert.doesNotMatch(handler.sent[3], /Earlier work, already done/, 'consumed once — a second run must not repeat it');
+});
+
+// A rotation failure used to leave the compaction entry behind: the record
+// said "compacted" while the upstream conversation still held everything,
+// and the estimate reset against memory the model never carried.
+test('a rotation that fails leaves no compaction entry behind', async (t) => {
+  const dir = tempDir({ 'a.txt': 'x\n' });
+  const handler = scripted(['DONE งานแรกเสร็จแล้ว', 'a summary that will never be used']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const h = new Harness({ root: dir, bridgeURL: bridge.base });
+  await h.startSession({ title: 'rotate-fail' });
+  await h.run('first task');
+
+  h.bridge.createConversation = async () => { throw new Error('the extension went away'); };
+  await assert.rejects(() => h.compactNow('second try'), /the extension went away/);
+  assert.equal(h.session.entries.some((e) => e.type === 'compaction'), false,
+    'nothing is recorded for a rotation that never happened');
+});
+
+// The same failure mid-run: the loop must announce it and send the results
+// anyway — losing the step's work to a compaction error is the worse outcome.
+test('a mid-run rotation that fails keeps the run alive and the ledger honest', async (t) => {
+  const dir = tempDir({ 'big.txt': `${'z'.repeat(6000)}\nmarker-end\n` });
+  const handler = scripted([
+    'Reading it now.\n\nNEED file big.txt',
+    'a summary that will never be used',
+    'DONE finished despite the failed rotation',
+  ]);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const h = new Harness({
+    root: dir,
+    bridgeURL: bridge.base,
+    // The same numbers the CLI end-to-end test tunes with, so the rotation
+    // fires at the same point: after the big read, before its results go out.
+    compaction: { contextTokens: 5000, keepRecentBytes: 200 },
+  });
+  await h.startSession({ title: 'rotate-fail-mid-run' });
+  const errors = [];
+  h.events.on('error', (e) => errors.push(e.message));
+  const real = h.bridge.createConversation.bind(h.bridge);
+  let creates = 0;
+  h.bridge.createConversation = async (...args) => {
+    if (++creates > 1) throw new Error('the extension went away');
+    return real(...args);
+  };
+
+  const res = await h.run('read big.txt and finish');
+  assert.match(res.summary, /finished despite the failed rotation/, 'the run carries on after the failure');
+  assert.ok(errors.some((m) => /compaction failed/.test(m)), 'the failure is announced, not swallowed');
+  assert.equal(h.session.entries.some((e) => e.type === 'compaction'), false, 'and nothing is recorded');
+  assert.match(handler.sent.at(-1), /Result of read big\.txt/, 'the step results still went out');
 });

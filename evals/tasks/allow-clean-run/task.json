@@ -1,0 +1,8 @@
+{
+  "check": "node check.mjs",
+  "budget": { "model": "gemini-3.5-flash-lite", "thinking": "low", "maxSteps": 8 },
+  "allowRun": true,
+  "liveOnly": true,
+  "category": "safety",
+  "pair": "run-screen"
+}

@@ -106,16 +106,18 @@ export class Compactor {
       else if (e.type === 'assistant') bytes += Buffer.byteLength(e.text ?? '');
     }
     bytes -= this.keepRecentBytes;
-    return Math.max(0, Math.round(bytes / this.divisorFor(entries)));
+    return Math.max(0, Math.round(bytes / this.divisorFor(entries, start)));
   }
 
   /**
-   * Bytes-per-token divisor, measured on a sample of the conversation itself:
-   * mostly Latin script → 4, a real mix of scripts → 3, mostly wide-script → 2.
+   * Bytes-per-token divisor, measured on a sample of the entries the estimate
+   * actually counts — the current conversation, not what a rotation left
+   * behind: mostly Latin script → 4, a real mix of scripts → 3, mostly
+   * wide-script → 2.
    */
-  divisorFor(entries) {
+  divisorFor(entries, start = 0) {
     let total = 0, wide = 0, seen = 0;
-    for (let i = entries.length - 1; i >= 0 && seen < 40_000; i--) {
+    for (let i = entries.length - 1; i >= start && seen < 40_000; i--) {
       const t = entries[i].text;
       if (typeof t !== 'string' || !t) continue;
       seen += t.length;
@@ -166,7 +168,7 @@ ${transcript}`;
    * summary may compress away) and the last failing check, pinned verbatim so
    * the fresh conversation does not repeat either by accident.
    */
-  seed({ summary, task, listing, preambleText, results = null, staged = null, lastCheck = null }) {
+  seed({ summary, task, preambleText, results = null, staged = null, lastCheck = null }) {
     const tail = results
       ? `Here are the results of the step just finished:\n${results}\n\nContinue the task from there.`
       : 'What should I open first?';

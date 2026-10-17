@@ -44,6 +44,7 @@ export function collectRuns(session) {
       stopReason: e.stopReason,
       model: e.model ?? null,
       steps: e.steps ?? 0,
+      turns: e.turns ?? (Array.isArray(e.stepMs) ? e.stepMs.length : 0),
       calls,
       refusals,
       refusalRate: calls ? refusals / calls : 0,
@@ -51,6 +52,7 @@ export function collectRuns(session) {
       stagnations: e.stagnations ?? 0,
       verifyPrompts: e.verifyPrompts ?? 0,
       repeatBlocks: e.repeatBlocks ?? 0,
+      commitBlocks: e.commitBlocks ?? 0,
       langPrompts: e.langPrompts ?? 0,
       novelResults: e.novelResults ?? 0,
       repeatedResults: e.repeatedResults ?? 0,
@@ -79,6 +81,7 @@ export function summarize(rows) {
     repeatedResults: 0,
     checks: 0,
     checkFails: 0,
+    commitBlocks: 0,
     firewallNotes: 0,
     spent: 0,
     byTool: {},
@@ -99,6 +102,7 @@ export function summarize(rows) {
     totals.repeatedResults += r.repeatedResults ?? 0;
     totals.checks += r.checks;
     if (r.checkVerdict === 'fail') totals.checkFails += 1;
+    totals.commitBlocks += r.commitBlocks ?? 0;
     totals.firewallNotes += r.firewallNotes;
     totals.spent += r.spent ?? 0;
     totals.byStop[r.stopReason] = (totals.byStop[r.stopReason] ?? 0) + 1;
@@ -114,9 +118,10 @@ export function summarize(rows) {
     if (GUARD_STOPS.has(r.stopReason)) byR.guardStops += 1;
     totals.byRoot[r.root ?? '?'] = byR;
     for (const [kind, s] of Object.entries(r.tools)) {
-      const t = totals.byTool[kind] ?? { n: 0, fail: 0 };
+      const t = totals.byTool[kind] ?? { n: 0, fail: 0, ms: 0 };
       t.n += s.n ?? 0;
       t.fail += s.fail ?? 0;
+      t.ms += s.ms ?? 0;
       totals.byTool[kind] = t;
     }
     for (const ms of r.stepMs) { totals.stepMsTotal += ms; totals.stepMsCount++; }
@@ -251,13 +256,15 @@ function main() {
     return;
   }
 
-  console.log(`lifetime  ${totals.runs} run(s) · ${totals.calls} tool call(s) · refusals ${pct(totals.calls ? totals.refusals / totals.calls : 0)} · nudges ${totals.nudges} · stagnation ${totals.stagnations} · verify ${totals.verifyPrompts} · repeat ${totals.repeatBlocks} · lang ${totals.langPrompts} · checks ${totals.checks}${totals.checkFails ? ` (${totals.checkFails}✗)` : ''} · firewall ${totals.firewallNotes} · ${credits(totals.spent)} credits`);
+  console.log(`lifetime  ${totals.runs} run(s) · ${totals.calls} tool call(s) · refusals ${pct(totals.calls ? totals.refusals / totals.calls : 0)} · nudges ${totals.nudges} · stagnation ${totals.stagnations} · verify ${totals.verifyPrompts} · repeat ${totals.repeatBlocks} · lang ${totals.langPrompts} · checks ${totals.checks}${totals.checkFails ? ` (${totals.checkFails}✗)` : ''} · firewall ${totals.firewallNotes}${totals.commitBlocks ? ` · commit-gate ${totals.commitBlocks}` : ''} · ${credits(totals.spent)} credits`);
   const avgStep = totals.stepMsCount ? Math.round(totals.stepMsTotal / totals.stepMsCount / 100) / 10 : null;
   const stops = Object.entries(totals.byStop).map(([k, n]) => `${k}×${n}`).join(', ');
   if (avgStep !== null) console.log(`          avg step ${avgStep}s · ends: ${stops}`);
+  // Per-tool latency: the mean wall time each kind spent, next to its refusal
+  // count — a slow run names where it went without reading the transcript.
   const toolLine = Object.entries(totals.byTool)
     .sort((a, b) => b[1].n - a[1].n)
-    .map(([kind, s]) => `${kind} ${s.fail ? `${s.fail}✗/` : ''}${s.n}`)
+    .map(([kind, s]) => `${kind} ${s.fail ? `${s.fail}✗/` : ''}${s.n}${s.ms && s.n ? ` ${Math.round(s.ms / s.n)}ms` : ''}`)
     .join(' · ');
   if (toolLine) console.log(`          tools: ${toolLine}`);
   const modelLine = Object.entries(totals.byModel)

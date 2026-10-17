@@ -6,6 +6,9 @@
 //
 //   rpc.method(name, fn)      answer a new /rpc method — the window calls it
 //   tools.register(marker, …) teach the model a new marker, e.g. `NOTE …`
+//                             ({risk: 'write'|'shell'} puts the marker behind
+//                             the permission gate a built-in of that kind
+//                             rides; without it the tool is trusted as before)
 //   panel({id, title, render}) add a section to the window's sidebar
 //   settings.define({key, …}) add a setting the window renders for you
 //   events.on(type, fn)       watch a run as it happens
@@ -39,7 +42,7 @@ export class PluginManager {
     this.failed = [];        // [{file, error}]
     this._methods = new Map();
     this._panels = [];
-    this._tools = new Map(); // marker → {impl, takesBody, description, plugin}
+    this._tools = new Map(); // marker → {impl, takesBody, description, plugin, risk}
     this._settingDefs = [];
   }
 
@@ -167,10 +170,16 @@ export class PluginManager {
       tools: {
         // The model writes `MARKER rest-of-line` (or a block ending in END when
         // takesBody is true) and gets the string back as a tool result.
-        register: (marker, impl, { takesBody = false, description = '' } = {}) => {
+        // `risk` is optional and additive: 'read' (or nothing) keeps the old
+        // behavior, 'write'/'shell' routes the marker through the same
+        // permission gate a built-in of that kind rides (loop.mjs).
+        register: (marker, impl, { takesBody = false, description = '', risk = null } = {}) => {
           if (!/^[A-Z][A-Z0-9_-]*$/.test(marker)) throw new Error(`marker must be UPPER_SNAKE, got ${marker}`);
           if (typeof impl !== 'function') throw new Error('tools.register(marker, fn)');
-          this._tools.set(marker, { impl, takesBody, description, plugin: name });
+          if (risk != null && !['read', 'write', 'shell'].includes(risk)) {
+            throw new Error(`risk must be 'read', 'write', 'shell' or left out, got: ${JSON.stringify(risk)}`);
+          }
+          this._tools.set(marker, { impl, takesBody, description, plugin: name, risk });
         },
       },
 
@@ -222,7 +231,9 @@ export class PluginManager {
 
   /** The marker table handed to the protocol parser and the preamble. */
   toolTable() {
-    return [...this._tools.entries()].map(([marker, def]) => ({ marker, takesBody: def.takesBody, description: def.description, plugin: def.plugin }));
+    return [...this._tools.entries()].map(([marker, def]) => ({
+      marker, takesBody: def.takesBody, description: def.description, plugin: def.plugin, risk: def.risk ?? null,
+    }));
   }
 
   async runTool(marker, { arg = '', body = '' } = {}) {

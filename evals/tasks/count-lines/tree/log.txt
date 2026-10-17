@@ -1,0 +1,9 @@
+07:02 boot ok
+07:03 cache warm
+07:05 first request
+07:06 db ping
+07:09 backup done
+07:12 second request
+07:15 log rotate
+07:18 cache hit rate 92%
+07:21 idle

@@ -32,6 +32,8 @@ export class Harness {
   #planResolve = null;
   /** The WEB scratch conversation id, created lazily and reused. */
   #scratch = null;
+  /** A manual rotation's summary, waiting for the next run to build its seed. */
+  #pendingSummary = null;
 
   /**
    * @param {object} opts
@@ -138,6 +140,8 @@ export class Harness {
   /* ------------------------------------------------------------ sessions */
 
   async startSession({ title = null, sessionId = null } = {}) {
+    // Another session's rotation must not seed this one.
+    this.#pendingSummary = null;
     if (!this.store) { this.session = null; return null; }
     this.session = sessionId ? this.store.load(sessionId) : null;
     if (!this.session) {
@@ -208,6 +212,18 @@ export class Harness {
     this.permissions.rules = Array.isArray(rules) ? rules : [];
     return this.permissions.rules;
   }
+  /**
+   * The staged files, deletes marked — what a rotation must not let a summary
+   * compress away. Read live: a manual rotation's seed is built at the next
+   * run, and by then the overlay may hold more than it did at rotation time.
+   */
+  #stagedList() {
+    return this.overlay.keys().map((abs) => {
+      const rel = path.relative(this.root, abs).split(path.sep).join('/');
+      return this.overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
+    }).slice(0, 20);
+  }
+
   async #rotate(summary, task) {
     await this.bridge.createConversation({ temporary: true, message: 'Continuing earlier work.' });
     const st = await this.bridge.status().catch(() => null);
@@ -242,20 +258,19 @@ export class Harness {
   async compactNow(task = '') {
     if (!this.session) throw new Error('no session to compact');
     const summary = await this.compactor.summarize(this.session, { task, model: this.bridge.model });
-    this.session.append('compaction', { summary, firstKeptEntryId: this.session.entries.at(-1)?.id ?? null });
+    // Rotate first, record second — the loop's rotation keeps the same order:
+    // a compaction entry for a rotation that failed would reset the estimate
+    // against a conversation the model never carried.
     await this.#rotate(summary, task);
+    this.session.append('compaction', { summary, lastSummarizedEntryId: this.session.entries.at(-1)?.id ?? null });
     this.events.emit('compacted', { summary });
     // The staged list rides along (deletes marked): a rotation is where a
     // pending edit gets forgotten, and the fresh conversation must know the
     // tree is not what the disk says yet.
-    const staged = this.overlay.keys().map((abs) => {
-      const rel = path.relative(this.root, abs).split(path.sep).join('/');
-      return this.overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
-    }).slice(0, 20);
+    const staged = this.#stagedList();
     const seedText = this.compactor.seed({
       summary,
       task,
-      listing: '',
       // The same preamble the run would send, flags and all: a rotation that
       // silently dropped SEARCH -i, ATTACH or a plugin's markers was a
       // different run wearing the same name (the loop's own rotation passes
@@ -272,6 +287,20 @@ export class Harness {
       staged,
     });
     return { summary, seedText };
+  }
+
+  /**
+   * Carry a manual rotation's summary into the next run. The window's
+   * /compact has no run in flight, so without this the summary it just paid
+   * for would never reach the fresh conversation — the next run would be
+   * told "the project is still open" with nothing remembered. The seed is
+   * built there, against that run's own task: at rotation time nobody knows
+   * what the next task will be, and losing it would be worse than the
+   * memory the seed restores. Consumed once, by run().
+   */
+  rememberSummary(summary) {
+    this.#pendingSummary = String(summary ?? '').trim() || null;
+    return this.#pendingSummary;
   }
 
   /** How full the context budget is right now, for whoever is watching. */
@@ -308,7 +337,29 @@ export class Harness {
       const isFirst = first ?? this.session.entries.every((e) => e.type !== 'task');
 
       // Context is a rotating resource here, so check it before the turn, not after.
+      // A manual rotation's summary rides the next run (rememberSummary): the
+      // seed is built here, against this run's own task — at rotation time
+      // nobody knew it yet. Consumed once: a second run must not repeat the
+      // seed into a conversation that already carries it.
       let seedText = null;
+      if (this.#pendingSummary) {
+        const summary = this.#pendingSummary;
+        this.#pendingSummary = null;
+        seedText = this.compactor.seed({
+          summary,
+          task,
+          preambleText: buildPreamble({
+            allowRun: Boolean(this.options.allowRun),
+            plan: Boolean(this.options.plan),
+            subagent: Boolean(this.options.subagent),
+            searchI: Boolean(this.options.searchI),
+            attach: Boolean(this.options.attach),
+            plugins: this.options.pluginTools ?? [],
+            lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
+          }),
+          staged: this.#stagedList(),
+        });
+      }
       if (this.compactor.needsCompaction(this.session)) {
         this.events.emit('note', { text: 'context is filling up - summarising earlier work and starting a fresh conversation' });
         seedText = (await this.compactNow(task)).seedText;
