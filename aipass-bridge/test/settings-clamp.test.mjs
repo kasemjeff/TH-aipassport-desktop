@@ -70,3 +70,30 @@ test('the user skills folder follows AIPASS_HOME, not the real home', () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('a path-shaped key of the wrong shape is dropped, not saved to crash a surface', () => {
+  // Each of these values reaches a path.resolve() or an iterable spread in
+  // some surface — the window's project list, the backend's root pick, the
+  // uploads folder, the skill library's dirs. A file that was hand-edited, or
+  // written by an older build, must not take those surfaces down.
+  const dir = scratch();
+  try {
+    const s = new Settings(dir, 'settings.json');
+    const v = s.set({
+      root: 42,
+      projects: [{ path: 123 }, null, 'not-an-entry', { path: 'keep/me', name: 'kept' }],
+      uploads: { nope: true },
+      skillsDirs: 5,
+      plugins: 'alpha',
+    });
+    assert.equal(v.root, null);
+    assert.deepEqual(v.projects, [{ path: 'keep/me', name: 'kept' }]);
+    assert.equal(v.uploads, null);
+    assert.deepEqual(v.skillsDirs, []);
+    assert.deepEqual(v.plugins, []);
+    // projectList used to throw on the first junk entry — the window's first call.
+    assert.deepEqual(s.projectList(), [{ name: 'kept', path: path.resolve('keep/me') }]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -214,6 +214,28 @@ export class Settings {
         }))
         .slice(0, 100)
       : [];
+    // Path-shaped keys are resolved by whoever reads them first — the window's
+    // project list, the backend's root pick, the uploads staging folder, the
+    // skill library's dirs — so a wrong-shaped value is not state, it is a
+    // crash waiting for the next call. Dropped here, like every other value
+    // that cannot work.
+    next.root = typeof next.root === 'string' && next.root.trim() ? next.root : null;
+    next.projects = Array.isArray(next.projects)
+      ? next.projects
+        .filter((p) => p && typeof p.path === 'string' && p.path.trim())
+        .map((p) => ({
+          ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}),
+          path: p.path,
+        }))
+        .slice(0, 40)
+      : [];
+    next.uploads = typeof next.uploads === 'string' && next.uploads.trim() ? next.uploads : null;
+    next.skillsDirs = Array.isArray(next.skillsDirs)
+      ? next.skillsDirs.filter((d) => typeof d === 'string' && d.trim())
+      : [];
+    next.plugins = Array.isArray(next.plugins)
+      ? next.plugins.filter((n) => typeof n === 'string' && n.trim())
+      : [];
     if (next.compaction) {
       const budget = num(next.compaction.contextTokens, 1000, 4_000_000, 24_000);
       const reserve = num(next.compaction.reserveTokens, 128, budget - 1, 4_096);
