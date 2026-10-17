@@ -62,11 +62,11 @@ test('adjacent hits do not repeat their shared context line', async () => {
   assert.equal(out.split('\n').filter((l) => /app\.js:\d[-:] plain/.test(l)).length, 1, 'the shared context line appears once');
 });
 
-test('GLOB output goes through the same cap as every other result', () => {
+test('GLOB output goes through the same cap as every other result', async () => {
   const files = {};
   for (let i = 0; i < 200; i++) files[`src/long-directory-name-${i}/file-with-a-long-name-${i}.ts`] = 'x';
   const dir = mkTracked(files);
-  const out = toolsIn(dir).glob('**/*.ts');
+  const out = await toolsIn(dir).glob('**/*.ts');
   assert.match(out, /src\/long-directory-name-0\/file-with-a-long-name-0\.ts/, 'the head of the list still shows');
   assert.match(out, /more bytes/, 'the rest is locatable');
   assert.ok(out.length < 3500, `clipped to the inline cap (${out.length} chars)`);

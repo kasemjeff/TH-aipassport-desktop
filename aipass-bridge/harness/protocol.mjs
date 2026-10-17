@@ -135,8 +135,6 @@ When you have changed code, do not call it done on the strength of the edit alon
   return text;
 };
 
-export const PREAMBLE = preamble();
-
 // A fenced code block is the model quoting, not asking: a NEED or an EDIT
 // shown as an example must never run, and a DONE inside one must never end
 // the run. Both parse() and prose() toggle on the same shape.

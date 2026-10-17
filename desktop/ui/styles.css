@@ -499,6 +499,13 @@ summary.nav-item::after {
 }
 .msg.assistant .body { padding-left: 2px; }
 .msg.assistant .body > :first-child { margin-top: 0; }
+/* The assistant bubble paints in two segments (app.js): the settled stretch
+   and the moving tail. They carry no box of their own, so spacing and markup
+   stay exactly what a single render produced. The first-block rule above now
+   matches a segment instead of a paragraph; this reaches through it — and
+   only for the first segment, so a heading mid-reply keeps its top margin. */
+.msg.assistant .body > .seg { display: contents; }
+.msg.assistant .body > .seg:first-child > :first-child { margin-top: 0; }
 .msg .body p { margin: 0 0 10px; }
 .msg .body pre {
   background: var(--code-bg);

@@ -27,6 +27,12 @@
 - **Paints coalesce.** Use the paint queue (`queuePaint`), never re-render the
   reply synchronously per delta. In tests the frame clock is a 0 ms timeout;
   assert after `await tick()`.
+- **A streaming paint appends to what settled; it never re-renders it.**
+  Prose paints as settled blocks plus the open tail (`splitMarkdownStable` in
+  `ui/md.js`); reasoning appends text nodes. The cost of a frame stays with
+  the tail, not with how long the answer has already grown.
+  Verify: "a long answer paints its settled paragraphs once and repaints only the tail"
+  Verify: "reasoning arrives by appending text, not by rewriting the fold each frame"
 - **Transport**: `fetchToken()` → `/token`; `EventSource(/events?token=…)`;
   `rpc()` → POST `/rpc` with `Authorization: Bearer`. Both transports must
   carry the token or a required-auth backend 403s every call.
