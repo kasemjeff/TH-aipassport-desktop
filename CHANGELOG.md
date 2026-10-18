@@ -193,6 +193,11 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   freshly pinned conversation gets the full table. The memory is written only
   after the message carrying the listing was accepted — never at composition
   time (`test/agent.test.mjs`, `test/compact.test.mjs`).
+- **Node 22 is the floor, stated everywhere.** `engines` has said `>=22`
+  since the type-check seed, while the installers, `aipass status`, the setup
+  doctor, the README badge and `aipass-bridge/package.json` still said `>=20`.
+  They all say 22 now, matching the CI matrix (22/24) and the September 2026
+  runner floor.
 
 ### Fixed
 

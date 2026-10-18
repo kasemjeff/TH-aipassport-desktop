@@ -87,7 +87,7 @@ function stopBridge() {
 
 async function status() {
   const major = Number(process.versions.node.split('.')[0]);
-  console.log(`node          ${process.versions.node}${major >= 20 ? '' : red('  ✗ need >= 20')}`);
+  console.log(`node          ${process.versions.node}${major >= 22 ? '' : red('  ✗ need >= 22')}`);
 
   const up = await bridgeUp();
   console.log(`bridge        ${up ? `${BRIDGE}  ok` : `${BRIDGE}  ${red('not running')} — run \`aipass dev\` (or npm run dev)`}`);

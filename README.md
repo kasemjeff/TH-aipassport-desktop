@@ -3,7 +3,7 @@
 > de.aipass.net from a desktop window, from your terminal, and from any OpenAI-compatible client — with live streaming, an autonomous file-editing agent, and a zero-dependency bridge.
 
 <p align="left">
-  <img src="https://img.shields.io/badge/node-%E2%89%A520-blue?logo=node.js&style=flat-square" alt="Node >= 20" />
+  <img src="https://img.shields.io/badge/node-%E2%89%A522-blue?logo=node.js&style=flat-square" alt="Node >= 22" />
   <img src="https://img.shields.io/badge/dependencies-zero-success?style=flat-square" alt="Zero Dependencies" />
   <img src="https://img.shields.io/badge/tests-601%20passing-brightgreen?style=flat-square" alt="Tests: 601 passing, 2 skipped" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgray?style=flat-square" alt="Platforms" />
