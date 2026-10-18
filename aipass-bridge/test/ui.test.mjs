@@ -1055,6 +1055,7 @@ test('the settings sheet shows its categories and saves once', async () => {
   assert.ok(rail, 'the sheet has a category rail');
   const tabs = rail.children.map((b) => b.textContent);
   assert.ok(tabs.length >= 4, `at least four categories, got ${tabs.length}`);
+  assert.ok(tabs.some((t) => /สุขภาพ/.test(t)), 'the health check has its own category');
   const pages = shell.children.find((c) => /settings-pages/.test(c.className));
   assert.ok(pages, 'and one page per category');
   assert.equal(node('modal').classList.contains('settings-sheet'), true, 'the sheet is marked');
@@ -1112,6 +1113,28 @@ test('the welcome card explains the app and shows what is missing', async () => 
   assert.match(text, /ตัวกลาง/, 'and says the local bridge is one of the three things it needs');
   assert.match(text, /ที่ล็อกอินอยู่/, 'and that a logged-in tab is another');
   assert.match(text, /พิมพ์ข้อความลงข้างล่าง|ข้างล่าง/, 'and tells you to type');
+});
+
+test('the welcome card names an empty credit pool instead of reading as broken', async () => {
+  // Credits ride a second rpc (force:false while idle), so the fake backend
+  // answers quota separately from status — exactly like the real one.
+  const backend = { ...BACKEND, credits: () => ({ available: 0, limit: 10000 }) };
+  const { screen, tick } = await bootApp(backend);
+  await tick(); await tick(); // refreshReadiness awaits the credits call
+  const card = screen('welcome');
+  assert.ok(card, 'an empty screen must not be an empty screen');
+  assert.match(card.textContent, /เครดิต 0/, 'the pool is named, with its figure');
+  assert.match(card.textContent, /free-credit/, 'and the way out is named');
+});
+
+test('a spent quota maps to the Thai copy, not the raw English', async () => {
+  // The run rpc itself throws: sendTask catches and maps through friendly().
+  const backend = { ...BACKEND, run: () => { throw new Error('quota exceeded for this period'); } };
+  const { node, tick } = await bootApp(backend);
+  node('task').value = 'do work';
+  node('task').dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.match(node('log').textContent, /เครดิตหมด/, 'the error reads as the fix');
 });
 
 test('every command in the palette has a handler that resolves', async () => {

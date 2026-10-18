@@ -536,8 +536,18 @@ async function getQuota({ force = false } = {}) {
     try {
       const value = extractQuota(JSON.parse(await fetchLoader(LOADERS.quota)));
       if (value) {
+        // The window polls credits every 10s while idle, so this line used to
+        // repeat identically thousands of times a day. Log only a change —
+        // the first sighting, a different figure, or a new limit.
+        const prev = quotaCache.value;
+        const changed = !prev
+          || prev.available !== value.available
+          || prev.used !== value.used
+          || prev.limit !== value.limit;
         quotaCache = { at: Date.now(), value };
-        log(`credits ${value.available.toFixed(0)} of ${value.limit.toFixed(0)} left`);
+        if (changed) {
+          log(`credits ${value.available.toFixed(0)} of ${value.limit.toFixed(0)} left`);
+        }
       }
     } catch (err) {
       log('credit refresh failed:', err.message);
@@ -1176,6 +1186,12 @@ async function chatCompletions(req, res) {
 
 /* -------------------------------------------------------- extension channel */
 
+// The extension's SSE cycles every few minutes (background.js reconnects
+// before Chrome's long-request ceiling), so connect/disconnect pairs arrive
+// all day long. Log the transition 1→0 / 0→1 only — a cycle that keeps at
+// least one tab attached is routine, not news.
+let hadExtension = false;
+
 function extEvents(req, res) {
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -1184,8 +1200,12 @@ function extEvents(req, res) {
     ...corsHeaders(),
   });
   const client = { id: randomUUID(), res };
+  const wasEmpty = extClients.size === 0;
   extClients.add(client);
-  log(`extension connected (${extClients.size} total)`);
+  if (wasEmpty && !hadExtension) {
+    log(`extension connected (${extClients.size} total)`);
+  }
+  hadExtension = true;
   sendToClient(client, 'ready', { clientId: client.id });
   // Warm the caches a moment after the tab attaches — but only if this client
   // is still the reason to: a tab that closed in the meantime would otherwise
@@ -1205,7 +1225,13 @@ function extEvents(req, res) {
   req.on('close', () => {
     clearInterval(ping);
     extClients.delete(client);
-    log(`extension disconnected (${extClients.size} left)`);
+    // The 1→0 edge only: a cycle leaves another tab attached, a real
+    // disconnect empties the set. The /* … left) */ shape stays so log
+    // scrapers keep matching.
+    if (extClients.size === 0 && hadExtension) {
+      log(`extension disconnected (${extClients.size} left)`);
+      hadExtension = false;
+    }
     // Do NOT fail in-flight chat jobs. The upstream fetch lives in the page and
     // survives the worker being evicted, which is exactly what happens during
     // a long web_search when no deltas flow to reset the worker's idle timer.
@@ -1571,11 +1597,20 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+let eaddrLoggedAt = 0;
 server.on('error', (err) => {
   if (/** @type {any} */ (err).code === 'EADDRINUSE') {
-    console.error(`\x1b[31m✗ Port ${PORT} is already in use.\x1b[0m`);
-    console.error(`  Another bridge process is running. You can kill it with:\n  \x1b[36mfuser -k ${PORT}/tcp\x1b[0m  or  \x1b[36mpkill -f "bridge/server.mjs"\x1b[0m\n`);
-    process.exit(1);
+    // A second starter is routine (desktop + CLI, two windows): the first
+    // process keeps answering, so say that once a minute at most and leave
+    // with code 0 — the supervisor's restart is what used to turn this into
+    // a wall of red in bridge.log.
+    const now = Date.now();
+    if (now - eaddrLoggedAt > 60_000) {
+      eaddrLoggedAt = now;
+      console.error('port ' + PORT + ' is busy — a bridge is already answering there; leaving it alone');
+      console.error('  (kill it first only if it should not be: pkill -f "bridge/server.mjs" — or check ~/.aipass/bridge.pid)');
+    }
+    process.exit(0);
   }
   throw err;
 });

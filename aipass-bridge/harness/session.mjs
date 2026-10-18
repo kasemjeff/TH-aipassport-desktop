@@ -310,7 +310,41 @@ export class SessionStore {
   remove(idOrFile) {
     const file = idOrFile.includes(path.sep) || idOrFile.includes('/') ? idOrFile : findById(this.dir, idOrFile);
     if (file && fs.existsSync(file)) fs.rmSync(file);
-    return Boolean(file && fs.existsSync(file));
+    return Boolean(file && !fs.existsSync(file));
+  }
+
+  /**
+   * Archive sessions idle longer than `olderThanMs`, newest-first.
+   *
+   * A project that has lived for months carries dozens of dead sessions in
+   * the picker — on this machine that was 61 files in one project. The
+   * archive is a sibling directory (`<root>/archive/`) holding the same
+   * JSONL files, so nothing is deleted, only moved out of the picker's way;
+   * `list()` never reads the archive dir. `limit` caps how many move per
+   * call so one call cannot surprise with a mass move. The live session
+   * (`keepId`) is never archived even when idle.
+   */
+  archiveIdle(root, { olderThanMs = 30 * 24 * 3600 * 1000, limit = 50, keepId = null } = {}) {
+    const dir = this.dirFor(root);
+    const now = Date.now();
+    const idle = this.list(root)
+      .filter((s) => s.id !== keepId && (now - (s.updated ?? 0)) > olderThanMs)
+      .sort((a, b) => (a.updated ?? 0) - (b.updated ?? 0));
+    const picked = idle.slice(0, Math.max(0, limit));
+    if (!picked.length) return { archived: [], archiveDir: path.join(dir, 'archive') };
+    const archiveDir = path.join(dir, 'archive');
+    fs.mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
+    tighten(archiveDir, 0o700);
+    const archived = [];
+    for (const s of picked) {
+      try {
+        const file = s.file ?? findById(this.dir, s.id);
+        if (!file || !fs.existsSync(file)) continue;
+        fs.renameSync(file, path.join(archiveDir, path.basename(file)));
+        archived.push(s.id);
+      } catch { /* one stuck file must not block the rest */ }
+    }
+    return { archived, archiveDir };
   }
 }
 

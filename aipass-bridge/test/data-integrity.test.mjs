@@ -60,6 +60,37 @@ test('a duplicated entry loads once — the chain keeps its shape', () => {
   assert.equal(s.entries[2].parentId, 'a1', 'links still resolve after the drop');
 });
 
+test('remove() reports the file gone, and archiveIdle moves only idle sessions', () => {
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const root = path.join(dir, 'proj');
+  const now = Date.now();
+
+  // remove: the old return read existsSync() AFTER deletion — always false
+  // on success is the wrong polarity for "did it go away".
+  const s = store.create({ root, title: 'gone' });
+  assert.equal(store.remove(s.id), true, 'a removed session reports gone');
+
+  // archive: one idle, one fresh, one live-but-idle. Only the first moves.
+  const idle = store.create({ root, title: 'idle' });
+  const fresh = store.create({ root, title: 'fresh' });
+  const live = store.create({ root, title: 'live' });
+  const touch = (session, updated) => {
+    const loaded = store.load(session.id);
+    loaded.header.updated = updated;
+    fs.writeFileSync(loaded.file, fs.readFileSync(loaded.file, 'utf8').replace(/"updated":\d+/, `"updated":${updated}`));
+  };
+  touch(idle, now - 40 * 24 * 3600 * 1000);
+  touch(live, now - 40 * 24 * 3600 * 1000);
+  touch(fresh, now);
+
+  const out = store.archiveIdle(root, { olderThanMs: 30 * 24 * 3600 * 1000, limit: 50, keepId: live.id });
+  assert.deepEqual(out.archived, [idle.id], 'only the idle non-live session moves');
+  assert.equal(store.list(root).some((e) => e.id === idle.id), false, 'archived leaves the picker');
+  assert.equal(store.list(root).some((e) => e.id === fresh.id), true, 'fresh stays');
+  assert.equal(store.list(root).some((e) => e.id === live.id), true, 'live stays even when idle');
+});
+
 test('wrong-typed data never reaches the picker or the chain', () => {
   const dir = tmp();
   const proj = path.join(dir, 'proj'); // list() scans project directories

@@ -7,6 +7,46 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Added
 
+- **Session archive.** Projects that lived for months carried dozens of dead
+  sessions in the picker (61 files in one project on this machine). Past 40
+  sessions the picker shows a one-click archive: `session.archive` moves
+  sessions idle 30+ days to `<project>/archive/` — nothing deleted, the live
+  session always kept (`test/data-integrity.test.mjs`).
+- **Health page in Settings.** The `🩺 สุขภาพ` section shows bridge /
+  extension / tab / credits / build with the fix for whatever is red — the
+  same answers as `aipass doctor`, without opening a terminal
+  (`test/ui.test.mjs`).
+- **Build version in the window.** `status()` carries `app` (the build that
+  wrote the backend), shown in `/status` and the health page — a stale
+  install reads as a version instead of a mystery.
+- **An empty credit pool names itself.** The welcome card gains a fourth
+  readiness row (credits available/limit) only when the quota is known: 0
+  reads as "รอรอบถัดไป หรือใช้โมเดล free-credit" instead of a blank window,
+  and quota errors map to the same Thai copy (`test/ui.test.mjs`).
+- **Packaged resources are pinned by test.** A new CLI at
+  `aipass-bridge/*.mjs` that nobody adds to `tauri.conf.json` used to ship a
+  window whose command is missing — a test now fails until it is listed
+  (`test/desktop.test.mjs`). The five missing CLIs (`mcp`, `memory`,
+  `plugin`, `scale`, `setup`) are added.
+
+### Fixed
+
+- **Log spam, three sources.** The credits line logged every 10s poll —
+  thousands of identical lines a day — now only on change. The extension
+  SSE cycle (every ~4 min) logged a connect/disconnect pair each time — now
+  only the 1↔0 edge. A second bridge starter exited 1 with a wall of red —
+  now exits 0 with one line a minute at most (`test/bridge.test.mjs`).
+- **The supervisor names the death.** A backend crash used to log only
+  `restart attempt N`; the note now carries the exit status, and a loop past
+  five straight failures says so instead of adding another identical line
+  (`desktop/src-tauri/src/main.rs`).
+- **`session.remove()` reported backwards.** It returned `existsSync()` after
+  deletion — `false` on success reads as "still there". Now returns whether
+  the file is gone (`test/data-integrity.test.mjs`).
+- **One root file, not two.** The Rust shell read `settings.json` then
+  `desktop.json` — two files that could disagree. `desktop.json` now
+  migrates into `settings.json` once and is removed.
+
 - **A failed send leaves a trace.** A run that stops because a send threw
   now records the cause in the session (a `note` entry and
   `run_stats.sendError`) instead of losing it, so the next failure names its

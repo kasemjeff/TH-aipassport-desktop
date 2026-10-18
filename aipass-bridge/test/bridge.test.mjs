@@ -265,6 +265,36 @@ test('credits are unavailable rather than wrong when no tab is attached', async 
   assert.equal(status.credits, null);
 });
 
+test('a repeated quota refresh with the same figures logs once, not per poll', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  // Two forced refreshes: the window polls credits every 10s while idle, and
+  // the log used to repeat the identical line thousands of times a day.
+  await fetch(`${bridge.base}/quota?refresh=1`).then((r) => r.json());
+  const before = bridge.logText();
+  await fetch(`${bridge.base}/quota?refresh=1`).then((r) => r.json());
+  const added = bridge.logText().slice(before.length);
+  assert.doesNotMatch(added, /credits .* of .* left/);
+});
+
+test('an SSE cycle that keeps a tab attached logs no connect/disconnect pair', async (t) => {
+  const first = await new FakeExtension(bridge.base).connect();
+  t.after(() => first.disconnect());
+  // A second tab joins while the first is still attached — the extension's
+  // few-minute reconnect cycle — then leaves. Neither edge is news.
+  const second = await new FakeExtension(bridge.base).connect();
+  const before = bridge.logText();
+  await second.disconnect();
+  const added = bridge.logText().slice(before.length);
+  assert.doesNotMatch(added, /extension (connected|disconnected)/);
+  // And the real edge still logs: the last tab leaving empties the set.
+  const lastLog = bridge.logText();
+  await first.disconnect();
+  await waitFor(async () => (await extCount()) === 0, { timeout: 3000 }).catch(() => {});
+  assert.match(bridge.logText().slice(lastLog.length), /extension disconnected \(0 left\)/);
+});
+
 test('a generated image comes back as a markdown image', async (t) => {
   const png = 'data:image/png;base64,iVBORw0KGgo=';
   const ext = await new FakeExtension(bridge.base, {

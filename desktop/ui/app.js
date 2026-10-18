@@ -89,6 +89,10 @@ const ERROR_COPY = [
   [/ECONNREFUSED|fetch failed|bridge offline/i, 'bridge ไม่ทำงาน — เริ่มด้วยคำสั่ง aipass ก่อน'],
   [/a run is already in flight/i, 'มี run ค้างอยู่ — กดหยุดก่อนแล้วค่อยส่งใหม่'],
   [/outside project root/i, 'path อยู่นอกโปรเจกต์ — ใช้ไฟล์ในโปรเจกต์เท่านั้น'],
+  // The wall every free-tier run eventually hits: quota.available is 0 while
+  // the limit is not — distinguishable from "no tab" (which never returns a
+  // number at all) so the banner can say which fix applies.
+  [/credit|quota|0 of .* left|insufficient/i, 'เครดิตหมด (0) — รอรอบถัดไป หรือสลับไปใช้โมเดล free-credit (gemini-3.1-flash-lite)'],
 ];
 const friendly = (msg) => {
   const s = String(msg ?? '');
@@ -1166,6 +1170,24 @@ async function refreshSessions() {
   const shown = list
     .filter((s) => !query || `${s.title ?? ''} ${s.id}`.toLowerCase().includes(query))
     .slice(0, 60);
+  // Past 40 sessions the picker is a junk drawer, not a list: the one-click
+  // archive (nothing deleted, files move to <project>/archive/) sits above it
+  // instead of hiding in a settings page.
+  if (list.length > 40) {
+    const bar = el('li', 'dim archive-bar');
+    const btn = el('button', 'mini', `เก็บ ${list.length - 40}+ บทสนทนาเก่า`);
+    btn.title = 'ย้ายบทสนทนาที่เงียบเกิน 30 วันไป archive/ (ไม่ลบไฟล์)';
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        const out = await rpc('session.archive', { olderThanDays: 30, limit: 50 });
+        addCommandOut(out?.count ? `เก็บ ${out.count} บทสนทนาเก่าเข้า archive/ แล้ว` : 'ไม่มีบทสนทนาเก่าเกิน 30 วันให้เก็บ');
+      } catch (err) { addNote(`เก็บไม่ได้: ${err.message}`); }
+      await refreshSessions();
+    };
+    bar.append(btn);
+    ul.append(bar);
+  }
   if (!shown.length) {
     ul.append(el('li', 'dim', query ? 'ไม่พบบทสนทนาที่ค้น' : 'ยังไม่มีบทสนทนา'));
     return;
@@ -1459,6 +1481,10 @@ const SETTINGS_SECTIONS = [
   ] },
   { id: 'skills', icon: '📘', title: 'คู่มือ (playbook)', sub: 'โฟลเดอร์ที่ใช้ค้นหาคู่มือ', custom: 'skillsDirs' },
   { id: 'rules', icon: '🛡️', title: 'กฎไฟล์', sub: 'path ที่มีกฎละเว้นโหมด — first match wins', custom: 'rules' },
+  // Health is pull-based on purpose (docs/RELIABILITY.md): no daemon pages
+  // anyone, so the check lives where the person already looks — one button,
+  // same answers as `aipass doctor` + `npm run stats -- --alerts`.
+  { id: 'health', icon: '🩺', title: 'สุขภาพ', sub: 'bridge · extension · tab · credits — กดตรวจตอนนี้', custom: 'health' },
 ];
 /**
  * The settings sheet — a category rail on the left, one page of settings on the
@@ -1549,8 +1575,15 @@ async function openSettings() {
   };
 
   const details = await rpc('plugins.list').catch(() => null);
+  // The MCP section is live connection state, not a file — it only means
+  // something when the backend answers mcp.list with rows (an older backend,
+  // or a test stub, answers nothing useful and gets no section).
+  const mcpList = await rpc('mcp.list').catch(() => null);
+  const mcpReady = mcpList && Array.isArray(mcpList.servers) ? mcpList : null;
   const sections = details
-    ? [...SETTINGS_SECTIONS, { id: 'plugins', icon: '🧩', title: 'ปลั๊กอิน', sub: `โค้ดเสริมจาก ${details.dir}`, custom: 'plugins' }]
+    ? [...SETTINGS_SECTIONS,
+      { id: 'plugins', icon: '🧩', title: 'ปลั๊กอิน', sub: `โค้ดเสริมจาก ${details.dir}`, custom: 'plugins' },
+      ...(mcpReady ? [{ id: 'mcp', icon: '🔌', title: 'MCP', sub: 'เซิร์ฟเวอร์เครื่องมือภายนอก — เพิ่ม ปิด ทดสอบ', custom: 'mcp' }] : [])]
     : SETTINGS_SECTIONS;
 
   const nav = el('nav', 'settings-nav');
@@ -1606,34 +1639,306 @@ async function openSettings() {
     }
 
     if (section.custom === 'plugins') {
-      if (!details.loaded.length && !details.failed.length) {
-        const hint = el('p', 'settings-empty');
-        hint.append('ยังไม่มีปลั๊กอิน — วางไฟล์ .mjs ลง ');
-        hint.append(el('code', null, details.dir));
-        hint.append(' แล้วกดโหลดใหม่');
-        page.append(hint);
-      }
-      for (const pl of details.loaded) {
-        const card = el('div', 'plugin-card');
-        card.append(el('div', 'plugin-name', `${pl.name} ${pl.version}`));
-        card.append(el('div', 'plugin-desc', pl.description || 'ไม่มีคำอธิบาย'));
-        page.append(card);
-      }
-      for (const f of details.failed) {
-        const card = el('div', 'plugin-card bad');
-        card.append(el('div', 'plugin-name', `โหลดไม่ได้ — ${f.file}`));
-        card.append(el('div', 'plugin-desc', f.error));
-        page.append(card);
-      }
-      if (details.tools.length) {
-        const marks = el('p', 'plugin-markers');
-        marks.append('markers: ');
-        marks.append(el('code', null, details.tools.join(', ')));
-        page.append(marks);
-      }
+      let live = details;
+
+      // The install box: a source in, a report out — inspect runs nothing.
+      // The click on "ติดตั้ง" is the consent moment: it is the first thing
+      // that loads the code, so nothing may happen before the report is read.
+      const box = el('div', 'set-group');
+      const line = el('div', 'install-line');
+      const src = document.createElement('input');
+      src.type = 'text';
+      src.placeholder = 'path ของไฟล์ .mjs หรือโฟลเดอร์ หรือ https://…';
+      const check = el('button', null, 'ตรวจสอบ');
+      line.append(src, check);
+      const out = el('div', 'install-out dim', 'วางที่อยู่แล้วกดตรวจสอบ — ยังไม่มีอะไรถูกรันจนกว่าจะกดติดตั้ง');
+      box.append(line, out);
+      page.append(box);
+
+      const empty = el('p', 'settings-empty');
+      empty.append('ยังไม่มีปลั๊กอินที่ติดตั้งผ่านแอป — วางที่อยู่ด้านบน หรือวางไฟล์ .mjs ลง ');
+      empty.append(el('code', null, details.dir));
+      const cards = el('div');
+      const markers = el('div', 'plugin-markers');
+      page.append(empty, cards, markers);
+
+      const paint = () => {
+        const known = live.known ?? live.loaded.map((pl) => pl.name);
+        empty.style.display = (!known.length && !live.failed.length) ? '' : 'none';
+        cards.textContent = '';
+        for (const name of known) {
+          const pl = live.loaded.find((x) => x.name === name) ?? null;
+          const rec = live.registry?.[name] ?? pl?.installed ?? null;
+          const on = Boolean(pl);
+          const card = el('div', `plugin-card${on ? '' : ' off'}`);
+          const head = el('div', 'plugin-head');
+          head.append(el('div', 'plugin-name', `${name}${pl ? ` ${pl.version}` : ''}`));
+          head.append(el('span', `plugin-state${on ? ' on' : ''}`, on ? 'เปิด' : 'ปิด'));
+          card.append(head);
+          card.append(el('div', 'plugin-desc', pl?.description || (on ? 'ไม่มีคำอธิบาย' : 'ปิดอยู่ — ไม่ถูกโหลด')));
+          if (rec) {
+            const note = el('div', 'plugin-source dim');
+            note.append(`ที่มา: ${rec.source?.ref ?? '?'} · sha ${rec.sha256 ?? '?'}`);
+            if (pl?.hashChanged) note.append(' · ไฟล์เปลี่ยนหลังติดตั้ง — กดโหลดใหม่หรือติดตั้งทับถ้าไม่ใช่ฝีมือคุณ');
+            card.append(note);
+          } else {
+            card.append(el('div', 'plugin-source dim', 'วางไฟล์เอง — ไม่ได้ติดตั้งผ่านแอป (ลบต้องยืนยันเป็นพิเศษ)'));
+          }
+          const actions = el('div', 'plugin-actions');
+          const toggle = el('button', null, on ? 'ปิด' : 'เปิด');
+          toggle.onclick = async () => {
+            toggle.disabled = true;
+            const res = await rpc(on ? 'plugins.disable' : 'plugins.enable', { name }).catch((e) => {
+              out.className = 'install-out err';
+              out.textContent = `err: ${e.message}`;
+              return null;
+            });
+            if (res) await refresh();
+            else toggle.disabled = false;
+          };
+          const del = el('button', 'danger-btn', 'ลบ');
+          del.onclick = async () => {
+            const first = rec
+              ? `ลบปลั๊กอิน "${name}"? ไฟล์จะถูกเก็บไว้ใน .trash (กู้คืนได้)`
+              : `"${name}" ไม่ได้ติดตั้งผ่านแอป — ไฟล์นี้คือผลงานของคุณ ยืนยันว่าจะย้ายไป .trash?`;
+            if (!window.confirm(first)) return;
+            if (!rec && !window.confirm('ยืนยันอีกครั้ง: ย้ายโฟลเดอร์นี้ไป .trash?')) return;
+            del.disabled = true;
+            const res = await rpc('plugins.remove', { name, force: true }).catch((e) => {
+              out.className = 'install-out err';
+              out.textContent = `err: ${e.message}`;
+              return null;
+            });
+            if (res) await refresh();
+            else del.disabled = false;
+          };
+          actions.append(toggle, del);
+          card.append(actions);
+          cards.append(card);
+        }
+        for (const f of live.failed) {
+          const card = el('div', 'plugin-card bad');
+          card.append(el('div', 'plugin-name', `โหลดไม่ได้ — ${f.file}`));
+          card.append(el('div', 'plugin-desc', f.error));
+          cards.append(card);
+        }
+        markers.textContent = '';
+        if (live.tools.length) {
+          markers.append('markers: ');
+          markers.append(el('code', null, live.tools.join(', ')));
+        }
+      };
+
+      const refresh = async () => {
+        live = await rpc('plugins.list').catch(() => live);
+        paint();
+      };
+
+      check.onclick = async () => {
+        const source = src.value.trim();
+        if (!source) { out.className = 'install-out err'; out.textContent = 'ใส่ path หรือ URL ก่อน'; return; }
+        check.disabled = true;
+        out.className = 'install-out dim';
+        out.textContent = 'กำลังตรวจสอบ…';
+        const info = await rpc('plugins.inspect', { source }).catch((e) => {
+          out.className = 'install-out err';
+          out.textContent = `err: ${e.message}`;
+          return null;
+        });
+        check.disabled = false;
+        if (!info) return;
+        out.className = 'install-out';
+        out.textContent = '';
+        out.append(el('div', null, `ที่มา: ${info.ref}`));
+        out.append(el('div', 'dim', `${info.entry} · ${info.size.toLocaleString()} bytes · sha256 ${info.sha256.slice(0, 16)}…`));
+        out.append(el('div', 'dim', 'ติดตั้ง = โหลดโค้ดนี้ในโปรเซสของแอปจริง ๆ ไม่มี sandbox — เทียบ sha256 กับต้นทางก่อนถ้าไม่แน่ใจ'));
+        const install = el('button', 'primary', 'ติดตั้ง');
+        install.onclick = async () => {
+          install.disabled = true;
+          const res = await rpc('plugins.install', { source: info.ref, expectedSha256: info.sha256 }).catch((e) => {
+            out.className = 'install-out err';
+            out.textContent = `err: ${e.message}`;
+            // A folder that is not the installer's is refused by default; this
+            // second click is the explicit force, and it still keeps a copy.
+            if (/not installed by aipass|already exists/.test(e.message)) {
+              const force = el('button', null, 'ติดตั้งทับ (เก็บสำเนาเดิมใน .trash)');
+              force.onclick = async () => {
+                force.disabled = true;
+                const forced = await rpc('plugins.install', { source: info.ref, expectedSha256: info.sha256, force: true }).catch((e2) => {
+                  out.textContent = `err: ${e2.message}`;
+                  return null;
+                });
+                if (forced) {
+                  out.className = 'install-out ok-text';
+                  out.textContent = `ติดตั้งทับ ${forced.plugin?.name ?? ''} ${forced.plugin?.version ?? ''} แล้ว — สำเนาเดิมอยู่ใน .trash`;
+                  await refresh();
+                } else force.disabled = false;
+              };
+              out.append(force);
+            }
+            return null;
+          });
+          if (res) {
+            out.className = 'install-out ok-text';
+            out.textContent = `ติดตั้ง ${res.plugin?.name ?? ''} ${res.plugin?.version ?? ''} แล้ว`;
+            await refresh();
+          } else install.disabled = false;
+        };
+        out.append(install);
+      };
+
       const reload = el('button', null, 'โหลดปลั๊กอินใหม่');
-      reload.onclick = async () => { await rpc('plugins.reload'); hideModal(); openSettings(); };
+      reload.onclick = async () => { await rpc('plugins.reload').catch(() => null); await refresh(); };
       page.append(reload);
+      paint();
+      continue;
+    }
+
+    if (section.custom === 'mcp') {
+      let live = mcpReady;
+      const wrap = el('div');
+      page.append(wrap);
+
+      const paintMcp = () => {
+        wrap.textContent = '';
+        for (const s of live.servers ?? []) {
+          const card = el('div', 'plugin-card');
+          const head = el('div', 'plugin-head');
+          head.append(el('div', 'plugin-name', s.name));
+          const state = !s.enabled ? 'ปิด' : s.connected ? `${s.tools} tools` : 'เชื่อมต่อไม่ได้';
+          head.append(el('span', `plugin-state${!s.enabled ? '' : s.connected ? ' on' : ' bad'}`, state));
+          card.append(head);
+          card.append(el('div', 'plugin-source dim',
+            `${s.scope === 'project' ? 'โปรเจกต์นี้' : 'ทุกโปรเจกต์'} · ${s.command}${s.args?.length ? ` ${s.args.join(' ')}` : ''}${s.risk === 'read' ? ' · อ่านอย่างเดียว' : ' · เขียน (ถามตามโหมด)'}`));
+          if (s.error) card.append(el('div', 'plugin-desc', s.error));
+          const actions = el('div', 'plugin-actions');
+          const toggle = el('button', null, s.enabled ? 'ปิด' : 'เปิด');
+          toggle.onclick = async () => {
+            toggle.disabled = true;
+            const res = await rpc(s.enabled ? 'mcp.disable' : 'mcp.enable', { name: s.name, scope: s.scope }).catch(() => null);
+            if (res) { live = res; paintMcp(); } else toggle.disabled = false;
+          };
+          const note = el('div', 'plugin-source dim');
+          const test = el('button', null, 'ทดสอบ');
+          test.onclick = async () => {
+            test.disabled = true;
+            note.className = 'plugin-source dim';
+            note.textContent = 'กำลังเชื่อมต่อ…';
+            const r = await rpc('mcp.test', { name: s.name, scope: s.scope }).catch((e) => ({ ok: false, error: e.message }));
+            note.className = r.ok ? 'plugin-source ok-text' : 'plugin-source err-text';
+            note.textContent = r.ok
+              ? `เชื่อมต่อได้ใน ${r.ms} ms — ${r.tools.length} tools${r.tools.length ? `: ${r.tools.map((t) => t.name).join(', ')}` : ''}`
+              : `err: ${r.error}`;
+            test.disabled = false;
+          };
+          const del = el('button', 'danger-btn', 'ลบ');
+          del.onclick = async () => {
+            if (!window.confirm(`ลบ MCP server "${s.name}" ออกจาก${s.scope === 'project' ? 'โปรเจกต์นี้' : 'การตั้งค่าส่วนกลาง'}?`)) return;
+            del.disabled = true;
+            const res = await rpc('mcp.remove', { name: s.name, scope: s.scope }).catch(() => null);
+            if (res) { live = res; paintMcp(); } else del.disabled = false;
+          };
+          actions.append(toggle, test, del);
+          card.append(actions, note);
+          wrap.append(card);
+        }
+
+        // The add form carries every field `aipass mcp add` takes — a form
+        // that cannot express what the command can is half a feature.
+        const nameI = document.createElement('input');
+        nameI.type = 'text';
+        nameI.placeholder = 'ชื่อ (a-z 0-9 - _)';
+        const cmdI = document.createElement('input');
+        cmdI.type = 'text';
+        cmdI.placeholder = 'คำสั่ง เช่น npx';
+        const argsI = document.createElement('textarea');
+        argsI.rows = 2;
+        argsI.placeholder = 'อาร์กิวเมนต์ บรรทัดละตัว';
+        const envI = document.createElement('textarea');
+        envI.rows = 2;
+        envI.placeholder = 'env บรรทัดละ K=V (ไม่บังคับ)';
+        const cwdI = document.createElement('input');
+        cwdI.type = 'text';
+        cwdI.placeholder = 'โฟลเดอร์ทำงาน สัมพัทธ์กับโปรเจกต์ (ไม่บังคับ)';
+        const scopeS = document.createElement('select');
+        for (const [v, text] of [['home', 'ทุกโปรเจกต์'], ['project', 'เฉพาะโปรเจกต์นี้']]) {
+          const opt = document.createElement('option');
+          opt.value = v;
+          opt.textContent = text;
+          scopeS.append(opt);
+        }
+        const riskS = document.createElement('select');
+        for (const [v, text] of [['write', 'เขียน — ผ่านการถามตามโหมด'], ['read', 'อ่านอย่างเดียว — ไม่ถามเลย']]) {
+          const opt = document.createElement('option');
+          opt.value = v;
+          opt.textContent = text;
+          riskS.append(opt);
+        }
+
+        const form = el('div', 'set-group');
+        form.append(el('div', 'set-title', 'เพิ่มเซิร์ฟเวอร์'));
+        form.append(row('ชื่อ', 'ใช้เป็นส่วนหนึ่งของ marker: MCP__ชื่อ__tool', nameI));
+        form.append(row('คำสั่ง', 'โปรแกรมที่พูด MCP ผ่าน stdio', cmdI));
+        form.append(row('อาร์กิวเมนต์', 'ทีละตัวต่อบรรทัด', argsI));
+        form.append(row('env', 'บรรทัดละ K=V', envI));
+        form.append(row('โฟลเดอร์ทำงาน', 'ไม่บังคับ — เซิร์ฟเวอร์ที่อ่าน path สัมพัทธ์จะอ้างจากที่นี่', cwdI));
+        form.append(row('ขอบเขต', 'ชื่อซ้ำกัน: โปรเจกต์นี้ทับค่าส่วนกลางเสมอ', scopeS));
+        form.append(row('ความเสี่ยง', 'MCP tool คือโปรแกรมของคนอื่น — ค่าเริ่มต้นคือ "เขียน" ให้ผ่านการถาม', riskS));
+
+        const readForm = () => {
+          const env = {};
+          for (const l of envI.value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean)) {
+            const eq = l.indexOf('=');
+            if (eq < 1) throw new Error(`env ต้องเป็น K=V: "${l}"`);
+            env[l.slice(0, eq)] = l.slice(eq + 1);
+          }
+          const params = {
+            name: nameI.value.trim(),
+            command: cmdI.value.trim(),
+            args: argsI.value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean),
+            env,
+            risk: riskS.value,
+            scope: scopeS.value,
+          };
+          if (cwdI.value.trim()) params.cwd = cwdI.value.trim();
+          return params;
+        };
+
+        const fout = el('div', 'plugin-source dim');
+        const testBtn = el('button', null, 'ทดสอบ');
+        testBtn.onclick = async () => {
+          let params;
+          try { params = readForm(); } catch (e) { fout.className = 'plugin-source err-text'; fout.textContent = e.message; return; }
+          testBtn.disabled = true;
+          fout.className = 'plugin-source dim';
+          fout.textContent = 'กำลังเชื่อมต่อ…';
+          const r = await rpc('mcp.test', params).catch((e) => ({ ok: false, error: e.message }));
+          fout.className = r.ok ? 'plugin-source ok-text' : 'plugin-source err-text';
+          fout.textContent = r.ok
+            ? `เชื่อมต่อได้ — ${r.tools.length} tools${r.tools.length ? `: ${r.tools.map((t) => t.name).join(', ')}` : ''}`
+            : `err: ${r.error}`;
+          testBtn.disabled = false;
+        };
+        const saveBtn = el('button', 'primary', 'บันทึก');
+        saveBtn.onclick = async () => {
+          let params;
+          try { params = readForm(); } catch (e) { fout.className = 'plugin-source err-text'; fout.textContent = e.message; return; }
+          saveBtn.disabled = true;
+          const res = await rpc('mcp.add', params).catch((e) => {
+            fout.className = 'plugin-source err-text';
+            fout.textContent = `err: ${e.message}`;
+            return null;
+          });
+          saveBtn.disabled = false;
+          if (res) { live = res; paintMcp(); }
+        };
+        const btnRow = el('div', 'plugin-actions');
+        btnRow.append(testBtn, saveBtn);
+        form.append(btnRow, fout);
+        wrap.append(form);
+      };
+
+      paintMcp();
       continue;
     }
 
@@ -1732,6 +2037,43 @@ async function openSettings() {
       add.onclick = () => { draft.rules.push({ pattern: '', decision: 'ask' }); redraw(); };
       group.append(add);
       page.append(group);
+      continue;
+    }
+
+    if (section.custom === 'health') {
+      // One button, same answers as the terminal: bridge up, extension
+      // attached, quota figures — plus the fix for whatever is red. `status`
+      // is token-free by design; `credits` rides the bridge cache so an idle
+      // check does not poke the tab upstream.
+      const out = el('div', 'set-group');
+      const lines = el('div', 'dim', 'ยังไม่ได้ตรวจ — กดปุ่มด้านล่าง');
+      out.append(lines);
+      const run = el('button', 'primary', 'ตรวจตอนนี้');
+      run.onclick = async () => {
+        run.disabled = true;
+        lines.textContent = '';
+        lines.className = 'dim';
+        try {
+          const st = await rpc('status');
+          const credits = await rpc('credits', { force: false }).catch(() => null);
+          const rows = [
+            ['bridge', st?.bridge ? 'พร้อม' : 'ไม่พร้อม', st?.bridge ? '' : 'รัน aipass dev หรือเปิดแอปใหม่'],
+            ['extension', (st?.extensions ?? 0) > 0 ? `เชื่อมอยู่ ×${st.extensions}` : 'ยังไม่มี', (st?.extensions ?? 0) > 0 ? '' : 'โหลดโฟลเดอร์ aipass-bridge/extension ใน chrome://extensions'],
+            ['tab', state.needsTab ? 'ยังไม่มี — run ล่าสุดขอ tab' : 'พร้อม (หรือยังไม่เคยขอ)', state.needsTab ? 'กด “เปิดให้” จาก welcome card' : ''],
+            ['credits', credits ? `${credits.available} / ${credits.limit}` : 'ไม่ทราบ (ไม่มี tab)', credits && Number(credits.available) <= 0 ? 'รอรอบถัดไป หรือใช้โมเดล free-credit' : ''],
+            ['build', st?.app ?? 'ไม่ทราบ', ''],
+          ];
+          for (const [k, v, fix] of rows) {
+            const line = el('div', null, `${k}: ${v}${fix ? ` — ${fix}` : ''}`);
+            lines.append(line);
+          }
+        } catch (err) {
+          lines.className = 'install-out err';
+          lines.textContent = `ตรวจไม่ได้: ${friendly(err.message)}`;
+        }
+        run.disabled = false;
+      };
+      page.append(out, run);
       continue;
     }
 
@@ -2021,6 +2363,14 @@ function showWelcome(readiness) {
     ['bridge', 'ตัวกลาง local', readiness.bridge],
     ['extension', 'ส่วนขยายใน Chrome', readiness.extensions > 0],
     ['tab', 'หน้า de.aipass.net ที่ล็อกอินอยู่', readiness.tab],
+    // A fourth row only when the quota is known: 0 available reads as
+    // "broken" without it, while null (no tab) means the tab row already
+    // explains what to fix.
+    ...(readiness.credits === null || readiness.credits === undefined ? [] : [[
+      'credits',
+      `เครดิต ${readiness.credits.available} / ${readiness.credits.limit}`,
+      Number(readiness.credits.available) > 0,
+    ]]),
   ];
   for (const [key, label, ok] of rows) {
     const row = el('div', 'ready-row ' + (ok ? 'ok' : 'no'));
@@ -2032,6 +2382,7 @@ function showWelcome(readiness) {
       fix.onclick = () => rpc('browser.open', { url: appSettingsUrl() }).catch(() => {});
       row.append(fix);
     }
+    if (!ok && key === 'credits') row.append(el('span', 'dim', 'รอรอบถัดไป หรือใช้โมเดล free-credit'));
     if (!ok && key === 'extension') row.append(el('span', 'dim', 'โหลดจากโฟลเดอร์ aipass-bridge/extension'));
     if (!ok && key === 'bridge') row.append(el('span', 'dim', 'รัน aipass dev'));
     ready.append(row);
@@ -2049,12 +2400,18 @@ const appSettingsUrl = () => state.settings?.chatUrl ?? 'https://de.aipass.net/c
 async function refreshReadiness() {
   const st = await rpc('status').catch(() => null);
   if (!st) { showWelcome({ bridge: false, extensions: 0, tab: false }); return; }
+  // The quota is what tells "no tab" (null — the tab row names the fix) from
+  // "tab attached but the pool is empty" (0 — the new credits row names its
+  // own fix). Idle windows ride the bridge cache (force:false); a run spends,
+  // so it forces.
+  const credits = await rpc('credits', { force: Boolean(state.running) }).catch(() => null);
   showWelcome({
     bridge: st.bridge,
     extensions: st.extensions ?? 0,
     // A run can only tell us "no tab" by failing, so the strip stays neutral
     // until that happens; the banner flips it and offers the fix.
     tab: !state.needsTab,
+    credits: credits ?? null,
   });
 }
 
@@ -2073,7 +2430,7 @@ const COMMANDS = [
   { cmd: 'fresh', desc: 'เริ่มบทสนทนาบน bridge ใหม่ (ความจำ wiped)', run: freshConversation },
   { cmd: 'compact', desc: 'บีบบริบททันที (สรุปงานเก่าแล้วเริ่ม conversation ใหม่)', run: compactNow },
   { cmd: 'memory', desc: 'ดู facts ที่จำข้าม session — /memory clear ลืมทั้งหมด', args: true, run: (arg) => showMemory(arg) },
-  { cmd: 'mcp', desc: 'ดู/เรียก tools จาก MCP servers', run: showMcp },
+  { cmd: 'mcp', desc: 'ดู servers/tools จาก MCP (จัดการที่ /settings → MCP)', run: showMcp },
   { cmd: 'symbols', desc: 'ดู declarations ของไฟล์ — /symbols <file>', args: true, run: (arg) => showSymbols(arg) },
   { cmd: 'new', desc: 'เริ่มบทสนทนาใหม่ในหน้าต่าง', run: startNewSession },
   { cmd: 'resume', desc: 'เปิดบทสนทนาเดิม', run: resumeSession },
@@ -2292,6 +2649,7 @@ async function showStatus() {
     `โมเดล: ${st.model ?? '-'} · mode: ${st.mode} · plan: ${st.plan ? 'เปิด' : 'ปิด'} · รันอยู่: ${st.running ? 'ใช่' : 'ไม่'}`,
     `ไฟล์รอเขียน: ${st.pending?.length ?? 0}`,
   ];
+  if (st.app) lines.push(`build: ${st.app}`);
   if (credits) lines.push(`credits: ${credits.available?.toLocaleString?.() ?? credits.available} / ${credits.limit?.toLocaleString?.() ?? credits.limit}`);
   if (state.needsTab) lines.push('⚠ ยังไม่มี tab de.aipass.net ที่ล็อกอิน — กดปุ่มเปิดได้จาก welcome card');
   for (const line of lines) addCommandOut(line);
@@ -2314,9 +2672,14 @@ async function showMemory(arg) {
 async function showMcp() {
   const res = await rpc('mcp.list').catch(() => null);
   if (!res) { addCommandOut('bridge ไม่ตอบ'); return; }
-  if (!res.tools?.length) { addCommandOut('(ไม่มี MCP server ที่ตั้งค่า — เพิ่ม ~/.aipass/mcp.json)'); return; }
-  addCommandOut(`MCP: ${res.servers.length} server, ${res.tools.length} tool:`);
-  for (const t of res.tools) addCommandOut(`  ${t.marker}  ${t.description}`);
+  const servers = res.servers ?? [];
+  if (!servers.length) { addCommandOut('(ยังไม่มี MCP server — เพิ่มที่ /settings → MCP หรือ `aipass mcp add`)'); return; }
+  addCommandOut(`MCP: ${servers.length} server · ${(res.tools ?? []).length} tool:`);
+  for (const s of servers) {
+    const state = !s.enabled ? 'ปิด' : s.connected ? `เชื่อมต่อแล้ว ${s.tools} tools` : `เชื่อมต่อไม่ได้: ${s.error ?? '?'}`;
+    addCommandOut(`  ${s.name} [${s.scope}] — ${state}${s.risk === 'read' ? '' : ' · เขียน'}`);
+  }
+  for (const t of res.tools ?? []) addCommandOut(`      ${t.marker}  ${t.description}`);
 }
 
 async function showSymbols(arg) {

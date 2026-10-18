@@ -18,7 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Harness } from './harness.mjs';
-import { SessionStore } from './session.mjs';
+import { SessionStore, APP_VERSION } from './session.mjs';
 import { SkillLibrary } from './skills.mjs';
 import { Settings, aipassHome } from './settings.mjs';
 import { PluginManager } from './plugins.mjs';
@@ -438,8 +438,14 @@ export function createRpc({
   // The manager's view plus what the installer's registry remembers. Every
   // plugin call that answers with details answers with this one shape — list,
   // reload, install, remove and enable all end here, so the window never has
-  // to reconcile two versions of "installed".
-  const decoratedPlugins = () => decorateDetails(plugins.details(), readRegistry(plugins.defaultDir));
+  // to reconcile two versions of "installed". `known` and `registry` are what
+  // let the sheet show a disabled-but-installed plugin as a row with a switch
+  // instead of a name that silently vanished.
+  const decoratedPlugins = () => {
+    const registry = readRegistry(plugins.defaultDir);
+    const details = decorateDetails(plugins.details(), registry);
+    return { ...details, registry: registry.plugins, known: knownNames(details, registry) };
+  };
 
   const mcpListing = () => ({ servers: current.mcp.status(), tools: current.mcp.toolTable() });
 
@@ -485,6 +491,10 @@ export function createRpc({
         })),
         bridge: Boolean(st?.ok),
         extensions: st?.extensions ?? 0,
+        // The build behind this backend: the window shows it (and warns when
+        // the packaged shell is older than the repo it was built from), so a
+        // stale install reads as a version instead of a mystery.
+        app: APP_VERSION ?? null,
         // The harness's model first: it is the one a run sends. The bridge's
         // own default is only a fallback, because the bridge remembers whatever
         // the browser tab last used — showing that instead would put a retired
@@ -737,6 +747,20 @@ export function createRpc({
     async 'session.entries'() { return current.session?.entries ?? []; },
     async 'session.rename'(params = {}) { current.store.rename(params.id, params.title); return { ok: true }; },
     async 'session.delete'(params = {}) { current.store.remove(params.id); return { ok: true }; },
+    /**
+     * Move idle sessions out of the picker's way. Nothing is deleted — files
+     * move to `<project>/archive/` — and the live session is always kept even
+     * when idle. `olderThanDays` 30 by default; `limit` caps the move count.
+     */
+    async 'session.archive'(params = {}) {
+      const days = Number(params.olderThanDays ?? 30);
+      const out = current.store.archiveIdle(current.root, {
+        olderThanMs: Number.isFinite(days) && days >= 0 ? days * 24 * 3600 * 1000 : 30 * 24 * 3600 * 1000,
+        limit: Math.min(200, Math.max(1, Math.floor(Number(params.limit ?? 50)) || 50)),
+        keepId: current.session?.id ?? null,
+      });
+      return { archived: out.archived, count: out.archived.length };
+    },
     async 'session.fork'(params = {}) {
       if (!current.session) throw new Error('no session to fork');
       const forked = current.session.fork(current.store, { fromEntryId: params.from ?? null });

@@ -540,6 +540,21 @@ test('the backend serves the window files in every layout', async (t) => {
   assert.equal(missing.status, 404);
 });
 
+test('every top-level aipass-bridge cli is in the packaged resources', async (t) => {
+  // tauri.conf.json enumerates resources file-by-file: a new CLI at
+  // aipass-bridge/*.mjs that nobody adds there ships a window whose command
+  // is missing. The dirs (bin/, bridge/, harness/, extension/, deploy/) ride
+  // as whole trees, so only the loose files need this pin.
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const conf = JSON.parse(fs.readFileSync(path.join(repo, 'desktop', 'src-tauri', 'tauri.conf.json'), 'utf8'));
+  const resources = conf.bundle.resources ?? {};
+  const shipped = new Set(Object.values(resources).map((v) => String(v).replace(/\/$/, '')));
+  const loose = fs.readdirSync(path.join(repo, 'aipass-bridge'))
+    .filter((f) => f.endsWith('.mjs'));
+  const missing = loose.filter((f) => !shipped.has(`aipass-bridge/${f}`));
+  assert.deepEqual(missing, [], `packaged resources miss: ${missing.join(', ')} — add them to desktop/src-tauri/tauri.conf.json`);
+});
+
 test('reading helpers: file listing, file text, and the playbook library', async (t) => {
   const env = await startRpc({
     files: {
