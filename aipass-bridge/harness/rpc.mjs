@@ -283,6 +283,7 @@ export function createRpc({
         requirePlanApproval: appSettings.get('requirePlanApproval'),
         subagent: appSettings.get('subagent'),
         thinking: appSettings.get('thinking'),
+        temperature: appSettings.get('temperature'),
         searchI: appSettings.get('searchI'),
         attach: appSettings.get('attach'),
         webScratch: appSettings.get('webScratch'),
@@ -383,7 +384,12 @@ export function createRpc({
       base = path.basename(abs);
       const sameDir = path.dirname(abs) === dir;
       const target = path.join(dir, `${id}-${base}`);
-      if (!sameDir) fs.copyFileSync(abs, target);
+      if (!sameDir) {
+        fs.copyFileSync(abs, target);
+        // The copy inherits the source's mode; this one is the backend's, so
+        // it is owner-only like the staging dir (best effort on Windows).
+        try { fs.chmodSync(target, 0o600); } catch { /* best effort */ }
+      }
       // Keep the original readable path so the model can be told where it is.
       // `owned` marks copies the backend may delete; the user's original is
       // never unlinked by dropAttachment.
@@ -396,7 +402,7 @@ export function createRpc({
     if (!bytes.length) throw new Error('empty attachment');
     if (bytes.length > MAX_ATTACHMENT_BYTES) throw new Error(`attachment too large: ${Math.round(bytes.length / 1024 / 1024)} MB (cap ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB)`);
     const file = path.join(dir, `${id}-${base}`);
-    fs.writeFileSync(file, bytes);
+    fs.writeFileSync(file, bytes, { mode: 0o600 });
     staged.set(id, { id, name: base, path: file, owned: true, bytes: bytes.length, mime, at: Date.now() });
     return staged.get(id);
   };
@@ -467,6 +473,7 @@ export function createRpc({
         // status answered both of these already; asking again was a second
         // diff of every staged file for a single reply.
         pending: status.pending,
+        asks: current.pendingAsks(),
         context: status.context,
         skills: current.skills.list(),
       };
@@ -536,6 +543,7 @@ export function createRpc({
       if (params.requirePlanApproval != null) current.options.requirePlanApproval = appSettings.get('requirePlanApproval');
       if (params.subagent != null) current.options.subagent = appSettings.get('subagent');
       if (params.thinking != null) current.options.thinking = appSettings.get('thinking');
+      if (params.temperature !== undefined) current.options.temperature = appSettings.get('temperature');
       if (params.defaultModel != null) current.bridge.model = params.defaultModel;
       if (params.compaction) current.compactor = Object.assign(current.compactor, params.compaction);
       // The rotation share is its own setting, not part of the budget object:
@@ -586,6 +594,23 @@ export function createRpc({
       current.bridge.model = next.defaultModel;
       emit('settings', next);
       return next;
+    },
+
+    /* ------------------------------------------------------- cross-session memory */
+
+    async 'memory.list'() {
+      return { facts: current.crossSessionMemory() };
+    },
+    async 'memory.clear'() {
+      current.clearCrossSessionMemory();
+      return { ok: true };
+    },
+
+    /* --------------------------------------------------------------- mcp tools */
+
+    async 'mcp.list'() {
+      await current.mcp.ensureLoaded();
+      return { servers: [...current.mcp.clients.keys()], tools: current.mcp.toolTable() };
     },
 
     /* ------------------------------------------------------------ projects */

@@ -29,6 +29,7 @@
     "evals:compare": "node scripts/evals-compare.mjs",
     "experiments": "node scripts/experiments.mjs",
     "setup-assistant": "node aipass-bridge/setup-assistant.mjs",
+    "setup": "node aipass-bridge/setup.mjs",
     "desktop": "node desktop/main.mjs",
     "desktop:sidecar": "node desktop/sidecar/fetch-node.mjs",
     "tauri:dev": "tauri dev --config desktop/src-tauri/tauri.conf.json",

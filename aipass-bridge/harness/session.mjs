@@ -69,8 +69,17 @@ const padHeader = (header) => {
 // MoveFileEx with MOVEFILE_REPLACE_EXISTING on Windows).
 function writeAtomic(file, text) {
   const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, text);
+  fs.writeFileSync(tmp, text, { mode: 0o600 });
+  tighten(tmp, 0o600);
   fs.renameSync(tmp, file);
+}
+
+// Owner-only where the OS has POSIX modes; Windows keeps ACLs, so the chmod is
+// best effort there. The store is the sensitive data class (SECURITY.md) — a
+// session holds the user's own words and the model's work, and the token file
+// already pins its own modes the same way.
+function tighten(target, mode) {
+  try { fs.chmodSync(target, mode); } catch { /* best effort on Windows */ }
 }
 
 // The header is the first line; rewriting it keeps list() cheap enough that
@@ -122,7 +131,7 @@ export class Session {
       ...data,
     };
     this.entries.push(entry);
-    fs.appendFileSync(this.file, JSON.stringify(entry) + '\n');
+    fs.appendFileSync(this.file, JSON.stringify(entry) + '\n', { mode: 0o600 });
     if (type !== 'header') {
       this.header.updated = entry.ts;
       this.header.entryCount = (this.header.entryCount ?? 1) + 1;
@@ -207,7 +216,10 @@ function readFirstLine(file, cap = 64 * 1024) {
 export class SessionStore {
   constructor(dir) {
     this.dir = dir;
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // A store an older build (or a loose umask) left readable turns owner-only
+    // the first time it is opened.
+    tighten(dir, 0o700);
   }
 
   static default(base = path.join(os.homedir(), '.aipass', 'sessions')) {
@@ -216,7 +228,8 @@ export class SessionStore {
 
   dirFor(root) {
     const dir = path.join(this.dir, slug(path.resolve(root)));
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    tighten(dir, 0o700);
     return dir;
   }
 
@@ -283,6 +296,8 @@ export class SessionStore {
       } catch { /* skip a torn line rather than lose the session */ }
     }
     if (!header || typeof header.id !== 'string') return null;
+    // A file written before the modes were pinned turns owner-only when opened.
+    tighten(file, 0o600);
     return new Session({ file, header, entries });
   }
 

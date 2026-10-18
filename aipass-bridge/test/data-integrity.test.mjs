@@ -213,3 +213,27 @@ test('a new session header records the app that wrote it, through a rewrite', ()
   assert.equal(reloaded.header.app, pkg.version, 'app survives the rewrite');
   assert.equal(reloaded.header.fromNewer, 'kept', 'and so does a field from a newer build');
 });
+
+// The store is the sensitive data class (SECURITY.md, Data classes): a session
+// holds the user's own words and the model's work, and staged uploads are
+// copies of the user's files. Where the OS has POSIX modes everything this
+// code creates is owner-only, and opening an old file tightens it. Windows
+// keeps ACLs instead of modes, so the assertions are skipped there.
+test('the session and upload stores are owner-only where the OS has modes',
+  { skip: process.platform === 'win32' }, () => {
+    const dir = tmp();
+    const store = new SessionStore(path.join(dir, 'sessions'));
+    assert.equal(fs.statSync(store.dir).mode & 0o777, 0o700, 'the store dir is 0o700');
+
+    const s = store.create({ root: path.join(dir, 'proj'), title: 'modes' });
+    assert.equal(fs.statSync(s.file).mode & 0o777, 0o600, 'a new session file is 0o600');
+    assert.equal(fs.statSync(path.dirname(s.file)).mode & 0o777, 0o700, 'the per-project dir is 0o700');
+
+    // A file an older build wrote readable is tightened when it is opened.
+    fs.chmodSync(s.file, 0o644);
+    assert.ok(store.load(s.file), 'the session still loads');
+    assert.equal(fs.statSync(s.file).mode & 0o777, 0o600, 'an opened old file turns owner-only');
+
+    const settings = new Settings(path.join(dir, 'home'));
+    assert.equal(fs.statSync(settings.uploadDir()).mode & 0o777, 0o700, 'the upload staging dir is 0o700');
+  });

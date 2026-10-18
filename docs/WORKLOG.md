@@ -6,6 +6,90 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-18 — opencode — UX: design first, then the window and the popup
+
+- **Files**: `docs/UX.md` (new — principles, surfaces, ranked pain points
+  P0–P2, implementation order, open questions, §7 status of what shipped);
+  `aipass-bridge/extension/popup.{html,js}` (Advanced gains "Paste from
+  clipboard" — the token `aipass setup` copies — and "Test connection", which
+  distinguishes OK / token-rejected / bridge-answered); `desktop/ui/index.html`
+  (hardcoded "Kasem" user card removed; 🧠 memory details group with `memory`,
+  `memory-head`, `memory-clear`); `desktop/ui/app.js` (`clickable()` makes
+  sessions/skills/files rows Enter/Space operable; `setHint()` + pulsing dot
+  while a run is in flight; `friendly()` maps the six common loop failures to
+  Thai with the next action, used at the stream error, send catch, attachment
+  and project-switch paths; `/memory`, `/mcp`, `/symbols` slash commands +
+  `showMemory`/`showMcp`/`showSymbols`; `refreshMemory()` + forget-all wiring;
+  `applyTheme` sets the theme-toggle glyph to the theme it will switch to);
+  `desktop/ui/styles.css` (`#hint.busy` pulse); `harness/harness.mjs`
+  (`crossSessionMemory()` / `clearCrossSessionMemory()` public accessors);
+  `harness/rpc.mjs` (`memory.list`, `memory.clear`, `mcp.list` methods —
+  disjoint hunks beside the sibling temperature WIP); `test/ui.test.mjs`
+  (+2 behavioral specs: a session row opens with Enter, the memory panel
+  lists facts and forget-all clears them — the latter caught that the panel
+  was only wired to the project-switch path, never to boot; boot now calls
+  `refreshMemory()`; also fixed a `toast()` call that had slipped in from the
+  popup's vocabulary).
+- **Tests**: `ui.test.mjs` 51 pass / 0 fail; `desktop-window.test.mjs` 17 pass
+  / 0 fail (includes the "window only reaches for elements that exist"
+  id-contract test against the edited html/js); `desktop.test.mjs` 21 pass /
+  0 fail; `node --check` clean on `app.js`, `popup.js`. The full suite's red
+  cells are unchanged and not this wave: the stale evals replay (needs a live
+  run) and the sibling temperature WIP in `settings.mjs`.
+- **Deferred**: a popup "Copy path" button is **not possible** — Chrome
+  exposes no filesystem path to the extension (documented in UX.md §7); the
+  error map is the first six failures only, to widen as the field reports more;
+  P0.2 (no-tab recovery) and P1.3 (context tooltip) were already shipped and
+  were left as found.
+- **Risks**: `harness/rpc.mjs` and `harness/harness.mjs` edits sit in files the
+  sibling temperature wave also touches — hunks are disjoint (new methods,
+  accessors) but keep the commit split apart; `memory.list` answers from the
+  live harness, so a run in flight shows the list as it stands.
+- **Cleanup**: none.
+
+## 2026-10-17 — opencode — the five capabilities from the gaps report
+
+- **Files**: `harness/mcp.mjs` (new — stdio JSON-RPC client:
+  initialize/tools-list/tools-call; config `~/.aipass/mcp.json` or
+  `<project>/.aipass/mcp.json`; a server that fails to connect is skipped,
+  never fatal; tools ride the plugin table as `MCP__<server>__<tool>`);
+  `harness/symbols.mjs` (new — zero-dependency regex symbol index for 15+
+  languages, cached under `~/.aipass/symbols`, refreshed on mtime change);
+  `harness/memory-store.mjs` (new — facts per project in
+  `~/.aipass/memory/<hash>.json`, case/space-insensitive dedupe, 200 chars per
+  fact, cap 50); `harness/tools.mjs` (SYMBOLS / DEF / REFS tools);
+  `harness/protocol.mjs` (the new markers + preamble lines);
+  `harness/loop.mjs` (SUBAGENT `background: true` returns a job id at once,
+  JOBS polls, finished results are injected at the next step start — no
+  nesting); `harness/harness.mjs` (`scale(task, n)` — best-of-N by check
+  verdict, max 5; cross-session facts loaded into a session's first turn; MCP
+  tools merged); `bin/aipass.mjs` + new `mcp.mjs` / `memory.mjs` / `scale.mjs`
+  CLIs (`aipass mcp [list|call]`, `aipass memory [list|clear|path]`,
+  `aipass scale "task" [--n N] [--allow-run]`); docs: `MATURITY.md` (four new
+  experimental rows; scaling row moved not-shipped → experimental),
+  `CHANGELOG.md`, `README.md` (tool table + Extra capabilities).
+- **Tests**: `agent.test.mjs` 50 pass / 0 fail; `ui.test.mjs` 49 / 0; all new
+  and changed `.mjs` syntax-checked. Full suite red only on the evals replay
+  (`stale` vs `solved` — the preamble gained markers, so the recorded digest no
+  longer matches) and the sibling temperature WIP; both pre-date this wave or
+  belong to it elsewhere.
+- **Deferred**: the new experimental MATURITY rows have no
+  `experiments/queue.json` records yet; the evals replay fixture stays stale
+  until a live re-run is approved (credits).
+- **Risks**: MCP servers are user-configured child processes — the config file
+  is the trust boundary (stated in the module header); the preamble change
+  invalidates recorded transcripts, so any other recorded fixtures should be
+  re-recorded against a live run before claiming green.
+- **Cleanup**: none.
+
+## 2026-10-17 — opencode — install easier + docs as our own work
+
+- **Files**: `aipass-bridge/setup.mjs` (new — one-command setup: Node check, state dir + token mint, PATH install, clipboard copy, bridge start, browser pages); `aipass-bridge/bin/aipass.mjs` (`setup` case + HELP); `package.json` (`setup` script); `aipass-bridge/install.sh` / `install.ps1` / `aipass-bridge/README.md` / `bin/aipass.mjs` (Node floor 18 → 20); `README.md` (Where this stands rewritten to lead with our work + compact niawjunior credit + influences note; Quick start + Development feature `aipass setup`); `aipass-bridge/README.md` (borrowed upstream screenshots removed; `aipass setup` in Setup); `desktop/README.md` (pi comparison table rewritten as constraint table + prior-art note); `desktop/ui/app.js` (temperature chip initialized on boot — one line, fixing a committed bug). Scope per user: root + component READMEs only; attribution: our voice with compact influences note; install: `aipass setup`.
+- **Tests**: `npm run agents:lint` ok (15 anchors); `ui.test.mjs` 49 pass / 0 fail; `aipass setup --no-open` runs end to end (adopts existing bridge, 1 extension connected). `npm test` overall red only because of the sibling session's in-progress temperature WIP in `settings.mjs` (chat.test.mjs 2 fails); reverting that file restores 16/0 — not my change. `setup.mjs` syntax-checked.
+- **Deferred**: broader docs/ pass (HARNESS_DESIGN, LOOP_DESIGN, …) not done — out of chosen scope; borrowed screenshots removed rather than replaced (user to capture own); chat.test.mjs failure left for the sibling session's temperature wave to reconcile.
+- **Risks**: `aipass setup` opens browser pages by default (`--no-open` to skip); assumes a local clone (repo is private, no remote one-liner). `desktop/ui/app.js` edit is a one-line fix to committed code; if the sibling's temperature wave rewrites that area, re-check. No push, no commit.
+- **Cleanup**: removed the temporary git worktree used for the clean-tree check; no temp files left.
+
 ## 2026-10-17 — opencode — the context manager's newer two tiers: elision and memory
 
 - **Files**: `harness/compact.mjs` (the elision pass in the summarisation
@@ -62,13 +146,28 @@ suite.
   rotate-fail ledger, mid-run rotate-fail, divisor window — fail-before
   verified for the guard and the divisor), `harness-qa.test.mjs` (the manual
   seed reaches the next run over RPC; compact refuses in flight),
-  `data-integrity.test.mjs` +1 (POSIX-only mode assertions). 553 → 560
-  tests.
-- **Tests**: `npm test` 558 pass / 0 fail / 2 skip (560 — the new skip is the
+  `data-integrity.test.mjs` +1 (POSIX-only mode assertions). Temperature wave:
+  `harness/settings.mjs` (`temperature` default + sane() clamp 0..2),
+  `bridge/server.mjs` (chatCompletions reads/clamps temperature + logs a
+  warning for ignored OpenAI sampling fields; startChat/Job carry it into the
+  extension dispatch frame), `harness/bridge.mjs` (#sendOnce sends it),
+  `harness/loop.mjs` (options.temperature → clamped number), `harness/rpc.mjs`
+  (harnessFor + live apply in settings.set), `agent.mjs` (--temperature flag +
+  validation + header print), `chat.mjs` (--temperature flag, /temperature
+  REPL command with picker, banner row), `desktop/ui/index.html` + `app.js`
+  (temperature chip beside the effort chip), `docs/DOCS.md`,
+  `desktop/README.md`, `CHANGELOG.md`. Tests: `settings-clamp.test.mjs` +5
+  asserts (temperature clamp/fallback inside the existing test),
+  `bridge.test.mjs` +2 (temperature ride/clamp/null-drop/warning +
+  ignored-fields warning), `agent.test.mjs` +1, `chat.test.mjs` +1,
+  `ui.test.mjs` +1 — the suite now stands at 575.
+- **Tests**: `npm test` 573 pass / 0 fail / 2 skip (575 — the skip is the
   POSIX-only mode test on Windows, where it cannot mean anything; the CI
   Linux/macOS lanes run it); `npm run qa` 9 ok / 0 warn / 0 fail;
-  `npm run agents:lint` ok (546 titles); `npm run evals:lint` OK. Nothing
-  committed.
+  `npm run agents:lint` ok (561 titles); `npm run evals:lint` OK. Nothing
+  committed. First full run after the wave failed 20 (temperature edit had
+  replaced `let thinkingLevel` in `chat.mjs` and `this.video = video` in the
+  Job constructor); both restored, the rerun is green.
 - **Deferred**: a small session reopened in a fresh process still hands the
   model only the new run's task (no compaction entry exists to seed from) —
   that is the `memory-cold-warm` probe's question, not a bug this round was

@@ -16,6 +16,8 @@ import { createTools } from './tools.mjs';
 import { PermissionEngine } from './permissions.mjs';
 import { SessionStore } from './session.mjs';
 import { Compactor } from './compact.mjs';
+import { loadMemory, saveMemory, clearMemory } from './memory-store.mjs';
+import { McpManager } from './mcp.mjs';
 import { runTask, applyOverlay, SUBAGENT_ROLES } from './loop.mjs';
 import { preamble as buildPreamble } from './protocol.mjs';
 import { RulesStore } from './rules.mjs';
@@ -34,6 +36,8 @@ export class Harness {
   #scratch = null;
   /** A manual rotation's summary + facts, waiting for the next run's seed. */
   #pendingSummary = null;
+  /** Facts persisted across sessions for this project (cross-session memory). */
+  #crossSessionMemory = [];
 
   /**
    * @param {object} opts
@@ -130,9 +134,16 @@ export class Harness {
     });
     for (const g of persisted.grants) this.permissions.grants.set(`${g.kind}:${g.arg}`, 'allow');
     this.compactor = new Compactor({ bridge: this.bridge, events: this.events, ...(opts.compaction ?? {}) });
+    this.mcp = new McpManager({ root: this.root, log: (t) => this.events.emit('note', { text: t }) });
     this.session = null;
     this.conversation = null;
     this.abort = new AbortController();
+    this.#crossSessionMemory = loadMemory(this.root);
+    this.events.on('compacted', ({ memory }) => {
+      if (Array.isArray(memory) && memory.length) {
+        try { this.#crossSessionMemory = saveMemory(this.root, [...this.#crossSessionMemory, ...memory]); } catch { /* best effort */ }
+      }
+    });
     this.running = false;
     this.#planResolve = null;
   }
@@ -224,6 +235,14 @@ export class Harness {
     }).slice(0, 20);
   }
 
+  /** The latest PLAN/TODO checklist the session recorded, or null. A run that
+   *  rotates mid-flight or a manual /compact must not forget the plan the
+   *  previous conversation was working against. */
+  #sessionTodo() {
+    const entry = [...(this.session?.entries ?? [])].reverse().find((e) => e.type === 'todo' && Array.isArray(e.items));
+    return entry?.items ?? null;
+  }
+
   async #rotate(summary, task) {
     await this.bridge.createConversation({ temporary: true, message: 'Continuing earlier work.' });
     const st = await this.bridge.status().catch(() => null);
@@ -268,6 +287,10 @@ export class Harness {
     await this.#rotate(summary, task);
     this.session.append('compaction', { summary, ...(memory.length ? { memory } : {}), lastSummarizedEntryId: this.session.entries.at(-1)?.id ?? null });
     this.events.emit('compacted', { summary });
+    // Persist the merged facts across sessions (cross-session memory).
+    if (memory.length) {
+      try { this.#crossSessionMemory = saveMemory(this.root, [...this.#crossSessionMemory, ...memory]); } catch { /* best effort */ }
+    }
     // The staged list rides along (deletes marked): a rotation is where a
     // pending edit gets forgotten, and the fresh conversation must know the
     // tree is not what the disk says yet.
@@ -290,6 +313,7 @@ export class Harness {
         lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
       staged,
+      todo: this.#sessionTodo(),
     });
     return { summary, memory, seedText };
   }
@@ -307,6 +331,9 @@ export class Harness {
   rememberSummary(summary, memory = null) {
     const s = String(summary ?? '').trim() || null;
     this.#pendingSummary = s ? { summary: s, memory: Array.isArray(memory) ? memory : [] } : null;
+    if (s && Array.isArray(memory) && memory.length) {
+      try { this.#crossSessionMemory = saveMemory(this.root, [...this.#crossSessionMemory, ...memory]); } catch { /* best effort */ }
+    }
     return s;
   }
 
@@ -341,6 +368,13 @@ export class Harness {
       if (!this.session) await this.startSession();
       this.abort = new AbortController();
 
+      // MCP: lazy-load configured servers once per harness, then merge their
+      // tools into the plugin tool table so the preamble and the loop see them.
+      try { await this.mcp.ensureLoaded(); } catch { /* best effort */ }
+      const mcpTools = this.mcp.toolTable();
+      const basePluginTools = (this.options.pluginTools ?? []).filter((t) => !String(t?.marker ?? '').startsWith('MCP__'));
+      this.options.pluginTools = [...basePluginTools, ...mcpTools];
+
       const isFirst = first ?? this.session.entries.every((e) => e.type !== 'task');
 
       // Context is a rotating resource here, so check it before the turn, not after.
@@ -366,6 +400,7 @@ export class Harness {
             lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
           }),
           staged: this.#stagedList(),
+          todo: this.#sessionTodo(),
         });
       }
       if (this.compactor.needsCompaction(this.session)) {
@@ -375,7 +410,15 @@ export class Harness {
 
       await this.#ensureConversation();
 
-      return await runTask(task, {
+      // Cross-session memory: on the first run of a session, carry forward the
+      // facts persisted from earlier sessions so the model does not rediscover
+      // them. Only on the first run — a later run in the same session already
+      // has them in context.
+      const effectiveTask = isFirst && this.#crossSessionMemory.length
+        ? `Facts carried from earlier sessions (durable; re-check anything that may have gone stale):\n${this.#crossSessionMemory.map((f) => '- ' + f).join('\n')}\n\nTask: ${task}`
+        : task;
+
+      return await runTask(effectiveTask, {
         bridge: this.bridge,
         tools: this.tools,
         overlay: this.overlay,
@@ -384,7 +427,12 @@ export class Harness {
         events: this.events,
         subagent: this.options.subagent ? this.#makeHelper() : null,
         check: this.#makeChecker(task),
-        runPluginTool: runPluginTool ?? this.runPluginTool ?? null,
+        runPluginTool: (marker, args) => {
+          if (this.mcp.hasTool(marker)) return this.mcp.runTool(marker, args);
+          const pluginRunner = runPluginTool ?? this.runPluginTool ?? null;
+          if (pluginRunner) return pluginRunner(marker, args);
+          return `no such tool: ${marker}`;
+        },
         approvePlan: this.options.requirePlanApproval
           ? () => new Promise((resolve) => { this.events.emit('plan_request', {}); this.#planResolve = resolve; })
           : null,
@@ -405,6 +453,25 @@ export class Harness {
     }
   }
 
+  /** Test-time scaling: run the task N times, keep the best by check verdict. */
+  async scale(task, n = 3, opts = {}) {
+    const attempts = Math.min(5, Math.max(1, Math.floor(Number(n) || 3)));
+    const results = [];
+    for (let i = 1; i <= attempts; i++) {
+      this.events.emit('note', { text: `scale: attempt ${i} of ${attempts}` });
+      try {
+        const r = await this.run(task, opts);
+        results.push({ attempt: i, summary: r.summary, stopReason: r.stopReason, steps: r.steps, check: r.check ?? null, changes: r.changes ?? [] });
+        if (r.check?.verdict === 'pass') break;
+      } catch (e) {
+        results.push({ attempt: i, error: e.message });
+      }
+    }
+    const rank = (v) => (v === 'pass' ? 2 : v === 'none' ? 1 : 0);
+    const best = results.reduce((a, b) => (rank(a?.check?.verdict) >= rank(b?.check?.verdict) ? a : b), results[0]);
+    return { attempts: results.length, results, best };
+  }
+
   /** The human answered a plan gate. */
   answerPlan(ok) { this.#planResolve?.(ok); this.#planResolve = null; }
 
@@ -418,6 +485,11 @@ export class Harness {
     return result;
   }
 
+  /** Cross-session memory facts (read-only copy). */
+  crossSessionMemory() { return [...this.#crossSessionMemory]; }
+  /** Forget all cross-session facts for this project. */
+  clearCrossSessionMemory() { this.#crossSessionMemory = []; clearMemory(this.root); }
+
   /** Drop everything pending without writing. */
   discard() {
     const n = this.overlay.size;
@@ -427,12 +499,28 @@ export class Harness {
   }
 
   cancel() {
+    // A run parked on a gate must not stay parked: abort first so the run's own
+    // signal reads 'cancelled', then release the plan gate (resolved as a
+    // decline) and deny every permission question still open, so the run leaves
+    // the gate instead of waiting forever behind a window that may have reloaded
+    // and lost the modal.
     this.abort.abort();
+    this.answerPlan(false);
+    this.permissions.cancelPending();
     this.events.emit('cancelled', {});
   }
 
   pendingChanges() {
     return this.overlay.changes().map(({ file, added, removed, deleted, isNew }) => ({ file, added, removed, deleted, isNew }));
+  }
+
+  /** What the run is still waiting on the human for — used by a window that
+   *  just reloaded to put the modal back on screen. */
+  pendingAsks() {
+    return {
+      permissions: this.permissions.pendingList(),
+      plan: this.#planResolve !== null,
+    };
   }
 
   /* ------------------------------------------------------------- helpers */

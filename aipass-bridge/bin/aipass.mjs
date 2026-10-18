@@ -87,7 +87,7 @@ function stopBridge() {
 
 async function status() {
   const major = Number(process.versions.node.split('.')[0]);
-  console.log(`node          ${process.versions.node}${major >= 18 ? '' : red('  ✗ need >= 18')}`);
+  console.log(`node          ${process.versions.node}${major >= 20 ? '' : red('  ✗ need >= 20')}`);
 
   const up = await bridgeUp();
   console.log(`bridge        ${up ? `${BRIDGE}  ok` : `${BRIDGE}  ${red('not running')} — run \`aipass dev\` (or npm run dev)`}`);
@@ -114,6 +114,10 @@ const HELP = `aipass — de.aipass.net from your terminal
   aipass credits         check credit quota
   aipass doctor          run diagnostics
   aipass setup-assistant configure custom assistant
+  aipass setup           first-run setup: Node, PATH, token, bridge, browser pages
+  aipass memory          list/clear facts carried across sessions for this project
+  aipass scale "task"    test-time scaling: run a task N times, keep the best
+  aipass mcp             list/call tools from configured MCP servers
   aipass status          check node / bridge / extension status
   aipass stop            stop any lingering background bridge
 
@@ -156,6 +160,22 @@ switch (cmd) {
   case 'setup-assistant':
     await ensureBridge();
     process.exit(await run('setup-assistant.mjs', ['--bridge', BRIDGE, ...rest]));
+    break;
+
+  case 'setup':
+    process.exit(await run('setup.mjs', rest));
+    break;
+
+  case 'memory':
+    process.exit(await run('memory.mjs', rest));
+    break;
+
+  case 'scale':
+    process.exit(await run('scale.mjs', rest));
+    break;
+
+  case 'mcp':
+    process.exit(await run('mcp.mjs', rest));
     break;
 
   case 'status':

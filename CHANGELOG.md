@@ -119,6 +119,46 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   {risk: 'write'|'shell'})` routes the marker through the same permission
   gate a built-in of that kind rides; undeclared tools keep the trust the
   plugin model states (`plugins.test.mjs`, `gates.test.mjs`).
+- **Temperature is a knob now.** `temperature` (0..2, null = the server's
+  per-model default) lives in `settings.json`, rides every send as
+  `temperature`, and is edited from the composer's temperature chip beside the
+  effort chip (`agent.test.mjs`, `chat.test.mjs`, `bridge.test.mjs`,
+  `ui.test.mjs`). The bridge clamps out-of-range values and drops a value
+  that is not a number, with a warning. The sampling fields the bridge cannot
+  forward (`top_p`, `max_tokens`, `presence_penalty`, `frequency_penalty`,
+  `seed`, `stop`, `logit_bias`, `logprobs`, `response_format`,
+  `reasoning_effort`, `top_k`, `n`) are no longer ignored silently: one
+  `warning:` line names them per request (`bridge.test.mjs`). The outer API
+  (`/v1/chat/completions`) still ignores everything else, now documented as
+  such (`docs/DOCS.md`).
+
+- **MCP client (stdio).** `harness/mcp.mjs` speaks JSON-RPC over stdio:
+  initialize, tools/list, tools/call. Servers are configured in
+  `~/.aipass/mcp.json` or `<project>/.aipass/mcp.json`; each tool is
+  exposed to the model as `MCP__<server>__<tool>` and merged into the
+  plugin table. A server that fails to connect is skipped, never fatal.
+  `aipass mcp [list|call]` inspects and calls them.
+- **Code navigation (SYMBOLS / DEF / REFS).** A zero-dependency,
+  regex-based symbol index (`harness/symbols.mjs`, 15+ languages) cached
+  under `~/.aipass/symbols`, refreshed on mtime change. The model can list
+  a file's declarations, find a definition, and find references.
+- **Cross-session memory.** Facts persisted per project in
+  `~/.aipass/memory/<project-hash>.json` and loaded into a new session's
+  first turn; persisted on compact/rotate. `aipass memory [list|clear|path]`.
+- **Background subagents.** A `SUBAGENT` with `background: true` starts and
+  returns a job id at once; results are polled with `JOBS` or injected
+  into a later turn. No nesting.
+- **Test-time scaling.** `aipass scale "task" [--n N]` runs the task N
+  times and keeps the best by check verdict (`Harness.scale`).
+- **UX pass over the window and the popup** (design record: `docs/UX.md`).
+  The extension popup's Advanced section gains **Paste from clipboard** and
+  **Test connection**; the desktop gains `/memory`, `/mcp`, `/symbols` and a
+  **memory panel** (facts carried across sessions + forget-all, via new
+  `memory.list` / `memory.clear` / `mcp.list` RPC methods); sessions, playbooks
+  and files rows are keyboard-operable; a run in flight pulses the composer
+  hint; the six most common loop failures are translated to Thai with the next
+  action; the hardcoded user card is gone; the theme toggle shows the theme it
+  will switch to.
 
 ### Changed
 

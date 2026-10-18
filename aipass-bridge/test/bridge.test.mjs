@@ -545,6 +545,39 @@ test('passes a valid thinking level through and drops a bogus one', async (t) =>
   assert.equal(ext.chats.at(-1).thinkingLevel, undefined, 'an unknown level must not be forwarded');
 });
 
+test('a temperature rides the job, clamped to 0..2, and a bogus one is dropped with a warning', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  await post({ messages: [{ role: 'user', content: 'hi' }], temperature: 0.7 });
+  assert.equal(ext.chats.at(-1).temperature, 0.7);
+
+  await post({ messages: [{ role: 'user', content: 'hi' }], temperature: 5 });
+  assert.equal(ext.chats.at(-1).temperature, 2, 'a number outside the range is clamped, not sent as-is');
+
+  const nullLog = bridge.logText();
+  await post({ messages: [{ role: 'user', content: 'hi' }], temperature: null });
+  assert.equal(ext.chats.at(-1).temperature, undefined, 'null means "not set", never Number(null) = 0');
+  assert.doesNotMatch(bridge.logText().slice(nullLog.length), /temperature/, 'null is not a mistake to warn about');
+
+  const logBefore = bridge.logText();
+  await post({ messages: [{ role: 'user', content: 'hi' }], temperature: 'banana' });
+  assert.equal(ext.chats.at(-1).temperature, undefined, 'a value that is not a number must not be forwarded');
+  assert.match(bridge.logText().slice(logBefore.length), /temperature/);
+});
+
+test('ignored OpenAI sampling fields earn one warning naming them', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  const logBefore = bridge.logText();
+  await post({ messages: [{ role: 'user', content: 'hi' }], top_p: 0.9, max_tokens: 100, seed: null });
+  const newLog = bridge.logText().slice(logBefore.length);
+  assert.match(newLog, /ignoring unsupported request fields: top_p, max_tokens/);
+  assert.doesNotMatch(newLog, /seed/, 'a field present but null is "not set", not a dropped setting');
+  assert.doesNotMatch(newLog, /temperature/);
+});
+
 const PDF = 'data:application/pdf;base64,JVBERi0xLjQK';
 
 test('a document part reaches the extension named and typed', async (t) => {

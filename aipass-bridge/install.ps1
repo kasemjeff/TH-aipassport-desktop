@@ -9,12 +9,12 @@ $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')   # repo root (package.json with the bin entry)
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  Write-Error 'need Node (>= 18) on PATH - https://nodejs.org'
+  Write-Error 'need Node (>= 20) on PATH - https://nodejs.org'
   exit 1
 }
 $major = [int](& node -e 'process.stdout.write(process.versions.node.split(".")[0])')
-if ($major -lt 18) {
-  Write-Error "need Node >= 18 (have $(& node -v))"
+if ($major -lt 20) {
+  Write-Error "need Node >= 20 (have $(& node -v))"
   exit 1
 }
 

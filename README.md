@@ -30,11 +30,23 @@
 
 ## Where this stands
 
-This project builds on work that came before it. The original bridge, Chrome
-extension and terminal client are
+aipass is one project: a desktop window, a terminal client and a file agent
+around de.aipass.net, sharing one settings file and one harness. Most of what
+you use day to day was written here.
+
+The terminal bridge, the Chrome extension and the CLI started life as
 **[niawjunior/aipass-bridge](https://github.com/niawjunior/aipass-bridge)** by
-[niawjunior](https://github.com/niawjunior). This repository continues that
-codebase; its own work sits on top:
+[niawjunior](https://github.com/niawjunior) — a MIT-licensed project this
+repository continues. That code (bridge, extension, CLI) stays under
+niawjunior's copyright, credited in [LICENSE](./LICENSE). Everything added on
+top — the desktop window, the harness, the sessions, the agent protocol — is
+this repository's own work. Influences beyond that: the session storage borrows
+its JSONL-per-session shape from the pi coding agent, and the permission/hook
+vocabulary and the tool-writing guidance (token-efficient results, head+tail
+clipping) follow the published agent-tool literature. Those are influences on
+the design, not code taken from anywhere.
+
+What sits on top:
 
 - a **desktop window** — a full app around the same bridge: projects, a chat
   list, transcripts that resume, per-file diff approval, playbooks, plugins, a
@@ -66,6 +78,17 @@ loopback token of its own; see *The bridge*, below.)
 
 Node ≥ 20. Nothing to install: the bridge, the harness, the window and the
 tests run on node builtins alone.
+
+The fastest path on a fresh machine is one command:
+
+```bash
+aipass setup            # or: npm run setup
+```
+
+It checks Node, puts `aipass` on your PATH, mints the loopback token (and copies
+it to your clipboard), starts the bridge, and opens the extension and site pages
+so you can finish the one-time browser steps. Re-run it any time — it is
+idempotent. The manual steps below are what it automates.
 
 ### 1. The extension (once)
 
@@ -151,13 +174,15 @@ agent working in the current project. The model asks, the harness acts:
 | `NEED dir <path>` · `NEED file <path> [start-end]` | list a directory / read a file, a screen at a time |
 | `SEARCH <text>` | grep-style search, `.gitignore` aware, big files skipped |
 | `GLOB <pattern>` | find files by pattern |
+| `SYMBOLS <file>` · `DEF <name>` · `REFS <name>` | code navigation: list a file's declarations, find a definition, find references (zero-dependency regex index) |
 | `GIT <subcommand>` | read-only git inspection |
 | `FETCH <url>` | read a URL — private and internal hosts refused |
 | `WEB <query>` | live web search with citations |
 | `CREATE` · `EDIT` · `DELETE` · `MOVE` | staged file changes — only applied per your approval |
 | `RUN … END` | a shell command — only when shell is allowed |
 | `ATTACH <file>` | send a file along with the message |
-| `DONE <summary>` | end the task with a summary |
+| `SUBAGENT ... END` | hand a self-contained piece to a helper (`role: verifier/reviewer/summariser`); add `background: true` to run it beside you, then poll with `JOBS` |
+| `MCP__<server>__<tool>` | a tool from a configured MCP server (stdio) — see `~/.aipass/mcp.json` |
 
 Guardrails that keep long tasks honest: writes are staged into an overlay and
 shown as diffs before they land; `RUN` is gated by the permission mode and
@@ -165,6 +190,14 @@ shown as diffs before they land; `RUN` is gated by the permission mode and
 **กฎไฟล์** page in the window) can veto reads and writes by glob; and the WAF
 module keeps risky spellings shortened on the way out and restores them on the
 way in, so an upstream block doesn't silently kill a run.
+
+Extra capabilities available to the agent: **code navigation**
+(`SYMBOLS`/`DEF`/`REFS` over a zero-dependency regex index), **MCP tools**
+(`MCP__<server>__<tool>` from servers in `~/.aipass/mcp.json`), **background
+helpers** (`SUBAGENT` with `background: true`, polled via `JOBS`), **cross-session
+memory** (facts persisted per project, loaded into the next session's first
+turn), and **test-time scaling** (`aipass scale "task" --n N`). Each has an
+off-switch or is opt-in; see `docs/MATURITY.md`.
 
 ## The bridge
 
@@ -256,6 +289,7 @@ aipass/
 ## Development
 
 ```bash
+npm run setup   # first-run machine setup: Node, PATH, token, bridge, browser pages
 npm test        # the whole suite (bridge, extension, harness, window logic)
 npm run check   # npm test and npm run qa in one go — the pre-push pair
 npm run qa      # static checks + suite + fake-DOM window + live status

@@ -136,9 +136,18 @@ export async function runTask(taskText, ctx = {}) {
   // against the model, so a level it lacks never breaks a run.
   const thinking = options.thinking && String(options.thinking).toLowerCase() !== 'off'
     ? String(options.thinking).toLowerCase() : null;
+  // Sampling temperature: a number 0..2 rides every send; anything else (the
+  // null default included) never asks, so the server's own default stands.
+  const temperature = typeof options.temperature === 'number' && Number.isFinite(options.temperature)
+    ? Math.min(2, Math.max(0, options.temperature)) : null;
   const useSlim = Boolean(options.slim);
   const seedText = options.seedText ?? null;
   const pluginTools = options.pluginTools ?? [];
+  // Background helper jobs: spawned by a SUBAGENT with `background: true`, run
+  // without blocking the step, and report when polled (JOBS) or when their
+  // result is injected into a later turn.
+  const backgroundJobs = new Map();
+  const reportedBg = new Set();
   // (Thai pack) Language policy. `replyLanguage` is what the preamble tells
   // the model; `langCheck` is the stop hook that measures it — the closing
   // message's share of Thai letters (code and URLs excluded) must reach
@@ -192,6 +201,7 @@ export async function runTask(taskText, ctx = {}) {
       parts: withParts ?? null,
       model,
       thinkingLevel: thinking,
+      temperature,
       ...(conversation ? { conversation, temporary: conversationTemporary } : {}),
       signal: options.signal ?? null,
       onText: (t) => events?.emit('assistant_delta', { text: t }),
@@ -277,6 +287,8 @@ export async function runTask(taskText, ctx = {}) {
   let verifySent = false;
   let codeTouched = false;   // a code file was staged this run
   let verifiedSinceChange = false;
+  let todoPrompts = 0;      // (plan checkpoint) one nudge when DONE arrives with open plan items
+  let todoPromptSent = false;
   let summary = null;
   let stopReason = 'steps';
 
@@ -403,6 +415,25 @@ export async function runTask(taskText, ctx = {}) {
   // re-sending the same image on every step would re-upload it and occupy the
   // context again for nothing. ATTACH queues (the tool's own) drain into the
   // next message, whatever turn that is.
+  // (plan checkpoint) A run that wrote a PLAN or a TODO carries a checklist of
+  // what "done" means. DONE used to be accepted with items still open — a long
+  // plan could end half-finished and nothing said so. One nudge (once per run)
+  // names the open items, so the model either finishes them, ticks them with a
+  // TODO update, or says plainly why they are dropped. A second DONE after it
+  // ends the run either way.
+  const openTodoMsg = () => {
+    if (todoPromptSent || !todoState.length) return null;
+    const open = todoState.filter((it) => !it.done);
+    if (!open.length) return null;
+    todoPromptSent = true;
+    todoPrompts += 1;
+    const cap = 8;
+    const named = open.slice(0, cap).map((it) => `- ${it.text}`).join('\n');
+    session?.append('note', { text: `plan checkpoint: DONE arrived with ${open.length} open item(s) — asking for them first` });
+    events?.emit('note', { text: `plan checkpoint: the checklist still has ${open.length} open item(s) — asking the model to close or drop them` });
+    return `Before I take that as done: the plan/TODO this run recorded still lists ${open.length} open item(s):\n${named}${open.length > cap ? `\n… and ${open.length - cap} more` : ''}\n\nIf they are finished, send a TODO list with [x] on them; if any is dropped, say which and why; otherwise continue with the open items and then say DONE. A DONE after this message ends the run either way.`;
+  };
+
   const firstParts = first ? (options.parts ?? null) : null;
   let sends = 0;
   const partsForSend = () => {
@@ -440,6 +471,18 @@ export async function runTask(taskText, ctx = {}) {
     if (Date.now() - runStart > maxWallClockMs) { spendBudget('time-limited'); break; }
     if (maxCredits && (await creditSpent()) >= maxCredits) { spendBudget('credit-limited'); break; }
     const stepStart = Date.now();
+    // Background helper results that finished since the last turn are injected
+    // here so the model sees them without having to poll.
+    const bgDone = [];
+    for (const [id, job] of backgroundJobs) {
+      if (job.status === 'done' && !reportedBg.has(id)) {
+        reportedBg.add(id);
+        bgDone.push(`Background helper ${id}${job.role ? ` (${job.role})` : ''} finished:\n${job.result}`);
+      }
+    }
+    if (bgDone.length) {
+      next = `${bgDone.join('\n\n')}\n\n${next}`;
+    }
     let reply;
     try { reply = await saySafe(next, partsForSend()); sends++; }
     catch (err) {
@@ -503,6 +546,11 @@ export async function runTask(taskText, ctx = {}) {
         const checkMsg = await finishCheck();
         if (checkMsg && step < maxSteps) {
           next = `${checkMsg}\n\n${REMINDER}`;
+          continue;
+        }
+        const todoMsg = step < maxSteps ? openTodoMsg() : null;
+        if (todoMsg && step < maxSteps) {
+          next = `${todoMsg}\n\n${REMINDER}`;
           continue;
         }
         const langMsg = replyLangMsg(proseText, cleanArg, work.length === 0);
@@ -745,7 +793,17 @@ export async function runTask(taskText, ctx = {}) {
     // plan mode is that the work does not start until it is read.
     if (calls.some((c) => c.kind === 'plan') && !planApproved) {
       const ok = approvePlan ? await approvePlan() : true;
-      if (!ok) { stopReason = 'plan-rejected'; events?.emit('note', { text: 'plan declined — stopping before any change.' }); break; }
+      if (!ok) {
+        // A stop (cancel) releases the gate too — the run ends as cancelled,
+        // not as a declined plan, so the transcript and run_stats say why.
+        stopReason = options.signal?.aborted ? 'cancelled' : 'plan-rejected';
+        events?.emit('note', {
+          text: stopReason === 'cancelled'
+            ? 'stopped while waiting for plan approval — the gate was released'
+            : 'plan declined — stopping before any change.',
+        });
+        break;
+      }
       planApproved = true;
       events?.emit('note', { text: 'plan approved — continuing.' });
     }
@@ -778,9 +836,12 @@ export async function runTask(taskText, ctx = {}) {
       // through the stagnation guard and the compaction estimate like any
       // other step, so the correction is a step the run actually took.
       const checkMsg = await finishCheck();
-      const langMsg = checkMsg && step < maxSteps ? null : replyLangMsg(proseText, summary, work.length === 0);
+      const todoMsg = !checkMsg && step < maxSteps ? openTodoMsg() : null;
+      const langMsg = (checkMsg || todoMsg) ? null : replyLangMsg(proseText, summary, work.length === 0);
       if (checkMsg && step < maxSteps) {
         next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${checkMsg}`;
+      } else if (todoMsg && step < maxSteps) {
+        next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${todoMsg}`;
       } else if (langMsg && step < maxSteps) {
         next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${langMsg}`;
       } else {
@@ -864,7 +925,7 @@ export async function runTask(taskText, ctx = {}) {
         // memory it does not have. Failing this way only retries next step.
         await rotate?.(note);
         session.append('compaction', { summary: note, ...(memory.length ? { memory } : {}), lastSummarizedEntryId: session.entries.at(-1)?.id ?? null });
-        events?.emit('compacted', { summary: note });
+        events?.emit('compacted', { summary: note, memory });
         // The fresh conversation keeps what a summary would drop: the files
         // staged so far (deletes marked) and the last check that has not
         // passed — the two constraints a rotation loses most expensively.
@@ -873,7 +934,7 @@ export async function runTask(taskText, ctx = {}) {
           return overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
         }).slice(0, 20);
         const lastCheck = checkResult && checkResult.verdict && checkResult.verdict !== 'pass' ? checkResult : null;
-        next = `${compactor.seed({ summary: note, memory, task: taskText, preambleText: pre, results: results.join('\n\n'), staged: stagedNow, lastCheck })}\n\n${REMINDER}`;
+        next = `${compactor.seed({ summary: note, memory, task: taskText, preambleText: pre, results: results.join('\n\n'), staged: stagedNow, lastCheck, todo: todoState })}\n\n${REMINDER}`;
       } catch (err) {
         events?.emit('error', { message: `compaction failed, sending the results without it: ${err.message}` });
       }
@@ -909,6 +970,7 @@ export async function runTask(taskText, ctx = {}) {
     firewallNotes,
     checks,
     checkVerdict: checkResult?.verdict ?? null,
+    todoPrompts,
     repeatBlocks,
     commitBlocks,
     errLoops,
@@ -982,6 +1044,7 @@ async function execute(call, ctx) {
   if (call.kind === 'subagent') {
     if (!subagent) return 'err: no helper is available in this run';
     const body = String(call.body ?? '');
+    const background = /^\s*background:\s*(true|yes|1)\s*$/im.test(body);
     // The optional `role:` line narrows the helper before it starts: its own
     // instructions and its own limits (SUBAGENT_ROLES). An unknown role is
     // refused here, before anything starts, and the error names the set.
@@ -990,13 +1053,42 @@ async function execute(call, ctx) {
       return `err: no helper role called "${role}" — use one of: ${Object.keys(SUBAGENT_ROLES).join(', ')} (or drop the role line).`;
     }
     const taskLine = body.match(/^\s*task:\s*(.+)$/im)?.[1];
-    const task = (taskLine ?? body.split('\n').find((l) => l.trim() && !/^\s*role:/i.test(l)) ?? '').trim();
+    const task = (taskLine ?? body.split('\n').find((l) => l.trim() && !/^\s*role:/i.test(l) && !/^\s*background:/i.test(l)) ?? '').trim();
     if (!task) return 'err: give the helper a task, on a `task:` line inside SUBAGENT';
+    if (background) {
+      const id = `bg${backgroundJobs.size + 1}`;
+      const job = { id, task, role: role || null, status: 'running', result: null };
+      backgroundJobs.set(id, job);
+      const promise = (async () => {
+        events?.emit('subagent_start', { task, role: role || null, background: true });
+        try {
+          const out = await subagent(task, role || null);
+          job.status = 'done';
+          job.result = String(out ?? '');
+          events?.emit('subagent_end', { task, role: role || null, out: job.result, background: true });
+          session?.append('note', { text: `background helper ${id}${role ? ` (${role})` : ''}: ${task}\n${job.result.slice(0, 2000)}` });
+        } catch (e) {
+          job.status = 'error';
+          job.result = `err: ${e.message}`;
+        }
+      })();
+      job.promise = promise;
+      return `started background job ${id} — poll with JOBS`;
+    }
     events?.emit('subagent_start', { task, role: role || null });
     const out = await subagent(task, role || null);
     events?.emit('subagent_end', { task, role: role || null, out });
     session?.append('note', { text: `helper${role ? ` (${role})` : ''}: ${task}\n${String(out).slice(0, 2000)}` });
     return out;
+  }
+
+  if (call.kind === 'jobs') {
+    if (!backgroundJobs.size) return '(no background jobs)';
+    const lines = [];
+    for (const [id, job] of backgroundJobs) {
+      lines.push(`${id}: ${job.status}${job.role ? ` (${job.role})` : ''} — ${job.task.slice(0, 60)}${job.status !== 'running' ? '\n  ' + String(job.result).slice(0, 400) : ''}`);
+    }
+    return lines.join('\n');
   }
 
   // A marker a plugin registered. It is the plugin's own code, so it is also

@@ -75,6 +75,8 @@ if (argv.includes('--help') || argv.includes('-h')) {
   --image PATH        attach an image directly
   --thinking LEVEL    how hard a reasoning model thinks (low, medium, high —
                       and max on Claude Opus)
+  --temperature N     sampling temperature 0..2 (default: the site's per-model
+                      default)
   --ratio R           aspect ratio          (images: 1:1, 3:4, 4:3;
                       video: 16:9, 9:16, 1:1, 4:3, 3:4, and 21:9 on seedance)
   --resolution R      video resolution      (480p, 720p — seedance only)
@@ -124,6 +126,7 @@ const NO_AUDIO = argv.includes('--no-audio');
 const imageArg = flag('image', null);
 const FILES = argv.reduce((/** @type {string[]} */ acc, a, i) => (a === '--file' && argv[i + 1] ? [...acc, argv[i + 1]] : acc), /** @type {string[]} */ ([]));
 let thinkingLevel = flag('thinking', null);
+let temperature = flag('temperature', null);
 let activeTone = TONE;
 let activeFormat = FORMAT;
 let activeImageStyle = IMAGE_STYLE;
@@ -1934,6 +1937,7 @@ async function ask(text, attachedImages = [], attachedFiles = []) {
       messages: [{ role: 'user', content: messagesContent }],
       ...(RATIO ? { aspect_ratio: RATIO } : {}),
       ...(thinkingLevel ? { thinking_level: thinkingLevel } : {}),
+      ...(temperature != null ? { temperature } : {}),
       ...(RESOLUTION ? { resolution: RESOLUTION } : {}),
       ...(DURATION ? { duration: Number(DURATION) } : {}),
       ...(activeVideoStyle ? { style_preprompt: activeVideoStyle } : {}),
@@ -2181,6 +2185,7 @@ function banner() {
   out(row(dim('session  ') + (status?.conversation ?? 'starts on first message')));
   out(row(dim('bridge   ') + BRIDGE.replace(/^https?:\/\//, '')));
   if (thinkingLevel) out(row(dim('thinking ') + cyan(thinkingLevel)));
+  if (temperature != null) out(row(dim('temp     ') + cyan(String(temperature))));
   if (activeTone || activeFormat) {
     const styleParts = [];
     if (activeTone) styleParts.push(`tone: ${activeTone}`);
@@ -2200,6 +2205,7 @@ const COMMANDS = [
   ['/model',        'pick a model — ↑↓ then Enter, or /model <id>'],
   ['/models',       'print the model list'],
   ['/thinking',     'set thinking level — ↑↓ then Enter, or /thinking <level>'],
+  ['/temperature',  'set sampling temperature 0..2, or "default" — /temperature 0.7'],
   ['/conversations','switch conversation — ↑↓ then Enter'],
   ['/new',          'start a fresh conversation'],
   ['/tone',         'set response tone — ↑↓ then Enter, or /tone <name|off>'],
@@ -2916,6 +2922,47 @@ while (!stopped && !question) {
     }
     thinkingLevel = level === 'off' ? null : level;
     console.log(dim(`  thinking level → ${thinkingLevel || 'off'}`));
+    continue;
+  }
+
+  // `/temperature` sets sampling temperature 0..2, or `default` to leave it
+  // to the server's per-model default.
+  if (line === '/temperature' || line.startsWith('/temperature ')) {
+    const TEMPS = [
+      { id: 'default', note: "leave it to the server's per-model default" },
+      { id: '0',   note: 'deterministic — the same input, the same answer' },
+      { id: '0.3', note: 'focused — close to deterministic' },
+      { id: '0.7', note: 'balanced' },
+      { id: '1',   note: 'the usual default most APIs use' },
+      { id: '1.5', note: 'more varied' },
+      { id: '2',   note: 'the most varied the range allows' },
+    ];
+    let raw = line === '/temperature' ? '' : line.slice(12).trim().toLowerCase();
+    if (!raw) {
+      if (!TTY) {
+        for (const t of TEMPS) console.log(`  ${t.id === (temperature == null ? 'default' : String(temperature)) ? '●' : ' '} ${t.id.padEnd(8)}  ${dim(t.note)}`);
+        continue;
+      }
+      const chosen = await pickList(TEMPS, {
+        current: temperature == null ? 'default' : String(temperature),
+        label: (t) => [t.id, t.note],
+      });
+      if (!chosen) { console.log(dim('  cancelled')); continue; }
+      raw = chosen.id;
+    }
+    if (raw === 'default' || raw === 'off') {
+      temperature = null;
+      console.log(dim('  temperature → default (the site decides)'));
+      continue;
+    }
+    const t = Number(raw);
+    if (!Number.isFinite(t) || t < 0 || t > 2) {
+      console.log(dim(`  current temperature: ${temperature ?? 'default'}`));
+      console.log(dim('  usage: /temperature <0..2 | default>'));
+      continue;
+    }
+    temperature = Math.round(t * 100) / 100;
+    console.log(dim(`  temperature → ${temperature}`));
     continue;
   }
 

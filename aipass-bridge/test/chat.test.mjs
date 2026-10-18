@@ -174,6 +174,24 @@ test('forwards thinking level when --thinking is provided', async (t) => {
   assert.equal(receivedThinking, 'high');
 });
 
+test('forwards temperature when --temperature is provided', async (t) => {
+  /** @type {any} */
+  let receivedTemperature = null;
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (job, e) => {
+      receivedTemperature = job.temperature;
+      await e.text('Sampled answer');
+      await e.done();
+    },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out, code } = await chat(['warm thought', '--temperature', '0.8']);
+  assert.equal(code, 0);
+  assert.match(out, /Sampled answer/);
+  assert.equal(receivedTemperature, 0.8);
+});
+
 test('a generated video is decoded to disk, not left as a data URI', async (t) => {
   const mp4 = Buffer.from('AAAAIGZ0eXBpc29t', 'base64');
   const ext = await new FakeExtension(bridge.base, {

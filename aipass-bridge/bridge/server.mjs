@@ -354,7 +354,7 @@ const DELTA_FLUSH_MS = 25;
 const TEXT_KINDS = new Set(['content', 'reasoning', 'status']);
 
 class Job {
-  constructor({ kind = 'chat', modelId, text, parts, conversationId, aspectRatio: ratio, url, message, requestId, assistant, assistantField, temporary, thinkingLevel, video, spec, imageStyleId, outputTone, outputFormat, timeoutMs, onDelta, onDone, onError }) {
+  constructor({ kind = 'chat', modelId, text, parts, conversationId, aspectRatio: ratio, url, message, requestId, assistant, assistantField, temporary, thinkingLevel, temperature, video, spec, imageStyleId, outputTone, outputFormat, timeoutMs, onDelta, onDone, onError }) {
     this.id = randomUUID();
     this.kind = kind;
     this.url = url;
@@ -364,6 +364,8 @@ class Job {
     this.assistantField = assistantField;
     this.temporary = temporary;
     this.thinkingLevel = thinkingLevel;
+    this.temperature = (typeof temperature === 'number' && Number.isFinite(temperature))
+      ? Math.min(2, Math.max(0, temperature)) : undefined;
     this.video = video;
     this.spec = spec;
     this.imageStyleId = imageStyleId;
@@ -399,7 +401,7 @@ class Job {
       ? { jobId: this.id, kind: 'assistant', ...this.spec }
       : this.kind === 'video'
       ? { jobId: this.id, kind: 'video', conversationId: this.conversationId, modelId: this.modelId, text: this.text, ...this.video }
-      : { jobId: this.id, kind: 'chat', conversationId: this.conversationId, modelId: this.modelId, text: this.text, parts: this.parts, aspectRatio: this.aspectRatio, temporary: this.temporary, thinkingLevel: this.thinkingLevel, imageStyleId: this.imageStyleId, outputTone: this.outputTone, outputFormat: this.outputFormat });
+      : { jobId: this.id, kind: 'chat', conversationId: this.conversationId, modelId: this.modelId, text: this.text, parts: this.parts, aspectRatio: this.aspectRatio, temporary: this.temporary, thinkingLevel: this.thinkingLevel, temperature: this.temperature, imageStyleId: this.imageStyleId, outputTone: this.outputTone, outputFormat: this.outputFormat });
       // A dead socket must fail this job now — not leak it until the idle
       // timeout fires minutes later with jobs.size inflated.
       if (!ok) return this.fail('extension disconnected mid-dispatch — reconnect the tab and retry');
@@ -638,7 +640,7 @@ async function resolveConversation() {
 
 // A 404 means the conversation was deleted; a 409 means the server still
 // believes a generation is running there. Neither recovers on its own.
-function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, video, imageStyleId, outputTone, outputFormat, conversation: fixedConversation = null, temporary: fixedTemporary = null, onDelta, onDone, onError }) {
+function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, temperature, video, imageStyleId, outputTone, outputFormat, conversation: fixedConversation = null, temporary: fixedTemporary = null, onDelta, onDone, onError }) {
   // A video model does not go through /actions/send-message at all — it is a
   // job submitted to /actions/video-generation and then polled. Same Job
   // machinery, different kind, so retries and aborts behave the same way.
@@ -665,7 +667,7 @@ function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, vi
 
     current = new Job({
       kind: isVideo ? 'video' : 'chat',
-      modelId, text, parts, conversationId, aspectRatio: ratio, thinkingLevel,
+      modelId, text, parts, conversationId, aspectRatio: ratio, thinkingLevel, temperature,
       imageStyleId, outputTone, outputFormat,
       temporary: jobTemporary,
       // No aspect-ratio fallback here: videoOptionsFor already read the request
@@ -1009,6 +1011,24 @@ async function chatCompletions(req, res) {
   const thinking = String(payload.thinking_level ?? payload.thinkingLevel ?? '').trim().toLowerCase();
   const thinkingLevel = thinking ? thinkingLevelFor(model, thinking) : undefined;
   const video = videoOptionsFor(model, payload);
+  // temperature: an OpenAI client's field. Clamped to the OpenAI range 0..2;
+  // a value that is not a number is dropped with a warning. null/absent/empty
+  // means "leave it to the site's per-model default" — and null must not be
+  // read as Number(null) = 0.
+  const rawTemperature = payload.temperature;
+  let temperature;
+  if (rawTemperature !== undefined && rawTemperature !== null && rawTemperature !== '') {
+    const t = Number(rawTemperature);
+    if (Number.isFinite(t)) temperature = Math.min(2, Math.max(0, Math.round(t * 100) / 100));
+    else log(`warning: temperature ${JSON.stringify(rawTemperature)} is not a number 0..2 — ignored`);
+  }
+  // OpenAI sampling fields the bridge cannot forward. Ignoring them silently
+  // reads as "the setting had no effect" — say so, once per request, naming
+  // them. `temperature` is handled above, so it is not on this list. A field
+  // present but null is "not set", not a setting being dropped.
+  const IGNORED_REQUEST_FIELDS = ['top_p', 'topP', 'top_k', 'topK', 'max_tokens', 'maxTokens', 'presence_penalty', 'frequency_penalty', 'seed', 'stop', 'logit_bias', 'logprobs', 'response_format', 'reasoning_effort', 'n'];
+  const ignored = IGNORED_REQUEST_FIELDS.filter((k) => payload[k] !== undefined && payload[k] !== null);
+  if (ignored.length) log(`warning: ignoring unsupported request field${ignored.length > 1 ? 's' : ''}: ${ignored.join(', ')}`);
 
   // An image style is sent by id; a tone and a format by their code. Each is
   // resolved from whatever the caller named — English, Thai, or the code — and
@@ -1069,7 +1089,7 @@ async function chatCompletions(req, res) {
     emit({ role: 'assistant', content: '' });
 
     const job = startChat({
-      modelId: model, text, parts, aspectRatio: ratio, thinkingLevel, video,
+      modelId: model, text, parts, aspectRatio: ratio, thinkingLevel, temperature, video,
       imageStyleId, outputTone, outputFormat,
       conversation, temporary: conversationTemporary,
       onDelta: (part) => {
@@ -1113,7 +1133,7 @@ async function chatCompletions(req, res) {
   let reasoning = '';
   await new Promise((resolve) => {
     const job = startChat({
-      modelId: model, text, parts, aspectRatio: ratio, thinkingLevel, video,
+      modelId: model, text, parts, aspectRatio: ratio, thinkingLevel, temperature, video,
       imageStyleId, outputTone, outputFormat,
       conversation, temporary: conversationTemporary,
       onDelta: (p) => {

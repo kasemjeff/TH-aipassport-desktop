@@ -60,6 +60,41 @@ const el = (tag, cls, text) => {
   if (text != null) n.textContent = text;
   return n;
 };
+
+/** The line under the composer: '' hides it; busy adds the pulsing dot. */
+const setHint = (text, busy = false) => {
+  const h = $('hint');
+  h.textContent = text ?? '';
+  h.classList.toggle('busy', Boolean(busy && text));
+};
+
+/** Make a list row behave like a button: click, Enter and Space all run it. */
+const clickable = (row, run) => {
+  row.onclick = run;
+  row.tabIndex = 0;
+  row.setAttribute('role', 'button');
+  row.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); run(ev); }
+  });
+  return row;
+};
+
+/* The loop's common failures, said in the language the person reads, each with
+   its single next action. Anything unlisted passes through untouched — an
+   unknown error is better verbatim than guessed at. */
+const ERROR_COPY = [
+  [/no extension connected/i, 'ยังไม่มี extension เชื่อมอยู่ — เปิด Chrome แล้วคลิกไอคอน aipass bridge'],
+  [/no de\.aipass\.net tab is open/i, 'ยังไม่มีแท็บ de.aipass.net ที่ล็อกอิน — เปิดแท็บนั้นแล้วลองใหม่'],
+  [/needs a token|unauthorized|401|403/i, 'bridge ปฏิเสธ token — เปิด popup ของ extension แล้ววาง token จาก ~/.aipass/.token'],
+  [/ECONNREFUSED|fetch failed|bridge offline/i, 'bridge ไม่ทำงาน — เริ่มด้วยคำสั่ง aipass ก่อน'],
+  [/a run is already in flight/i, 'มี run ค้างอยู่ — กดหยุดก่อนแล้วค่อยส่งใหม่'],
+  [/outside project root/i, 'path อยู่นอกโปรเจกต์ — ใช้ไฟล์ในโปรเจกต์เท่านั้น'],
+];
+const friendly = (msg) => {
+  const s = String(msg ?? '');
+  for (const [re, copy] of ERROR_COPY) if (re.test(s)) return copy;
+  return s;
+};
 /** Follow the conversation only while the reader is already at the bottom.
  *  Scrolling up to read something and being yanked back down by the next line
  *  is the kind of small thing that makes a window feel hostile. */
@@ -424,6 +459,15 @@ function askPlan() {
   $('modal').classList.remove('hidden');
 }
 
+/** A gate the reload swallowed: the run is still waiting on an answer. */
+function restoreAsks(asks) {
+  if (asks.plan) { askPlan(); return; }
+  const list = asks.permissions ?? [];
+  if (!list.length) return;
+  askPermission(list[0]);
+  if (list.length > 1) addNote(`มีคำถามรออนุมัติอีก ${list.length - 1} รายการ — ตอบข้อนี้ก่อน`);
+}
+
 /* ------------------------------------------------------------------ events */
 
 // EventSource cannot set headers, so the token (when there is one) rides the
@@ -461,19 +505,24 @@ async function restoreFromSnapshot() {
   if (!snap) return;
   state.sessionId = snap.session?.id ?? null;
   if (!state.sessionId) return;
-  if (log.childNodes.length) { renderPending(snap.pending); refreshMeter(); return; }
+  if (log.childNodes.length) { renderPending(snap.pending); refreshMeter(); restoreAsks(snap.asks ?? {}); return; }
   for (const entry of snap.entries ?? []) {
     if (entry.type === 'task') addTask(entry.text);
     else if (entry.type === 'assistant') replayAssistant(entry.text ?? '');
     // A tool entry is the replay's step boundary: the reply above it is done
     // and the next assistant entry starts a new bubble, the way the live
     // stream splits them at every `step` event.
+    else if (entry.type === 'todo' && Array.isArray(entry.items)) renderTodo(entry.items);
     else if (entry.type === 'tool') { addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '' }); state.assistant = null; }
     else if (entry.type === 'note') addNote(entry.text);
   }
   endTurn();
   renderPending(snap.pending);
   refreshMeter();
+  restoreAsks(snap.asks ?? {});
+  // The run may still be in flight when the window reloaded: say so, instead of
+  // looking idle while the backend waits on a gate nobody can see.
+  if (snap.status?.running) { state.running = true; $('send').textContent = 'หยุด'; setHint('ทำงานอยู่…', true); }
   await refreshSessions();
 }
 
@@ -490,7 +539,7 @@ setInterval(() => {
   if (Date.now() - lastEventAt > 20_000) {
     state.running = false;
     $('send').textContent = 'ส่ง';
-    $('hint').textContent = '';
+    setHint('');
     addNote('run นี้เงียบไป 20 วินาที — ถือว่าหยุดแล้ว (backend อาจหลุด) · ลองส่งใหม่ หรือเช็ค aipass doctor');
     refreshMeter();
   }
@@ -588,7 +637,7 @@ stream.addEventListener('budget', (e) => {
   addNote(`budget spent (${used}) — stopping`);
   offerCarryOn(`หยุดเพราะครบ budget (${used}) — `);
 });
-stream.addEventListener('error', (e) => addNote(`error: ${JSON.parse(e.data).message}`));
+stream.addEventListener('error', (e) => addNote(`error: ${friendly(JSON.parse(e.data).message)}`));
 stream.addEventListener('todo', (e) => renderTodo(JSON.parse(e.data).items));
 stream.addEventListener('diff_update', (e) => renderPending(JSON.parse(e.data).changes));
 stream.addEventListener('permission_request', (e) => askPermission(JSON.parse(e.data)));
@@ -631,7 +680,7 @@ stream.addEventListener('finished', async (e) => {
   foldRun(stopReason);
   state.running = false;
   $('send').textContent = 'ส่ง';
-  $('hint').textContent = '';
+  setHint('');
   refreshMeter();
   if (credits) addNote(`credits  ${credits.available?.toLocaleString?.() ?? credits.available} of ${credits.limit?.toLocaleString?.() ?? credits.limit} left${spent > 0 ? ` · ${spent.toLocaleString()} this run` : ''}`);
   if (stopReason !== 'done') addNote(`stopped: ${stopReason}`);
@@ -709,7 +758,7 @@ async function sendTask(seed = null) {
   state.running = true;
   state.lastCheck = null; // a fresh run's verdict is not the old run's
   $('send').textContent = 'หยุด';
-  $('hint').textContent = 'ทำงานอยู่…';
+  setHint('ทำงานอยู่…', true);
   try {
     await rpc('run', {
       task: text,
@@ -721,10 +770,10 @@ async function sendTask(seed = null) {
       title: text.slice(0, 60),
     });
   } catch (err) {
-    addNote(`error: ${err.message}`);
+    addNote(`error: ${friendly(err.message)}`);
     state.running = false;
     $('send').textContent = 'ส่ง';
-    $('hint').textContent = '';
+    setHint('');
   }
 }
 
@@ -844,11 +893,28 @@ function applyThinkingFromSettings() {
   $('thinking').value = ['off', 'low', 'medium', 'high', 'max'].includes(level) ? level : 'low';
 }
 
+/** The temperature chip mirrors the effort chip: it sits beside the model chip
+ *  and writes through settings.set the moment it changes. null (default) means
+ *  "leave it to the server's per-model default". */
+function applyTemperatureFromSettings() {
+  const value = state.settings?.temperature;
+  const key = value == null ? 'default' : String(value);
+  $('temperature').value = ['default', '0', '0.3', '0.7', '1', '1.5', '2'].includes(key) ? key : 'default';
+}
+
 $('thinking').onchange = () => {
   const level = $('thinking').value;
   rpc('settings.set', { thinking: level })
     .then(() => { state.settings = { ...(state.settings ?? {}), thinking: level }; })
     .catch((err) => addNote(`เปลี่ยนระดับ effort ไม่ได้: ${err.message}`));
+};
+
+$('temperature').onchange = () => {
+  const value = $('temperature').value;
+  const next = value === 'default' ? null : Number(value);
+  rpc('settings.set', { temperature: next })
+    .then(() => { state.settings = { ...(state.settings ?? {}), temperature: next }; })
+    .catch((err) => addNote(`ตั้งค่า temperature ไม่ได้: ${err.message}`));
 };
 
 /**
@@ -956,7 +1022,7 @@ async function refreshSessions() {
     li.append(el('span', null, s.title || '(untitled)'));
     if (when) li.append(el('span', 'sub', when.toLocaleDateString(undefined, { day: '2-digit', month: 'short' })));
     li.title = `${s.title ?? '(untitled)'}\n${s.id}\n${when ? when.toLocaleString() : ''}`;
-    li.onclick = () => void openSession(s.id);
+    clickable(li, () => void openSession(s.id));
     ul.append(li);
   }
 }
@@ -969,7 +1035,7 @@ async function refreshSkills() {
     const li = el('li');
     li.append(el('span', null, s.name));
     li.title = s.file ?? '';
-    li.onclick = async () => {
+    clickable(li, async () => {
       const found = await rpc('skills.load', { name: s.name }).catch((err) => ({ error: err.message }));
       $('modal-title').textContent = `playbook — ${s.name}`;
       const body = $('modal-body');
@@ -981,10 +1047,34 @@ async function refreshSkills() {
       close.onclick = hideModal;
       $('modal-actions').append(close);
       $('modal').classList.remove('hidden');
-    };
+    });
     ul.append(li);
   }
 }
+
+async function refreshMemory() {
+  const res = await rpc('memory.list').catch(() => null);
+  const ul = $('memory');
+  if (!ul) return;
+  ul.textContent = '';
+  const facts = res?.facts ?? [];
+  const head = $('memory-head');
+  if (head) head.textContent = facts.length ? `facts ข้าม session (${facts.length})` : 'facts ข้าม session';
+  if (!facts.length) { ul.append(el('li', 'dim', '(ยังไม่มี — รัน /compact หรือให้ agent ทำงาน)')); return; }
+  for (const f of facts) {
+    const li = el('li');
+    li.append(el('span', null, f));
+    ul.append(li);
+  }
+}
+
+// Memory panel: forget all cross-session facts.
+const _mc = $('memory-clear');
+if (_mc) _mc.addEventListener('click', async () => {
+  await rpc('memory.clear').catch(() => {});
+  addCommandOut('ลืม facts ข้าม session ทั้งหมดแล้ว');
+  refreshMemory();
+});
 
 /* --------------------------------------------------------------- the files */
 
@@ -1015,17 +1105,17 @@ async function refreshFiles(dir = filesState.dir) {
     const li = el('li', 'dim');
     li.textContent = e.dir ? `${e.name}/` : e.name;
     if (e.dir) {
-      li.onclick = () => void refreshFiles(dir === '.' ? e.name : `${dir}/${e.name}`);
+      clickable(li, () => void refreshFiles(dir === '.' ? e.name : `${dir}/${e.name}`));
     } else {
       const rel = dir === '.' ? e.name : `${dir}/${e.name}`;
-      li.onclick = () => void openFile(rel);
+      clickable(li, () => void openFile(rel));
       // Attach straight from the panel: the file is right there, and a picker is
       // a detour.
       const attach = el('button', 'mini', 'แนบ');
       attach.onclick = async (ev) => {
         ev?.stopPropagation?.();
         const item = await rpc('attachment.stage', { path: rel }).catch((err) => ({ error: err.message }));
-        if (item.error) { addNote(`แนบไม่ได้: ${item.error}`); return; }
+        if (item.error) { addNote(`แนบไม่ได้: ${friendly(item.error)}`); return; }
         state.attachments.set(item.id, item);
         renderAttachments();
         addCommandOut(`แนบแล้ว: ${item.name}`);
@@ -1131,12 +1221,12 @@ async function refreshProjects(projects) {
 
 $('project').onchange = async () => {
   const result = await rpc('projects.switch', { path: $('project').value }).catch((err) => ({ error: err.message }));
-  if (result.error) { addNote(`could not switch project: ${result.error}`); return; }
+  if (result.error) { addNote(`สลับโปรเจกต์ไม่ได้: ${friendly(result.error)}`); return; }
   log.textContent = '';
   state.sessionId = null;
   renderPending([]);
   addNote(`project: ${$('project').value}`);
-  await Promise.all([refreshSessions(), refreshFiles('.'), refreshSkills(), refreshPanels()]);
+  await Promise.all([refreshSessions(), refreshFiles('.'), refreshSkills(), refreshPanels(), refreshMemory()]);
 };
 
 $('add-project').onclick = async () => {
@@ -1568,6 +1658,7 @@ async function openSettings() {
     await refreshHeader();
     applyModeFromSettings();
     applyThinkingFromSettings();
+    applyTemperatureFromSettings();
     addCommandOut('บันทึกการตั้งค่าแล้ว');
   };
 
@@ -1793,6 +1884,9 @@ const COMMANDS = [
   { cmd: 'conversations', desc: 'เลือกบทสนทนาของ bridge (ความจำของโมเดล)', run: pickConversation },
   { cmd: 'fresh', desc: 'เริ่มบทสนทนาบน bridge ใหม่ (ความจำ wiped)', run: freshConversation },
   { cmd: 'compact', desc: 'บีบบริบททันที (สรุปงานเก่าแล้วเริ่ม conversation ใหม่)', run: compactNow },
+  { cmd: 'memory', desc: 'ดู facts ที่จำข้าม session — /memory clear ลืมทั้งหมด', args: true, run: (arg) => showMemory(arg) },
+  { cmd: 'mcp', desc: 'ดู/เรียก tools จาก MCP servers', run: showMcp },
+  { cmd: 'symbols', desc: 'ดู declarations ของไฟล์ — /symbols <file>', args: true, run: (arg) => showSymbols(arg) },
   { cmd: 'new', desc: 'เริ่มบทสนทนาใหม่ในหน้าต่าง', run: startNewSession },
   { cmd: 'resume', desc: 'เปิดบทสนทนาเดิม', run: resumeSession },
   { cmd: 'fork', desc: 'แยกบทสนทนาจุดนี้ไปแก้ต่อแยก', run: forkSession },
@@ -2013,6 +2107,34 @@ async function showStatus() {
   if (credits) lines.push(`credits: ${credits.available?.toLocaleString?.() ?? credits.available} / ${credits.limit?.toLocaleString?.() ?? credits.limit}`);
   if (state.needsTab) lines.push('⚠ ยังไม่มี tab de.aipass.net ที่ล็อกอิน — กดปุ่มเปิดได้จาก welcome card');
   for (const line of lines) addCommandOut(line);
+}
+
+async function showMemory(arg) {
+  if (arg && arg.trim().toLowerCase() === 'clear') {
+    await rpc('memory.clear').catch(() => {});
+    addCommandOut('ลืม facts ข้าม session ทั้งหมดแล้ว');
+    return;
+  }
+  const res = await rpc('memory.list').catch(() => null);
+  const facts = res?.facts ?? [];
+  if (!facts.length) { addCommandOut('(ยังไม่มี facts ข้าม session — รัน /compact หรือให้ agent ทำงานสักพัก)'); return; }
+  addCommandOut(`facts ข้าม session ${facts.length} รายการ:`);
+  for (const f of facts) addCommandOut(`  - ${f}`);
+  addCommandOut('ลืมทั้งหมด: /memory clear');
+}
+
+async function showMcp() {
+  const res = await rpc('mcp.list').catch(() => null);
+  if (!res) { addCommandOut('bridge ไม่ตอบ'); return; }
+  if (!res.tools?.length) { addCommandOut('(ไม่มี MCP server ที่ตั้งค่า — เพิ่ม ~/.aipass/mcp.json)'); return; }
+  addCommandOut(`MCP: ${res.servers.length} server, ${res.tools.length} tool:`);
+  for (const t of res.tools) addCommandOut(`  ${t.marker}  ${t.description}`);
+}
+
+async function showSymbols(arg) {
+  const file = (arg || '').trim();
+  if (!file) { addCommandOut('usage: /symbols <file>  (หรือใช้ marker SYMBOLS <file> ใน agent run)'); return; }
+  addCommandOut(`SYMBOLS ใช้ใน agent run: SYMBOLS ${file}  (หรือ DEF <name> / REFS <name>)`);
 }
 
 async function listModels() {
@@ -2292,6 +2414,11 @@ function applyTheme(theme) {
     ? (window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
     : (theme === 'light' ? 'light' : 'dark');
   document.documentElement.dataset.theme = picked;
+  const btn = $('theme-toggle');
+  if (btn) {
+    btn.textContent = picked === 'dark' ? '☀' : '☾';
+    btn.title = picked === 'dark' ? 'สลับเป็นธีมสว่าง' : 'สลับเป็นธีมมืด';
+  }
 }
 
 (async function boot() {
@@ -2304,9 +2431,11 @@ function applyTheme(theme) {
   await refreshSessions();
   await refreshFiles();
   await refreshSkills();
+  await refreshMemory();
   await refreshPanels();
   await refreshPending();
   applyModeFromSettings();
   applyThinkingFromSettings();
+  applyTemperatureFromSettings();
   $('task').focus();
 })();

@@ -44,13 +44,16 @@ gets long.
 
 So the harness works *around* it rather than pretending otherwise:
 
-| What pi does | What this does | Why |
+| The constraint | How this works | Why |
 |---|---|---|
-| manages a message array | keeps a local session log (JSONL) and replays one user message per turn | the array would be a 403 |
-| compacts by dropping messages | summarises, then **rotates**: a fresh temporary conversation seeded with the summary | the server's history cannot be trimmed |
-| calls a subagent on a second session | saves the conversation, runs the helper on its own, restores | the bridge holds exactly one current conversation |
-| asks per tool natively | the protocol has a permission gate; writes never touch disk until approved | writes are CREATE/EDIT/DELETE/MOVE in prose |
-| skills/extensions from a registry | `~/.aipass/skills`, `<project>/.aipass/skills`, then the shipped library | plain markdown, no manifest |
+| the upstream owns the conversation | keeps a local session log (JSONL) and replays one user message per turn | a `messages` array with an assistant turn is a 403 |
+| the upstream cannot be trimmed | summarises, then **rotates**: a fresh temporary conversation seeded with the summary | the server's history cannot be trimmed |
+| the bridge holds one conversation | saves the conversation, runs the helper on its own, restores | a second session would clobber the current one |
+| there are no native tool calls | the protocol has a permission gate; writes never touch disk until approved | writes are CREATE/EDIT/DELETE/MOVE in prose |
+| playbooks and extensions | `~/.aipass/skills`, `<project>/.aipass/skills`, then the shipped library | plain markdown, no manifest |
+
+The session log borrows its JSONL-per-session, tree-of-entries shape from the pi
+coding agent; everything else above is our own design. (Influence, not code.)
 
 ## The window
 
@@ -340,7 +343,10 @@ What it holds: default model (+ the **thinking level** the model reasons at
 before each step — edited from the composer's effort chip in the window, or
 `/thinking` in the terminal; it streams into a fold labeled `✻ reasoning…` and
 closes when the turn ends, and only models that advertise thinking levels
-honour it), write
+honour it), the **sampling temperature** (`temperature`, 0..2 — edited from
+the composer's temperature chip beside the effort chip; `null` leaves it to
+the server's per-model default, and a value outside the range is clamped),
+write
 permission (`ask` / `auto` / `yolo`), `allowRun`, `maxSteps` (0 = no cap, the
 shipped default), the per-run caps `maxToolCalls` / `maxWallClockMs` (the sheet
 asks for the wall clock in minutes), plan mode (+
@@ -362,7 +368,7 @@ refused at Save rather than stored where it would look like protection.
 Every setting applies the moment it is written — not just the file, the
 running process: the ones that govern a run (`maxSteps`, the per-run caps,
 plan,
-`requirePlanApproval`, helpers, thinking, model, mode, the compaction knobs) move
+`requirePlanApproval`, helpers, thinking, temperature, model, mode, the compaction knobs) move
 the live harness — the composer's effort chip writes the same way the moment it
 changes — `skillsDirs` rebuilds the playbook library, the plugin list
 reloads the plugins by name, and a new root switches project outright. The

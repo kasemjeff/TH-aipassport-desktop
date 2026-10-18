@@ -111,6 +111,17 @@
         </label>
 
         <details class="nav-group">
+          <summary class="nav-item" title="facts ที่จำข้าม session">
+            <span class="nav-ico" aria-hidden="true">🧠</span>ความจำ
+          </summary>
+          <div class="nav-body">
+            <h3 class="side-h" id="memory-head">facts ข้าม session</h3>
+            <ul id="memory" class="list dim"></ul>
+            <button type="button" id="memory-clear" class="mini" title="ลืม facts ทั้งหมด">ลืมทั้งหมด</button>
+          </div>
+        </details>
+
+        <details class="nav-group">
           <summary class="nav-item" title="แม่แบบคำสั่ง / คู่มือที่บันทึกไว้">
             <span class="nav-ico" aria-hidden="true">📋</span>พรีพรอมต์
           </summary>
@@ -161,13 +172,6 @@
     </div>
 
     <div class="side-foot">
-      <div class="user-card">
-        <span class="avatar" aria-hidden="true">K</span>
-        <span class="user-meta">
-          <strong class="user-name">Kasem</strong>
-          <span class="user-mail dim">kasem@localhost</span>
-        </span>
-      </div>
     </div>
   </aside>
 
@@ -216,6 +220,17 @@
               <option value="medium">effort medium</option>
               <option value="high">effort high</option>
               <option value="max">effort max</option>
+            </select>
+          </span>
+          <span class="model-chip effort-chip" title="temperature — ความคิดสร้างสรรค์/การสุ่มของการตอบ (0 นิ่ง … 2 หลากหลาย); default = ค่าเริ่มต้นของโมเดล">
+            <select id="temperature" title="temperature — ความคิดสร้างสรรค์/การสุ่มของการตอบ">
+              <option value="default">temp default</option>
+              <option value="0">temp 0</option>
+              <option value="0.3">temp 0.3</option>
+              <option value="0.7">temp 0.7</option>
+              <option value="1">temp 1.0</option>
+              <option value="1.5">temp 1.5</option>
+              <option value="2">temp 2.0</option>
             </select>
           </span>
           <span class="grow"></span>

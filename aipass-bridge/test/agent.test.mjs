@@ -783,6 +783,25 @@ test('--thinking off asks for nothing and a bad level stops the start', async (t
   assert.match(bad.out, /bad --thinking/);
 });
 
+test('--temperature rides every send, and a bad value stops the start', async (t) => {
+  const dir = tempDir({ 'README.md': 'x\n' });
+  const handler = scripted(['DONE nothing to do']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir, ['--temperature', '0.4']);
+  assert.ok(ext.chats.length >= 1, 'the run sent at least one message');
+  assert.equal(ext.chats.at(-1).temperature, 0.4, 'the flag rides the send');
+  assert.match(out, /temp/, 'the header names the level');
+
+  await agent(dir);
+  assert.equal(ext.chats.at(-1).temperature, undefined, 'without the flag the site default stands');
+
+  const bad = await agent(dir, ['--temperature', 'hot']);
+  assert.equal(bad.code, 1, 'a typo is refused before any message is sent');
+  assert.match(bad.out, /bad --temperature/);
+});
+
 test('reasoning streams as its own dim line, apart from the step', async (t) => {
   const dir = tempDir({ 'README.md': 'a starter project\n' });
   const onChat = async (job, e) => {

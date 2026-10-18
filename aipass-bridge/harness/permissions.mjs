@@ -357,6 +357,17 @@ export class PermissionEngine {
   }
 
   pendingCount() { return this.pending.size; }
+
+  /** The questions still waiting on the human, for a window that just reloaded. */
+  pendingList() {
+    return [...this.pending.entries()].map(([id, { kind, arg }]) => ({ id, kind, arg }));
+  }
+
+  /** A stop answers every open question as a deny — a run must not stay parked on a gate nobody will see. */
+  cancelPending() {
+    for (const [, entry] of this.pending) entry.resolve('deny');
+    this.pending.clear();
+  }
 }
 
 const verdictFnAnswer = (d) => (d === 'always' || d === 'allow-always' ? 'always' : d === 'allow' ? 'allow' : 'deny');

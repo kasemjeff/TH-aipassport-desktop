@@ -8,11 +8,11 @@ set -e
 cd "$(dirname "$0")/.."   # repo root
 
 if ! command -v node >/dev/null 2>&1; then
-  echo "need Node (>= 18) on PATH — https://nodejs.org" >&2
+  echo "need Node (>= 20) on PATH — https://nodejs.org" >&2
   exit 1
 fi
-if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 18 ? 0 : 1)'; then
-  echo "need Node >= 18 (have $(node -v))" >&2
+if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)'; then
+  echo "need Node >= 20 (have $(node -v))" >&2
   exit 1
 fi
 

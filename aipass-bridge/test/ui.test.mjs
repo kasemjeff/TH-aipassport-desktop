@@ -206,6 +206,7 @@ const BACKEND = {
     subagent: true,
     parallelHelpers: true,
     thinking: 'low',
+    temperature: null,
     compaction: { contextTokens: 24000, reserveTokens: 4096, keepRecentBytes: 6000 },
     compactAtPercent: 40,
     skillsDirs: [],
@@ -239,7 +240,7 @@ test('typing "/" opens the palette and filters it as you type', async (t) => {
   task.dispatch('keydown', { key: 'm' });
   await tick();
   const shown = node('slash-list').children.map((li) => li.children[0].textContent);
-  assert.deepEqual(shown, ['/model', '/models', '/mode'], 'commands sharing a prefix all show');
+  assert.deepEqual(shown, ['/model', '/models', '/mode', '/memory', '/mcp'], 'commands sharing a prefix all show');
   assert.equal(node('slash').classList.contains('hidden'), false, 'palette stays visible while a command is typed');
 });
 
@@ -644,6 +645,23 @@ test('the session list filters as you type', async () => {
   assert.match(node('sessions').textContent, /ไม่พบบทสนทนา/, 'and says so when nothing matches');
 });
 
+test('a session row opens with Enter, not only with the mouse', async () => {
+  // Mouse-only rows leave keyboard users with a list they cannot act on, so
+  // every clickable row is a real button now: focusable, Enter and Space alike.
+  const { node, calls, tick } = await bootApp({
+    ...BACKEND,
+    'session.list': () => [{ id: 'aaa', title: 'first', updated: Date.UTC(2026, 9, 10) }],
+    'session.open': () => [],
+  });
+  await tick(); await tick();
+  const row = node('sessions').children[0];
+  assert.equal(row.attrs.role, 'button', 'the row announces itself as a button');
+  assert.equal(row.tabIndex, 0, 'and can take focus');
+  row.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.ok(calls.includes('session.open'), 'Enter opens the session');
+});
+
 test('the file panel walks into folders and attaches a file', async () => {
   // The panel listed one directory and stopped: a folder was a dead click.
   const { node, calls, tick } = await bootApp({
@@ -670,6 +688,26 @@ test('the file panel walks into folders and attaches a file', async () => {
   await tick(); await tick();
   assert.ok(calls.includes('attachment.stage'), 'clicking it stages the file');
   assert.match(node('log').textContent, /แนบแล้ว: guide\.md/);
+});
+
+test('the memory panel shows carried facts, and forget-all clears them', async () => {
+  // Facts carried across sessions were invisible: the model "remembered"
+  // something the person could neither see nor drop.
+  let facts = ['ชอบ indent ด้วยสเปซ', 'โปรเจกต์รันบน Node 20'];
+  const { node, calls, tick } = await bootApp({
+    ...BACKEND,
+    'memory.list': () => ({ facts }),
+    'memory.clear': () => { facts = []; return { ok: true }; },
+  });
+  await tick(); await tick(); await tick();
+  assert.equal(node('memory').children.length, 2, 'both facts are listed');
+  assert.match(node('memory-head').textContent, /\(2\)/, 'the header counts them');
+
+  node('memory-clear').dispatch('click');
+  await tick(); await tick();
+  assert.ok(calls.includes('memory.clear'), 'forget-all reaches the backend');
+  assert.equal(node('memory').children.length, 1, 'the panel re-renders empty');
+  assert.match(node('memory').textContent, /ยังไม่มี/, 'and says so instead of going blank');
 });
 
 test('an apply refreshes the file panel, so the new file is on screen', async () => {
@@ -723,6 +761,24 @@ test('the effort level is picked in the composer, not buried in settings', async
   node('settings-btn').dispatch('click');
   await tick(); await tick(); await tick();
   assert.equal(/thinking level/.test(node('modal-body').textContent), false, 'the sheet does not ask for the effort anymore');
+});
+
+test('the temperature chip sits beside the effort chip and writes through', async () => {
+  // Sampling temperature is a per-message knob too: it rides beside the effort
+  // chip and writes through settings.set the moment it changes; null means the
+  // server's per-model default, so the chip boots at "default".
+  const { node, sent, tick } = await bootApp(BACKEND);
+  assert.equal(node('temperature').value, 'default', 'the chip boots at the default');
+
+  node('temperature').value = '0.7';
+  node('temperature').dispatch('change');
+  await tick();
+  assert.deepEqual(sent.at(-1), { method: 'settings.set', params: { temperature: 0.7 } }, 'a pick is a number on the wire');
+
+  node('temperature').value = 'default';
+  node('temperature').dispatch('change');
+  await tick();
+  assert.deepEqual(sent.at(-1), { method: 'settings.set', params: { temperature: null } }, 'default clears it back to null');
 });
 
 test('shift+tab cycles ask, auto and plan — and writes each through', async () => {

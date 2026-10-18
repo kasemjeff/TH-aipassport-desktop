@@ -776,6 +776,10 @@ details.run > *:not(summary) { margin-left: 2px; }
 #hint { color: var(--dim); white-space: nowrap; }
 #hint:not(:empty) { color: var(--accent); }
 #hint:not(:empty)::before { content: "● "; font-size: 8px; vertical-align: 1px; }
+/* While a run is in flight the dot pulses: motion is the "still working" signal
+   without another word next to it. */
+@keyframes hint-pulse { 50% { opacity: .2; } }
+#hint.busy:not(:empty)::before { animation: hint-pulse .9s ease-in-out infinite; }
 .foot-dim { color: var(--dim); }
 
 /* ------------------------------------------------------------------ slash */

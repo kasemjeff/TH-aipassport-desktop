@@ -54,6 +54,12 @@ export const DEFAULTS = {
   // max. It rides every send as `thinking_level`; the bridge drops a level the
   // chosen model does not advertise, so the setting never breaks a run.
   thinking: 'low',
+  // Sampling temperature, or null to leave it to the site's per-model
+  // default. The OpenAI range 0..2: 0 is as deterministic as the model can be,
+  // 2 as varied as it gets. It rides every send as `temperature` when set,
+  // and the site ignores a field it does not know — nothing breaks when it
+  // does, the run just stays at the default.
+  temperature: null,
   // (Thai pack) The reply language and its stop hook. Tool vocabulary stays
   // English whatever this says; the check measures the closing message's Thai
   // share (letters only, code and URLs excluded) and asks for a rewrite once.
@@ -230,6 +236,17 @@ export class Settings {
     // which reads as "thinking is on" in the form and "off" in the run. The
     // one place every surface writes keeps the two equal.
     if (!['off', 'low', 'medium', 'high', 'max'].includes(next.thinking)) next.thinking = DEFAULTS.thinking;
+    // temperature: null is "whatever the server defaults to" — the one "not
+    // set" value every surface agrees on. A number (or a numeric string,
+    // which is what a select's value is) is clamped to the OpenAI range 0..2;
+    // anything else falls back to the default rather than riding a request.
+    const rawTemperature = next.temperature;
+    const parsedTemperature = rawTemperature == null || rawTemperature === ''
+      ? null
+      : (typeof rawTemperature === 'number' || (typeof rawTemperature === 'string' && rawTemperature.trim() !== ''))
+        ? Number(rawTemperature) : null;
+    next.temperature = parsedTemperature !== null && Number.isFinite(parsedTemperature)
+      ? Math.min(2, Math.max(0, Math.round(parsedTemperature * 100) / 100)) : null;
     // (Thai pack) The language keys follow the thinking level's rule: a value
     // nobody recognises becomes the default instead of reaching a run.
     if (!['th', 'en'].includes(next.replyLanguage)) next.replyLanguage = DEFAULTS.replyLanguage;
@@ -340,7 +357,9 @@ export class Settings {
   /** Upload staging area: ~/.aipass/uploads by default. */
   uploadDir() {
     const dir = this.values.uploads ?? path.join(this.dir, 'uploads');
-    fs.mkdirSync(dir, { recursive: true });
+    // Owner-only when this call creates it; a directory the user configured
+    // already is left exactly as they set it up.
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     return dir;
   }
 }

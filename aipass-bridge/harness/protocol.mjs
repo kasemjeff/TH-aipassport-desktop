@@ -33,6 +33,9 @@ NEED file README.md
 NEED file src/index.ts 1-80
 SEARCH text to find across the whole project${searchI ? ' — put -i first (SEARCH -i Text) to match without letter case' : ''}
 GLOB **/*.ts
+SYMBOLS src/index.ts
+DEF someName
+REFS someName
 GIT status
 GIT diff
 FETCH HTTPS-URLexample.com/docs
@@ -107,7 +110,9 @@ END
 
 It reports back one summary when it finishes. Use it for reading and summarising in bulk, or for a piece of work that is separate from yours. Do not use it to ask a question you can answer yourself.
 
-When the piece to hand over is a check rather than a task, name a role on its own line before the task line: role: verifier (reads and runs checks, edits nothing), role: reviewer (reads and reports), or role: summariser (one tight summary). A helper without a role may stage edits like you can; one with a role cannot, and says so when it tries.`;
+When the piece to hand over is a check rather than a task, name a role on its own line before the task line: role: verifier (reads and runs checks, edits nothing), role: reviewer (reads and reports), or role: summariser (one tight summary). A helper without a role may stage edits like you can; one with a role cannot, and says so when it tries.
+
+A helper normally waits for its result before you continue. To let it run beside you instead, add a line \`background: true\` inside the SUBAGENT block — it starts and hands back a job id at once, and you keep working. Poll with \`JOBS\` on its own line to see which finished and read their summaries.`;
   }
 
   if (plugins.length) {
@@ -174,7 +179,7 @@ const markerRe = (marker) => {
 
 // The model usually writes its answer as prose and then a bare DONE, so fall
 // back to that prose rather than reporting an empty result.
-export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|list|ls|file)\b|[^\s]+(?: [\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+)?\s*$)|SEARCH\b|GLOB\b|SKILL\b|GIT\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|ASK\b|(?:\*{1,3}|#{1,6}\s*)?DONE\b)/i;
+export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|list|ls|file)\b|[^\s]+(?: [\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+)?\s*$)|SEARCH\b|GLOB\b|SYMBOLS\b|DEF\b|REFS\b|SKILL\b|GIT\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|ASK\b|(?:\*{1,3}|#{1,6}\s*)?DONE\b|JOBS\s*$)/i;
 export const prose = (reply, plugins = []) => {
   const re = proseRe(plugins);
   let inFence = false;
@@ -188,7 +193,7 @@ export const prose = (reply, plugins = []) => {
 // recorded replies wrote "NEED list desktop" and bare "RUN" as broken markers,
 // while prose that merely starts with the word ("Need to check the logs") must
 // never count as an attempt.
-const MARKER_ATTEMPT = /^\s*(?:\*{1,3}|#{1,6}\s*)?(?:NEED|SEARCH|GLOB|SKILL|GIT|FETCH|WEB|DELETE|MOVE|EDIT|CREATE|ATTACH|FIND|NEW|END|RUN|PLAN|TODO|SUBAGENT|TASK|ASK|DONE)\b/;
+const MARKER_ATTEMPT = /^\s*(?:\*{1,3}|#{1,6}\s*)?(?:NEED|SEARCH|GLOB|SYMBOLS|DEF|REFS|SKILL|GIT|FETCH|WEB|DELETE|MOVE|EDIT|CREATE|ATTACH|FIND|NEW|END|RUN|PLAN|TODO|SUBAGENT|JOBS|TASK|ASK|DONE)\b/;
 
 /**
  * Did the reply try to speak the protocol — even in a shape parse() cannot
@@ -213,7 +218,7 @@ export function attemptedMarker(reply) {
  *  SUBAGENT are reads in the same sense: their result travels with the NEXT
  *  message too, so a DONE beside one of them used to end the run and throw
  *  the payoff away unread (a listing, a fetched page, a helper's summary). */
-export const READING = new Set(['list', 'read', 'search', 'glob', 'skill', 'attach', 'git', 'fetch', 'web', 'subagent']);
+export const READING = new Set(['list', 'read', 'search', 'glob', 'symbols', 'def', 'refs', 'skill', 'attach', 'git', 'fetch', 'web', 'subagent', 'jobs']);
 
 export function parse(reply, { plugins = [] } = {}) {
   const lines = reply.split('\n');

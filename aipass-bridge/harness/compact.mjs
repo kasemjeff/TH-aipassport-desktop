@@ -323,7 +323,7 @@ ${transcript}`;
    * merged memory facts — the distilled backbone the narrative is a
    * rephrasing of.
    */
-  seed({ summary, task, preambleText, results = null, staged = null, lastCheck = null, memory = null }) {
+  seed({ summary, task, preambleText, results = null, staged = null, lastCheck = null, memory = null, todo = null }) {
     const tail = results
       ? `Here are the results of the step just finished:\n${results}\n\nContinue the task from there.`
       : 'What should I open first?';
@@ -333,6 +333,9 @@ ${transcript}`;
         : '',
       lastCheck
         ? `\nThe last check of the staged tree did not pass (${lastCheck.verdict}):\n${String(lastCheck.text ?? '').slice(0, 600)}`
+        : '',
+      Array.isArray(todo) && todo.length
+        ? `\nThe plan/TODO checklist this run recorded, as it stands — keep it in step (send TODO with [x] as items finish):\n${todo.map((i) => `- [${i.done ? 'x' : ' '}] ${i.text}`).join('\n')}`
         : '',
     ].join('');
     // Facts ride next to the narrative, and only when there are any — a seed
