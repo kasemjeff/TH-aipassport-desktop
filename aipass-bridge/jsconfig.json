@@ -13,5 +13,17 @@
     "types": ["node"],
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["harness/log-line.mjs"]
+  "include": [
+    "harness/log-line.mjs",
+    "harness/events.mjs",
+    "harness/log-file.mjs",
+    "harness/gitignore.mjs",
+    "harness/argguard.mjs",
+    "harness/lang.mjs",
+    "harness/authtoken.mjs",
+    "harness/waf.mjs",
+    "bridge/log-scrub.mjs",
+    "bridge/private-hosts.mjs",
+    "bridge/attachment-types.mjs"
+  ]
 }
