@@ -288,6 +288,34 @@ suite.
   differently). Nothing was committed — the working tree carries the wave.
 - **Cleanup**: temp dirs from lint/tests only; nothing left in the repo.
 
+## 2026-10-18 — opencode — a follow-up task remembers the listing instead of re-pasting it
+
+- **Files**: `aipass-bridge/harness/loop.mjs` (the delta: per-conversation
+  `listingShown` lookup, the `listingToRecord` composition, the record on the
+  first accepted send), `aipass-bridge/harness/harness.mjs` (`#listingShown`
+  Map, handed to the run) `aipass-bridge/test/agent.test.mjs` (the `--watch`
+  test updated to the new contract + a "tree moved" sibling that proves the
+  full table comes back), `aipass-bridge/test/compact.test.mjs` (a rotation
+  forgets the memory, so the next follow-up pastes the table again),
+  `docs/HARNESS_DESIGN.md`, `CHANGELOG.md`, `docs/WORKLOG.md`.
+- **Contract change**: `--watch`/same-conversation follow-ups used to re-paste
+  the whole top level on every task (issue #32's ground-truth fix). The frame
+  is still restated every time; a listing identical to the one the
+  conversation was last shown becomes a one-line "unchanged" note, and any
+  other case — tree moved, conversation created, rotated, or pinned fresh —
+  still gets the full table. The memory is written only after the carrying
+  message was accepted, so a failed send can never become a false "unchanged".
+- **Tests**: `npm test` green on this machine (one git-absent skip);
+  `npm run agents:lint` and `npm run evals:lint` green. `node --check` on
+  every touched file.
+- **Deferred**: the elision tier, test-time scaling (best-of-N via the
+  checker), and the live skills smoke once credits allow.
+- **Risks**: low — the only change is fewer bytes on follow-ups; a miss
+  (unknown conversation) degrades to today's full paste, never to a wrong
+  claim, because the note is only ever sent when the identical listing was
+  accepted by that same conversation.
+- **Cleanup**: none needed.
+
 ## 2026-10-18 — opencode — per-model context budgets and a tunable tool-result cap
 
 - **Files**: `aipass-bridge/harness/compact.mjs` (exported `DEFAULT_MODEL_BUDGETS`),

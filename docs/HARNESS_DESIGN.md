@@ -521,8 +521,12 @@ Block by block, against the code as it stands:
 
 - **Bootstrap — done.** Turn 1 carries the preamble, the tool protocol and the
   listing; every later turn opens with "the project is still open in front of
-  me" plus the listing again (`loop.mjs`, the `again` message). The digest's
-  "2–4 turns spent rediscovering the tree" is what these two messages buy back.
+  me" plus the listing again (`loop.mjs`, the `again` message) — except when
+  the listing has not moved, which is answered with a one-line "unchanged"
+  note: the same conversation still holds the last one (`listingShown`, keyed
+  by conversation id). The digest's "2–4 turns spent rediscovering the tree"
+  is what these messages buy back; the delta is what keeps them from being
+  paid for twice.
 - **Loop — done.** One user message per turn; the whole reply is parsed; every
   marker runs in order and all results return as ONE message.
 - **Observation compressor — done, three levers.** A single tool result is
@@ -574,9 +578,9 @@ The map, then what each gap is worth:
 
 | hook | spine stage | mechanism today | status |
 |---|---|---|---|
-| SessionStart — inject a snapshot | Bootstrap | preamble + top-level listing on turn 1, the same listing after every rotation (`loop.mjs` the `again` message, `compact.mjs` re-seed); `--snapshot` (CLI) adds `git status --short` and the package scripts to turn 1 | partial — the listing is the only default snapshot; everything else still costs a NEED |
+| SessionStart — inject a snapshot | Bootstrap | preamble + top-level listing on turn 1; a later turn re-pastes the listing only when it moved — an unchanged one is a single line, and a rotation forgets the memory, so the first follow-up after it pastes the table in full; `--snapshot` (CLI) adds `git status --short` and the package scripts to turn 1 (`loop.mjs` the `again` message, `harness.mjs#listingShown`) | partial — the listing is the only default snapshot; everything else still costs a NEED |
 | PreToolUse — validate the shape, deny with a reason | Action validator | per-tool checks returning `err: …` and the fix (F5); fenced protocol text never executes (F1); `node --check` on staged JS (R2); permission denials carry the rule name; a plugin marker that declared a `risk` rides the permission engine | done per tool — no single pre-dispatch layer; undeclared plugin markers keep the stated trust |
-| PostToolUse — compact an oversized result | Observation compressor | clip at `maxResult` + spill file with a `NEED` locator (`tools.mjs`) — reads keep the head, `RUN` keeps head+tail (ACI round); the summary transcript elides stale bulk (opt-in) and the rotation's seed pins the memory facts; conversation summarise→rotate at the budget (`compact.mjs`) | done — clip + spill, elision (opt-in), rotate; the elided middle of a command sits on disk, not lost |
+| PostToolUse — compact an oversized result | Observation compressor | clip at `maxResult` + spill file with a `NEED` locator (`tools.mjs`) — reads keep the head, `RUN` keeps head+tail (ACI round); the summary transcript elides stale bulk (opt-in) and the rotation's seed pins the memory facts; conversation summarise→rotate at the budget (`compact.mjs`) | done, three tiers — clip + spill, elision (opt-in), rotate; the elided middle of a command sits on disk, not lost |
 | Stop — tests fail, keep working | Verify | R4's one soft nudge (`verifyPrompts`); the checker at DONE — a read-only child runs the project's own check, the verdict computed from what it ran, one continuation on fail (`loop.mjs`, `harness.mjs#makeChecker`) | done v1 — the verdict is advisory: a second DONE is accepted with `checks`/`checkVerdict` recorded |
 | PreToolUse — count calls, log every event | Budget + trace | one `run_stats` line per run + one session JSONL entry per tool call, 20 000-char result and all; `run_stats.tools` carries `{n, fail, ms}` per kind and `stats` prints the mean latency | done — a hard per-run cap is still not recorded (the budget stops a run with its reason instead) |
 | PreToolUse — destructive commands, config files, red-test commits | Safety gates | modes + the H9 rule engine: path rules outrank the mode, reads included; no listener means deny; `classifyRun` asks about hazardous `RUN` bodies in every mode, ahead of grants; `SAFETY_RULES` ask about config/lockfile mutations (`permissions.mjs`, `settings.mjs`); the declared check (`.aipass/check.txt`) arms the red-test commit gate: a `git commit` RUN is refused until it passed at the current tree state, and `run_stats.commitBlocks` counts the refusals | done — the gate is keyed off the declared check, no separate `verifyCommand` surface |

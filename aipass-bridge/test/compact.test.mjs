@@ -491,6 +491,32 @@ test("a manual rotation's facts ride the next run, and only that run", async (t)
   assert.doesNotMatch(handler.sent[3], /Facts carried from earlier rotations/, 'consumed once — a second run must not repeat it');
 });
 
+// (listing delta) A rotated conversation has no memory of the top level — the
+// seed carries none — so the next follow-up must paste the table again
+// instead of answering "unchanged" about ground the fresh conversation never
+// received.
+test('a rotation forgets the listing: the next follow-up pastes it again', async (t) => {
+  const dir = tempDir({ 'a.txt': 'x\n' });
+  const handler = scripted(['DONE one', 'a tight summary of the work so far', 'DONE two']);
+  // uniqueTemporaryIds: the delta is keyed by conversation id, so the fixture
+  // must model what the real bridge does — a rotation is a different id — or
+  // the fresh conversation would look like the one that already has the table.
+  const ext = await new FakeExtension(bridge.base, { onChat: handler, uniqueTemporaryIds: true }).connect();
+  t.after(() => ext.disconnect());
+
+  const h = new Harness({ root: dir, bridgeURL: bridge.base });
+  await h.startSession({ title: 'listing delta' });
+  await h.run('first task');
+  await h.compactNow('keep going');
+  await h.run('second task');
+
+  const followUp = handler.sent.at(-1);
+  assert.match(followUp, /New task: second task/);
+  assert.match(followUp, /a\.txt/, 'the fresh conversation gets the full table');
+  assert.doesNotMatch(followUp, /unchanged since my last listing/,
+    'the note would be a lie in a conversation that never saw the listing');
+});
+
 test('the default per-model budget map covers the flash family and falls back for unknowns', () => {
   const c = new Compactor({ keepRecentBytes: 0, budgets: DEFAULT_MODEL_BUDGETS });
   assert.equal(c.budgetFor('gemini-3.5-flash-lite'), 100_000, 'flash-lite gets the flash budget, not the 24k flat default');

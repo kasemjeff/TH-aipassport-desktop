@@ -39,6 +39,15 @@ export class Harness {
   /** Facts persisted across sessions for this project (cross-session memory). */
   #crossSessionMemory = [];
   /**
+   * (listing delta) The top level each conversation was last shown, keyed by
+   * bridge conversation id. The loop reads it to answer an identical listing
+   * with a one-line "unchanged" note instead of re-pasting the table, and
+   * writes it after the message that carried the listing was accepted. A
+   * conversation created or rotated here gets no entry, so it always starts
+   * from the full listing.
+   */
+  #listingShown = new Map();
+  /**
    * How `conversation` came about, for the per-send temporary flag: true/false
    * for a conversation this harness created, null when it was pointed at one
    * (an explicit id, or one resolved from the bridge's own pointer).
@@ -489,6 +498,9 @@ export class Harness {
           : null,
         compactor: this.compactor,
         rotate: (summary) => this.#rotate(summary, task),
+        // (listing delta) The per-conversation listing memory the loop reads
+        // and updates; see #listingShown.
+        listingShown: this.#listingShown,
         options: {
           ...this.options,
           signal: this.abort.signal,
