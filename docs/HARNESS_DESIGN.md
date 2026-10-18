@@ -509,8 +509,12 @@ Block by block, against the code as it stands:
 
 - **Bootstrap — done.** Turn 1 carries the preamble, the tool protocol and the
   listing; every later turn opens with "the project is still open in front of
-  me" plus the listing again (`loop.mjs`, the `again` message). The digest's
-  "2–4 turns spent rediscovering the tree" is what these two messages buy back.
+  me" plus the listing again (`loop.mjs`, the `again` message) — except when
+  the listing has not moved, which is answered with a one-line "unchanged"
+  note: the same conversation still holds the last one (`listingShown`, keyed
+  by conversation id). The digest's "2–4 turns spent rediscovering the tree"
+  is what these messages buy back; the delta is what keeps them from being
+  paid for twice.
 - **Loop — done.** One user message per turn; the whole reply is parsed; every
   marker runs in order and all results return as ONE message.
 - **Observation compressor — done, two tiers.** A single tool result is clipped
@@ -560,7 +564,7 @@ The map, then what each gap is worth:
 
 | hook | spine stage | mechanism today | status |
 |---|---|---|---|
-| SessionStart — inject a snapshot | Bootstrap | preamble + top-level listing on turn 1, the same listing after every rotation (`loop.mjs` the `again` message, `compact.mjs` re-seed) | partial — the listing is the only snapshot; everything else costs a NEED |
+| SessionStart — inject a snapshot | Bootstrap | preamble + top-level listing on turn 1; a later turn re-pastes the listing only when it moved — an unchanged one is a single line, and a rotation forgets the memory, so the first follow-up after it pastes the table in full (`loop.mjs` the `again` message, `harness.mjs#listingShown`) | partial — the listing is the only snapshot; everything else costs a NEED |
 | PreToolUse — validate the shape, deny with a reason | Action validator | per-tool checks returning `err: …` and the fix (F5); fenced protocol text never executes (F1); `node --check` on staged JS (R2); permission denials carry the rule name | done per tool — no single pre-dispatch layer, and plugin markers skip the gate entirely |
 | PostToolUse — compact an oversized result | Observation compressor | clip at `maxResult` + spill file with a `NEED` locator (`tools.mjs`) — reads keep the head, `RUN` keeps head+tail (ACI round); conversation summarise→rotate at the budget (`compact.mjs`) | done, three tiers; the elided middle of a command sits on disk, not lost |
 | Stop — tests fail, keep working | Verify | R4's one soft nudge (`verifyPrompts`); the checker at DONE — a read-only child runs the project's own check, the verdict computed from what it ran, one continuation on fail (`loop.mjs`, `harness.mjs#makeChecker`) | done v1 — the verdict is advisory: a second DONE is accepted with `checks`/`checkVerdict` recorded |

@@ -77,13 +77,19 @@ const previewOf = (call) => {
  * @param {Function} [ctx.approvePlan] async () => boolean
  * @param {Function} [ctx.runPluginTool] async (marker, {arg, body}) => string
  * @param {object} [ctx.options]
+ * @param {Map<string,string>} [ctx.listingShown] per-conversation memory of the
+ *   top level each conversation was last shown. The loop reads it to answer an
+ *   identical listing with a one-line "unchanged" note instead of re-pasting
+ *   the table, and writes it after the message carrying the listing was
+ *   accepted — never before, or a send that failed could make a later task
+ *   claim "unchanged" about ground the model never received.
  * @param {boolean} [first]       first turn of this conversation (send the preamble)
  */
 export async function runTask(taskText, ctx = {}) {
   const {
     bridge, tools, overlay, session = null, permissions = null, events = null,
     subagent = null, check = null, approvePlan = null, options = {}, first = true,
-    runPluginTool = null, compactor = null, rotate = null,
+    runPluginTool = null, compactor = null, rotate = null, listingShown = null,
   } = ctx;
   let conversation = ctx.conversation ?? null;
   let conversationTemporary = ctx.conversationTemporary ?? null;
@@ -191,8 +197,21 @@ export async function runTask(taskText, ctx = {}) {
   let listing = '';
   try { listing = outbound(tools.list('.')); } catch { /* ignore */ }
 
+  // (listing delta) A follow-up task used to paste the whole top level again
+  // even when not one entry had moved — the conversation already holds the
+  // earlier listing, so those tokens bought nothing. `listingShown` is the
+  // harness's per-conversation memory of the last listing a conversation was
+  // told; only an identical listing is answered with the one-line note. A
+  // created, rotated or freshly pinned conversation has no entry, so it still
+  // gets the full table.
+  const shownListing = conversation && listingShown instanceof Map
+    ? listingShown.get(conversation) ?? null : null;
+  const listingSame = listing !== '' && shownListing === listing;
+
   const again = `The project is still open in front of me and I will paste you whatever you ask for.`
-    + `\nTop level right now:\n${listing}`;
+    + (listingSame
+      ? `\nTop level: unchanged since my last listing of it — every entry is the same.`
+      : `\nTop level right now:\n${listing}`);
 
   const pre = buildPreamble({
     allowRun: Boolean(options.allowRun),
@@ -204,15 +223,24 @@ export async function runTask(taskText, ctx = {}) {
     lang: replyLanguage,
   });
 
+  // What this message shows of the top level, if anything — recorded (by the
+  // first accepted send, below) as what this conversation has been shown. The
+  // message pastes the table when it is a slim first, a full first, or a full
+  // follow-up whose listing moved; a slim follow-up shows none, and the
+  // unchanged-note follow-up shows none either (the memory already has it).
+  let listingToRecord = null;
   let next = useSlim
     ? `${first ? `Top level of the project: ${listing}\n\n` : ''}Task: ${taskText}\n\nWhat should I open first?`
     : first
       ? `${pre}\n\nTo save you a step, here is what is at the top level already:\n${listing}\n\nHere is what I want to know: ${taskText}\n\nWhat should I open first?`
       : `${again}\n\nNew task: ${taskText}\n\nWhat should I open first?`;
+  const pasted = useSlim ? first : (first || !listingSame);
+  if (pasted && listing !== '') listingToRecord = listing;
 
   // A rotated conversation (after compaction) starts from the summary seed
   // instead of a bare task: the fresh conversation has no memory of anything.
-  if (first && seedText) next = seedText;
+  // The seed lists nothing, so the memory must not be written for it.
+  if (first && seedText) { next = seedText; listingToRecord = null; }
 
   let nudges = 0;            // (stats) every "no marker" nudge the run needed
   let nudgeStreak = 0;       // consecutive ones — the third stops the run
@@ -388,7 +416,18 @@ export async function runTask(taskText, ctx = {}) {
     let sendGivenUp = false;
     const recover = recoverWaits();
     for (let attempt = 0; ; attempt++) {
-      try { reply = await saySafe(next, partsForSend()); sends++; break; }
+      try {
+        reply = await saySafe(next, partsForSend());
+        // (listing delta) The memory only becomes true once the message that
+        // carries the listing was accepted. The first send of the run is the
+        // composed `next`; every later message carries results or the seed,
+        // never the table.
+        if (sends === 0 && listingToRecord != null && conversation && listingShown instanceof Map) {
+          listingShown.set(conversation, listingToRecord);
+        }
+        sends++;
+        break;
+      }
       catch (err) {
         // The user pressed stop: the signal ends the in-flight fetch with an
         // AbortError, which is an ending, not a failure — the transcript should

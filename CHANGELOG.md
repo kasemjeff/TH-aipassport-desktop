@@ -74,6 +74,13 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   llama/mistral/grok 128k, gemini 1M) instead of a flat 24k, and a new
   `maxResult` setting (default 3000) reaches the tool context from the sheet
   too (`test/compact.test.mjs`, `test/settings-clamp.test.mjs`).
+- **A follow-up task stops re-pasting an unchanged top-level listing.** The
+  harness keeps a per-conversation memory of the listing each conversation was
+  last shown (`Harness#listingShown`, `loop.mjs`); an identical listing is
+  answered with a one-line "unchanged" note, while a created, rotated or
+  freshly pinned conversation gets the full table. The memory is written only
+  after the message carrying the listing was accepted — never at composition
+  time (`test/agent.test.mjs`, `test/compact.test.mjs`).
 
 ### Fixed
 

@@ -777,7 +777,10 @@ test('a text file that merely contains odd bytes is still readable', async (t) =
 // The other half of issue #32: --watch continues the same conversation, so a
 // follow-up inherited the model's earlier (wrong) conclusion that it could not
 // reach the filesystem. A bare "New task:" gave it nothing to correct against.
-test('a --watch follow-up re-states the frame and the current listing', async (t) => {
+// (listing delta) The frame is still restated on every follow-up; the listing
+// itself is only pasted again when it moved — the same conversation still
+// holds the last one, so repeating it byte-for-byte bought nothing.
+test('a --watch follow-up re-states the frame; an unchanged listing stays one line', async (t) => {
   const dir = tempDir({ 'a.txt': 'x\n' });
   const handler = scripted(['DONE nothing to do']);
   const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
@@ -788,7 +791,33 @@ test('a --watch follow-up re-states the frame and the current listing', async (t
   const followUp = handler.sent.at(-1);
   assert.match(followUp, /New task: second task/);
   assert.match(followUp, /still open in front of me/, 'the frame is restated');
-  assert.match(followUp, /a\.txt/, 'with ground truth to correct a drifted belief against');
+  assert.match(followUp, /Top level: unchanged since my last listing of it/, 'ground truth in one line');
+  assert.doesNotMatch(followUp, /a\.txt/, 'the full table is not re-pasted when nothing moved');
+});
+
+// The other half of the delta: the moment the tree moves, the follow-up must
+// carry the new entries — "unchanged" here would be issue #32's drift wearing
+// the delta's clothes.
+test('a --watch follow-up pastes the listing whole once the tree moved', async (t) => {
+  const dir = tempDir({ 'a.txt': 'x\n' });
+  const inner = scripted(['DONE nothing to do']);
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (job, e) => {
+      const out = await inner(job, e);
+      // The tree moves between the two tasks: the second run's listing no
+      // longer matches what the conversation was shown.
+      if (inner.sent.length === 1) fs.writeFileSync(path.join(dir, 'b.txt'), 'arrived late\n');
+      return out;
+    },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  await agent(dir, ['--watch'], { stdin: [[300, 'second task\n'], [400, 'exit\n']] });
+  assert.ok(inner.sent.length >= 2, 'the follow-up task ran');
+  const followUp = inner.sent.at(-1);
+  assert.match(followUp, /Top level right now:/, 'the moved listing is pasted whole');
+  assert.match(followUp, /a\.txt/, 'the entries the conversation already knew');
+  assert.match(followUp, /b\.txt/, 'and the new entry that moved the listing');
 });
 
 test('thinking is on by default and rides every send as thinking_level', async (t) => {
