@@ -46,7 +46,7 @@ const askHarness = (root, queues) => {
 test('ASK pauses the run: the question is the closing line, and no check runs', async () => {
   const root = tempDir({ 'notes.txt': 'hello\n' });
   const { h, events } = askHarness(root, {
-    parent: ['Both names fit the format.\nASK should the export keep the old column names?'],
+    'conv-1': ['Both names fit the format.\nASK should the export keep the old column names?'],
   });
   const asks = [];
   const lines = [];
@@ -68,7 +68,7 @@ test('ASK pauses the run: the question is the closing line, and no check runs', 
 test('an ASK beside a NEED waits for the read — the question lands one step later', async () => {
   const root = tempDir({ 'notes.txt': 'hello\n' });
   const { h, bridge } = askHarness(root, {
-    parent: [
+    'conv-1': [
       'ASK which name do you want?\nNEED file notes.txt',
       'ASK which name do you want?',
     ],

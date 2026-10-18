@@ -54,6 +54,10 @@ export class PluginManager {
     let entries = [];
     try { entries = fs.readdirSync(this.dir, { withFileTypes: true }); } catch { return out; }
     for (const entry of entries) {
+      // Dot-entries are the installer's working areas — .staging (a copy being
+      // validated), .trash (what a replace moved aside), .registry.json. None
+      // is a candidate, by name, not by accident of depth.
+      if (entry.name.startsWith('.')) continue;
       const full = path.join(this.dir, entry.name);
       if (entry.isFile() && entry.name.endsWith('.mjs')) out.push(full);
       else if (entry.isDirectory()) {

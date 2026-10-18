@@ -93,10 +93,16 @@ not rewritten — it is waited out, first in the page (10s/45s/120s, on a clock
 the whole tab shares) and then by the client and the message layer
 (`RATE_WAITS_MS` — 60s/180s — twice over), so a busy edge pauses a run
 instead of ending it; the rewrite chain never sees a rate refusal, and a
-refusal that arrives after deltas streamed is never resent at all. The user
-pressing stop surfaces as `AbortError` — an ending, not a failure — and the
-transcript must not read "error" for it: `cancelled`. An error naming a missing
-chat tab emits `needs_tab` so the window can offer the fix in one click.
+refusal that arrives after deltas streamed is never resent at all. Above the
+chain the loop keeps one bounded recovery of its own (`RECOVER_WAITS_MS` —
+30s then 60s): a send that delivered nothing and heals by waiting — the
+connection-cycle shapes, a tab still loading, a rate window, a 403 the chain
+could not clear — is paused and given the same message again
+(`sendRecoverable` names the shapes; `run_stats.sendRecoveries` counts it),
+so `error` is what stays once even those waits run out. The user pressing
+stop surfaces as `AbortError` — an ending, not a failure — and the transcript
+must not read "error" for it: `cancelled`. An error naming a missing chat tab
+emits `needs_tab` so the window can offer the fix in one click.
 Stops: `cancelled`, `error`.
 
 **3. Parse.** `prose()` + `parse()` scan the whole reply. Markers only count

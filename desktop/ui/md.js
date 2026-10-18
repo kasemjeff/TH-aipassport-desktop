@@ -18,6 +18,52 @@ const inline = (s) => escapeHtml(s)
   .replace(/(^|[\s(])\*([^*\n]+)\*/g, '$1<em>$2</em>')
   .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
 
+/**
+ * Where a streamed source stops being re-renderable: `stable` is every block
+ * whose rendering can no longer change as more text arrives, `tail` is the one
+ * construct still open at the end (the growing paragraph, list or code fence).
+ *
+ * `paintAssistant` paints the two apart so a long answer stops re-parsing its
+ * own finished prefix on every frame — the settled stretch is rendered once
+ * and only the tail repaints. The split must be invisible: for any source,
+ * `renderMarkdown(src)` equals the two pieces rendered and joined, and as the
+ * source grows the stable piece only ever gains text (never rewrites), which is
+ * what lets the window append instead of reset. Both properties are pinned in
+ * test/ui-md.test.mjs.
+ */
+export function splitMarkdownStable(src) {
+  const text = String(src ?? '').replace(/\r\n/g, '\n');
+  let at = 0;            // char offset of the line being read
+  let openAt = null;     // where the construct still open at the end began
+  let openKind = null;   // 'para' | 'ul' | 'ol' | 'fence'
+  let fence = false;
+  const close = () => { openAt = null; openKind = null; };
+  for (const line of text.split('\n')) {
+    if (fence) {
+      if (/^\s*```\s*$/.test(line)) { fence = false; close(); }
+      at += line.length + 1;
+      continue;
+    }
+    if (/^\s*```(\S*)\s*$/.test(line)) { fence = true; openAt = at; openKind = 'fence'; at += line.length + 1; continue; }
+    // Headings, rules and quote lines are whole in themselves (this renderer
+    // closes each on its own line), the way renderMarkdown treats them.
+    if (/^(#{1,4})\s+/.test(line) || /^\s*([-*_])\1{2,}\s*$/.test(line) || /^\s*>/.test(line)) { close(); at += line.length + 1; continue; }
+    const ul = /^\s*[-*+]\s+/.test(line);
+    const ol = /^\s*\d+[.)]\s+/.test(line);
+    if (ul || ol) {
+      const kind = ul ? 'ul' : 'ol';
+      if (openKind !== kind) { openAt = at; openKind = kind; }
+      at += line.length + 1;
+      continue;
+    }
+    if (!line.trim()) { close(); at += line.length + 1; continue; }
+    if (openKind !== 'para') { openAt = at; openKind = 'para'; }
+    at += line.length + 1;
+  }
+  const cut = openAt ?? text.length;
+  return { stable: text.slice(0, cut), tail: text.slice(cut) };
+}
+
 export function renderMarkdown(src) {
   const text = String(src ?? '').replace(/\r\n/g, '\n');
   const lines = text.split('\n');

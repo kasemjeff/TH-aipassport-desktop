@@ -37,11 +37,11 @@ The full field list and its defaults live in `harness/settings.mjs`
 | `defaultModel` | string? | null | the model a fresh run starts on |
 | `mode` | `ask` \| `auto` \| `yolo` | `ask` | who may write |
 | `allowRun` | bool | false | shell commands allowed at all |
-| `maxSteps` / `maxToolCalls` / `maxWallClockMs` | number | 10 / 300 / 1800000 | per-run caps; a zero or nonsense value falls back to the default |
+| `maxSteps` / `maxToolCalls` / `maxWallClockMs` | number | 0 / 300 / 1800000 | per-run caps; `maxSteps` 0 means no cap (the run ends on DONE, a guard, or a budget), the other two fall back to the default on zero or nonsense |
 | `maxCredits` | number | 0 | spend ceiling in credits — the one cap where 0 really means off; checked against the cached quota (at most ~30s stale) |
 | `plan`, `requirePlanApproval` | bool | false | the plan gate |
 | `thinking` | `off`…`max` | `low` | reasoning level per send |
-| `replyLanguage`, `langCheck`, `minThaiRatio` | `th` \| `en`, bool, 0–1 | `th`, true, 0.25 | the language check |
+| `replyLanguage`, `langCheck`, `minThaiRatio` | `th` \| `en`, bool, 0–1 | `th`, true, 0.4 | the language check |
 | `repeatGuard`, `repeatGuardMax` | bool, number | true, 4 | the repeat guard |
 | `compaction` | `{contextTokens, reserveTokens, keepRecentBytes}` | see code | the context budget |
 | `compactAtPercent` | number | 40 | rotate at this share of the budget |
@@ -103,10 +103,11 @@ says the same, in the same words.
 
 `~/.aipass/.token` — a 256-bit hex token, minted once
 (`harness/authtoken.mjs`), written `0600` under a `0700` home (best effort on
-Windows). Every bridge and backend route except `/status` and `/health`
-requires it as a bearer. `AIPASS_TOKEN` overrides the file (containers,
-tests); `AIPASS_REQUIRE_AUTH=0` disables the requirement with a boot warning —
-for transition only.
+Windows). Every bridge and backend route except `/status`, `/health`, the
+same-origin `/token` handoff the window boots from, and the backend's own
+static UI files requires it as a bearer. `AIPASS_TOKEN` overrides the file
+(containers, tests); `AIPASS_REQUIRE_AUTH=0` disables the requirement with a
+boot warning — for transition only.
 
 ## logs/
 

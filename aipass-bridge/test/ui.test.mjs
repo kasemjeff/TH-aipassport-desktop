@@ -117,6 +117,16 @@ const findById = (root, id) => {
   return null;
 };
 
+/** A bubble's rendered answer, across both paint segments (settled + tail).
+ *  app.js paints those as two elements so a streaming answer stops re-parsing
+ *  its own finished prefix; the fake DOM keeps innerHTML as a string, so the
+ *  text is read there — joined, because where the split falls is not the
+ *  contract, what the reader sees is. */
+const bubbleHtml = (msg) => (msg?.children?.[0]?.children ?? [])
+  .map((seg) => seg.innerHTML ?? '')
+  .filter(Boolean)
+  .join('\n');
+
 let boots = 0;
 
 /**
@@ -419,6 +429,28 @@ test('a model in use that the filter would drop stays visible', async () => {
   assert.equal(select.value, 'seedream-4.0', 'the header shows the model that will run');
 });
 
+test('a model the live catalog dropped is marked in the picker', async () => {
+  // Recorded live: the saved model was retired from the site and the picker
+  // kept it with no sign — the run then stopped at the catalog check and the
+  // window showed an error for a choice made days ago. The mark is that
+  // verdict, moved to where the fix lives.
+  const status = () => ({ root: '/p', bridge: true, extensions: 1, model: 'gemini-3.1-flash-lite', running: false, mode: 'ask', plan: false, pending: [], projects: [{ path: '/p', name: 'p', current: true }], settings: {} });
+  const live = { status, models: () => ({ source: 'live', data: [{ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', kind: 'chat' }] }) };
+  const { node } = await bootApp({ ...BACKEND, ...live });
+  const select = node('model');
+  const dead = select.children.find((c) => c.value === 'gemini-3.1-flash-lite');
+  assert.ok(dead, 'the retired model stays in view — hiding it would make the header lie');
+  assert.match(dead.textContent, /ไม่มีในรายการของเว็บแล้ว/, 'and it is marked as gone');
+  assert.equal(select.value, 'gemini-3.1-flash-lite', 'still the model the header shows');
+
+  // A fallback list cannot judge a pick — no mark, the same rule as the loop's.
+  const stale = { status, models: () => ({ source: 'fallback', data: [{ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', kind: 'chat' }] }) };
+  const second = await bootApp({ ...BACKEND, ...stale });
+  const kept = second.node('model').children.find((c) => c.value === 'gemini-3.1-flash-lite');
+  assert.ok(kept, 'the saved model is still kept in view');
+  assert.doesNotMatch(kept.textContent, /ไม่มีในรายการของเว็บแล้ว/, 'a list that cannot judge makes no verdict');
+});
+
 test('a run that stops for want of steps offers the next move', async () => {
   // Three dead-end reports used to just say "stopped". A "carry on" button turns
   // the same event into a run.
@@ -479,6 +511,24 @@ test('thinking streams into an open fold that closes when the turn ends', async 
   assert.match(box.textContent, /reasoning · \d+s/, 'and the summary says it happened');
 });
 
+test('reasoning arrives by appending text, not by rewriting the fold each frame', async () => {
+  // The fold used to get its whole text reassigned per animation frame — a
+  // long think re-created a pre full of text over and over, which is exactly
+  // the stutter a long reasoning stream caused. Appended text nodes keep what
+  // already arrived.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('reasoning_delta', { text: 'first thought. ' });
+  await tick();
+  const box = node('log').children.find((c) => c.tagName === 'DETAILS' && /think/.test(c.className));
+  const pre = box.children[1];
+  const firstNode = pre.children[0];
+  globalThis.__stream.emit('reasoning_delta', { text: 'second thought.' });
+  await tick();
+  assert.equal(pre.textContent, 'first thought. second thought.');
+  assert.equal(pre.children[0], firstNode, 'what was already painted stays put');
+  assert.equal(pre.children.length, 2, 'only the new stretch is a new node');
+});
+
 test('a finished run folds its working trail and leaves the result open', async () => {
   // The run used to leave every step on screen — the answer sat at the bottom
   // of a wall of rows. On done/ask the trail folds under one line and the
@@ -504,9 +554,9 @@ test('a finished run folds its working trail and leaves the result open', async 
 
   const result = log.children.find((c) => /(^|\s)result(\s|$)/.test(c.className ?? ''));
   assert.ok(result, 'the closing bubble is marked as the result');
-  // The closing summary is painted as markdown into the bubble's body; the
-  // fake DOM keeps innerHTML as a string, so the text is asserted there.
-  assert.match(result.children[0].innerHTML, /อ่าน README แล้ว/, 'and carries the closing text');
+  // The closing summary is painted as markdown into the bubble's segments;
+  // the fake DOM keeps innerHTML as a string, so the text is asserted there.
+  assert.match(bubbleHtml(result), /อ่าน README แล้ว/, 'and carries the closing text');
   assert.equal(fold.children.includes(result), false, 'the result is not inside the fold');
   assert.ok(log.children.indexOf(fold) < log.children.indexOf(result), 'the fold sits above the result');
 });
@@ -1005,7 +1055,7 @@ test('the bubble holds the prose, never the wire — calls live in their rows', 
   globalThis.__stream.emit('assistant_delta', { text: 'I checked the file.\nEDIT notes.md\nFIND\nline two\nNEW\nline 2\nEND\nLooks right.' });
   await tick();
   const bubble = node('log').children.find((c) => c.className.includes('assistant'));
-  const html = bubble.children[0].innerHTML;
+  const html = bubbleHtml(bubble);
   assert.match(html, /I checked the file\./, 'the prose before the block is there');
   assert.match(html, /Looks right\./, 'and so is the prose after it');
   assert.equal(/EDIT|FIND|NEW|END/.test(html), false, 'no raw marker survives in the bubble');
@@ -1030,8 +1080,8 @@ test('each step gets its own bubble, so rows sit under the step that made them',
   const kids = node('log').children;
   const bubbles = kids.filter((c) => c.className.includes('assistant'));
   assert.equal(bubbles.length, 2, 'one bubble per step');
-  assert.match(bubbles[0].children[0].innerHTML, /first step prose/);
-  assert.match(bubbles[1].children[0].innerHTML, /second step prose/);
+  assert.match(bubbleHtml(bubbles[0]), /first step prose/);
+  assert.match(bubbleHtml(bubbles[1]), /second step prose/);
   const firstAt = kids.findIndex((c) => c.className.includes('assistant'));
   const rowAt = kids.findIndex((c) => c.className.includes('tool'));
   const lastAt = kids.map((c) => c.className.includes('assistant')).lastIndexOf(true);
@@ -1044,7 +1094,7 @@ test('a DONE is said once — streamed prose and the harvested summary never dou
   globalThis.__stream.emit('done_line', { text: 'wired the widget' });
   await tick();
   const first = node('log').children.find((c) => c.className.includes('assistant'));
-  const html = first.children[0].innerHTML;
+  const html = bubbleHtml(first);
   const count = (needle) => html.split(needle).length - 1;
   assert.equal(count('Wired it up.'), 1, 'prose once');
   assert.equal(count('wired the widget'), 1, 'the summary once');
@@ -1056,14 +1106,14 @@ test('a DONE is said once — streamed prose and the harvested summary never dou
   globalThis.__stream.emit('done_line', { text: 'All clear.' });
   await tick();
   const second = node('log').children.filter((c) => c.className.includes('assistant')).at(-1);
-  assert.equal(second.children[0].innerHTML.split('All clear.').length - 1, 1, 'not doubled');
+  assert.equal(bubbleHtml(second).split('All clear.').length - 1, 1, 'not doubled');
 
   // A bare DONE with no prose above it still leaves the reader something.
   globalThis.__stream.emit('assistant_delta', { text: 'DONE fixed the bug' });
   globalThis.__stream.emit('done_line', { text: 'fixed the bug' });
   await tick();
   const third = node('log').children.filter((c) => c.className.includes('assistant')).at(-1);
-  assert.match(third.children[0].innerHTML, /fixed the bug/);
+  assert.match(bubbleHtml(third), /fixed the bug/);
 });
 
 test('opening a session replays prose without markers, DONE summary included', async () => {
@@ -1082,7 +1132,7 @@ test('opening a session replays prose without markers, DONE summary included', a
   await tick(); await tick();
   const bodies = node('log').children
     .filter((c) => c.className.includes('assistant'))
-    .map((c) => c.children[0].innerHTML);
+    .map((c) => bubbleHtml(c));
   assert.equal(bodies.length, 2, 'one bubble per replayed reply');
   assert.match(bodies[0], /Read the file\./);
   assert.equal(/NEED|DONE/.test(bodies[0]), false, 'no raw wire in the replay');
@@ -1100,10 +1150,38 @@ test('a plugin marker the backend reports is hidden too', async () => {
   globalThis.__stream.emit('assistant_delta', { text: 'Echoing now.\nECHO hello there\nThat is all.' });
   await tick();
   const bubble = node('log').children.find((c) => c.className.includes('assistant'));
-  const html = bubble.children[0].innerHTML;
+  const html = bubbleHtml(bubble);
   assert.match(html, /Echoing now\./);
   assert.match(html, /That is all\./);
   assert.equal(/ECHO hello there/.test(html), false, 'the plugin call is a row, not prose');
+});
+
+test('a long answer paints its settled paragraphs once and repaints only the tail', async () => {
+  // Repainting a streaming answer used to re-parse every paragraph it had
+  // already shown, once per frame — the cost of a paint grew with the answer,
+  // so long replies stuttered. The settled stretch renders once now; only the
+  // unfinished tail is repainted, and a closed paragraph moves into the
+  // settled layer without being dropped.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('assistant_delta', { text: 'para one\n\npara two' });
+  await tick();
+  const bubble = node('log').children.find((c) => c.className.includes('assistant'));
+  const body = bubble.children[0];
+  const [settled, moving] = body.children;
+  assert.match(settled.innerHTML, /para one/, 'the finished paragraph settles');
+  assert.match(moving.innerHTML, /para two/, 'the growing paragraph is the tail');
+  const settledHtml = settled.innerHTML;
+
+  globalThis.__stream.emit('assistant_delta', { text: ' continues' });
+  await tick();
+  assert.equal(body.children[0], settled, 'the settled layer is not replaced');
+  assert.equal(body.children[0].innerHTML, settledHtml, 'and it is not repainted while the tail grows');
+  assert.match(body.children[1].innerHTML, /para two continues/, 'only the tail moves');
+
+  globalThis.__stream.emit('assistant_delta', { text: '\n\npara three' });
+  await tick();
+  assert.match(body.children[0].innerHTML, /para two continues/, 'the closed paragraph moved into the settled layer');
+  assert.match(body.children[1].innerHTML, /para three/, 'and the new paragraph is the tail');
 });
 
 test('repainting a plugin panel replaces its body instead of stacking copies', async () => {

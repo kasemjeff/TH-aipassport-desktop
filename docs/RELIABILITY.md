@@ -18,7 +18,9 @@ the only honest availability is the chain: account → tab → bridge → backen
 `stats --json` carries the per-run rows — model, project root, stop reason,
 refusals, spend, `stepMs` — and the `byModel` / `byRoot` groupings, so the
 same report answers "which model drifts" and "which project drifts" instead
-of blending them. `--html FILE` renders the same page.
+of blending them. A run that predates `run_stats.model` is attributed to the
+model its session recorded; `(unrecorded)` is left for sessions that wrote no
+model at all. `--html FILE` renders the same page.
 
 ## Error budget
 
@@ -47,11 +49,14 @@ shapes:
 
 - **No tab / signed out** → the run pauses (`needs_tab`), `doctor` names the
   fix, nothing is lost, reconnecting continues the run.
-- **Rate window (429)** → the client waits it out and retries; only a 429
-  that survives the waits ends the run, surfaced — never silent.
+- **Rate window (429)** → the client waits it out and retries; a 429 that
+  survives the waits gets one more pause from the loop's recovery
+  (`sendRecoveries`), and only then ends the run, surfaced — never silent.
 - **Edge firewall (403)** → trigger-shaped content is encoded on the way
   out; a rejected turn is split and resent, and a fragment that cannot pass
-  is dropped with a `firewallNotes` count.
+  is dropped with a `firewallNotes` count. A refusal that outlasts the whole
+  rewrite chain is paused and the same message goes again before it can end
+  the run.
 - **A guard trips** → the run stops with the reason recorded (`stalled`,
   `stagnation`, `steps`, `tool-calls`, …) and the session keeps everything.
 - **Backend crash** → the desktop shell restarts it (`[supervisor]` lines);

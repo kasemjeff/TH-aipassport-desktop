@@ -11,7 +11,7 @@
 //
 // The artifact itself is gitignored on purpose: a ~90 MB executable does not
 // belong in a repo.
-import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

@@ -30,6 +30,7 @@ import { resolveBridgeURL } from './bridge.mjs';
 import { openCommandFor } from './open-command.mjs';
 import { loadOrMintToken, authorized, authorizedQuery } from './authtoken.mjs';
 import { openLogFile } from './log-file.mjs';
+import { formatLogLine } from './log-line.mjs';
 import { scrubSecrets } from '../bridge/log-scrub.mjs';
 
 // Re-exported for desktop/main.mjs, whose ensureBridge probe must resolve the
@@ -277,6 +278,7 @@ export function createRpc({
         mode: appSettings.get('mode'),
         allowRun: appSettings.get('allowRun'),
         maxSteps: appSettings.get('maxSteps'),
+        maxResult: appSettings.get('maxResult'),
         maxToolCalls: appSettings.get('maxToolCalls'),
         maxWallClockMs: appSettings.get('maxWallClockMs'),
         plan: appSettings.get('plan'),
@@ -360,7 +362,7 @@ export function createRpc({
    * path on disk (/file, /image) — a desktop user usually has the path, not a
    * picker, and re-reading the bytes here keeps the window free of file access.
    */
-  const stageAttachment = ({ name, dataUrl, path: fromPath }) => {
+  const stageAttachment = async ({ name, dataUrl, path: fromPath }) => {
     const id = Math.random().toString(16).slice(2, 10);
     const dir = appSettings.uploadDir();
     let bytes;
@@ -378,14 +380,14 @@ export function createRpc({
       // The data-URL branch below enforces MAX_ATTACHMENT_BYTES; a path needs
       // the same cap BEFORE the read, or staging a multi-GB file OOMs the
       // backend (and base64-inflates it again per send in partsFor).
-      const size = fs.statSync(abs).size;
+      const size = (await fs.promises.stat(abs)).size;
       if (size > MAX_ATTACHMENT_BYTES) throw new Error(`attachment too large: ${Math.round(size / 1024 / 1024)} MB (cap ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB)`);
-      bytes = fs.readFileSync(abs);
+      bytes = await fs.promises.readFile(abs);
       base = path.basename(abs);
       const sameDir = path.dirname(abs) === dir;
       const target = path.join(dir, `${id}-${base}`);
       if (!sameDir) {
-        fs.copyFileSync(abs, target);
+        await fs.promises.copyFile(abs, target);
         // The copy inherits the source's mode; this one is the backend's, so
         // it is owner-only like the staging dir (best effort on Windows).
         try { fs.chmodSync(target, 0o600); } catch { /* best effort */ }
@@ -402,18 +404,21 @@ export function createRpc({
     if (!bytes.length) throw new Error('empty attachment');
     if (bytes.length > MAX_ATTACHMENT_BYTES) throw new Error(`attachment too large: ${Math.round(bytes.length / 1024 / 1024)} MB (cap ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB)`);
     const file = path.join(dir, `${id}-${base}`);
-    fs.writeFileSync(file, bytes, { mode: 0o600 });
+    await fs.promises.writeFile(file, bytes, { mode: 0o600 });
     staged.set(id, { id, name: base, path: file, owned: true, bytes: bytes.length, mime, at: Date.now() });
     return staged.get(id);
   };
 
   /** Parts the bridge wants, in the order they should be sent. */
-  const partsFor = (ids = []) => ids.map((id) => {
+  // Async reads: an attachment can be MAX_ATTACHMENT_BYTES, and a sync read +
+  // base64 of it inside the run handler freezes every window call (rule 9).
+  const partsFor = async (ids = []) => Promise.all(ids.map(async (id) => {
     const item = staged.get(id);
     if (!item) throw new Error(`attachment ${id} is gone — stage it again`);
-    if (item.mime.startsWith('image/')) return { type: 'image_url', image_url: { url: `data:${item.mime};base64,${fs.readFileSync(item.path).toString('base64')}` } };
-    return { type: 'file', file: { file_data: `data:${item.mime};base64,${fs.readFileSync(item.path).toString('base64')}`, filename: item.name } };
-  });
+    const base64 = (await fs.promises.readFile(item.path)).toString('base64');
+    if (item.mime.startsWith('image/')) return { type: 'image_url', image_url: { url: `data:${item.mime};base64,${base64}` } };
+    return { type: 'file', file: { file_data: `data:${item.mime};base64,${base64}`, filename: item.name } };
+  }));
 
   const dropAttachment = (id) => {
     const item = staged.get(id);
@@ -432,7 +437,14 @@ export function createRpc({
       const st = await current.bridge.status().catch(() => null);
       return {
         root: current.root,
-        projects: appSettings.projectList().map((p) => ({ ...p, current: p.path === current.root })),
+        // Every project's running flag, not just the current one's: a window
+        // on project A must be able to see that B still has a run going, so a
+        // switch is an informed move instead of a surprise.
+        projects: appSettings.projectList().map((p) => ({
+          ...p,
+          current: p.path === current.root,
+          running: harnesses.get(path.resolve(p.path))?.running === true,
+        })),
         bridge: Boolean(st?.ok),
         extensions: st?.extensions ?? 0,
         // The harness's model first: it is the one a run sends. The bridge's
@@ -539,6 +551,12 @@ export function createRpc({
       // rather than at the next start. A half-applied form is worse than no
       // form: it writes one truth and keeps the process running another.
       if (params.maxSteps != null) current.options.maxSteps = appSettings.get('maxSteps');
+      // The budgets are read once per run from `current.options`; without this
+      // a budget change was a note for the next backend start while the sheet
+      // said it was live.
+      if (params.maxToolCalls != null) current.options.maxToolCalls = appSettings.get('maxToolCalls');
+      if (params.maxWallClockMs != null) current.options.maxWallClockMs = appSettings.get('maxWallClockMs');
+      if (params.maxCredits != null) current.options.maxCredits = appSettings.get('maxCredits');
       if (params.plan != null) current.options.plan = appSettings.get('plan');
       if (params.requirePlanApproval != null) current.options.requirePlanApproval = appSettings.get('requirePlanApproval');
       if (params.subagent != null) current.options.subagent = appSettings.get('subagent');
@@ -665,6 +683,12 @@ export function createRpc({
 
     async run(params = {}) {
       if (!params.task?.trim()) throw new Error('no task given');
+      // The window names the project it is looking at. Another window may have
+      // switched the backend since — running where `current` happens to point
+      // would put the task in the wrong project and stream it to a window that
+      // is not showing that project. remember:false keeps the project list's
+      // order alone: this is a target for the call, not a switch by the human.
+      if (params.root && path.resolve(params.root) !== current.root) switchProject(params.root, { remember: false });
       current.setPolicy({ mode: params.mode ?? null, allowRun: params.allowRun ?? null });
       Object.assign(current.options, {
         plan: params.plan ?? current.options.plan,
@@ -683,7 +707,7 @@ export function createRpc({
         webScratch: params.webScratch ?? current.options.webScratch,
         parallelHelpers: params.parallelHelpers ?? current.options.parallelHelpers,
         attempts: params.attempts ?? current.options.attempts,
-        parts: partsFor(params.attachments ?? []),
+        parts: await partsFor(params.attachments ?? []),
         pluginTools: plugins.toolTable(),
       });
       if (params.model) current.bridge.model = params.model;
@@ -702,7 +726,7 @@ export function createRpc({
         result = await current.run(params.task, { runPluginTool: (marker, args) => plugins.runTool(marker, args) });
         const verdict = result.check?.verdict ?? null;
         if (used === attempts || verdict !== 'fail') break;
-        emit('note', { text: `check failed after attempt ${used} of ${attempts} — running the task again` });
+        emit('note', { text: `check failed after attempt ${used} of ${attempts} — running the task again`, project: current.root });
       }
       return {
         summary: result.summary,
@@ -715,12 +739,29 @@ export function createRpc({
       };
     },
 
-    cancel() { current.cancel(); return { ok: true }; },
+    cancel(params = {}) {
+      // A window cancels what it is looking at: when it names a project, the
+      // cancel goes to that project's harness — another window may have made
+      // a different project current since this window's run started. A root
+      // with no harness (nothing ever ran there) has nothing to cancel.
+      const h = params.root ? harnesses.get(path.resolve(params.root)) : current;
+      h?.cancel();
+      return { ok: true };
+    },
 
     /* -------------------------------------------------------- permissions */
 
-    async 'permission.answer'(params = {}) { return { ok: current.answer(params.id, params.decision) }; },
-    async 'plan.answer'(params = {}) { current.answerPlan(Boolean(params.ok)); return { ok: true }; },
+    async 'permission.answer'(params = {}) {
+      // The question names its project: a window may be answering a request
+      // that belongs to a run the backend has since switched away from.
+      const h = params.project ? harnesses.get(path.resolve(params.project)) : current;
+      return { ok: h ? h.answer(params.id, params.decision) : false };
+    },
+    async 'plan.answer'(params = {}) {
+      const h = params.project ? harnesses.get(path.resolve(params.project)) : current;
+      h?.answerPlan(Boolean(params.ok));
+      return { ok: true };
+    },
 
     /* -------------------------------------------------------------- diffs */
 

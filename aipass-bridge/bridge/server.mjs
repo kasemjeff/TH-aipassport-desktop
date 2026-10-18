@@ -10,7 +10,7 @@
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { DOCUMENT_TYPES, MAX_ATTACHMENT_BYTES, isAllowedAttachment } from './attachment-types.mjs';
+import { MAX_ATTACHMENT_BYTES, isAllowedAttachment } from './attachment-types.mjs';
 
 const PORT = Number(process.env.AIPASS_PORT ?? 8787);
 const HOST = process.env.AIPASS_HOST ?? '127.0.0.1';
@@ -624,7 +624,13 @@ async function createConversation({ modelId = defaultModel, message = 'Hello', a
 
 async function resolveConversation() {
   if (PINNED_CONVERSATION) return PINNED_CONVERSATION;
-  if (conversationCache) return conversationCache;
+  // A temporary conversation is the private working space of whichever session
+  // minted it (a desktop run, an agent run). Adopting it as the shared pointer
+  // is fine — the session keeps passing the id itself — but a caller with no
+  // conversation of its own must not be handed it: its send would land inside
+  // another session's private conversation, reading context it never saw
+  // written. Such a caller resolves from the account's own list instead.
+  if (conversationCache && !conversationIsTemporary) return conversationCache;
   if (!conversationList.length) await loadConversations();
   const pick = conversationList[conversationIndex];
   if (!pick) {
@@ -1049,9 +1055,10 @@ async function chatCompletions(req, res) {
   const { text, parts } = await extractUserParts(payload.messages);
   if (!text && (!parts || parts.length === 0)) return oaiError(res, 400, 'no user message');
 
-  // A client that manages its own conversations — the harness's helpers, a
-  // pool — names one per request here. Without it every chat goes to the
-  // bridge's current conversation, exactly as before.
+  // A client that manages its own conversations — the harness, its helpers, a
+  // pool — names one per request here. Without it the bridge's current
+  // conversation is used unless that pointer is a temporary conversation
+  // someone else minted (resolveConversation skips those).
   const conversation = typeof payload.conversation === 'string' && payload.conversation.trim()
     ? payload.conversation.trim()
     : null;

@@ -19,11 +19,14 @@ import {
   REMINDER, prose, parse, parseTodo, mergeTodo, READING, attemptedMarker,
   preamble as buildPreamble,
 } from './protocol.mjs';
-import { resilientSay, decode } from './bridge.mjs';
+import { resilientSay, decode, recoverWaits, sendRecoverable, waitLabel } from './bridge.mjs';
 import { classify, isGitCommit } from './permissions.mjs';
 import { posix } from './overlay.mjs';
 import { thaiRatio } from './lang.mjs';
 import { PATHY, pathVariants, beYearNote } from './argguard.mjs';
+
+/** A pause the loop itself takes — the recovery waits between send attempts. */
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // (R1/R4) The research round's two sets: which call kinds change the overlay,
 // and which files count as code for the verification nudge.
@@ -110,8 +113,10 @@ export async function runTask(taskText, ctx = {}) {
     bridge, tools, overlay, session = null, permissions = null, events = null,
     subagent = null, check = null, approvePlan = null, options = {}, first = true,
     runPluginTool = null, compactor = null, rotate = null,
-    conversation = null, conversationTemporary = null,
-  } = ctx;  // The step cap, or no cap at all: 0 (the shipped default) means the
+  } = ctx;
+  let conversation = ctx.conversation ?? null;
+  let conversationTemporary = ctx.conversationTemporary ?? null;
+  // The step cap, or no cap at all: 0 (the shipped default) means the
   // run goes until it is DONE, a guard stops it, or a budget below is spent. A
   // positive number caps the run, and the last step says so (step_limit).
   const rawCap = Number(options.maxSteps ?? 0);
@@ -193,6 +198,7 @@ export async function runTask(taskText, ctx = {}) {
   // spent in total, so stats can print where a slow run actually went.
   const toolStats = new Map(); // kind → { n, fail, ms }
   let firewallNotes = 0;
+  let sendRecoveries = 0;  // (stats) refused sends the loop paused and tried again
   const stepMs = [];
 
   const say = async (text, withParts = null) => {
@@ -289,6 +295,7 @@ export async function runTask(taskText, ctx = {}) {
   let verifiedSinceChange = false;
   let todoPrompts = 0;      // (plan checkpoint) one nudge when DONE arrives with open plan items
   let todoPromptSent = false;
+  let sendError = null;      // the message that ended the run, when stopReason is 'error'
   let summary = null;
   let stopReason = 'steps';
 
@@ -484,25 +491,50 @@ export async function runTask(taskText, ctx = {}) {
       next = `${bgDone.join('\n\n')}\n\n${next}`;
     }
     let reply;
-    try { reply = await saySafe(next, partsForSend()); sends++; }
-    catch (err) {
-      // The user pressed stop: the signal ends the in-flight fetch with an
-      // AbortError, which is an ending, not a failure — the transcript should
-      // not read "error" for something the user did on purpose.
-      if (err?.name === 'AbortError') { stopReason = 'cancelled'; break; }
-      events?.emit('error', { message: err.message });
-      // The one failure with an obvious cause and an obvious fix: the bridge is
-      // up and the extension is connected, but no logged-in chat tab is open, so
-      // there is nowhere for the request to run. Say so on its own event, and
-      // whoever is watching gets to fix it in one click instead of reading a
-      // stack trace. Both spellings: the dispatch refusal ("no extension
-      // connected — open a de.aipass.net tab") and the tab's own report.
-      if (/no extension connected|no de\.aipass\.net tab is open/i.test(err.message)) {
-        events?.emit('needs_tab', { url: options.chatUrl ?? 'https://de.aipass.net/chat', reason: err.message });
+    let sendGivenUp = false;
+    const recover = recoverWaits();
+    for (let attempt = 0; ; attempt++) {
+      try { reply = await saySafe(next, partsForSend()); sends++; break; }
+      catch (err) {
+        // The user pressed stop: the signal ends the in-flight fetch with an
+        // AbortError, which is an ending, not a failure — the transcript should
+        // not read "error" for something the user did on purpose.
+        if (err?.name === 'AbortError') { stopReason = 'cancelled'; sendGivenUp = true; break; }
+        // A send that delivered nothing and heals by waiting — the extension's
+        // cycle, a tab mid-reload, a rate window, a 403 the rewrite chain could
+        // not clear — is paused and given the same message again before it is
+        // allowed to end the run (sendRecoverable says which shapes; the waits
+        // are bounded). The ending below is what stays when they are spent.
+        if (attempt < recover.length && sendRecoverable(err)) {
+          const wait = recover[attempt];
+          sendRecoveries++;
+          const line = `the send was refused — waiting ${waitLabel(wait)}, then sending it again (recovery ${attempt + 1}/${recover.length})`;
+          session?.append('note', { text: line });
+          events?.emit('firewall_note', { text: line });
+          await sleep(wait);
+          continue;
+        }
+        events?.emit('error', { message: err.message });
+        // Keep the reason a run died: the UI event is ephemeral, and 40% of
+        // runs ended this way before the recovery above — without a note the
+        // session keeps no trace of why.
+        session?.append('note', { text: `the send failed: ${err.message}` });
+        sendError = String(err.message ?? err);
+        // The one failure with an obvious cause and an obvious fix: the bridge is
+        // up and the extension is connected, but no logged-in chat tab is open, so
+        // there is nowhere for the request to run. Say so on its own event, and
+        // whoever is watching gets to fix it in one click instead of reading a
+        // stack trace. Both spellings: the dispatch refusal ("no extension
+        // connected — open a de.aipass.net tab") and the tab's own report.
+        if (/no extension connected|no de\.aipass\.net tab is open/i.test(err.message)) {
+          events?.emit('needs_tab', { url: options.chatUrl ?? 'https://de.aipass.net/chat', reason: err.message });
+        }
+        stopReason = 'error';
+        sendGivenUp = true;
+        break;
       }
-      stopReason = 'error';
-      break;
     }
+    if (sendGivenUp) break;
     reply = decode(reply);
 
     const elapsed = ((Date.now() - stepStart) / 1000).toFixed(1);
@@ -584,7 +616,11 @@ export async function runTask(taskText, ctx = {}) {
         events?.emit('give_up', {}); stopReason = 'stalled'; break;
       }
       events?.emit('nudge', { n: nudgeStreak });
-      next = `That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it. I will paste back exactly what you ask for. ${REMINDER}`;
+      const attempted = attemptedMarker(reply);
+      const shapeHint = attempted
+        ? `That reply looked like it was trying to act — something in it had the shape of a marker — but it did not parse as one. A marker must sit at the start of its own line, with no indentation, bold or code fence, and use an exact keyword: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it, and so on. One call per line. `
+        : '';
+      next = `${shapeHint}That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it — if your answer is already written above, that is all the reply needs. I will paste back exactly what you ask for. ${REMINDER}`;
       continue;
     }
     nudgeStreak = 0;
@@ -913,7 +949,7 @@ export async function runTask(taskText, ctx = {}) {
     if (compactor && session && compactor.needsCompaction(session, { pending: next })) {
       try {
         events?.emit('note', { text: 'context is filling up — summarising this conversation and rotating to a fresh one' });
-        const raw = await compactor.summarize(session, { task: taskText, model });
+        const raw = await compactor.summarize(session, { task: taskText, model, conversation, temporary: conversationTemporary });
         // The reply is two products: the narrative and (when the tier is on)
         // the trailing MEMORY: facts, merged across rotations. A reply
         // without the section digests to the plain summary, so an older
@@ -923,7 +959,15 @@ export async function runTask(taskText, ctx = {}) {
         // fails would leave a compaction entry behind and reset the estimate
         // to a conversation the model never carried — a session claiming
         // memory it does not have. Failing this way only retries next step.
-        await rotate?.(note);
+        const rotated = await rotate?.(note);
+        // The fresh conversation is where the seed and every later send must
+        // go. The harness hands its new id back because this loop's own
+        // `conversation` binding would otherwise keep naming the conversation
+        // the rotation just left behind.
+        if (rotated?.conversation) {
+          conversation = rotated.conversation;
+          conversationTemporary = rotated.temporary === true;
+        }
         session.append('compaction', { summary: note, ...(memory.length ? { memory } : {}), lastSummarizedEntryId: session.entries.at(-1)?.id ?? null });
         events?.emit('compacted', { summary: note, memory });
         // The fresh conversation keeps what a summary would drop: the files
@@ -955,6 +999,7 @@ export async function runTask(taskText, ctx = {}) {
   // protocol drift shows up before it is guessed at.
   const runStats = {
     stopReason,
+    sendError,
     // The model that produced this run — `stats` groups by it (`byModel`), so
     // "which model drifts" is a field, not a guess. Null on a bridge without one.
     model: bridge.model ?? null,
@@ -968,6 +1013,7 @@ export async function runTask(taskText, ctx = {}) {
     stagnations: stagnationWarns,
     verifyPrompts,
     firewallNotes,
+    sendRecoveries,
     checks,
     checkVerdict: checkResult?.verdict ?? null,
     todoPrompts,

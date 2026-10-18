@@ -7,6 +7,10 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Added
 
+- **A failed send leaves a trace.** A run that stops because a send threw
+  now records the cause in the session (a `note` entry and
+  `run_stats.sendError`) instead of losing it, so the next failure names its
+  shape (`test/harness-fixes.test.mjs`).
 - **`maxCredits` — a spend cap per run.** The loop counts observed spend
   against the bridge's cached quota (0 = off, the default) and stops a run at
   the ceiling with the stop reason `credit-limited`. Set it in Settings, in
@@ -176,6 +180,12 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   `lastSummarizedEntryId` — the old `firstKeptEntryId` named the wrong end of
   the boundary (`docs/DATA_FORMATS.md` notes the old spelling). The `seed()`
   helper's never-read `listing` parameter is gone.
+- **Per-model context budgets finally drive compaction.** `Compactor` already
+  knew how to pick a budget by model id (prefix match); the desktop path now
+  passes a curated map (flash 100k, pro/sonnet/opus/gpt 200k, deepseek/qwen/
+  llama/mistral/grok 128k, gemini 1M) instead of a flat 24k, and a new
+  `maxResult` setting (default 3000) reaches the tool context from the sheet
+  too (`test/compact.test.mjs`, `test/settings-clamp.test.mjs`).
 
 ### Fixed
 
@@ -206,9 +216,96 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   on its untouched tree (a no-leak-only check scores nothing). The check now
   requires the explicit `denied` ending, so fail-before holds for every one
   of the 111 checks and CI's lint is green again.
+- **A closing message carries the answer.** The standing instructions now say
+  the findings belong above the DONE — a question or a summary never closes
+  with a "done summarizing" line while the substance stays inside a pasted
+  web result — and the no-marker nudge says a written answer plus DONE is
+  enough (`test/protocol.test.mjs`, `test/harness-fixes.test.mjs`). The
+  math-fix replay fingerprint follows the new preamble
+  (`evals/fixtures/math-fix-replay.json`).
+- **The picker marks a model the live catalog dropped.** A saved model the
+  site no longer offers used to sit in the dropdown unmarked and then failed
+  the run at the catalog check; the option now carries that verdict before
+  the run starts, and a model missing from a fallback list stays unjudged —
+  the same rule the loop applies (`test/ui.test.mjs`).
+- **A pace-score 403 cools the whole tab, not just the job it refused.** The
+  edge 403s by pace as well as by content — the same limiter family as a 429 —
+  but only the refused job used to wait: every send behind it left at full
+  pace into the window that had just said no. The page now arms the tab-wide
+  `rateQuietUntil` clock and the five-minute `RATE_MEMORY_MS` pacing on a 403
+  exactly as on a 429 (`test/page.test.mjs`).
+- **The settings sheet's budgets reach the live run the moment Save lands.**
+  `maxToolCalls`, `maxWallClockMs` and `maxCredits` join the keys re-applied
+  to the running harness on save — before this a budget change only took
+  effect at the next backend start while the sheet said it was live
+  (`test/hardening.test.mjs`).
+- **The `models:` line covers history, not just new runs.** A run that
+  predates `run_stats.model` is attributed to the model its session recorded
+  — the one a fresh run started on — so older sessions no longer blend under
+  `(unrecorded)`, which stays for sessions that recorded no model at all
+  (`test/stats.test.mjs`).
+- **A refused send no longer ends the run at the first exhaustion.** Past the
+  redact/wait/split/omit chain the loop pauses and sends the same message
+  again (`RECOVER_WAITS_MS` — 30s then 60s, bounded): the connection-cycle
+  shapes, a tab still loading, rate windows, and 403s that were never about
+  the content. Each recovery is a `firewall_note` and counts in
+  `run_stats.sendRecoveries`; the transport also waits out a content script
+  mid-reinjection (`TRANSIENT_SEND`), and a run that still dies keeps its
+  recorded cause (`test/agent.test.mjs`).
+- **Streaming stops repainting what it already painted.** A reply paints in two
+  layers now — the settled blocks render once, only the unfinished tail
+  re-renders per frame — and the reasoning fold appends the text that arrived
+  instead of reassigning its whole body, so a long answer or a long think no
+  longer slows the window as it grows (`test/ui-md.test.mjs`,
+  `test/ui.test.mjs`).
+- **The backend's big reads and walks no longer block the window.** GLOB's tree
+  walk, SEARCH's per-entry size check, and attachment staging/sending used sync
+  fs calls that froze every window request for their duration; they go through
+  `fs.promises` now — the walk stays sequential, so the cap still returns the
+  same files (`test/tools.test.mjs`, `test/tools-aci.test.mjs`).
+- `docs/DATA_FORMATS.md` matches the code again: `maxSteps` defaults to 0 (no
+  cap), `minThaiRatio` to 0.4, and the auth exemption list names the same
+  routes the backend skips (`/token`, the static UI files).
+- **GLOB speaks shell globs again.** Brace alternation (`*.{js,css,html}`)
+  and `?` are expanded and matched the way the shells do; the braces were
+  escaped before, so a tree full of matching files answered "no files matched"
+  (`test/tools.test.mjs`).
+- **The nudge names a broken marker.** When a reply contained marker-shaped
+  text that did not parse, the correction now says so and lists the shape
+  rules (start of its own line, no indentation, bold or code fence, exact
+  keyword) instead of the generic "no marker" line.
 - `RUN type .env`, `SEARCH` over `server.pem`, and `git show HEAD:.env` were
   three ways around the secret floor; all three are refused now
   (`test/secret-screen.test.mjs`).
+- **A backend crash no longer masks itself as a `ReferenceError`.** The desktop
+  backend's `fatal()` handler called `formatLogLine` without importing it, so
+  every uncaught error exited as `ReferenceError: formatLogLine is not defined`
+  and the real cause was lost — and the supervisor restarted the backend, making
+  the crash look like a restart. The import is restored, so a crash now prints
+  the error that caused it (`test/hardening.test.mjs`).
+- **A project is a first-class scope in the window.** `state.root` is set from
+  the project list/switch/snapshot, every run and cancel carries `root`, and
+  events from other projects are dropped so a run in one project cannot paint
+  another; a foreign permission/plan modal still shows, tagged with the other
+  project's name, and its answer is routed back by project
+  (`test/ui.test.mjs`).
+- **A run is bound to its root.** `run(params)` switches the harness when
+  `params.root` differs (remember:false), `cancel(params)` targets the named
+  harness, and `status()` reports per-project `running`; the window sends
+  `root: state.root` on run/cancel (`test/desktop.test.mjs`).
+- **Helpers read the parent's staged tree.** `Overlay` gains a read-through
+  `base` layer; a helper is built with `base: overlay` and its own `before`
+  snapshot, and copy-back skips files staged since it started, naming them in
+  `helper_end.skipped` (`test/harness-fixes.test.mjs`).
+- **`readSet` is per run.** `#makeTools()` is called in `run()`, not shared,
+  so a read in one run no longer licenses a blind CREATE in the next
+  (`test/harness-fixes.test.mjs`).
+- **Rotation keeps the conversation its `create` returned.** `#rotate` uses
+  `made.id` instead of re-reading the bridge's shared pointer; the server's
+  `resolveConversation` skips a temporary `conversationCache` for nameless
+  callers; sends now carry `conversation`/`conversationTemporary` per send
+  (including summarize), and the loop rebinds `conversation` after rotation
+  (`test/harness-fixes.test.mjs`, `test/bridge.test.mjs`).
 
 ## [0.2.0]
 

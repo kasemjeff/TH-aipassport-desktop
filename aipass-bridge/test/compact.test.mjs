@@ -4,7 +4,7 @@
 // prove a long task survives crossing its budget halfway.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { Compactor } from '../harness/compact.mjs';
+import { Compactor, DEFAULT_MODEL_BUDGETS } from '../harness/compact.mjs';
 import { Harness } from '../harness/harness.mjs';
 import { startBridge, FakeExtension, scripted, tempDir, run, AGENT } from './harness.mjs';
 
@@ -489,4 +489,11 @@ test("a manual rotation's facts ride the next run, and only that run", async (t)
   assert.match(handler.sent[2], /- constraint: never push without a word/);
   assert.match(handler.sent[2], /Task: second task/, "built against the run's own task");
   assert.doesNotMatch(handler.sent[3], /Facts carried from earlier rotations/, 'consumed once — a second run must not repeat it');
+});
+
+test('the default per-model budget map covers the flash family and falls back for unknowns', () => {
+  const c = new Compactor({ keepRecentBytes: 0, budgets: DEFAULT_MODEL_BUDGETS });
+  assert.equal(c.budgetFor('gemini-3.5-flash-lite'), 100_000, 'flash-lite gets the flash budget, not the 24k flat default');
+  assert.equal(c.budgetFor('gemini-3.1-pro-preview'), 200_000, 'pro-class models get the pro budget');
+  assert.equal(c.budgetFor('some-unknown-model-xyz'), 24_000, 'an unknown model falls back to contextTokens (no guess)');
 });

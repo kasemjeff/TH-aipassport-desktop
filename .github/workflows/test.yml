@@ -7,10 +7,19 @@ on:
     branches: [master]
   pull_request:
 
+# A push supersedes its predecessors: cancel their runs so a hung runner
+# cannot queue every newer run behind it (five runs piled up on 2026-10-17).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: node ${{ matrix.node }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # A stuck job would otherwise hold its runner for the platform default of
+    # six hours; the suite itself runs in minutes.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -30,6 +39,20 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
+
+      # The bridge and its tests have no runtime dependencies, so `npm test`
+      # works with a clean checkout. Dev dependencies (typescript, @types/node)
+      # are needed only for `npm run typecheck` below.
+      - name: Install dev dependencies
+        run: npm ci
+
+      - name: Lint this guide (anchors, shims, size budgets)
+        run: npm run agents:lint
+
+      # Type-check the files that opt in with `// @ts-check`. Grows one file
+      # at a time; see aipass-bridge/jsconfig.json.
+      - name: Type check
+        run: npm run typecheck
 
       # The bridge and its tests have no dependencies, so there is nothing to
       # install — the suite spawns the real server and a fake extension.
@@ -58,3 +81,14 @@ jobs:
       - uses: actions/checkout@v7
       - name: Syntax-check the deployment scripts
         run: for f in aipass-bridge/deploy/*.sh; do bash -n "$f"; done
+
+  smoke:
+    name: smoke e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Smoke end-to-end
+        run: npm run smoke:e2e

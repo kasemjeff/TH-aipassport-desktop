@@ -160,15 +160,23 @@ test('settings written by an older build merge over DEFAULTS — nothing to migr
 test('duplicate projects load once — first entry wins', () => {
   const dir = tmp();
   fs.mkdirSync(path.join(dir, 'home'), { recursive: true });
+  // Platform-absolute paths: Settings.projectList() resolves each entry with
+  // path.resolve(), which is a no-op for an already-absolute path on Windows
+  // but would otherwise anchor a relative value to cwd (and silently pass on
+  // Windows while failing on POSIX). Build the inputs already resolved so the
+  // assertion is identical on every OS.
+  const root = path.parse(process.cwd()).root; // 'C:\\' on Windows, '/' on POSIX
+  const pa = path.resolve(root, 'p', 'a');
+  const pb = path.resolve(root, 'p', 'b');
   fs.writeFileSync(path.join(dir, 'home', 'settings.json'), JSON.stringify({
     projects: [
-      { name: 'a', path: 'C:\\p\\a' },
-      { name: 'a again', path: 'C:\\p\\a' }, // same path, different name
-      { name: 'b', path: 'C:\\p\\b' },
+      { name: 'a', path: pa },
+      { name: 'a again', path: pa }, // same path, different name
+      { name: 'b', path: pb },
     ],
   }));
   const settings = new Settings(path.join(dir, 'home'));
-  assert.deepEqual(settings.projectList().map((p) => p.path), ['C:\\p\\a', 'C:\\p\\b']);
+  assert.deepEqual(settings.projectList().map((p) => p.path), [pa, pb]);
   assert.equal(settings.projectList()[0].name, 'a', 'the first entry keeps its name');
 });
 

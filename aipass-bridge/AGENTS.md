@@ -34,11 +34,14 @@ Read it before non-trivial bridge changes and keep it current with them.
 - **One-message constraint**: the upstream endpoint rejects assistant turns in
   `messages` and agent-style system prompts; `lastUserText()` forwards only the
   newest user message; multi-turn is server-side history. `agent.mjs` sends
-  its `PREAMBLE` once into a fresh conversation and then only tool results.
+  its instruction preamble once into a fresh conversation and then only tool
+  results.
 - **Conversation rotation** (`resolveConversation`, `startChat`): reuse the
   most recent (or just-created) conversation; on `404` (deleted) / `409`
   (generation still running) advance to the next-most-recent — but only when
-  no deltas were delivered yet and `AIPASS_CONVERSATION_ID` isn't pinned.
+  no deltas were delivered yet and `AIPASS_CONVERSATION_ID` isn't pinned. A
+  nameless send never resolves into a *temporary* conversation: those are the
+  private space of the session that minted them, which names them per send.
 - **turbo-stream**: the app's `.data` loaders return react-router turbo-stream
   (a flat indexed pool). `decodeTurboStream()` in `server.mjs` reads it;
   `encodeTurboStream()` in `test/harness.mjs` builds fixtures the same way.

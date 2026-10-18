@@ -232,6 +232,9 @@ test('settings.set moves every module the sheet claims, not just the file', asyn
   const skillsDir = tempDir({ 'probe.md': '# probe' });
   await env.call('settings.set', {
     maxSteps: 7,
+    maxToolCalls: 900,
+    maxWallClockMs: 3_600_000,
+    maxCredits: 5,
     plan: true,
     requirePlanApproval: true,
     subagent: false,
@@ -240,6 +243,9 @@ test('settings.set moves every module the sheet claims, not just the file', asyn
 
   const { rpc } = env;
   assert.equal(rpc.current.options.maxSteps, 7, 'the loop reads its step limit from the harness');
+  assert.equal(rpc.current.options.maxToolCalls, 900, 'and its budgets from the same save');
+  assert.equal(rpc.current.options.maxWallClockMs, 3_600_000);
+  assert.equal(rpc.current.options.maxCredits, 5);
   assert.equal(rpc.current.options.plan, true);
   assert.equal(rpc.current.options.requirePlanApproval, true);
   assert.equal(rpc.current.options.subagent, false);
@@ -249,6 +255,8 @@ test('settings.set moves every module the sheet claims, not just the file', asyn
   const st = await env.call('status');
   assert.equal(st.maxSteps, 7);
   assert.equal(st.settings.maxSteps, 7);
+  assert.equal(st.settings.maxToolCalls, 900);
+  assert.equal(st.settings.maxWallClockMs, 3_600_000);
 });
 
 /* 5 — snapshot --------------------------------------------------------------- */
@@ -308,4 +316,20 @@ test('the extension requests only the hosts it uses', (t) => {
   for (const cs of m.content_scripts ?? []) {
     assert.ok(cs.matches.every((p) => p.includes('aipass.net')), 'content scripts stay on the aipass origin');
   }
+});
+
+/* 8 — the backend's crash path names its error ---------------------------- */
+
+// The desktop backend installs an uncaughtException handler whose whole job is
+// to name the crash before the process exits. Calling a symbol it never
+// imported turned every real crash into a masked `ReferenceError` and hid the
+// cause (and the supervisor restarted the backend, making the crash look like
+// a restart). The import must be present for the handler to do its job.
+test('the backend fatal line can name the crash it was called for', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(here, '..', 'harness', 'rpc.mjs'), 'utf8');
+  assert.match(src, /const fatal = [\s\S]*?formatLogLine/,
+    'the fatal handler must call the formatter it is supposed to print through');
+  assert.match(src, /import \{ formatLogLine \} from '\.\/log-line\.mjs'/,
+    'the formatter must actually be imported — otherwise the handler throws a ReferenceError and the real error is lost');
 });

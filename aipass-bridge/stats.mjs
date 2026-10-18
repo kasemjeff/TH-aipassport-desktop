@@ -30,6 +30,11 @@ const GUARD_STOPS = new Set(['stalled', 'stagnation', 'error']);
 
 /** The run_stats lines of one session, shaped into comparable rows. */
 export function collectRuns(session) {
+  // Runs written before `run_stats.model` existed carry no model of their own;
+  // the session's header still names the model a fresh run started on, so the
+  // byModel grouping keeps that history attributable instead of blending it
+  // into "(unrecorded)" — which stays for sessions that recorded nothing.
+  const sessionModel = session.meta().model ?? null;
   const rows = [];
   for (const e of session.entries) {
     if (e.type !== 'run_stats') continue;
@@ -42,7 +47,7 @@ export function collectRuns(session) {
       root: session.root,
       ts: e.ts,
       stopReason: e.stopReason,
-      model: e.model ?? null,
+      model: e.model ?? sessionModel,
       steps: e.steps ?? 0,
       turns: e.turns ?? (Array.isArray(e.stepMs) ? e.stepMs.length : 0),
       calls,

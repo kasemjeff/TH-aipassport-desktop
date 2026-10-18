@@ -288,6 +288,128 @@ suite.
   differently). Nothing was committed — the working tree carries the wave.
 - **Cleanup**: temp dirs from lint/tests only; nothing left in the repo.
 
+## 2026-10-18 — opencode — per-model context budgets and a tunable tool-result cap
+
+- **Files**: `aipass-bridge/harness/compact.mjs` (exported `DEFAULT_MODEL_BUDGETS`),
+  `aipass-bridge/harness/harness.mjs` (fallback to it when compaction names none),
+  `aipass-bridge/harness/settings.mjs` (defaults + clamp for `maxResult` and
+  `compaction.budgets`), `aipass-bridge/harness/rpc.mjs` (passes `maxResult`
+  through), `desktop/ui/app.js` (a `maxResult` row + validation), `CHANGELOG.md`,
+  `docs/WORKLOG.md`, `aipass-bridge/test/compact.test.mjs` (one new test).
+- **Tests**: `npm test` green on this machine (one git-absent skip);
+  `npm run agents:lint` and `npm run evals:lint` green. `node --check` on every
+  touched file.
+- **Deferred**: listing-delta, elision tier, test-time scaling (best-of-N via
+  the checker), and a `maxResult`-aware run smoke once credits reset.
+- **Risks**: the curated budget map is conservative (well under real windows)
+  but still a guess — a model whose window is smaller than its entry would
+  rotate late. `AIPASS_CONTEXT_TOKENS` and the settings sheet still override.
+- **Cleanup**: none needed.
+
+## 2026-10-17 — opencode — the playbook library is back in reach, and the run's two dead flags reach the tools
+
+- **Files**: `aipass-bridge/harness/harness.mjs` (the run's `maxResult` /
+  `readLines` now reach all three tool contexts — main, helper, checker),
+  `aipass-bridge/test/harness-fixes.test.mjs` (H11: a run's options clip a
+  6 KB read at 500 bytes behind the spill locator, and page a 10-line file at
+  three — red at `be0e1c5`, proven in a throwaway worktree), `CHANGELOG.md`,
+  `docs/WORKLOG.md`. Machine-local, outside the repo: `D:\skills` is now a
+  junction to `D:\aipass2\skills` (the library HOW-TO.md documents, stranded
+  when the repo moved beside `aipass2` instead of inside it) and
+  `~/.aipass/settings.json` carries `skillsDirs: ["D:\\aipass2\\skills"]` for
+  the desktop backend.
+- **Tests**: `npm test` green on this machine (one git-absent skip; see
+  `npm test` for the count — parallel sessions move it); `npm run agents:lint`
+  and `npm run evals:lint` green.
+- **Deferred**: the two remaining quick wins — bootstrap snapshot (git status
+  + scripts on turn 1) and step-cap visibility — are new prompt surface, not
+  plumbing; they want their own design pass with the eval gate behind them.
+- **Risks**: the junction and `skillsDirs` are machine-local; a CLI run from a
+  tree not on `D:\` (e.g. `C:\Users\ASUS\aipass-bridge`) still resolves an
+  empty default — point `AIPASS_SKILLS_DIR` there, or link it the same way.
+- **Cleanup**: the proof worktree removed; no other processes started.
+
+## 2026-10-17 — opencode — five-fix round: project-scoped runs, helper base layer, per-run readSet, rotation keeps created id
+
+- **Files**: `desktop/ui/app.js` (`state.root` from refreshProjects/projects.switch/restoreFromSnapshot; `onRun`/`onAny` wrappers around ~35 handlers dropping foreign-project events; run/cancel carry `root: state.root`; foreign permission/plan modals show with a project label and route answers by project), `aipass-bridge/harness/rpc.mjs` (`run(params)` switches the harness when `params.root` differs with remember:false; `cancel(params)` targets the named harness; `status()` exposes per-project `running`), `aipass-bridge/harness/overlay.mjs` (read-through `base` layer), `aipass-bridge/harness/harness.mjs` (helper uses `child = new Overlay(root, {base: overlay})` with a `before` snapshot; copy-back skips files staged since start and records them in `helper_end.skipped`; `#makeTools()` called in `run()` so `readSet` resets per run; `#rotate` uses `made.id`; sends carry `conversation`/`conversationTemporary`), `aipass-bridge/harness/loop.mjs` (rebinds `conversation` after rotation), `aipass-bridge/bridge/server.mjs` (`resolveConversation` skips a temporary `conversationCache` for nameless callers), `aipass-bridge/harness/compact.mjs` (`summarize` accepts `conversation`/`temporary`), `aipass-bridge/test/bridge.test.mjs`, `checker.test.mjs`, `ask.test.mjs` (conversation-id contract), `aipass-bridge/test/harness-fixes.test.mjs` (+6 tests), `CHANGELOG.md`, `docs/WORKLOG.md`.
+- **Tests**: `npm test` green (535 tests, 534 pass, 1 skip, 0 fail); `node --check` clean on all touched files.
+- **Deferred**: live UI multi-project smoke (needs a real window run); desktop.test.mjs multi-project run routing (covered at the harness/rpc layer by the new harness-fixes tests and existing desktop-window tests).
+- **Risks**: the per-project running map and foreign-event filter rely on every handler going through `onRun`/`onAny`; a handler added later that bypasses them silently re-introduces cross-project painting.
+- **Cleanup**: debug removed; edits confined to the `aipass-fix` worktree.
+
+## 2026-10-17 — opencode — the closing message carries the answer; the picker marks a dropped model
+
+- **Files**: `aipass-bridge/harness/protocol.mjs` (the standing instructions now
+  put the answer itself above the DONE — findings must not live only inside
+  pasted material, and "finished" alone is not an answer), `aipass-bridge/harness/loop.mjs`
+  (the no-marker nudge: if the answer is already written, the DONE line is all
+  that is missing), `aipass-bridge/test/protocol.test.mjs` +
+  `aipass-bridge/test/harness-fixes.test.mjs` (one new assertion each),
+  `desktop/ui/app.js` (`fillModels` marks a model the live catalog dropped,
+  keeps it visible either way, and never judges a fallback list — the catalog
+  check's verdict, moved before the run), `aipass-bridge/test/ui.test.mjs`,
+  `evals/fixtures/math-fix-replay.json` (fingerprint re-stamped: preambleBytes
+  5020, digest `c7baf38722feae54`), `CHANGELOG.md`.
+- **Tests**: `npm test` green on this machine (528 tests, 527 pass, 0 fail,
+  1 skip); `npm run agents:lint` clean. The pushed CI run is the judge.
+- **Deferred**: a live re-test of the recorded shapes (a WEB-search summary;
+  the mangled-marker stall) — needs a real window run, which is the user's to
+  start; the nudge half reaches conversations already in flight, the preamble
+  half reaches new ones only (it is sent once per conversation).
+- **Risks**: the guidance is prompt-level — a model that ignores it still
+  closes short; the nudge is the runtime half. `allowRun` was flipped to true
+  in the user's `~/.aipass/settings.json` (outside the repo): with mode=auto
+  ordinary shell auto-runs, hazardous commands still ask.
+- **Cleanup**: none needed — no processes started, edits confined to the
+  `aipass-fix` worktree; investigation timelines live under
+  `AppData/Local/Temp/opencode/inv/` (reference only).
+
+## 2026-10-17 — opencode — the `models:` line covers history, not just new runs
+
+- **Files**: `aipass-bridge/stats.mjs` (`collectRuns()` attributes a run that
+  carries no `model` of its own to the session's recorded model — the header
+  names the one a fresh run started on; a run-level `model` still wins),
+  `aipass-bridge/test/stats.test.mjs` (a new test for the fallback and its
+  precedence; the `(unrecorded)` test now covers only sessions that recorded
+  no model either), `docs/RELIABILITY.md`, `CHANGELOG.md`.
+- **Tests**: `npm test` green on this machine (526 tests, 0 fail, 1 skip);
+  the pushed CI run is the judge. Live proof on the real store: the `models:`
+  line went from `(unrecorded) 63r` to the full breakdown
+  (gemini-3.5-flash-lite 40r · DeepSeek-V3.2 16r · claude-sonnet-5@default 4r
+  · grok-4.6 3r · gemini-3.1-flash-lite 2r · gemini-3.8-flash 2r).
+- **Deferred**: none blocking. The desktop app already writes the per-run
+  model again (first keyed runs 19:44 today); the fallback is what carries
+  the 63 runs written before that.
+- **Risks**: for a pre-field session that switched models mid-history, every
+  run attributes to the session's starting model — the best record that
+  exists; runs written from `adbb31d` on carry the exact model per run.
+- **Cleanup**: none needed — no processes started, edits confined to the
+  `aipass-fix` worktree.
+
+## 2026-10-17 — opencode — the refused send pauses instead of ending the run
+
+- **Files**: `aipass-bridge/harness/bridge.mjs` (`TRANSIENT_SEND` now covers a
+  content script mid-reinjection; new `RECOVER_WAITS_MS` / `recoverWaits()` /
+  `sendRecoverable()`; `AIPASS_SEND_RETRY_MS` shrinks the transport wait for
+  tests), `aipass-bridge/harness/loop.mjs` (the send is a bounded retry loop:
+  a recoverable failure pauses and the same message goes again; each recovery
+  is a `firewall_note` and `run_stats.sendRecoveries` counts it),
+  `aipass-bridge/test/harness.mjs` (`scripted(..., { gap })` models the
+  connection-cycle shapes), `aipass-bridge/test/agent.test.mjs` (four tests:
+  chain exhaustion → rescue, never-clears → bounded stop, loading tab →
+  recovered, mid-reinjection → retried inside the send), plus `CHANGELOG.md`,
+  `docs/LOOP_DESIGN.md`, `docs/RELIABILITY.md`.
+- **Tests**: `npm test` green on this machine (520 tests, 0 fail, 1 skip);
+  the pushed CI run is the judge.
+- **Deferred**: the conversation churn ("created temporary conversation" every
+  ~30s in the morning's failing runs) — diagnosed as a lead, not reproduced
+  here; the other session's `aipass-loopbug` worktree owns that repro.
+- **Risks**: a hard rate window now stalls longer before dying (bounded:
+  ~8min in resilientSay + 90s of recovery); "bridge returned 5xx" counts as
+  recoverable, so a sick bridge is retried twice before the old ending.
+- **Cleanup**: none needed — no processes started, edits confined to the
+  `aipass-fix` worktree.
+
 ## 2026-10-17 — opencode — CI revived: the runners' git phrasing, then the sessions' batch
 
 - **Files**: `aipass-bridge/test/gates.test.mjs` + `aipass-bridge/harness/tools.mjs`
