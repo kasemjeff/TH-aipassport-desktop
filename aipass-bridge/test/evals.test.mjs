@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { tempDir } from './harness.mjs';
 import {
   EvalTaskError,
+  digestOf,
   formatSummary,
   loadTask,
   loadTranscript,
@@ -23,7 +24,9 @@ import {
   resolveTask,
   runAttempt,
   runEval,
+  treeDigestOf,
 } from '../../scripts/evals.mjs';
+import { APP_VERSION } from '../harness/session.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EVALS = path.resolve(HERE, '..', '..', 'evals');
@@ -48,10 +51,19 @@ function writeFiles(dir, files) {
 }
 
 /** A task built in a temp dir, the same shape the shipped fixtures use. */
-function makeTask(files, { id = 'temp-task', check = 'node check.mjs', budget = {}, allowRun = false, taskText = 'Do the task.' } = {}) {
+function makeTask(files, {
+  id = 'temp-task', check = 'node check.mjs', budget = {}, allowRun = false,
+  taskText = 'Do the task.', category = null, liveOnly = false,
+} = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-eval-task-'));
   fs.writeFileSync(path.join(dir, 'task.md'), taskText);
-  fs.writeFileSync(path.join(dir, 'task.json'), JSON.stringify({ check, budget, allowRun }, null, 2));
+  fs.writeFileSync(path.join(dir, 'task.json'), JSON.stringify({
+    check,
+    budget,
+    allowRun,
+    ...(category ? { category } : {}),
+    ...(liveOnly ? { liveOnly: true } : {}),
+  }, null, 2));
   writeFiles(path.join(dir, 'tree'), files);
   return loadTask(dir, { id });
 }
@@ -301,4 +313,162 @@ test('runEval waits pauseMs between attempts, and --pause parses strictly', asyn
   assert.equal(parseArgs(['--pause', '2500']).pause, 2500);
   assert.equal(parseArgs([]).pause, 0);
   assert.throws(() => parseArgs(['--pause', 'soon']), /--pause needs milliseconds/);
+  assert.equal(parseArgs([]).keep, false, '--keep is off by default');
+  assert.equal(parseArgs(['--keep']).keep, true);
+});
+
+/* 8 — dataset versions: taskDigest / treeDigest / category / env on a row --- */
+
+test('rows carry the dataset versions and the environment they ran on', async () => {
+  const task = makeTask({ 'out.txt': 'x\n', 'check.mjs': OUT_CHECK }, {
+    id: 'versioned', budget: { maxSteps: 2 }, category: 'robustness',
+  });
+  const row = track(await runAttempt(task, {
+    mode: 'replay',
+    bridge: replayBridge(['CREATE out.txt\n42\nEND\nDONE wrote 42']),
+  }));
+
+  assert.equal(row.category, 'robustness');
+  assert.equal(row.taskDigest, digestOf(task.taskText));
+  assert.equal(row.treeDigest, treeDigestOf(path.join(task.dir, 'tree')));
+  assert.match(row.promptDigest, /^[0-9a-f]{16}$/, 'the prompt version rides every row');
+  assert.equal(row.env.app, APP_VERSION);
+  assert.equal(row.env.node, process.version);
+  assert.equal(row.env.platform, process.platform);
+
+  // A one-byte change to the fixture moves the tree digest.
+  const twin = makeTask({ 'out.txt': 'y\n', 'check.mjs': OUT_CHECK }, { id: 'versioned-2', budget: { maxSteps: 2 } });
+  assert.notEqual(treeDigestOf(path.join(twin.dir, 'tree')), row.treeDigest, 'the digest tracks the tree');
+});
+
+/* 9 — --keep: a copy of the attempt session lands beside the results -------- */
+
+test('--keep copies each attempt session beside the run results', async () => {
+  const task = makeTask({ 'out.txt': 'x\n', 'check.mjs': OUT_CHECK }, { id: 'kept', budget: { maxSteps: 2 } });
+  const dir = resultsDir();
+  const out = await runEval({
+    tasks: [task],
+    mode: 'replay',
+    bridgeFor: () => replayBridge(['CREATE out.txt\n42\nEND\nDONE wrote 42']),
+    resultsDir: dir,
+    keep: true,
+  });
+  const row = track(out.rows[0]);
+  assert.ok(row.session.kept, 'the row points at the kept copy');
+  assert.ok(row.session.kept.startsWith(dir), 'the copy lands beside the results, not in %TEMP%');
+  assert.ok(fs.existsSync(row.session.kept));
+  const keptText = fs.readFileSync(row.session.kept, 'utf8');
+  assert.equal(keptText, fs.readFileSync(row.session.file, 'utf8'), 'the copy is byte-identical');
+  assert.match(keptText, /"type":"run_stats"|run_stats/, 'the evidence includes the run stats line');
+  assert.ok(out.keepDir && fs.existsSync(out.keepDir));
+
+  // Without --keep the row says so honestly.
+  const plain = track(await runAttempt(task, { mode: 'replay', bridge: replayBridge(['DONE nothing']) }));
+  assert.equal(plain.session.kept, null);
+});
+
+/* 10 — replay skips live-only tasks ---------------------------------------- */
+
+test('a replay run skips live-only tasks, and refuses to score only those', async () => {
+  const normal = makeTask({ 'out.txt': 'x\n', 'check.mjs': OUT_CHECK }, { id: 'normal', budget: { maxSteps: 2 } });
+  const safety = makeTask({ 'out.txt': 'x\n', 'check.mjs': OUT_CHECK }, { id: 'safety-temp', budget: { maxSteps: 2 }, liveOnly: true });
+  assert.equal(safety.liveOnly, true, 'loadTask reads the liveOnly key');
+
+  const logged = [];
+  const out = await runEval({
+    tasks: [normal, safety],
+    mode: 'replay',
+    bridgeFor: () => replayBridge(['CREATE out.txt\n42\nEND\nDONE wrote 42']),
+    resultsDir: resultsDir(),
+    log: (line) => logged.push(line),
+  });
+  for (const row of out.rows) track(row);
+  assert.deepEqual(out.rows.map((r) => r.taskId), ['normal']);
+  assert.ok(logged.some((l) => /skipped live-only: safety-temp/.test(l)), logged.join('\n'));
+
+  await assert.rejects(
+    runEval({ tasks: [safety], mode: 'replay', resultsDir: resultsDir() }),
+    /every selected task is live-only/,
+  );
+});
+
+/* 11 — the summary's slices: category, mixed attempts, pair drift ----------- */
+
+test('formatSummary names categories, mixed outcomes and pair drift', () => {
+  const rows = [
+    { taskId: 'sum-numbers', outcome: 'solved', scored: true, category: 'robustness', pair: 'sum-numbers', wallMs: 1000 },
+    { taskId: 'sum-numbers-twin', outcome: 'unsolved', scored: true, category: 'robustness', pair: 'sum-numbers', wallMs: 1200 },
+    { taskId: 'math-fix', outcome: 'solved', scored: true, category: null, pair: null, wallMs: 900 },
+    { taskId: 'math-fix', outcome: 'unsolved', scored: true, category: null, pair: null, wallMs: 950 },
+    { taskId: 'safety-x', outcome: 'solved', scored: true, category: 'safety', pair: null, wallMs: 800 },
+  ];
+  const text = formatSummary(rows);
+  assert.match(text, /by category: robustness 1\/2 · safety 1\/1 · uncategorized 1\/2/);
+  assert.match(text, /mixed outcomes: math-fix 1\/2/);
+  assert.match(text, /pair drift: sum-numbers 1\/2/);
+});
+
+/* 12 — digests are stable across runs, and move with the bytes ------------- */
+
+test('digests are stable across runs and track a one-byte fixture change', async () => {
+  const task = makeTask({ 'out.txt': 'x\n', 'check.mjs': OUT_CHECK }, { id: 'digest-a', budget: { maxSteps: 3 } });
+  const reply = ['NEED file out.txt\n', 'CREATE out.txt\n42\nEND\nDONE wrote 42'];
+  const a = track(await runAttempt(task, { mode: 'replay', bridge: replayBridge(reply) }));
+  const b = track(await runAttempt(task, { mode: 'replay', bridge: replayBridge(reply) }));
+
+  assert.equal(a.outcome, 'solved');
+  assert.equal(b.outcome, 'solved');
+  assert.equal(a.taskDigest, b.taskDigest, 'same task bytes, same digest');
+  assert.equal(a.treeDigest, b.treeDigest, 'same tree bytes, same digest');
+  assert.equal(a.promptDigest, b.promptDigest, 'same preamble bytes, same digest');
+  assert.deepEqual(a.env, b.env, 'same build, same environment');
+
+  // A one-byte-scale edit to the fixture moves the tree digest — and the
+  // check runs against the new bytes: a reply that writes 42 now fails a
+  // check that wants 7. The row proves which bytes were scored.
+  const before = treeDigestOf(path.join(task.dir, 'tree'));
+  fs.writeFileSync(path.join(task.dir, 'tree', 'check.mjs'), OUT_CHECK.split("'42'").join("'7'"));
+  const after = treeDigestOf(path.join(task.dir, 'tree'));
+  assert.notEqual(after, before, 'the digest tracks the tree bytes');
+
+  const moved = track(await runAttempt(task, { mode: 'replay', bridge: replayBridge(reply) }));
+  assert.equal(moved.treeDigest, after, 'the row names the bytes that ran');
+  assert.equal(moved.outcome, 'unsolved');
+  assert.match(moved.check.tail, /FAIL: out\.txt holds 42/, 'the mutated check is what scored');
+});
+
+/* 13 — a dead bridge is invalid, never unsolved (the 429 storm) ------------ */
+
+test('a run whose bridge dies is invalid — the model is never charged for the network', async () => {
+  const task = makeTask({ 'out.txt': 'x\n', 'check.mjs': OUT_CHECK }, { id: 'storm', budget: { maxSteps: 3 } });
+  const dead = replayBridge([]);
+  dead.chat = async () => { throw new Error('429 — the account edge refused the burst'); };
+
+  const row = track(await runAttempt(task, { mode: 'replay', bridge: dead }));
+  assert.equal(row.outcome, 'invalid', 'a transport death is not a wrong answer');
+  assert.equal(row.scored, false, 'invalid rows stay out of the scored rates');
+  assert.match(row.invalidReason, /429/, `invalidReason: ${row.invalidReason}`);
+  assert.notEqual(row.check.exit, 0, 'the check still ran on the applied tree');
+});
+
+/* 14 — the summary's slices stay quiet when there is nothing to say --------- */
+
+test('the category and pair-drift slices only appear when they have something to say', () => {
+  const noCategory = formatSummary([
+    { taskId: 'plain', outcome: 'solved', scored: true, category: null, pair: null, wallMs: 1 },
+  ]);
+  assert.doesNotMatch(noCategory, /by category:/, 'no category on any row, no category line');
+
+  const symmetric = formatSummary([
+    { taskId: 'sum-numbers', outcome: 'solved', scored: true, category: 'robustness', pair: 'sum-numbers', wallMs: 1 },
+    { taskId: 'sum-numbers-twin', outcome: 'solved', scored: true, category: 'robustness', pair: 'sum-numbers', wallMs: 1 },
+  ]);
+  assert.doesNotMatch(symmetric, /pair drift:/, 'twins that agree are not a drift');
+  assert.match(symmetric, /by category: robustness 2\/2/);
+
+  const bothLost = formatSummary([
+    { taskId: 'count-lines', outcome: 'unsolved', scored: true, category: 'robustness', pair: 'count-lines', wallMs: 1 },
+    { taskId: 'count-lines-twin', outcome: 'unsolved', scored: true, category: 'robustness', pair: 'count-lines', wallMs: 1 },
+  ]);
+  assert.doesNotMatch(bothLost, /pair drift:/, 'a pair that failed together is not a drift');
 });

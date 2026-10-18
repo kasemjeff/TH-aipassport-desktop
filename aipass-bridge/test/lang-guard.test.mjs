@@ -149,7 +149,9 @@ test('an identical call is refused on the third time and counted', async () => {
   assert.equal(blocks.length, 1, 'exactly one refusal');
   const stat = b.stats();
   assert.equal(stat.repeatBlocks, 1);
-  assert.deepEqual(stat.tools.read, { n: 3, fail: 1 }, 'the third read is the refused one');
+  assert.equal(stat.tools.read.n, 3, 'three reads');
+  assert.equal(stat.tools.read.fail, 1, 'the third read is the refused one');
+  assert.ok(stat.tools.read.ms >= 0, 'the reads carry their wall time');
   assert.ok(stat.repeatedResults >= 1 && stat.novelResults >= 2, 'the novel/repeat split is real');
   assert.match(b.bridge.received[3], /repeating it cannot produce a different result|already made/i,
     'the refusal reached the model');

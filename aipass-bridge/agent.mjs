@@ -48,6 +48,7 @@ const MAX_RESULT = Number(flag('max-result', 3000));
 // Same default as the window's (settings.mjs 'thinking'): 'off' asks for
 // nothing and lets each model's own default stand.
 const THINKING = String(flag('thinking', 'low')).toLowerCase();
+const TEMPERATURE_RAW = flag('temperature', null);
 const CONVERSATION = flag('conversation', null);
 // A conversation carries its own history, so reusing one drags in whatever was
 // said before — including any refusal. Each run gets a fresh one by default.
@@ -60,6 +61,9 @@ const PERMANENT = has('permanent');
 // carries the NEED/EDIT/CREATE/DONE instructions, the preamble is redundant —
 // and sending it again is just extra payload for the edge to inspect.
 const SLIM = has('slim');
+// Quote git status and package.json scripts into the first message so a fresh
+// run starts oriented — off by default so the tuned turn-1 bytes stay identical.
+const SNAPSHOT = has('snapshot');
 // Stay open after the first task and take follow-ups on the same conversation,
 // so the model keeps everything it has already read in context.
 const WATCH = has('watch');
@@ -117,6 +121,7 @@ if (!task || HELP) {
   --skills DIR    playbook library for SKILL         (default: one level above the repo)
   --model ID      model id                           (default: bridge default)
   --thinking LVL  model thinking: off|low|medium|high|max  (default: low)
+  --temperature N sampling temperature: a number 0..2      (default: the site's per-model default)
   --apply         write without asking               (default: ask after the diff)
   --allow-run     let the agent run shell commands   (default: off)
   --max N         cap this run's steps (0 = none)     (default: none)
@@ -124,6 +129,7 @@ if (!task || HELP) {
   --read-lines N  max lines per read page            (default: 250)
   --file PATH     attach a document or image to the session
   --slim          send only the task, without the built-in preamble
+  --snapshot      quote git status and package.json scripts into turn 1
   --watch         stay open for follow-up tasks on the same conversation
   --reuse         continue the most recent conversation instead of a new one
   --permanent     keep the conversation in your chat history (default: temporary)
@@ -149,6 +155,15 @@ const THINKING_LEVELS = ['off', 'low', 'medium', 'high', 'max'];
 if (!THINKING_LEVELS.includes(THINKING)) {
   console.error(`bad --thinking: "${THINKING}" — expected ${THINKING_LEVELS.join(' | ')}`);
   process.exit(1);
+}
+
+let TEMPERATURE = null;
+if (TEMPERATURE_RAW != null) {
+  TEMPERATURE = Number(TEMPERATURE_RAW);
+  if (!Number.isFinite(TEMPERATURE) || TEMPERATURE < 0 || TEMPERATURE > 2) {
+    console.error(`bad --temperature: "${TEMPERATURE_RAW}" — expected a number 0..2`);
+    process.exit(1);
+  }
 }
 
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;
@@ -316,9 +331,11 @@ const harness = new Harness({
   options: {
     maxSteps: MAX_STEPS,
     thinking: THINKING,
+    temperature: TEMPERATURE,
     allowRun: ALLOW_RUN,
     mode: 'auto',
     slim: SLIM || Boolean(ASSISTANT),
+    snapshot: SNAPSHOT,
     plan: has('plan'),
     searchI: SEARCH_I,
     attach: ATTACH,
@@ -398,6 +415,7 @@ console.log(bold('chat  ') + (bridgeStatus?.conversation ?? 'resolves on first m
   dim(CONVERSATION ? '  (continuing)' : REUSE ? '  (reusing the most recent)' : PERMANENT ? '  (new)' : '  (new, temporary)') +
   (ASSISTANT ? dim(`  · assistant ${ASSISTANT}`) : ''));
 console.log(bold('think ') + (THINKING === 'off' ? dim('off') : THINKING));
+if (TEMPERATURE != null) console.log(bold('temp  ') + TEMPERATURE);
 
 const runOne = async (text, first) => {
   await harness.run(text, { first });

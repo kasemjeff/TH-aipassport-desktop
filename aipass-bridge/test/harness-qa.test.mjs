@@ -114,7 +114,7 @@ test('settings.reset returns to defaults but keeps the project you are in', asyn
 });
 
 test('context reports the budget, and compact rotates the conversation', async (t) => {
-  const { call, stop } = await startRpc({ replies: ['ok', 'summary of earlier work', 'ok'] });
+  const { call, stop } = await startRpc();
   try {
     // Compaction asks the model for a summary and starts a conversation, so it
     // needs the extension just like a run does.
@@ -134,5 +134,37 @@ test('context reports the budget, and compact rotates the conversation', async (
     const after = await call('status');
     assert.ok(after.result.context.percent <= before.result.context.percent,
       'rotation lowers the estimate by moving the history off the conversation');
+
+    // A manual /compact has no run of its own: its summary must reach the
+    // model on the NEXT run — the seed is that run's first message, and the
+    // session file shows it was sent, carrying that run's own task.
+    const again = await call('run', { task: 'continue the work', mode: 'ask' });
+    assert.equal(again.ok, true, again.error);
+    const entries = (await call('session.entries')).result;
+    const boundary = entries.findLastIndex((e) => e.type === 'compaction');
+    const seed = entries.slice(boundary + 1).find((e) => e.type === 'user' && /Earlier work, already done/.test(e.text ?? ''));
+    assert.ok(seed, 'the run after a manual /compact carries the summary');
+    assert.match(seed.text, /Task: continue the work/, "built against that run's own task");
+  } finally { stop(); }
+});
+
+test('compact refuses while a run is in flight', async (t) => {
+  const { call, stop } = await startRpc();
+  try {
+    // A reply that takes its time holds the run in flight while the compact
+    // request arrives: rotating under it would move the conversation its
+    // next message is aimed at.
+    const ext = await new FakeExtension(bridge.base, {
+      onChat: async (job, emit) => { await new Promise((r) => setTimeout(r, 200)); await emit.text('ok'); await emit.done(); },
+    }).connect();
+    t.after(() => ext.disconnect());
+
+    const running = call('run', { task: 'take a while', mode: 'ask' });
+    await new Promise((r) => setTimeout(r, 80));
+    const refused = await call('compact');
+    assert.equal(refused.ok, false, 'the rotation waits for the run');
+    assert.match(refused.error, /in flight/);
+    const finished = await running;
+    assert.equal(finished.ok, true, finished.error);
   } finally { stop(); }
 });

@@ -125,3 +125,34 @@ export default {
   assert.deepEqual(details.tools, ['PLAIN_TOOL'], 'the refused plugin setup never ran');
   assert.equal(details.loaded[0].apiVersion, null, 'silence means API 1, recorded as null');
 });
+
+test('a tool risk must be a known word, and the table carries what was declared', async () => {
+  const dir = tempDir({
+    'settings.json': JSON.stringify({ plugins: [] }),
+    'plugins/risky.mjs': `
+export default {
+  name: 'risky',
+  version: '1.0.0',
+  setup(ctx) {
+    ctx.tools.register('NOTE', () => 'ok', { risk: 'write' });
+    ctx.tools.register('PLAIN', () => 'ok');
+  },
+};
+`,
+    'plugins/bad.mjs': `
+export default {
+  name: 'bad',
+  version: '1.0.0',
+  setup(ctx) { ctx.tools.register('BAD_TOOL', () => 'x', { risk: 'sudo' }); },
+};
+`,
+  });
+  const manager = new PluginManager({ dir: path.join(dir, 'plugins'), settings: new Settings(dir), log: () => {} });
+  const details = await manager.load();
+
+  const byMarker = Object.fromEntries(manager.toolTable().map((t) => [t.marker, t]));
+  assert.equal(byMarker.NOTE.risk, 'write', 'the declared risk rides the table the loop reads');
+  assert.equal(byMarker.PLAIN.risk, null, 'undeclared stays null — the old trust, unchanged');
+  assert.equal(details.failed.length, 1, 'an unknown risk fails the plugin at load, not mid-run');
+  assert.match(details.failed[0].error, /risk must be 'read', 'write', 'shell'/);
+});

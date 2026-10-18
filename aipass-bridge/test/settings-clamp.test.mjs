@@ -26,6 +26,11 @@ test('a value that would break a run is clamped, not stored', () => {
     assert.equal(s.set({ compactAtPercent: 9_999 }).compactAtPercent, 100, 'the rotation share has a ceiling');
     assert.equal(s.set({ thinking: 'banana' }).thinking, 'low', 'an unknown thinking level falls back, never stores');
     assert.equal(s.set({ thinking: 'high' }).thinking, 'high', 'and a real level passes through');
+    assert.equal(s.set({ temperature: 0.7 }).temperature, 0.7, 'a real temperature passes through');
+    assert.equal(s.set({ temperature: 5 }).temperature, 2, 'an out-of-range temperature is clamped to the ceiling');
+    assert.equal(s.set({ temperature: -1 }).temperature, 0, 'a negative temperature is clamped to the floor');
+    assert.equal(s.set({ temperature: 'banana' }).temperature, null, 'nonsense falls back to the default, never a request');
+    assert.equal(s.set({ temperature: null }).temperature, null, 'null means "the site decides"');
     assert.equal(s.set({ maxToolCalls: 0 }).maxToolCalls, 300, 'zero tool calls means the default, never zero');
     assert.equal(s.set({ maxToolCalls: 25 }).maxToolCalls, 25, 'a real tool-call cap passes through');
     assert.equal(s.set({ maxToolCalls: 9_999_999 }).maxToolCalls, 10_000, 'the tool-call cap has a ceiling');

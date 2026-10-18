@@ -44,13 +44,16 @@ gets long.
 
 So the harness works *around* it rather than pretending otherwise:
 
-| What pi does | What this does | Why |
+| The constraint | How this works | Why |
 |---|---|---|
-| manages a message array | keeps a local session log (JSONL) and replays one user message per turn | the array would be a 403 |
-| compacts by dropping messages | summarises, then **rotates**: a fresh temporary conversation seeded with the summary | the server's history cannot be trimmed |
-| calls a subagent on a second session | saves the conversation, runs the helper on its own, restores | the bridge holds exactly one current conversation |
-| asks per tool natively | the protocol has a permission gate; writes never touch disk until approved | writes are CREATE/EDIT/DELETE/MOVE in prose |
-| skills/extensions from a registry | `~/.aipass/skills`, `<project>/.aipass/skills`, then the shipped library | plain markdown, no manifest |
+| the upstream owns the conversation | keeps a local session log (JSONL) and replays one user message per turn | a `messages` array with an assistant turn is a 403 |
+| the upstream cannot be trimmed | summarises, then **rotates**: a fresh temporary conversation seeded with the summary | the server's history cannot be trimmed |
+| the bridge holds one conversation | saves the conversation, runs the helper on its own, restores | a second session would clobber the current one |
+| there are no native tool calls | the protocol has a permission gate; writes never touch disk until approved | writes are CREATE/EDIT/DELETE/MOVE in prose |
+| playbooks and extensions | `~/.aipass/skills`, `<project>/.aipass/skills`, then the shipped library | plain markdown, no manifest |
+
+The session log borrows its JSONL-per-session, tree-of-entries shape from the pi
+coding agent; everything else above is our own design. (Influence, not code.)
 
 ## The window
 
@@ -316,6 +319,9 @@ macOS and Linux builds are wired and compile per-branch, but the verified end
 to end on this machine is the Windows one: the packaged app has been run and
 quit there, and the tray behaviour was exercised by hand. Treat the other two
 as ready-to-try, not as ready-to-ship, until somebody runs them and says so.
+The Node-side suite now takes a macOS lane in `.github/workflows/test.yml`, so
+a darwin branch bug shows up on push; the packaged window and tray are still
+the hand-run part.
 
 Toolchain on this machine: Rust 1.99 (`D:\rust`), MSVC Build Tools (`D:\VS`),
 cargo target `D:\aipass-build`. The Node sidecar is a copy of the local
@@ -337,7 +343,10 @@ What it holds: default model (+ the **thinking level** the model reasons at
 before each step — edited from the composer's effort chip in the window, or
 `/thinking` in the terminal; it streams into a fold labeled `✻ reasoning…` and
 closes when the turn ends, and only models that advertise thinking levels
-honour it), write
+honour it), the **sampling temperature** (`temperature`, 0..2 — edited from
+the composer's temperature chip beside the effort chip; `null` leaves it to
+the server's per-model default, and a value outside the range is clamped),
+write
 permission (`ask` / `auto` / `yolo`), `allowRun`, `maxSteps` (0 = no cap, the
 shipped default), the per-run caps `maxToolCalls` / `maxWallClockMs` (the sheet
 asks for the wall clock in minutes), plan mode (+
@@ -359,7 +368,7 @@ refused at Save rather than stored where it would look like protection.
 Every setting applies the moment it is written — not just the file, the
 running process: the ones that govern a run (`maxSteps`, the per-run caps,
 plan,
-`requirePlanApproval`, helpers, thinking, model, mode, the compaction knobs) move
+`requirePlanApproval`, helpers, thinking, temperature, model, mode, the compaction knobs) move
 the live harness — the composer's effort chip writes the same way the moment it
 changes — `skillsDirs` rebuilds the playbook library, the plugin list
 reloads the plugins by name, and a new root switches project outright. The
@@ -398,6 +407,7 @@ A plugin is one `.mjs` file in `~/.aipass/plugins` (or a folder with a
 ```js
 setup(ctx) {
   ctx.tools.register('NOTE', handler, { description: '…' });  // a marker the model can call
+  ctx.tools.register('SEND', handler, { risk: 'shell' });      // …routed through the permission gate
   ctx.panel({ id: 'notes', title: 'scratchpad', render });     // a sidebar section
   ctx.rpc.method('plugin.notes.clear', handler);               // a /rpc method
   ctx.settings.define({ key: 'notes.file', label: '…' });      // a setting
@@ -408,7 +418,11 @@ setup(ctx) {
 Tools the model can call arrive as `MARKER rest-of-line` — or as a block ending
 in `END` when `takesBody` is true — and their result comes back exactly like a
 NEED or SEARCH result. The preamble grows one paragraph listing them while a
-run is in flight.
+run is in flight. A tool that declares `risk: 'write' | 'shell'` rides the same
+permission gate a built-in of that kind does (asked in `ask`/`auto` modes,
+per the path rules); without it the tool keeps the stated trust and runs
+directly — the choice is the plugin author's, made where the tool is
+registered.
 
 Panels are rendered across the process boundary, so a plugin returns markup
 (`render: async () => ({ html })`) rather than DOM nodes. Plugins run in the

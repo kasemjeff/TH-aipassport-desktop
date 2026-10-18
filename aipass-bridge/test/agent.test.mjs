@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execSync } from 'node:child_process';
 import { startBridge, FakeExtension, scripted, tempDir, run, AGENT } from './harness.mjs';
 import { outbound, inbound } from '../harness/waf.mjs';
 
@@ -84,6 +85,46 @@ test('later turns carry only results, never the instructions again', async (t) =
   assert.ok(handler.sent.length >= 2);
   assert.doesNotMatch(handler.sent[1], /NEED file README\.md/, 'preamble must not be resent');
   assert.ok(Buffer.byteLength(handler.sent[1]) < Buffer.byteLength(handler.sent[0]) / 2);
+});
+
+test('--snapshot quotes git status and package.json scripts into turn 1', async (t) => {
+  const dir = tempDir({
+    'package.json': JSON.stringify({ scripts: { test: 'node --test', build: 'node build.mjs' } }, null, 2),
+    'wip.txt': 'half done\n',
+  });
+  // The git half is exercised where git exists; the scripts half everywhere.
+  let repo = false;
+  try {
+    execSync('git init -q', { cwd: dir, stdio: 'ignore', windowsHide: true });
+    repo = fs.existsSync(path.join(dir, '.git'));
+  } catch { /* git absent — the scripts half still runs */ }
+
+  const handler = scripted(['DONE looked around']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  await agent(dir, ['--snapshot']);
+  const first = handler.sent[0];
+  assert.match(first, /Snapshot of where this project stands right now/, 'the snapshot rides turn 1');
+  assert.match(first, /package scripts:/, 'the scripts section is there');
+  assert.match(first, /test: node --test/, 'a script line is quoted verbatim');
+  if (repo) {
+    assert.match(first, /git status:/, 'the repository is a git repository');
+    assert.match(first, /wip\.txt/, 'an uncommitted file is named');
+  } else {
+    assert.doesNotMatch(first, /git status:/, 'no repository, no git line');
+  }
+});
+
+test('without --snapshot turn 1 carries no snapshot bytes', async (t) => {
+  const dir = tempDir({ 'package.json': JSON.stringify({ scripts: { test: 'x' } }) });
+  const handler = scripted(['DONE done']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  await agent(dir);
+  assert.doesNotMatch(handler.sent[0], /Snapshot of where this project stands|package scripts:/,
+    'the flag is the only way the snapshot appears');
 });
 
 test('dry run shows a diff but writes nothing; --apply writes', async (t) => {
@@ -777,7 +818,10 @@ test('a text file that merely contains odd bytes is still readable', async (t) =
 // The other half of issue #32: --watch continues the same conversation, so a
 // follow-up inherited the model's earlier (wrong) conclusion that it could not
 // reach the filesystem. A bare "New task:" gave it nothing to correct against.
-test('a --watch follow-up re-states the frame and the current listing', async (t) => {
+// (listing delta) The frame is still restated on every follow-up; the listing
+// itself is only pasted again when it moved — the same conversation still
+// holds the last one, so repeating it byte-for-byte bought nothing.
+test('a --watch follow-up re-states the frame; an unchanged listing stays one line', async (t) => {
   const dir = tempDir({ 'a.txt': 'x\n' });
   const handler = scripted(['DONE nothing to do']);
   const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
@@ -788,7 +832,33 @@ test('a --watch follow-up re-states the frame and the current listing', async (t
   const followUp = handler.sent.at(-1);
   assert.match(followUp, /New task: second task/);
   assert.match(followUp, /still open in front of me/, 'the frame is restated');
-  assert.match(followUp, /a\.txt/, 'with ground truth to correct a drifted belief against');
+  assert.match(followUp, /Top level: unchanged since my last listing of it/, 'ground truth in one line');
+  assert.doesNotMatch(followUp, /a\.txt/, 'the full table is not re-pasted when nothing moved');
+});
+
+// The other half of the delta: the moment the tree moves, the follow-up must
+// carry the new entries — "unchanged" here would be issue #32's drift wearing
+// the delta's clothes.
+test('a --watch follow-up pastes the listing whole once the tree moved', async (t) => {
+  const dir = tempDir({ 'a.txt': 'x\n' });
+  const inner = scripted(['DONE nothing to do']);
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (job, e) => {
+      const out = await inner(job, e);
+      // The tree moves between the two tasks: the second run's listing no
+      // longer matches what the conversation was shown.
+      if (inner.sent.length === 1) fs.writeFileSync(path.join(dir, 'b.txt'), 'arrived late\n');
+      return out;
+    },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  await agent(dir, ['--watch'], { stdin: [[300, 'second task\n'], [400, 'exit\n']] });
+  assert.ok(inner.sent.length >= 2, 'the follow-up task ran');
+  const followUp = inner.sent.at(-1);
+  assert.match(followUp, /Top level right now:/, 'the moved listing is pasted whole');
+  assert.match(followUp, /a\.txt/, 'the entries the conversation already knew');
+  assert.match(followUp, /b\.txt/, 'and the new entry that moved the listing');
 });
 
 test('thinking is on by default and rides every send as thinking_level', async (t) => {
@@ -821,6 +891,25 @@ test('--thinking off asks for nothing and a bad level stops the start', async (t
   const bad = await agent(dir, ['--thinking', 'banana']);
   assert.equal(bad.code, 1, 'a typo is refused before any message is sent');
   assert.match(bad.out, /bad --thinking/);
+});
+
+test('--temperature rides every send, and a bad value stops the start', async (t) => {
+  const dir = tempDir({ 'README.md': 'x\n' });
+  const handler = scripted(['DONE nothing to do']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir, ['--temperature', '0.4']);
+  assert.ok(ext.chats.length >= 1, 'the run sent at least one message');
+  assert.equal(ext.chats.at(-1).temperature, 0.4, 'the flag rides the send');
+  assert.match(out, /temp/, 'the header names the level');
+
+  await agent(dir);
+  assert.equal(ext.chats.at(-1).temperature, undefined, 'without the flag the site default stands');
+
+  const bad = await agent(dir, ['--temperature', 'hot']);
+  assert.equal(bad.code, 1, 'a typo is refused before any message is sent');
+  assert.match(bad.out, /bad --temperature/);
 });
 
 test('reasoning streams as its own dim line, apart from the step', async (t) => {

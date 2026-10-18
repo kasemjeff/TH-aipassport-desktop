@@ -514,10 +514,31 @@ test('creates a temporary conversation and repeats the flag on every turn', asyn
   // the id comes from the conversation object, not a conversationId field
   assert.equal(made.id, 'M5uhmgOBsPk0v4WN');
 
-  await post({ messages: [{ role: 'user', content: 'hi' }] });
+  // Named per send, the temporary conversation is used and the flag repeats.
+  await post({ messages: [{ role: 'user', content: 'hi' }], conversation: made.id, temporary: true });
   const chat = ext.chats.at(-1);
   assert.equal(chat.conversationId, 'M5uhmgOBsPk0v4WN');
   assert.equal(chat.temporary, true, 'every turn must repeat isTemporary');
+});
+
+test('a nameless send never lands inside a temporary conversation', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  // Creating adopts the pointer, as usual for the session that created it.
+  const made = await (await fetch(`${bridge.base}/conversations/new`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ temporary: true }),
+  })).json();
+
+  // A caller with no conversation of its own resolves from the account's own
+  // list instead: a temporary conversation is private to the session that
+  // minted it, and its send must not read context it never saw written.
+  await post({ messages: [{ role: 'user', content: 'hi' }] });
+  const chat = ext.chats.at(-1);
+  assert.notEqual(chat.conversationId, made.id);
+  assert.equal(chat.conversationId, 'aaaa1111aaaa1111', 'the account list is what a nameless caller gets');
+  assert.ok(!chat.temporary);
 });
 
 test('a normal conversation is not marked temporary', async (t) => {
@@ -543,6 +564,39 @@ test('passes a valid thinking level through and drops a bogus one', async (t) =>
 
   await post({ messages: [{ role: 'user', content: 'hi' }], thinking_level: 'ludicrous' });
   assert.equal(ext.chats.at(-1).thinkingLevel, undefined, 'an unknown level must not be forwarded');
+});
+
+test('a temperature rides the job, clamped to 0..2, and a bogus one is dropped with a warning', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  await post({ messages: [{ role: 'user', content: 'hi' }], temperature: 0.7 });
+  assert.equal(ext.chats.at(-1).temperature, 0.7);
+
+  await post({ messages: [{ role: 'user', content: 'hi' }], temperature: 5 });
+  assert.equal(ext.chats.at(-1).temperature, 2, 'a number outside the range is clamped, not sent as-is');
+
+  const nullLog = bridge.logText();
+  await post({ messages: [{ role: 'user', content: 'hi' }], temperature: null });
+  assert.equal(ext.chats.at(-1).temperature, undefined, 'null means "not set", never Number(null) = 0');
+  assert.doesNotMatch(bridge.logText().slice(nullLog.length), /temperature/, 'null is not a mistake to warn about');
+
+  const logBefore = bridge.logText();
+  await post({ messages: [{ role: 'user', content: 'hi' }], temperature: 'banana' });
+  assert.equal(ext.chats.at(-1).temperature, undefined, 'a value that is not a number must not be forwarded');
+  assert.match(bridge.logText().slice(logBefore.length), /temperature/);
+});
+
+test('ignored OpenAI sampling fields earn one warning naming them', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  const logBefore = bridge.logText();
+  await post({ messages: [{ role: 'user', content: 'hi' }], top_p: 0.9, max_tokens: 100, seed: null });
+  const newLog = bridge.logText().slice(logBefore.length);
+  assert.match(newLog, /ignoring unsupported request fields: top_p, max_tokens/);
+  assert.doesNotMatch(newLog, /seed/, 'a field present but null is "not set", not a dropped setting');
+  assert.doesNotMatch(newLog, /temperature/);
 });
 
 const PDF = 'data:application/pdf;base64,JVBERi0xLjQK';

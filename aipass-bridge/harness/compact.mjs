@@ -11,6 +11,26 @@
 // continuous piece of work.
 import { outbound } from './waf.mjs';
 
+// Conservative per-model context budgets (tokens). Used as the default when a
+// surface does not name one, so a flash-class run no longer rotates every 9k
+// tokens while a pro-class run still gets room. Prefix-matched in budgetFor()
+// (key length >= 3), so more specific keys must come first.
+export const DEFAULT_MODEL_BUDGETS = {
+  'flash-lite': 100_000,
+  'flash': 100_000,
+  'pro': 200_000,
+  'sonnet': 200_000,
+  'opus': 200_000,
+  'gpt-5': 200_000,
+  'gpt-6': 200_000,
+  'deepseek': 128_000,
+  'qwen': 128_000,
+  'llama': 128_000,
+  'mistral': 128_000,
+  'grok': 128_000,
+  'gemini': 1_000_000,
+};
+
 // Scripts that do not separate words with spaces — Thai first among them —
 // cost a tokenizer roughly twice as many tokens per byte as English. When the
 // conversation's own text is mostly one of these, the byte estimate divides by
@@ -24,9 +44,44 @@ const WIDE_SCRIPT = /[\u0590-\u05FF\u0600-\u06FF\u0900-\u097F\u0E00-\u0E7F\u0E80
 // per-character loop did.
 const WIDE_SCRIPT_G = new RegExp(WIDE_SCRIPT.source, 'g');
 
+// The elision tier (`elideStaleResults`, off by default — the queue record
+// `elision-tier` is what flips the default): the summarisation transcript is
+// the one bill the context manager pays for its own bookkeeping, and stale
+// tool results dominate it. A stale message past the recency window is cut to
+// a counted head…tail stub — its opening (what the output was) and its ending
+// (the verdict or the error) — instead of the plain 1200-char slice that paid
+// for the bulk either way. The slice's first message is never elided: it is
+// the only candidate for the opening seed, where the task statement sits.
+// Turning the tier on can only shrink the transcript, never grow it.
+const ELIDE_MIN_CHARS = 1200; // only messages the plain slice would cut anyway
+const ELIDE_KEEP_RECENT = 8;  // the newest sends stay whole — they carry the live state
+const ELIDE_HEAD = 240;
+const ELIDE_TAIL = 240;
+
+// The memory tier (`carryMemory`, on by default; `AIPASS_MEMORY=off`): the
+// durable facts a rotation must not lose — decisions, constraints, files.
+// The summariser is asked for them as a trailing MEMORY: section on the same
+// call (one bill, two products); they merge across rotations (deduped,
+// clipped, capped), record on the compaction entry, and pin into every later
+// seed. A reply without the section costs nothing — the narrative is
+// unchanged and the facts simply stay in prose. The cap is the failure
+// behavior: an overflow drops the oldest facts, never the newest.
+const MEMORY_FACTS_MAX = 20;
+const MEMORY_FACT_MAX = 200; // chars per fact
+
 const envPositive = (name, fallback) => {
   const n = Number(process.env[name]);
   return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+// A boolean env switch, the sibling of envPositive: unset means the option
+// stands; `1/true/on/yes` turns it on and anything else turns it off. The
+// CLI builds no settings object, so these are the tuning channel a terminal
+// run has — and what the experiment arms run against.
+const envFlag = (name, fallback = false) => {
+  const v = String(process.env[name] ?? '').trim().toLowerCase();
+  if (!v) return fallback;
+  return v === '1' || v === 'true' || v === 'on' || v === 'yes';
 };
 
 export class Compactor {
@@ -45,8 +100,19 @@ export class Compactor {
    *                                     which is what the CLI runs on; the window's
    *                                     settings sheet owns that knob.
    * @param {number} opts.keepRecentBytes recent traffic never summarised away
+   * @param {boolean} [opts.elideStaleResults] the elision tier: cut stale,
+   *                                     bulky sends in the summarisation
+   *                                     transcript to head…tail stubs. Off by
+   *                                     default — the `elision-tier` arm is
+   *                                     what flips it; `AIPASS_ELIDE` turns it
+   *                                     on for a terminal run.
+   * @param {boolean} [opts.carryMemory] the memory tier: extract the durable
+   *                                     facts from the summary reply, merge
+   *                                     them across rotations, and pin them
+   *                                     into every later seed. On by default;
+   *                                     `AIPASS_MEMORY=off`.
    */
-  constructor({ bridge, events = null, contextTokens = 24_000, budgets = null, reserveTokens = 4_096, compactAtPercent = null, keepRecentBytes = 6_000 } = {}) {
+  constructor({ bridge, events = null, contextTokens = 24_000, budgets = null, reserveTokens = 4_096, compactAtPercent = null, keepRecentBytes = 6_000, elideStaleResults = false, carryMemory = true } = {}) {
     this.bridge = bridge;
     this.events = events;
     this.budgets = budgets ?? {};
@@ -57,6 +123,8 @@ export class Compactor {
     this.keepRecentBytes = envPositive('AIPASS_KEEP_RECENT_BYTES', keepRecentBytes);
     this.reserveTokens = reserveTokens;
     this.compactAtPercent = compactAtPercent == null ? null : Math.min(100, Math.max(1, Number(compactAtPercent)));
+    this.elideStaleResults = envFlag('AIPASS_ELIDE', Boolean(elideStaleResults));
+    this.carryMemory = envFlag('AIPASS_MEMORY', carryMemory !== false);
   }
 
   /** The share of the budget the window rotates at, or null when unset. */
@@ -106,16 +174,18 @@ export class Compactor {
       else if (e.type === 'assistant') bytes += Buffer.byteLength(e.text ?? '');
     }
     bytes -= this.keepRecentBytes;
-    return Math.max(0, Math.round(bytes / this.divisorFor(entries)));
+    return Math.max(0, Math.round(bytes / this.divisorFor(entries, start)));
   }
 
   /**
-   * Bytes-per-token divisor, measured on a sample of the conversation itself:
-   * mostly Latin script → 4, a real mix of scripts → 3, mostly wide-script → 2.
+   * Bytes-per-token divisor, measured on a sample of the entries the estimate
+   * actually counts — the current conversation, not what a rotation left
+   * behind: mostly Latin script → 4, a real mix of scripts → 3, mostly
+   * wide-script → 2.
    */
-  divisorFor(entries) {
+  divisorFor(entries, start = 0) {
     let total = 0, wide = 0, seen = 0;
-    for (let i = entries.length - 1; i >= 0 && seen < 40_000; i--) {
+    for (let i = entries.length - 1; i >= start && seen < 40_000; i--) {
       const t = entries[i].text;
       if (typeof t !== 'string' || !t) continue;
       seen += t.length;
@@ -140,33 +210,144 @@ export class Compactor {
   }
 
   /**
+   * The summarisation transcript: the last sends, each sliced to 1200 chars —
+   * and, when the elision tier is on, stale bulky ones cut to a counted
+   * head…tail stub instead. Head and tail survive because they are the parts
+   * a summary can use: the opening says what the output was, the ending
+   * usually carries the verdict or the error; the middle is the bulk the
+   * slice was paying for either way. This shrinks this one call's bill —
+   * what the server holds is untouched.
+   */
+  transcriptFor(sent) {
+    const staleBelow = Math.max(0, sent.length - ELIDE_KEEP_RECENT);
+    return sent.map((m, i) => {
+      const text = String(m?.text ?? '');
+      // The slice's first message is the only one that can be the opening
+      // seed — where the task statement sits when the conversation is young;
+      // never elided, at the cost of one message's worth of saving.
+      if (!this.elideStaleResults || i === 0 || i >= staleBelow || text.length <= ELIDE_MIN_CHARS) {
+        return text.slice(0, 1200);
+      }
+      const middle = text.length - ELIDE_HEAD - ELIDE_TAIL;
+      return `${text.slice(0, ELIDE_HEAD)}\n… [elided ${middle} chars of a stale tool result — it ran; its outcome and any follow-up are in the later steps] …\n${text.slice(-ELIDE_TAIL)}`;
+    }).join('\n---\n');
+  }
+
+  /**
    * Ask the model for a summary of the work so far, in the conversation that
    * already holds the history — it is the only party that can see all of it.
+   * The memory ask rides the same call (one bill, two products); a model that
+   * ignores the format still compacts correctly, because digest() falls back
+   * to the text as written.
+   * The conversation is named explicitly (when there is one): the bridge's
+   * shared pointer can have been moved by another session's run since this
+   * one started, and a summary request is the one message that must land in
+   * the conversation it is summarising.
    */
-  async summarize(session, { task = '', model = null } = {}) {
+  async summarize(session, { task = '', model = null, conversation = null, temporary = null } = {}) {
     const sent = session.sentMessages().slice(-40);
-    const transcript = sent.map((m) => m.text.slice(0, 1200)).join('\n---\n');
+    const transcript = this.transcriptFor(sent);
+    const memoryAsk = this.carryMemory
+      ? `\n\nAfter the summary, on its own line, write exactly MEMORY: and then up to 10 bullet lines ("- " prefix, each under 200 characters) holding only durable facts a future conversation must not rediscover — a decision and its reason (prefix "decision:"), a constraint ("constraint:"), a file path and its role ("file:"). No other bullets; if nothing qualifies, leave the section empty.`
+      : '';
     const prompt = `Summarise the work carried out so far in this session, so it can continue in a fresh conversation.
 
-Capture, in under 400 words: what was asked, what was found, what files were read, what was changed (path + what changed), what was decided, and what is still outstanding. Keep every proper noun, name, number, date, filename and quoted string exactly as written — never translate, shorten or paraphrase them; Thai text stays Thai. Current task: ${task || '(none given)'}.
+Capture, in under 400 words: what was asked, what was found, what files were read, what was changed (path + what changed), what was decided, and what is still outstanding. Keep every proper noun, name, number, date, filename and quoted string exactly as written — never translate, shorten or paraphrase them; Thai text stays Thai. Current task: ${task || '(none given)'}.${memoryAsk}
 
 Conversation so far, oldest first:
 ${transcript}`;
 
-    const res = await this.bridge.chat({ message: outbound(prompt), model });
+    const res = await this.bridge.chat({ message: outbound(prompt), model, ...(conversation ? { conversation, temporary } : {}) });
     return res.text.trim();
+  }
+
+  /**
+   * Split a summariser reply into its two products: the narrative, and the
+   * trailing MEMORY: facts (when the tier is on). Lenient by design — the
+   * label is matched case-insensitively on a line of its own (markdown
+   * emphasis tolerated), bullets are `-`/`*`/`•`/`N.` lines under it, and a
+   * reply without the section returns the text untouched with an empty list.
+   */
+  splitSummary(raw) {
+    const text = String(raw ?? '').trim();
+    if (!text) return { summary: '', memory: [] };
+    const lines = text.split('\n');
+    let at = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const label = lines[i].trim().replace(/^\*+|\*+$/g, '').trim();
+      if (/^MEMORY:?$/i.test(label)) { at = i; break; }
+    }
+    if (at === -1) return { summary: text, memory: [] };
+    const memory = [];
+    for (const line of lines.slice(at + 1)) {
+      const bullet = line.match(/^\s*(?:[-*•]|\d+[.)])\s+(.+)$/);
+      if (bullet) memory.push(bullet[1].trim());
+    }
+    return { summary: lines.slice(0, at).join('\n').trim(), memory };
+  }
+
+  /**
+   * The facts the latest rotation carried, read off the newest compaction
+   * entry — empty for a session that never rotated, or one whose record
+   * predates the memory tier. A missing field is zero facts to merge, not a
+   * problem to fix.
+   */
+  memoryOf(session) {
+    const entries = session?.entries ?? [];
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e?.type === 'compaction') return Array.isArray(e.memory) ? e.memory : [];
+    }
+    return [];
+  }
+
+  /**
+   * prev + fresh, oldest first, deduped and capped: a fact never rides twice
+   * (case- and whitespace-insensitive), one runaway bullet cannot eat the
+   * budget the memory exists to save, and an overflow drops the oldest facts
+   * — the newest are what a live run is building on.
+   */
+  mergeMemory(prev = [], fresh = []) {
+    const out = [];
+    const seen = new Set();
+    for (const raw of [...prev, ...fresh]) {
+      const fact = String(raw ?? '').replace(/\s+/g, ' ').trim();
+      if (!fact) continue;
+      const clipped = fact.length > MEMORY_FACT_MAX ? `${fact.slice(0, MEMORY_FACT_MAX - 1)}…` : fact;
+      const key = clipped.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(clipped);
+    }
+    return out.slice(-MEMORY_FACTS_MAX);
+  }
+
+  /**
+   * One rotation's two products, ready to record and seed. The merge reads
+   * the session, so the cap accumulates across rotations instead of per
+   * call; the off-switch refuses the whole tier whatever is already stored —
+   * the seed stops mentioning facts the moment `carryMemory` is off.
+   */
+  digest(session, raw) {
+    const { summary, memory } = this.splitSummary(raw);
+    return {
+      summary,
+      memory: this.carryMemory ? this.mergeMemory(this.memoryOf(session), memory) : [],
+    };
   }
 
   /**
    * The first message of a rotated conversation: the summary, the task, and
    * the instruction frame that keeps the model inside the marker protocol.
    * A mid-run rotation pastes the step's tool results on top, so nothing the
-   * model asked for is lost to the rotation itself. Two harder-won things
+   * model asked for is lost to the rotation itself. Three harder-won things
    * ride along when the caller has them: the staged file list (edits the
-   * summary may compress away) and the last failing check, pinned verbatim so
-   * the fresh conversation does not repeat either by accident.
+   * summary may compress away), the last failing check, pinned verbatim so
+   * the fresh conversation does not repeat either by accident, and the
+   * merged memory facts — the distilled backbone the narrative is a
+   * rephrasing of.
    */
-  seed({ summary, task, listing, preambleText, results = null, staged = null, lastCheck = null }) {
+  seed({ summary, task, preambleText, results = null, staged = null, lastCheck = null, memory = null, todo = null }) {
     const tail = results
       ? `Here are the results of the step just finished:\n${results}\n\nContinue the task from there.`
       : 'What should I open first?';
@@ -177,11 +358,19 @@ ${transcript}`;
       lastCheck
         ? `\nThe last check of the staged tree did not pass (${lastCheck.verdict}):\n${String(lastCheck.text ?? '').slice(0, 600)}`
         : '',
+      Array.isArray(todo) && todo.length
+        ? `\nThe plan/TODO checklist this run recorded, as it stands — keep it in step (send TODO with [x] as items finish):\n${todo.map((i) => `- [${i.done ? 'x' : ' '}] ${i.text}`).join('\n')}`
+        : '',
     ].join('');
+    // Facts ride next to the narrative, and only when there are any — a seed
+    // without them is byte-for-byte what it always was.
+    const facts = Array.isArray(memory) && memory.length
+      ? `\n\nFacts carried from earlier rotations (durable; re-check anything that may have gone stale):\n${memory.map((m) => `- ${m}`).join('\n')}`
+      : '';
     return `${preambleText}
 
 Earlier work, already done — do not repeat it, build on it:
-${summary || '(nothing recorded yet)'}
+${summary || '(nothing recorded yet)'}${facts}
 
 Task: ${task}${carried}
 

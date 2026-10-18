@@ -101,21 +101,59 @@ test('an unknown entry type from a newer build is preserved, not dropped', () =>
   assert.equal(typeof s.meta().entryCount, 'number');
 });
 
+test('a compaction entry with no summary loads and still reads as a marker', () => {
+  const dir = tmp();
+  const file = path.join(dir, 'session-bare-compaction.jsonl');
+  writeSession(file, [
+    header('bare'),
+    entry('user', 'u1', 'bare', { text: 'before' }),
+    entry('compaction', 'c1', 'u1'), // an older or hand-edited write: no summary
+    entry('user', 'u2', 'c1', { text: 'after' }),
+  ]);
+
+  const s = new SessionStore(dir).load(file);
+  assert.deepEqual(s.entries.map((e) => e.type), ['user', 'compaction', 'user'], 'the marker rides along');
+  assert.equal(s.find('c1').summary, undefined, 'nothing invents a summary');
+  const md = s.toMarkdown(); // must not throw on the barest marker
+  assert.match(md, /compacted: \(no summary\)/, 'the renderer says a summary is missing instead of printing undefined');
+  assert.match(md, /after/, 'the rest of the transcript still renders');
+});
+
+test('an unknown entry type survives a header rewrite, not just a load', () => {
+  const dir = tmp();
+  const file = path.join(dir, 'session-future2.jsonl');
+  writeSession(file, [
+    header('future2'),
+    entry('user', 'u1', 'future2', { text: 'hi' }),
+    entry('widget', 'w1', 'u1', { payload: { shape: 'unseen' } }), // a future type
+  ]);
+
+  const store = new SessionStore(dir);
+  store.rename(file, 'renamed after a newer build wrote it');
+
+  const reloaded = store.load(file);
+  assert.equal(reloaded.title, 'renamed after a newer build wrote it', 'the rename landed');
+  assert.deepEqual(reloaded.find('w1').payload, { shape: 'unseen' }, 'the unknown entry rode the rewrite');
+});
+
 test('settings written by an older build merge over DEFAULTS — nothing to migrate', () => {
   const dir = tmp();
   fs.mkdirSync(path.join(dir, 'home'), { recursive: true });
   // A file from a build that predates most keys, carrying one unknown key a
-  // person put there deliberately.
-  fs.writeFileSync(path.join(dir, 'home', 'settings.json'), JSON.stringify({ maxSteps: 7, myOwnKey: 'keep me' }));
+  // person put there deliberately — and a schema stamp from a "newer" build
+  // than this one: an unknown key, preserved rather than interpreted.
+  fs.writeFileSync(path.join(dir, 'home', 'settings.json'), JSON.stringify({ maxSteps: 7, myOwnKey: 'keep me', schema: 99 }));
 
   const settings = new Settings(path.join(dir, 'home'));
   assert.equal(settings.get('maxSteps'), 7, 'the stored value survives');
   assert.equal(settings.get('mode'), 'ask', 'missing keys take their defaults');
   assert.equal(settings.get('myOwnKey'), 'keep me', 'unknown keys are preserved, not dropped');
+  assert.equal(settings.get('schema'), 99, "a newer build's schema stamp survives too");
 
   settings.set({ thinking: 'high' });
   const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'home', 'settings.json'), 'utf8'));
   assert.equal(onDisk.myOwnKey, 'keep me', 'a save keeps the unknown key too');
+  assert.equal(onDisk.schema, 99, 'and the newer schema stamp');
   assert.equal(onDisk.thinking, 'high');
 });
 
@@ -183,3 +221,27 @@ test('a new session header records the app that wrote it, through a rewrite', ()
   assert.equal(reloaded.header.app, pkg.version, 'app survives the rewrite');
   assert.equal(reloaded.header.fromNewer, 'kept', 'and so does a field from a newer build');
 });
+
+// The store is the sensitive data class (SECURITY.md, Data classes): a session
+// holds the user's own words and the model's work, and staged uploads are
+// copies of the user's files. Where the OS has POSIX modes everything this
+// code creates is owner-only, and opening an old file tightens it. Windows
+// keeps ACLs instead of modes, so the assertions are skipped there.
+test('the session and upload stores are owner-only where the OS has modes',
+  { skip: process.platform === 'win32' }, () => {
+    const dir = tmp();
+    const store = new SessionStore(path.join(dir, 'sessions'));
+    assert.equal(fs.statSync(store.dir).mode & 0o777, 0o700, 'the store dir is 0o700');
+
+    const s = store.create({ root: path.join(dir, 'proj'), title: 'modes' });
+    assert.equal(fs.statSync(s.file).mode & 0o777, 0o600, 'a new session file is 0o600');
+    assert.equal(fs.statSync(path.dirname(s.file)).mode & 0o777, 0o700, 'the per-project dir is 0o700');
+
+    // A file an older build wrote readable is tightened when it is opened.
+    fs.chmodSync(s.file, 0o644);
+    assert.ok(store.load(s.file), 'the session still loads');
+    assert.equal(fs.statSync(s.file).mode & 0o777, 0o600, 'an opened old file turns owner-only');
+
+    const settings = new Settings(path.join(dir, 'home'));
+    assert.equal(fs.statSync(settings.uploadDir()).mode & 0o777, 0o700, 'the upload staging dir is 0o700');
+  });

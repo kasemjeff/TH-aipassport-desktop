@@ -12,6 +12,7 @@
 //   - writes pass a permission gate (ask / auto / yolo) before they land in the
 //     overlay, rather than all-or-nothing at the end of the run
 //   - PLAN / TODO / SUBAGENT markers exist on top of the original set
+import fs from 'node:fs';
 import path from 'node:path';
 import { outbound } from './waf.mjs';
 import {
@@ -19,7 +20,7 @@ import {
   preamble as buildPreamble,
 } from './protocol.mjs';
 import { resilientSay, decode, recoverWaits, sendRecoverable, waitLabel } from './bridge.mjs';
-import { classify } from './permissions.mjs';
+import { classify, isGitCommit } from './permissions.mjs';
 import { posix } from './overlay.mjs';
 import { thaiRatio } from './lang.mjs';
 import { PATHY, pathVariants, beYearNote } from './argguard.mjs';
@@ -62,6 +63,34 @@ const previewOf = (call) => {
 };
 
 /**
+ * (bootstrap snapshot, `--snapshot`) What a run otherwise learns one round trip
+ * at a time: the git working-tree state (read-only, through the same GIT tool
+ * the model has) and the package.json scripts. Both reads are bounded and both
+ * failures are silent — a head start, never a blocker — and the caller places
+ * the result in turn 1 only.
+ */
+async function bootstrapSnapshot(tools, root) {
+  const parts = [];
+  try {
+    const status = String(await tools.git('status --short')).trim();
+    if (status && !/^err:/i.test(status)) {
+      const lines = status.split('\n');
+      const shown = lines.slice(0, 15).map((l) => `  ${l}`).join('\n');
+      parts.push(`git status:\n${shown}${lines.length > 15 ? `\n  … ${lines.length - 15} more file(s)` : ''}`);
+    } else if (!status) {
+      parts.push('git status: clean — nothing uncommitted');
+    }
+  } catch { /* not a repository, or git is absent — the snapshot skips it */ }
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    const scripts = Object.entries(pkg.scripts ?? {}).filter(([, v]) => typeof v === 'string').slice(0, 12);
+    if (scripts.length) parts.push(`package scripts:\n${scripts.map(([k, v]) => `  ${k}: ${v}`).join('\n')}`);
+  } catch { /* no package.json — the snapshot skips it */ }
+  const text = parts.join('\n');
+  return text.length > 1500 ? `${text.slice(0, 1500)}…` : text;
+}
+
+/**
  * Drive one task to a DONE — or to whatever ends it first: a guard, a cap, a budget.
  *
  * @param {string} taskText
@@ -77,15 +106,23 @@ const previewOf = (call) => {
  * @param {Function} [ctx.approvePlan] async () => boolean
  * @param {Function} [ctx.runPluginTool] async (marker, {arg, body}) => string
  * @param {object} [ctx.options]
+ * @param {Map<string,string>} [ctx.listingShown] per-conversation memory of the
+ *   top level each conversation was last shown. The loop reads it to answer an
+ *   identical listing with a one-line "unchanged" note instead of re-pasting
+ *   the table, and writes it after the message carrying the listing was
+ *   accepted — never before, or a send that failed could make a later task
+ *   claim "unchanged" about ground the model never received.
  * @param {boolean} [first]       first turn of this conversation (send the preamble)
  */
 export async function runTask(taskText, ctx = {}) {
   const {
     bridge, tools, overlay, session = null, permissions = null, events = null,
     subagent = null, check = null, approvePlan = null, options = {}, first = true,
-    runPluginTool = null, compactor = null, rotate = null,
-    conversation = null, conversationTemporary = null,
-  } = ctx;  // The step cap, or no cap at all: 0 (the shipped default) means the
+    runPluginTool = null, compactor = null, rotate = null, listingShown = null,
+  } = ctx;
+  let conversation = ctx.conversation ?? null;
+  let conversationTemporary = ctx.conversationTemporary ?? null;
+  // The step cap, or no cap at all: 0 (the shipped default) means the
   // run goes until it is DONE, a guard stops it, or a budget below is spent. A
   // positive number caps the run, and the last step says so (step_limit).
   const rawCap = Number(options.maxSteps ?? 0);
@@ -110,9 +147,18 @@ export async function runTask(taskText, ctx = {}) {
   // against the model, so a level it lacks never breaks a run.
   const thinking = options.thinking && String(options.thinking).toLowerCase() !== 'off'
     ? String(options.thinking).toLowerCase() : null;
+  // Sampling temperature: a number 0..2 rides every send; anything else (the
+  // null default included) never asks, so the server's own default stands.
+  const temperature = typeof options.temperature === 'number' && Number.isFinite(options.temperature)
+    ? Math.min(2, Math.max(0, options.temperature)) : null;
   const useSlim = Boolean(options.slim);
   const seedText = options.seedText ?? null;
   const pluginTools = options.pluginTools ?? [];
+  // Background helper jobs: spawned by a SUBAGENT with `background: true`, run
+  // without blocking the step, and report when polled (JOBS) or when their
+  // result is injected into a later turn.
+  const backgroundJobs = new Map();
+  const reportedBg = new Set();
   // (Thai pack) Language policy. `replyLanguage` is what the preamble tells
   // the model; `langCheck` is the stop hook that measures it — the closing
   // message's share of Thai letters (code and URLs excluded) must reach
@@ -153,8 +199,10 @@ export async function runTask(taskText, ctx = {}) {
   };
 
   // Per-run metrics (P2-D): the session already records every tool call and
-  // the run records credits; these counters are what turns that into rates.
-  const toolStats = new Map(); // kind → { n, fail }
+  // the run records credits; these counters are what turns that into rates —
+  // and, since per-tool latency landed, `ms` carries the wall time each kind
+  // spent in total, so stats can print where a slow run actually went.
+  const toolStats = new Map(); // kind → { n, fail, ms }
   let firewallNotes = 0;
   let sendRecoveries = 0;  // (stats) refused sends the loop paused and tried again
   const stepMs = [];
@@ -165,6 +213,7 @@ export async function runTask(taskText, ctx = {}) {
       parts: withParts ?? null,
       model,
       thinkingLevel: thinking,
+      temperature,
       ...(conversation ? { conversation, temporary: conversationTemporary } : {}),
       signal: options.signal ?? null,
       onText: (t) => events?.emit('assistant_delta', { text: t }),
@@ -189,8 +238,32 @@ export async function runTask(taskText, ctx = {}) {
   let listing = '';
   try { listing = outbound(tools.list('.')); } catch { /* ignore */ }
 
+  // (bootstrap snapshot, opt-in via `--snapshot`) The head start a fresh run
+  // otherwise spends round trips discovering: whether the project is a repo
+  // and what is uncommitted, and which scripts package.json carries. It rides
+  // the turn-1 listing slot — before the task, only on the first message, only
+  // when asked for — so the tuned bytes stay identical while the flag is off.
+  const snapshot = first && !seedText && options.snapshot
+    ? await bootstrapSnapshot(tools, overlay.root)
+    : '';
+  const listingBlock = snapshot
+    ? `${listing}\n\nSnapshot of where this project stands right now (asked for with --snapshot):\n${snapshot}`
+    : listing;
+  // (listing delta) A follow-up task used to paste the whole top level again
+  // even when not one entry had moved — the conversation already holds the
+  // earlier listing, so those tokens bought nothing. `listingShown` is the
+  // harness's per-conversation memory of the last listing a conversation was
+  // told; only an identical listing is answered with the one-line note. A
+  // created, rotated or freshly pinned conversation has no entry, so it still
+  // gets the full table.
+  const shownListing = conversation && listingShown instanceof Map
+    ? listingShown.get(conversation) ?? null : null;
+  const listingSame = listing !== '' && shownListing === listing;
+
   const again = `The project is still open in front of me and I will paste you whatever you ask for.`
-    + `\nTop level right now:\n${listing}`;
+    + (listingSame
+      ? `\nTop level: unchanged since my last listing of it — every entry is the same.`
+      : `\nTop level right now:\n${listing}`);
 
   const pre = buildPreamble({
     allowRun: Boolean(options.allowRun),
@@ -202,15 +275,27 @@ export async function runTask(taskText, ctx = {}) {
     lang: replyLanguage,
   });
 
+  // What this message shows of the top level, if anything — recorded (by the
+  // first accepted send, below) as what this conversation has been shown. The
+  // message pastes the table when it is a slim first, a full first, or a full
+  // follow-up whose listing moved; a slim follow-up shows none, and the
+  // unchanged-note follow-up shows none either (the memory already has it).
+  let listingToRecord = null;
   let next = useSlim
-    ? `${first ? `Top level of the project: ${listing}\n\n` : ''}Task: ${taskText}\n\nWhat should I open first?`
+    ? `${first ? `Top level of the project: ${listingBlock}\n\n` : ''}Task: ${taskText}\n\nWhat should I open first?`
     : first
-      ? `${pre}\n\nTo save you a step, here is what is at the top level already:\n${listing}\n\nHere is what I want to know: ${taskText}\n\nWhat should I open first?`
+      ? `${pre}\n\nTo save you a step, here is what is at the top level already:\n${listingBlock}\n\nHere is what I want to know: ${taskText}\n\nWhat should I open first?`
       : `${again}\n\nNew task: ${taskText}\n\nWhat should I open first?`;
+  const pasted = useSlim ? first : (first || !listingSame);
+  if (pasted && listing !== '') listingToRecord = listing;
 
   // A rotated conversation (after compaction) starts from the summary seed
   // instead of a bare task: the fresh conversation has no memory of anything.
-  if (first && seedText) next = seedText;
+  // Not gated on `first`: between-runs compaction fires once the context has
+  // grown — on the second run of a session or later — so the run that needs
+  // the seed most is exactly the one that is not the first. The seed lists
+  // nothing, so the memory must not be written for it.
+  if (seedText) { next = seedText; listingToRecord = null; }
 
   let nudges = 0;            // (stats) every "no marker" nudge the run needed
   let nudgeStreak = 0;       // consecutive ones — the third stops the run
@@ -235,6 +320,8 @@ export async function runTask(taskText, ctx = {}) {
   let verifySent = false;
   let codeTouched = false;   // a code file was staged this run
   let verifiedSinceChange = false;
+  let todoPrompts = 0;      // (plan checkpoint) one nudge when DONE arrives with open plan items
+  let todoPromptSent = false;
   let sendError = null;      // the message that ended the run, when stopReason is 'error'
   let summary = null;
   let stopReason = 'steps';
@@ -246,6 +333,23 @@ export async function runTask(taskText, ctx = {}) {
   let repeatTrip = false;    // the refusal ceiling was hit — stop after this step
   const repeatSeen = new Map(); // call signature → { count, mark }
   let mutations = 0;         // staged changes this run — the guard's clock
+  // (red-test gate) The project's declared check (.aipass/check.txt,
+  // docs/SPEC_CHECKER.md): the first non-comment line, read lazily once. The
+  // gate bars a `git commit` RUN until that exact command has *passed* at the
+  // current mutation count — a commit of a tree nobody verified is how a red
+  // test lands in history. Any later change moves the clock and re-arms it;
+  // no declared check, no gate.
+  let declaredCheck = null;   // null = not read yet; '' = absent (or unreadable)
+  let declaredPassAt = -1;    // the mutation count the declared check passed at
+  let commitBlocks = 0;       // (stats) git commits the gate refused
+  const declaredCheckCommand = () => {
+    if (declaredCheck !== null) return declaredCheck;
+    try {
+      const raw = fs.readFileSync(path.join(overlay.root, '.aipass', 'check.txt'), 'utf8');
+      declaredCheck = raw.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#')) ?? '';
+    } catch { declaredCheck = ''; }
+    return declaredCheck;
+  };
   let langPrompts = 0;       // reply-language nudges sent (at most one per run)
   let langSent = false;
   let novelResults = 0;      // tool results that said something new
@@ -345,6 +449,25 @@ export async function runTask(taskText, ctx = {}) {
   // re-sending the same image on every step would re-upload it and occupy the
   // context again for nothing. ATTACH queues (the tool's own) drain into the
   // next message, whatever turn that is.
+  // (plan checkpoint) A run that wrote a PLAN or a TODO carries a checklist of
+  // what "done" means. DONE used to be accepted with items still open — a long
+  // plan could end half-finished and nothing said so. One nudge (once per run)
+  // names the open items, so the model either finishes them, ticks them with a
+  // TODO update, or says plainly why they are dropped. A second DONE after it
+  // ends the run either way.
+  const openTodoMsg = () => {
+    if (todoPromptSent || !todoState.length) return null;
+    const open = todoState.filter((it) => !it.done);
+    if (!open.length) return null;
+    todoPromptSent = true;
+    todoPrompts += 1;
+    const cap = 8;
+    const named = open.slice(0, cap).map((it) => `- ${it.text}`).join('\n');
+    session?.append('note', { text: `plan checkpoint: DONE arrived with ${open.length} open item(s) — asking for them first` });
+    events?.emit('note', { text: `plan checkpoint: the checklist still has ${open.length} open item(s) — asking the model to close or drop them` });
+    return `Before I take that as done: the plan/TODO this run recorded still lists ${open.length} open item(s):\n${named}${open.length > cap ? `\n… and ${open.length - cap} more` : ''}\n\nIf they are finished, send a TODO list with [x] on them; if any is dropped, say which and why; otherwise continue with the open items and then say DONE. A DONE after this message ends the run either way.`;
+  };
+
   const firstParts = first ? (options.parts ?? null) : null;
   let sends = 0;
   const partsForSend = () => {
@@ -382,11 +505,34 @@ export async function runTask(taskText, ctx = {}) {
     if (Date.now() - runStart > maxWallClockMs) { spendBudget('time-limited'); break; }
     if (maxCredits && (await creditSpent()) >= maxCredits) { spendBudget('credit-limited'); break; }
     const stepStart = Date.now();
+    // Background helper results that finished since the last turn are injected
+    // here so the model sees them without having to poll.
+    const bgDone = [];
+    for (const [id, job] of backgroundJobs) {
+      if (job.status === 'done' && !reportedBg.has(id)) {
+        reportedBg.add(id);
+        bgDone.push(`Background helper ${id}${job.role ? ` (${job.role})` : ''} finished:\n${job.result}`);
+      }
+    }
+    if (bgDone.length) {
+      next = `${bgDone.join('\n\n')}\n\n${next}`;
+    }
     let reply;
     let sendGivenUp = false;
     const recover = recoverWaits();
     for (let attempt = 0; ; attempt++) {
-      try { reply = await saySafe(next, partsForSend()); sends++; break; }
+      try {
+        reply = await saySafe(next, partsForSend());
+        // (listing delta) The memory only becomes true once the message that
+        // carries the listing was accepted. The first send of the run is the
+        // composed `next`; every later message carries results or the seed,
+        // never the table.
+        if (sends === 0 && listingToRecord != null && conversation && listingShown instanceof Map) {
+          listingShown.set(conversation, listingToRecord);
+        }
+        sends++;
+        break;
+      }
       catch (err) {
         // The user pressed stop: the signal ends the in-flight fetch with an
         // AbortError, which is an ending, not a failure — the transcript should
@@ -472,6 +618,11 @@ export async function runTask(taskText, ctx = {}) {
           next = `${checkMsg}\n\n${REMINDER}`;
           continue;
         }
+        const todoMsg = step < maxSteps ? openTodoMsg() : null;
+        if (todoMsg && step < maxSteps) {
+          next = `${todoMsg}\n\n${REMINDER}`;
+          continue;
+        }
         const langMsg = replyLangMsg(proseText, cleanArg, work.length === 0);
         if (langMsg && step < maxSteps) {
           next = `${langMsg}\n\n${REMINDER}`;
@@ -507,7 +658,7 @@ export async function runTask(taskText, ctx = {}) {
       const shapeHint = attempted
         ? `That reply looked like it was trying to act — something in it had the shape of a marker — but it did not parse as one. A marker must sit at the start of its own line, with no indentation, bold or code fence, and use an exact keyword: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it, and so on. One call per line. `
         : '';
-      next = `${shapeHint}That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it. I will paste back exactly what you ask for. ${REMINDER}`;
+      next = `${shapeHint}That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it — if your answer is already written above, that is all the reply needs. I will paste back exactly what you ask for. ${REMINDER}`;
       continue;
     }
     nudgeStreak = 0;
@@ -520,15 +671,23 @@ export async function runTask(taskText, ctx = {}) {
     // helper runs, not after.
     const execCtx = { tools, permissions, events, subagent, todoState, session, approvePlan, options, runPluginTool };
     let helperResults = null;
+    // Parallel SUBAGENTs fan out before the serial loop, so their wall time is
+    // measured here — keyed by the call — and added to the stats when the
+    // serial loop walks past that call.
+    const helperMs = new Map();
     if (options.parallelHelpers && work.some((c) => c.kind === 'subagent')) {
       const helpers = work.filter((c) => c.kind === 'subagent').length;
       if (toolsRun + helpers > maxToolCalls) spendBudget('tools-limited');
       else if (Date.now() - runStart > maxWallClockMs) spendBudget('time-limited');
       else if (maxCredits && (await creditSpent()) >= maxCredits) spendBudget('credit-limited');
       else {
-        helperResults = await Promise.all(work.map((c) => c.kind === 'subagent'
-          ? execute(c, execCtx).catch((err) => `err: ${err.message}`)
-          : null));
+        helperResults = await Promise.all(work.map(async (c) => {
+          if (c.kind !== 'subagent') return null;
+          const t0 = Date.now();
+          const out = await execute(c, execCtx).catch((err) => `err: ${err.message}`);
+          helperMs.set(c, Date.now() - t0);
+          return out;
+        }));
       }
     }
     if (budgetHit) break;
@@ -542,6 +701,19 @@ export async function runTask(taskText, ctx = {}) {
     //     characters stripped and Thai digits swapped, and the result says so;
     //   - a machine-facing year in the 2400s gets an advisory CE note.
     const guarded = async (call) => {
+      // (red-test gate) A `git commit` RUN is refused while the declared check
+      // has not passed at the current tree state. The gate sits ahead of the
+      // permission ask on purpose: this is not a question to override, it is
+      // "run the check first" — the command that un-bars it is named in full.
+      if (options.allowRun && call.kind === 'run' && isGitCommit(call.body)) {
+        const declared = declaredCheckCommand();
+        if (declared && declaredPassAt !== mutations) {
+          commitBlocks += 1;
+          session?.append('note', { text: `red-test gate: refused a git commit — the declared check (${declared}) has not passed since the last change in this run` });
+          events?.emit('note', { text: 'red-test gate: a git commit was refused — run the declared check (.aipass/check.txt) first, then commit' });
+          return `err: a git commit was requested, but this project declares a check (.aipass/check.txt: ${declared}) and it has not passed since the last change in this run. Run it first (RUN\n${declared}\nEND) and commit once it passes — a commit of an unverified tree is exactly what the gate exists to stop.`;
+        }
+      }
       const sig = `${call.kind}\u0000${String(call.arg ?? '')}\u0000${call.kind === 'run' ? String(call.body ?? '') : ''}`;
       if (repeatGuard && !['plan', 'todo', 'subagent', 'done'].includes(call.kind)) {
         const seen = repeatSeen.get(sig) ?? { count: 0, mark: -1 };
@@ -610,9 +782,15 @@ export async function runTask(taskText, ctx = {}) {
         continue;
       }
       toolsRun++;
+      const callStartedAt = Date.now();
       const result = helperResults && call.kind === 'subagent'
         ? helperResults[i]
         : await guarded(call);
+      // A serial call is timed where it ran; a parallel SUBAGENT carries the
+      // wall time measured at its fan-out (its `await` already happened).
+      const callMs = helperResults && call.kind === 'subagent'
+        ? (helperMs.get(call) ?? 0)
+        : Date.now() - callStartedAt;
       const text = String(result);
       const [head, ...rest] = text.split('\n');
       // Tools answer with an `err: …` prefix when they failed (the tool
@@ -653,8 +831,15 @@ export async function runTask(taskText, ctx = {}) {
       }
       // The repeat guard's clock: only staged changes move it.
       if (!refused && (MUTATING.has(call.kind) || call.kind === 'run')) mutations += 1;
-      const stat = toolStats.get(call.kind) ?? { n: 0, fail: 0 };
+      // (red-test gate) A declared check that just passed un-bars commits at
+      // exactly this tree state; any later change moves the clock and re-arms.
+      if (!refused && call.kind === 'run' && declaredCheckCommand()
+          && String(call.body ?? '').trim() === declaredCheckCommand()) {
+        declaredPassAt = mutations;
+      }
+      const stat = toolStats.get(call.kind) ?? { n: 0, fail: 0, ms: 0 };
       stat.n += 1;
+      stat.ms += callMs;
       if (refused) stat.fail += 1;
       toolStats.set(call.kind, stat);
       const isLast = i === work.length - 1 && !done;
@@ -682,7 +867,17 @@ export async function runTask(taskText, ctx = {}) {
     // plan mode is that the work does not start until it is read.
     if (calls.some((c) => c.kind === 'plan') && !planApproved) {
       const ok = approvePlan ? await approvePlan() : true;
-      if (!ok) { stopReason = 'plan-rejected'; events?.emit('note', { text: 'plan declined — stopping before any change.' }); break; }
+      if (!ok) {
+        // A stop (cancel) releases the gate too — the run ends as cancelled,
+        // not as a declined plan, so the transcript and run_stats say why.
+        stopReason = options.signal?.aborted ? 'cancelled' : 'plan-rejected';
+        events?.emit('note', {
+          text: stopReason === 'cancelled'
+            ? 'stopped while waiting for plan approval — the gate was released'
+            : 'plan declined — stopping before any change.',
+        });
+        break;
+      }
       planApproved = true;
       events?.emit('note', { text: 'plan approved — continuing.' });
     }
@@ -715,9 +910,12 @@ export async function runTask(taskText, ctx = {}) {
       // through the stagnation guard and the compaction estimate like any
       // other step, so the correction is a step the run actually took.
       const checkMsg = await finishCheck();
-      const langMsg = checkMsg && step < maxSteps ? null : replyLangMsg(proseText, summary, work.length === 0);
+      const todoMsg = !checkMsg && step < maxSteps ? openTodoMsg() : null;
+      const langMsg = (checkMsg || todoMsg) ? null : replyLangMsg(proseText, summary, work.length === 0);
       if (checkMsg && step < maxSteps) {
         next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${checkMsg}`;
+      } else if (todoMsg && step < maxSteps) {
+        next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${todoMsg}`;
       } else if (langMsg && step < maxSteps) {
         next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${langMsg}`;
       } else {
@@ -789,10 +987,27 @@ export async function runTask(taskText, ctx = {}) {
     if (compactor && session && compactor.needsCompaction(session, { pending: next })) {
       try {
         events?.emit('note', { text: 'context is filling up — summarising this conversation and rotating to a fresh one' });
-        const note = await compactor.summarize(session, { task: taskText, model });
-        session.append('compaction', { summary: note, firstKeptEntryId: session.entries.at(-1)?.id ?? null });
-        await rotate?.(note);
-        events?.emit('compacted', { summary: note });
+        const raw = await compactor.summarize(session, { task: taskText, model, conversation, temporary: conversationTemporary });
+        // The reply is two products: the narrative and (when the tier is on)
+        // the trailing MEMORY: facts, merged across rotations. A reply
+        // without the section digests to the plain summary, so an older
+        // model's answer still lands.
+        const { summary: note, memory } = compactor.digest(session, raw);
+        // Rotate first, record second: an append that lands while the rotation
+        // fails would leave a compaction entry behind and reset the estimate
+        // to a conversation the model never carried — a session claiming
+        // memory it does not have. Failing this way only retries next step.
+        const rotated = await rotate?.(note);
+        // The fresh conversation is where the seed and every later send must
+        // go. The harness hands its new id back because this loop's own
+        // `conversation` binding would otherwise keep naming the conversation
+        // the rotation just left behind.
+        if (rotated?.conversation) {
+          conversation = rotated.conversation;
+          conversationTemporary = rotated.temporary === true;
+        }
+        session.append('compaction', { summary: note, ...(memory.length ? { memory } : {}), lastSummarizedEntryId: session.entries.at(-1)?.id ?? null });
+        events?.emit('compacted', { summary: note, memory });
         // The fresh conversation keeps what a summary would drop: the files
         // staged so far (deletes marked) and the last check that has not
         // passed — the two constraints a rotation loses most expensively.
@@ -801,7 +1016,7 @@ export async function runTask(taskText, ctx = {}) {
           return overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
         }).slice(0, 20);
         const lastCheck = checkResult && checkResult.verdict && checkResult.verdict !== 'pass' ? checkResult : null;
-        next = `${compactor.seed({ summary: note, task: taskText, listing: '', preambleText: pre, results: results.join('\n\n'), staged: stagedNow, lastCheck })}\n\n${REMINDER}`;
+        next = `${compactor.seed({ summary: note, memory, task: taskText, preambleText: pre, results: results.join('\n\n'), staged: stagedNow, lastCheck, todo: todoState })}\n\n${REMINDER}`;
       } catch (err) {
         events?.emit('error', { message: `compaction failed, sending the results without it: ${err.message}` });
       }
@@ -826,7 +1041,11 @@ export async function runTask(taskText, ctx = {}) {
     // The model that produced this run — `stats` groups by it (`byModel`), so
     // "which model drifts" is a field, not a guess. Null on a bridge without one.
     model: bridge.model ?? null,
+    // `steps` is executed marker calls (the name the evals rows already read);
+    // `turns` is the replies it took — the two denominators were one ambiguous
+    // word before, and both are cheap to carry.
     steps: toolsRun,
+    turns: stepMs.length,
     tools: Object.fromEntries(toolStats),
     nudges,
     stagnations: stagnationWarns,
@@ -835,7 +1054,9 @@ export async function runTask(taskText, ctx = {}) {
     sendRecoveries,
     checks,
     checkVerdict: checkResult?.verdict ?? null,
+    todoPrompts,
     repeatBlocks,
+    commitBlocks,
     errLoops,
     chainSkips,
     langPrompts,
@@ -907,6 +1128,7 @@ async function execute(call, ctx) {
   if (call.kind === 'subagent') {
     if (!subagent) return 'err: no helper is available in this run';
     const body = String(call.body ?? '');
+    const background = /^\s*background:\s*(true|yes|1)\s*$/im.test(body);
     // The optional `role:` line narrows the helper before it starts: its own
     // instructions and its own limits (SUBAGENT_ROLES). An unknown role is
     // refused here, before anything starts, and the error names the set.
@@ -915,8 +1137,28 @@ async function execute(call, ctx) {
       return `err: no helper role called "${role}" — use one of: ${Object.keys(SUBAGENT_ROLES).join(', ')} (or drop the role line).`;
     }
     const taskLine = body.match(/^\s*task:\s*(.+)$/im)?.[1];
-    const task = (taskLine ?? body.split('\n').find((l) => l.trim() && !/^\s*role:/i.test(l)) ?? '').trim();
+    const task = (taskLine ?? body.split('\n').find((l) => l.trim() && !/^\s*role:/i.test(l) && !/^\s*background:/i.test(l)) ?? '').trim();
     if (!task) return 'err: give the helper a task, on a `task:` line inside SUBAGENT';
+    if (background) {
+      const id = `bg${backgroundJobs.size + 1}`;
+      const job = { id, task, role: role || null, status: 'running', result: null };
+      backgroundJobs.set(id, job);
+      const promise = (async () => {
+        events?.emit('subagent_start', { task, role: role || null, background: true });
+        try {
+          const out = await subagent(task, role || null);
+          job.status = 'done';
+          job.result = String(out ?? '');
+          events?.emit('subagent_end', { task, role: role || null, out: job.result, background: true });
+          session?.append('note', { text: `background helper ${id}${role ? ` (${role})` : ''}: ${task}\n${job.result.slice(0, 2000)}` });
+        } catch (e) {
+          job.status = 'error';
+          job.result = `err: ${e.message}`;
+        }
+      })();
+      job.promise = promise;
+      return `started background job ${id} — poll with JOBS`;
+    }
     events?.emit('subagent_start', { task, role: role || null });
     const out = await subagent(task, role || null);
     events?.emit('subagent_end', { task, role: role || null, out });
@@ -924,11 +1166,34 @@ async function execute(call, ctx) {
     return out;
   }
 
+  if (call.kind === 'jobs') {
+    if (!backgroundJobs.size) return '(no background jobs)';
+    const lines = [];
+    for (const [id, job] of backgroundJobs) {
+      lines.push(`${id}: ${job.status}${job.role ? ` (${job.role})` : ''} — ${job.task.slice(0, 60)}${job.status !== 'running' ? '\n  ' + String(job.result).slice(0, 400) : ''}`);
+    }
+    return lines.join('\n');
+  }
+
   // A marker a plugin registered. It is the plugin's own code, so it is also
   // the plugin's own responsibility: the result is a string, or an error
-  // string, and nothing here interprets it.
+  // string, and nothing here interprets it. A plugin tool that declared a
+  // `risk` at registration rides the same permission gate a built-in of that
+  // kind would; an undeclared tool keeps the trust the plugin model states —
+  // it runs, and its side effects are the plugin's to own.
   if (call.kind === 'plugin') {
     if (!runPluginTool) return `err: no plugin tool named ${call.name} is installed`;
+    const declaredRisk = (options.pluginTools ?? []).find((t) => t?.marker === call.name)?.risk ?? null;
+    if (permissions && declaredRisk && declaredRisk !== 'read') {
+      const verdict = permissions.evaluate({ kind: 'plugin', arg: call.name, body: call.body, risk: declaredRisk });
+      if (verdict.decision !== 'allow') {
+        const decision = await permissions.request({
+          kind: 'plugin', arg: call.name, preview: previewOf(call), body: call.body, risk: declaredRisk,
+        });
+        if (decision === 'deny') return `err: the person watching declined plugin marker ${call.name}`;
+        if (decision === 'always') permissions.grant('plugin', call.name);
+      }
+    }
     events?.emit('plugin_call', { marker: call.name, arg: call.arg });
     try {
       return String(await runPluginTool(call.name, { arg: call.arg, body: call.body ?? '' }) ?? '');

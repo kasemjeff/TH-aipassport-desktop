@@ -22,6 +22,7 @@ import { secretHit, scrubSecretDiff } from './permissions.mjs';
 import { isPrivateHost, hostResolvesPrivate } from '../bridge/private-hosts.mjs';
 import { loadGitignore } from './gitignore.mjs';
 import { stripInvisibles } from './lang.mjs';
+import { extractSymbols, indexProject, listSymbols, findDefinition, findReferences, formatSymbols, formatDefs, formatRefs } from './symbols.mjs';
 import { MAX_ATTACHMENT_BYTES, mimeOf, isAllowedAttachment } from '../bridge/attachment-types.mjs';
 
 const execP = promisify(exec);
@@ -820,6 +821,39 @@ export function createTools(ctx) {
       if (reasoning && (reasoning.includes('http') || reasoning.includes('sources:'))) sources = '\n' + reasoning;
       const result = (text + (sources ? `\n\n${sources}` : '')).trim();
       return clip(outbound(`${WEB_UNTRUSTED}\n\n${result || 'no results found'}`));
+    },
+    // Code navigation (LSP-ish, zero deps, regex-based). SYMBOLS lists what a
+    // file (or the whole project) declares; DEF finds where a name is defined;
+    // REFS finds every use. The index is cached under ~/.aipass/symbols and
+    // refreshed when a file's mtime changes.
+    symbols(arg) {
+      const target = String(arg ?? '').trim();
+      if (!target) {
+        const idx = indexProject(root);
+        const all = [];
+        for (const [file, entry] of Object.entries(idx.files)) {
+          for (const s of entry.symbols) all.push({ file, ...s });
+        }
+        if (!all.length) return '(no symbols found)';
+        const shown = all.slice(0, 200);
+        const more = all.length > 200 ? `\n… ${all.length - 200} more (pass a file path to narrow)` : '';
+        return shown.map((s) => `${s.file}:${s.line}  ${s.kind} ${s.name}`).join('\n') + more;
+      }
+      const abs = safe(target);
+      if (abs.startsWith('err:')) return abs;
+      if (!existsAt(abs)) return `err: no such file: ${target}`;
+      const rel = path.relative(root, abs).replace(/\\/g, '/');
+      return formatSymbols(listSymbols(root, rel));
+    },
+    def(arg) {
+      const name = String(arg ?? '').trim();
+      if (!name) return 'err: DEF needs a name — DEF foo';
+      return formatDefs(findDefinition(root, name));
+    },
+    refs(arg) {
+      const name = String(arg ?? '').trim();
+      if (!name) return 'err: REFS needs a name — REFS foo';
+      return formatRefs(findReferences(root, name));
     },
   };
 

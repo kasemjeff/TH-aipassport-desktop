@@ -129,3 +129,13 @@ test('the preamble documents the ASK pause', () => {
   assert.match(text, /ASK should the export keep the old column names\?/);
   assert.match(text, /Never put ASK in the same reply as a NEED/);
 });
+
+test('the preamble keeps the answer itself in the message, above the DONE', () => {
+  // Recorded live: a WEB-search run closed with a "summary done" line while the
+  // findings never left the pasted result — a one-line bubble for a request
+  // whose whole point was the summary.
+  const text = preamble({});
+  assert.match(text, /write the answer itself in your message/);
+  assert.match(text, /findings must not live only inside what I pasted back/);
+  assert.match(text, /"finished" alone is not an answer/);
+});

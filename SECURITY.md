@@ -114,6 +114,13 @@ Then restart the bridge and reload the extension.
   stores it once; the CLI and the desktop backend read the file themselves; the
   window bootstraps it from a same-origin-only `/token` endpoint. `AIPASS_TOKEN`
   overrides, `AIPASS_REQUIRE_AUTH=0` disables (with a boot warning).
+- **The session and upload stores are owner-only where the OS has modes**
+  (`harness/session.mjs`, `harness/settings.mjs`): the sessions directory, its
+  per-project directories and every session file are created 0o700/0o600, a
+  file an older build left readable is tightened when it is opened, and staged
+  upload copies match — the sensitive store no longer hinges on the ambient
+  umask. Windows keeps its profile ACL, and the same-user limit under "Known
+  limits" applies there too.
 - **`browser.open` can no longer run a shell** (`harness/rpc.mjs`): the URL is
   allowlisted to `http(s)` and passed as argv through `execFile` — quotes,
   whitespace and shell punctuation are refused. The desktop shell's window

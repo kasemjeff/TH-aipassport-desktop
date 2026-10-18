@@ -193,7 +193,9 @@ where objects address their keys and values by index, and negative numbers are
 ### Conversations
 
 - **`resolveConversation()`** — precedence: `AIPASS_CONVERSATION_ID` (pinned) →
-  `conversationCache` → newest entry of a freshly loaded list
+  `conversationCache` (unless it is temporary — a temporary conversation belongs
+  to the session that created it, so a nameless caller resolves from the list
+  instead of landing inside it) → newest entry of a freshly loaded list
   (`loadConversations()` sorts by `updatedAt` desc).
 - **`createConversation({modelId, message, assistant})`** — fires a `create`
   job, reads `conversationId` out of the turbo-stream response (the server
@@ -209,7 +211,12 @@ where objects address their keys and values by index, and negative numbers are
 
 `lastUserText(messages)` keeps only the last `role:"user"` entry (string
 `content` or the concatenation of its text parts). Everything else in the
-request body is ignored. Stream mode emits OpenAI-shaped
+request body is ignored — with one exception: a numeric `temperature` (0..2,
+clamped; a value that is not a number is dropped with a warning) rides the
+send as the model's sampling temperature. The OpenAI sampling fields the
+bridge cannot forward (`top_p`, `max_tokens`, `presence_penalty`, ...) are
+ignored and named in one `warning:` log line, so an API client is not left
+thinking a setting took effect. Stream mode emits OpenAI-shaped
 `chat.completion.chunk` frames; `status` parts from the extension become
 `reasoning_content` deltas unless `AIPASS_TOOL_VISIBILITY` says otherwise
 (`text` inlines them into `content`, `off` drops them). `note` parts — lines

@@ -39,7 +39,9 @@ Read it before non-trivial bridge changes and keep it current with them.
 - **Conversation rotation** (`resolveConversation`, `startChat`): reuse the
   most recent (or just-created) conversation; on `404` (deleted) / `409`
   (generation still running) advance to the next-most-recent — but only when
-  no deltas were delivered yet and `AIPASS_CONVERSATION_ID` isn't pinned.
+  no deltas were delivered yet and `AIPASS_CONVERSATION_ID` isn't pinned. A
+  nameless send never resolves into a *temporary* conversation: those are the
+  private space of the session that minted them, which names them per send.
 - **turbo-stream**: the app's `.data` loaders return react-router turbo-stream
   (a flat indexed pool). `decodeTurboStream()` in `server.mjs` reads it;
   `encodeTurboStream()` in `test/harness.mjs` builds fixtures the same way.
@@ -86,6 +88,8 @@ Loopback auth: `AIPASS_TOKEN` (explicit — containers, tests),
 Harness and clients: `AIPASS_HOME` (state dir), `AIPASS_BRIDGE` (bridge URL),
 `AIPASS_SKILLS_DIR`, `AIPASS_FETCH_ALLOW_PRIVATE`, `AIPASS_FETCH_MAX_BYTES`,
 `AIPASS_SPILL_KEEP` (spill files kept per project, 200),
+`AIPASS_ELIDE` (elision tier on — off by default),
+`AIPASS_MEMORY` (`off` stops carrying facts across rotations),
 `AIPASS_LOG_MAX_BYTES` (log rotation cap, 5 MB), `AIPASS_LOG_FORMAT=json`.
 
 Desktop: `AIPASS_DESKTOP_PORT` (8790), `AIPASS_DESKTOP_NO_OPEN`.

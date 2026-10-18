@@ -26,6 +26,8 @@ const { createRpc, resolveBridgeURL } = await import(pathToFileURL(path.join(REP
 const { aipassHome } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'settings.mjs')));
 // Size-capped log files, the same helper the backend uses for bridge.log.
 const { openLogFile } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'log-file.mjs')));
+// One platform→argv rule, shared with the backend's browser.open.
+const { openCommandFor } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'open-command.mjs')));
 // One resolver for the probe and the harness client alike: AIPASS_BRIDGE
 // (http(s)://host:port, host:port or a bare port) or the loopback default.
 const BRIDGE_URL = resolveBridgeURL();
@@ -54,19 +56,13 @@ const openWindow = async (url) => {
   const target = String(url ?? '');
   if (!/^https?:\/\//i.test(target)) return;
   try {
-    // argv, not a shell string — the same shape the backend's browser.open
-    // uses. The old `cmd /c start "" "${url}"` interpolated, and its
-    // `default` from node:child_process is a module object, not a callable,
-    // so the throw was swallowed and no window ever opened.
+    // argv, not a shell string — openCommandFor owns the per-platform shape
+    // (the same rule the backend's browser.open uses). The old
+    // `cmd /c start "" "${url}"` interpolated, and its `default` from
+    // node:child_process is a module object, not a callable, so the throw was
+    // swallowed and no window ever opened.
     const { execFile } = await import('node:child_process');
-    const [cmd, args] = process.platform === 'win32'
-      // '' becomes a bare "" on the command line — cmd's canonical empty
-      // title for `start`, which is what keeps a URL with & from being
-      // eaten as the window title.
-      ? ['cmd', ['/c', 'start', '', target]]
-      : process.platform === 'darwin'
-        ? ['open', [target]]
-        : ['xdg-open', [target]];
+    const [cmd, args] = openCommandFor(process.platform, target);
     await new Promise((resolve) => {
       const child = execFile(cmd, args, { windowsHide: true }, () => resolve());
       child.on('error', () => resolve());

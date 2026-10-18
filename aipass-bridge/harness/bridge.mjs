@@ -271,7 +271,7 @@ export class BridgeClient {
   }
 
   /** One wire attempt of chat(); `markStreamed` flips the retry gate above. */
-  async #sendOnce({ message, parts = null, model = null, conversation = null, temporary = null, thinkingLevel = null, onText = () => {}, onReasoning = () => {}, signal = null } = {}, markStreamed) {
+  async #sendOnce({ message, parts = null, model = null, conversation = null, temporary = null, thinkingLevel = null, temperature = null, onText = () => {}, onReasoning = () => {}, signal = null } = {}, markStreamed) {
     const content = Array.isArray(parts) && parts.length
       ? [{ type: 'text', text: message }, ...parts]
       : message;
@@ -282,6 +282,7 @@ export class BridgeClient {
         ...(model ?? this.model ? { model: model ?? this.model } : {}),
         ...(conversation ? { conversation, ...(temporary === null ? {} : { temporary: temporary === true }) } : {}),
         ...(thinkingLevel ? { thinking_level: thinkingLevel } : {}),
+        ...(typeof temperature === 'number' ? { temperature } : {}),
         stream: true,
         messages: [{ role: 'user', content }],
       }),

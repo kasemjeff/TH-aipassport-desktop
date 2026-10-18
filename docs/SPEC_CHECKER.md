@@ -209,3 +209,13 @@ Two changes from the Thai pack round:
    command's own exit code lands in the child's `run` entries — and the
    declared value rides back in the result as `declared`. Absent the file,
    nothing changes. Pinned in `test/checker.test.mjs`.
+4. **The declared check arms the red-test commit gate (2026-10-17).** A
+   `git commit` RUN is refused while the declared command has not *passed* at
+   the current tree state — the refusal names the exact command that un-bars
+   it (`RUN` → `<declared>` → `END`), any later change re-arms the gate, and
+   a project without `.aipass/check.txt` is untouched. The gate sits ahead of
+   the permission ask on purpose: it is not a question to override, it is
+   "run the check first". Refusals are counted in `run_stats.commitBlocks`
+   and the gate itself is one exported function (`isGitCommit`) shared with
+   the command-risk classifier, so the two cannot drift. Pinned in
+   `test/gates.test.mjs`.

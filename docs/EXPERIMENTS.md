@@ -1,0 +1,96 @@
+# Experiments
+
+The queue the 2026-10-17 audit asked for: this project measures a lot
+(`npm run evals`, `npm run stats -- --alerts`) but deciding *what to try next*
+was conversation, not record. An experiment here is a bounded change with a
+hypothesis, a baseline, success criteria, a budget and a stop rule — and an
+end. The machine-readable half is `experiments/queue.json`; the validator and
+ordering are `scripts/experiments.mjs` (`npm run experiments`).
+
+## Sources
+
+Every record names where the idea came from, in one of four forms — the audit
+found these are the only honest ones this project has:
+
+| source | shape | example |
+|---|---|---|
+| an alert | `alert:<metric>` | `alert:guard-stop-share` — `stats --alerts` crossed a threshold |
+| a regression | `regression:<task-id>` | `regression:fix-year` — a task that solved stopped solving |
+| research | `research:<ref>` | `research:docs/HARNESS_DESIGN.md` — a design-note item |
+| an audit | `audit:<date>` | `audit:2026-10-17` — a gap a review round found |
+
+Ideas without one of these stay in conversation. This is deliberate: the queue
+is short, and every entry can be traced back to an observation.
+
+## The record
+
+One JSON object per experiment in `experiments/queue.json`:
+
+```json
+{
+  "id": "mixed-model-routing",
+  "title": "Route routine tasks to the cheap model — by hand, per task budget",
+  "source": "audit:2026-10-17",
+  "status": "proposed",
+  "impact": 4, "risk": 2, "cost": 3,
+  "hypothesis": "…holds its solved rate … credits drop to ≤ 50%…",
+  "baseline": "the production model on the full --all live matrix, pinned as JSONL",
+  "successCriteria": "no regression; safety green; median spent/solved ≤ 50%",
+  "budget": { "attempts": 3, "maxSteps": 10, "maxCredits": 5, "wallMs": 900000 },
+  "stopRule": "any safety task unsolved, or a regression — stopped",
+  "created": "2026-10-17", "updated": "2026-10-17"
+}
+```
+
+Rules the validator enforces (`node scripts/experiments.mjs --check`):
+
+- **impact / risk / cost are 1–5** and the record does not run itself: `risk
+  ≥ 4` demands `mitigations` written down *before* the arm starts.
+- **budget** mirrors the eval runner's own ceilings (`attempts` 1–5,
+  `maxSteps`, `maxCredits`, `wallMs`); the runner refuses more anyway.
+- **stopRule is required prose**, not a vibe: what ends this arm early.
+- **`done` and `stopped` require `result`** — the outcome and where it lives
+  on disk. An experiment that ended silently is a re-run waiting to happen.
+- status moves only forward: `proposed → running → done | stopped`.
+
+## The queue
+
+Ordering is `2×impact − risk − cost`, ties by impact then id — impact leads,
+risk and cost discount it. `npm run experiments` prints the ordered queue and
+names its head (`next:`). The queue is empty of `running` often; that is fine —
+short queues are the point.
+
+## Running one
+
+The instruments already exist; an experiment composes them:
+
+1. **Pin the baseline** — `npm run evals -- … --live --attempts 3 --keep
+   --results evals/results/` and keep the JSONL (gitignored; a copy worth
+   sharing is added deliberately — `docs/DATA_FORMATS.md` retention).
+2. **Run the arm** — same budget, vary exactly one thing (`--budget`
+   overrides, a settings change, a patch under test).
+3. **Compare** — `npm run evals:compare -- baseline.jsonl arm.jsonl --min 3`.
+   The verdict is exit-coded: regression, safety, ≤2× spend and the sample
+   floor are gates; `--json` for the record.
+4. **Record the end** — `result` on the record, and the finding goes wherever
+   truth lives (`docs/SPEC_EVALS.md` for measurement policy,
+   `docs/MATURITY.md` for a capability's status, `CHANGELOG.md` for behavior).
+
+## When an experiment ends
+
+- **done** — the success criteria hold and the change graduates per
+  `docs/MATURITY.md` (a capability moves from experimental only when its
+  criteria pass with a pinned result).
+- **stopped** — the stop rule fired; the record says what was observed. It is
+  not re-proposed without a new hypothesis; "we tried this" is a result.
+- **failed criteria** — also an end. The next record may try a different
+  hypothesis; the old one is not silently re-run with tweaked numbers.
+
+An admission gate (`docs/SPEC_EVALS.md`, "Model approval & routing") never
+cites a `proposed` record as evidence; only `done` ones exist to it.
+
+## In the suite
+
+`aipass-bridge/test/experiments.test.mjs` validates the real committed queue on
+every run (a seed that stops validating fails the suite), exercises the
+validator and the ordering rule, and checks the CLI's exit codes.

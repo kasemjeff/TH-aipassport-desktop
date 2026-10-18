@@ -3,22 +3,6 @@
 Use [de.aipass.net](https://de.aipass.net/chat) from your terminal, with
 streaming.
 
-<img width="2048" height="1055" alt="image" src="https://github.com/user-attachments/assets/fa865ce3-7cf1-41f9-b98e-1f5a489a7619" />
-
-<img width="2048" height="1332" alt="image" src="https://github.com/user-attachments/assets/101dcb7c-8e20-47f1-8858-de43aa06bc8f" />
-
-<img width="2048" height="1332" alt="image" src="https://github.com/user-attachments/assets/d9115273-2585-4eeb-808e-3c6368b985a7" />
-
-<img width="2904" height="1444" alt="image" src="https://github.com/user-attachments/assets/0715f177-0ac0-476a-a175-46661e99cf89" />
-
-<img width="2048" height="1067" alt="image" src="https://github.com/user-attachments/assets/1a288db9-bd0a-42cc-9651-bc66958d5fc9" />
-
-
-https://github.com/user-attachments/assets/56975f8d-a9ad-4562-9e00-422078cc66a2
-
-https://github.com/user-attachments/assets/aa8ee7aa-ba2a-4f7c-ab9c-4f401cffd3b2
-
-
 ```
 terminal ──HTTP──▶ bridge (node, no deps)
                       │  SSE: jobs out, POST: deltas back
@@ -37,8 +21,19 @@ For the full structure and how every piece works, see [`DOCS.md`](./DOCS.md).
 
 ## Setup
 
+The fastest path on a fresh machine is one command:
+
+```bash
+aipass setup            # or: npm run setup
+```
+
+It checks Node, puts `aipass` on your PATH, mints the loopback token (and copies
+it to your clipboard), starts the bridge, and opens the extension and site pages
+so you can finish the one-time browser steps. Re-run it any time — it is
+idempotent. The manual steps below are what it automates.
+
 There is nothing to build and nothing to `npm install`. Everything under
-`aipass-bridge/` is `node:*` builtins, so on **any machine with Node ≥ 18** the
+`aipass-bridge/` is `node:*` builtins, so on **any machine with Node ≥ 20** the
 same three steps apply — copy the repo over and run them again.
 
 ### 1. Get the `aipass` command on your PATH
@@ -80,7 +75,7 @@ for everything except the health probes; `AIPASS_REQUIRE_AUTH=0` disables it.
 ### Check it
 
 ```bash
-aipass status     # node ≥ 18? bridge up? extension connected?
+aipass status     # node ≥ 20? bridge up? extension connected?
 ```
 
 Then:

@@ -15,7 +15,9 @@ import { BridgeClient, DEFAULT_BRIDGE_URL } from './bridge.mjs';
 import { createTools } from './tools.mjs';
 import { PermissionEngine } from './permissions.mjs';
 import { SessionStore } from './session.mjs';
-import { Compactor } from './compact.mjs';
+import { Compactor, DEFAULT_MODEL_BUDGETS } from './compact.mjs';
+import { loadMemory, saveMemory, clearMemory } from './memory-store.mjs';
+import { McpManager } from './mcp.mjs';
 import { runTask, applyOverlay, SUBAGENT_ROLES } from './loop.mjs';
 import { preamble as buildPreamble } from './protocol.mjs';
 import { RulesStore } from './rules.mjs';
@@ -32,6 +34,25 @@ export class Harness {
   #planResolve = null;
   /** The WEB scratch conversation id, created lazily and reused. */
   #scratch = null;
+  /** A manual rotation's summary + facts, waiting for the next run's seed. */
+  #pendingSummary = null;
+  /** Facts persisted across sessions for this project (cross-session memory). */
+  #crossSessionMemory = [];
+  /**
+   * (listing delta) The top level each conversation was last shown, keyed by
+   * bridge conversation id. The loop reads it to answer an identical listing
+   * with a one-line "unchanged" note instead of re-pasting the table, and
+   * writes it after the message that carried the listing was accepted. A
+   * conversation created or rotated here gets no entry, so it always starts
+   * from the full listing.
+   */
+  #listingShown = new Map();
+  /**
+   * How `conversation` came about, for the per-send temporary flag: true/false
+   * for a conversation this harness created, null when it was pointed at one
+   * (an explicit id, or one resolved from the bridge's own pointer).
+   */
+  #conversationTemporary = null;
 
   /**
    * @param {object} opts
@@ -81,18 +102,6 @@ export class Harness {
     this.skills = opts.skills ?? SkillLibrary.default({ root: this.root, repoDir: REPO_SKILLS });
     this.store = opts.store === 'off' ? null : (opts.store ?? new SessionStore(path.join(home(), 'sessions')));
     this.overlay = new Overlay(this.root);
-    this.tools = createTools({
-      root: this.root,
-      overlay: this.overlay,
-      skills: this.skills,
-      bridge: this.bridge,
-      model: this.bridge.model,
-      allowRun: this.options.allowRun,
-      events: this.events,
-      log: (_level, text) => this.events.emit('note', { text }),
-      // WEB on a scratch conversation (P2-B), when the run opts in.
-      webConversation: this.options.webScratch ? () => this.#scratchConversation() : null,
-    });
     /* ------------------------------------------------------------- path rules *
      *
      * Two stores have held permission rules, and this is where they meet.
@@ -127,17 +136,65 @@ export class Harness {
       onGrant: (kind, arg) => this.rulesStore.addGrant(this.root, kind, arg),
     });
     for (const g of persisted.grants) this.permissions.grants.set(`${g.kind}:${g.arg}`, 'allow');
-    this.compactor = new Compactor({ bridge: this.bridge, events: this.events, ...(opts.compaction ?? {}) });
+    const comp = opts.compaction ?? {};
+    // A per-model budget map, when one is supplied (or the default one when it is
+    // not), wins over the flat contextTokens default — flash-class runs no longer
+    // rotate every 9k tokens. An explicit budgets object always overrides.
+    const budgets = (comp.budgets && typeof comp.budgets === 'object' && !Array.isArray(comp.budgets) && Object.keys(comp.budgets).length)
+      ? comp.budgets
+      : DEFAULT_MODEL_BUDGETS;
+    this.compactor = new Compactor({ bridge: this.bridge, events: this.events, budgets, ...comp });
+    this.mcp = new McpManager({ root: this.root, log: (t) => this.events.emit('note', { text: t }) });
     this.session = null;
     this.conversation = null;
     this.abort = new AbortController();
+    this.#crossSessionMemory = loadMemory(this.root);
+    this.events.on('compacted', ({ memory }) => {
+      if (Array.isArray(memory) && memory.length) {
+        try { this.#crossSessionMemory = saveMemory(this.root, [...this.#crossSessionMemory, ...memory]); } catch { /* best effort */ }
+      }
+    });
     this.running = false;
     this.#planResolve = null;
+  }
+
+  /**
+   * The tool table for one run.
+   *
+   * A fresh table per run is what the read-first gate needs: `readSet`
+   * (tools.mjs) is the list of files THIS run has looked at, and a table
+   * shared across runs carries a mark from a previous run into the next —
+   * letting a blind CREATE past the very gate that exists to refuse it. The
+   * ATTACH queue rides the same lifetime: a part belongs to the message it
+   * was queued for, not to the harness. Building here also keeps the table's
+   * copy of live options (allowRun's refusal text, the web scratch hook) in
+   * step with setPolicy between runs.
+   */
+  #makeTools() {
+    return createTools({
+      root: this.root,
+      overlay: this.overlay,
+      skills: this.skills,
+      bridge: this.bridge,
+      model: this.bridge.model,
+      allowRun: this.options.allowRun,
+      // The CLI's --max-result / --read-lines are per-run knobs: without this
+      // plumbing they sat in this.options and the tools kept their defaults,
+      // so the flags were notes nobody read.
+      maxResult: this.options.maxResult,
+      readLines: this.options.readLines,
+      events: this.events,
+      log: (_level, text) => this.events.emit('note', { text }),
+      // WEB on a scratch conversation (P2-B), when the run opts in.
+      webConversation: this.options.webScratch ? () => this.#scratchConversation() : null,
+    });
   }
 
   /* ------------------------------------------------------------ sessions */
 
   async startSession({ title = null, sessionId = null } = {}) {
+    // Another session's rotation must not seed this one.
+    this.#pendingSummary = null;
     if (!this.store) { this.session = null; return null; }
     this.session = sessionId ? this.store.load(sessionId) : null;
     if (!this.session) {
@@ -155,6 +212,7 @@ export class Harness {
     if (this.options.conversation) {
       await this.bridge.config({ conversation: this.options.conversation });
       this.conversation = this.options.conversation;
+      this.#conversationTemporary = null;
       return;
     }
     if (this.options.reuse) {
@@ -177,6 +235,7 @@ export class Harness {
       throw err;
     });
     this.conversation = made?.id ?? null;
+    this.#conversationTemporary = made?.id ? !this.options.permanent : null;
     this.events.emit('conversation', { id: this.conversation, temporary: !this.options.permanent });
   }
 
@@ -208,12 +267,38 @@ export class Harness {
     this.permissions.rules = Array.isArray(rules) ? rules : [];
     return this.permissions.rules;
   }
+  /**
+   * The staged files, deletes marked — what a rotation must not let a summary
+   * compress away. Read live: a manual rotation's seed is built at the next
+   * run, and by then the overlay may hold more than it did at rotation time.
+   */
+  #stagedList() {
+    return this.overlay.keys().map((abs) => {
+      const rel = path.relative(this.root, abs).split(path.sep).join('/');
+      return this.overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
+    }).slice(0, 20);
+  }
+
+  /** The latest PLAN/TODO checklist the session recorded, or null. A run that
+   *  rotates mid-flight or a manual /compact must not forget the plan the
+   *  previous conversation was working against. */
+  #sessionTodo() {
+    const entry = [...(this.session?.entries ?? [])].reverse().find((e) => e.type === 'todo' && Array.isArray(e.items));
+    return entry?.items ?? null;
+  }
+
   async #rotate(summary, task) {
-    await this.bridge.createConversation({ temporary: true, message: 'Continuing earlier work.' });
-    const st = await this.bridge.status().catch(() => null);
-    this.conversation = st?.conversation ?? this.conversation;
+    // The id the create just returned, not a re-read of the bridge's shared
+    // pointer: another harness may adopt its own conversation in the gap
+    // between create and status, and `status` would then hand this run the
+    // other session's conversation to continue in.
+    const made = await this.bridge.createConversation({ temporary: true, message: 'Continuing earlier work.' });
+    this.conversation = made?.id ?? this.conversation;
+    this.#conversationTemporary = true;
     this.events.emit('conversation', { id: this.conversation, temporary: true, rotated: true });
-    return summary;
+    // The loop re-binds its own send target from this: its copy of the id is
+    // what names every message until the run ends.
+    return { conversation: this.conversation, temporary: this.#conversationTemporary };
   }
 
   /** One throwaway conversation all WEB lookups share (P2-B), lazily made. */
@@ -237,25 +322,36 @@ export class Harness {
    * demand from the window's compact button - the same path, because a manual
    * rotation that behaved differently would be a surprise waiting to happen.
    *
-   * @returns {Promise<{summary: string, seedText: string}>}
+   * @returns {Promise<{summary: string, memory: string[], seedText: string}>}
    */
   async compactNow(task = '') {
     if (!this.session) throw new Error('no session to compact');
-    const summary = await this.compactor.summarize(this.session, { task, model: this.bridge.model });
-    this.session.append('compaction', { summary, firstKeptEntryId: this.session.entries.at(-1)?.id ?? null });
+    const raw = await this.compactor.summarize(this.session, {
+      task, model: this.bridge.model,
+      conversation: this.conversation, temporary: this.#conversationTemporary,
+    });
+    // The reply digests into the narrative and the merged facts — the facts
+    // accumulate across rotations (digest reads the session's compaction
+    // entries), so this rotation's seed carries everything earlier ones kept.
+    const { summary, memory } = this.compactor.digest(this.session, raw);
+    // Rotate first, record second — the loop's rotation keeps the same order:
+    // a compaction entry for a rotation that failed would reset the estimate
+    // against a conversation the model never carried.
     await this.#rotate(summary, task);
+    this.session.append('compaction', { summary, ...(memory.length ? { memory } : {}), lastSummarizedEntryId: this.session.entries.at(-1)?.id ?? null });
     this.events.emit('compacted', { summary });
+    // Persist the merged facts across sessions (cross-session memory).
+    if (memory.length) {
+      try { this.#crossSessionMemory = saveMemory(this.root, [...this.#crossSessionMemory, ...memory]); } catch { /* best effort */ }
+    }
     // The staged list rides along (deletes marked): a rotation is where a
     // pending edit gets forgotten, and the fresh conversation must know the
     // tree is not what the disk says yet.
-    const staged = this.overlay.keys().map((abs) => {
-      const rel = path.relative(this.root, abs).split(path.sep).join('/');
-      return this.overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
-    }).slice(0, 20);
+    const staged = this.#stagedList();
     const seedText = this.compactor.seed({
       summary,
+      memory,
       task,
-      listing: '',
       // The same preamble the run would send, flags and all: a rotation that
       // silently dropped SEARCH -i, ATTACH or a plugin's markers was a
       // different run wearing the same name (the loop's own rotation passes
@@ -270,8 +366,28 @@ export class Harness {
         lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
       staged,
+      todo: this.#sessionTodo(),
     });
-    return { summary, seedText };
+    return { summary, memory, seedText };
+  }
+
+  /**
+   * Carry a manual rotation's summary into the next run. The window's
+   * /compact has no run in flight, so without this the summary it just paid
+   * for would never reach the fresh conversation — the next run would be
+   * told "the project is still open" with nothing remembered. The merged
+   * facts ride along or a long session's spine is cut at the rotation. The
+   * seed is built there, against that run's own task: at rotation time
+   * nobody knows what the next task will be, and losing it would be worse
+   * than the memory the seed restores. Consumed once, by run().
+   */
+  rememberSummary(summary, memory = null) {
+    const s = String(summary ?? '').trim() || null;
+    this.#pendingSummary = s ? { summary: s, memory: Array.isArray(memory) ? memory : [] } : null;
+    if (s && Array.isArray(memory) && memory.length) {
+      try { this.#crossSessionMemory = saveMemory(this.root, [...this.#crossSessionMemory, ...memory]); } catch { /* best effort */ }
+    }
+    return s;
   }
 
   /** How full the context budget is right now, for whoever is watching. */
@@ -305,10 +421,41 @@ export class Harness {
       if (!this.session) await this.startSession();
       this.abort = new AbortController();
 
+      // MCP: lazy-load configured servers once per harness, then merge their
+      // tools into the plugin tool table so the preamble and the loop see them.
+      try { await this.mcp.ensureLoaded(); } catch { /* best effort */ }
+      const mcpTools = this.mcp.toolTable();
+      const basePluginTools = (this.options.pluginTools ?? []).filter((t) => !String(t?.marker ?? '').startsWith('MCP__'));
+      this.options.pluginTools = [...basePluginTools, ...mcpTools];
+
       const isFirst = first ?? this.session.entries.every((e) => e.type !== 'task');
 
       // Context is a rotating resource here, so check it before the turn, not after.
+      // A manual rotation's summary rides the next run (rememberSummary): the
+      // seed is built here, against this run's own task — at rotation time
+      // nobody knew it yet. Consumed once: a second run must not repeat the
+      // seed into a conversation that already carries it.
       let seedText = null;
+      if (this.#pendingSummary) {
+        const { summary, memory } = this.#pendingSummary;
+        this.#pendingSummary = null;
+        seedText = this.compactor.seed({
+          summary,
+          memory,
+          task,
+          preambleText: buildPreamble({
+            allowRun: Boolean(this.options.allowRun),
+            plan: Boolean(this.options.plan),
+            subagent: Boolean(this.options.subagent),
+            searchI: Boolean(this.options.searchI),
+            attach: Boolean(this.options.attach),
+            plugins: this.options.pluginTools ?? [],
+            lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
+          }),
+          staged: this.#stagedList(),
+          todo: this.#sessionTodo(),
+        });
+      }
       if (this.compactor.needsCompaction(this.session)) {
         this.events.emit('note', { text: 'context is filling up - summarising earlier work and starting a fresh conversation' });
         seedText = (await this.compactNow(task)).seedText;
@@ -316,21 +463,44 @@ export class Harness {
 
       await this.#ensureConversation();
 
-      return await runTask(task, {
+      // Cross-session memory: on the first run of a session, carry forward the
+      // facts persisted from earlier sessions so the model does not rediscover
+      // them. Only on the first run — a later run in the same session already
+      // has them in context.
+      const effectiveTask = isFirst && this.#crossSessionMemory.length
+        ? `Facts carried from earlier sessions (durable; re-check anything that may have gone stale):\n${this.#crossSessionMemory.map((f) => '- ' + f).join('\n')}\n\nTask: ${task}`
+        : task;
+
+      return await runTask(effectiveTask, {
         bridge: this.bridge,
-        tools: this.tools,
+        // The run talks in its own conversation, named on every send: with
+        // several projects running at once the bridge's shared pointer can be
+        // moved by any of them, and a nameless send would land wherever it
+        // happens to point. The temporary flag rides along because every turn
+        // of a temporary conversation has to repeat it.
+        conversation: this.conversation,
+        conversationTemporary: this.conversation ? this.#conversationTemporary : null,
+        tools: this.#makeTools(),
         overlay: this.overlay,
         session: this.session,
         permissions: this.permissions,
         events: this.events,
         subagent: this.options.subagent ? this.#makeHelper() : null,
         check: this.#makeChecker(task),
-        runPluginTool: runPluginTool ?? this.runPluginTool ?? null,
+        runPluginTool: (marker, args) => {
+          if (this.mcp.hasTool(marker)) return this.mcp.runTool(marker, args);
+          const pluginRunner = runPluginTool ?? this.runPluginTool ?? null;
+          if (pluginRunner) return pluginRunner(marker, args);
+          return `no such tool: ${marker}`;
+        },
         approvePlan: this.options.requirePlanApproval
           ? () => new Promise((resolve) => { this.events.emit('plan_request', {}); this.#planResolve = resolve; })
           : null,
         compactor: this.compactor,
         rotate: (summary) => this.#rotate(summary, task),
+        // (listing delta) The per-conversation listing memory the loop reads
+        // and updates; see #listingShown.
+        listingShown: this.#listingShown,
         options: {
           ...this.options,
           signal: this.abort.signal,
@@ -346,6 +516,25 @@ export class Harness {
     }
   }
 
+  /** Test-time scaling: run the task N times, keep the best by check verdict. */
+  async scale(task, n = 3, opts = {}) {
+    const attempts = Math.min(5, Math.max(1, Math.floor(Number(n) || 3)));
+    const results = [];
+    for (let i = 1; i <= attempts; i++) {
+      this.events.emit('note', { text: `scale: attempt ${i} of ${attempts}` });
+      try {
+        const r = await this.run(task, opts);
+        results.push({ attempt: i, summary: r.summary, stopReason: r.stopReason, steps: r.steps, check: r.check ?? null, changes: r.changes ?? [] });
+        if (r.check?.verdict === 'pass') break;
+      } catch (e) {
+        results.push({ attempt: i, error: e.message });
+      }
+    }
+    const rank = (v) => (v === 'pass' ? 2 : v === 'none' ? 1 : 0);
+    const best = results.reduce((a, b) => (rank(a?.check?.verdict) >= rank(b?.check?.verdict) ? a : b), results[0]);
+    return { attempts: results.length, results, best };
+  }
+
   /** The human answered a plan gate. */
   answerPlan(ok) { this.#planResolve?.(ok); this.#planResolve = null; }
 
@@ -359,6 +548,11 @@ export class Harness {
     return result;
   }
 
+  /** Cross-session memory facts (read-only copy). */
+  crossSessionMemory() { return [...this.#crossSessionMemory]; }
+  /** Forget all cross-session facts for this project. */
+  clearCrossSessionMemory() { this.#crossSessionMemory = []; clearMemory(this.root); }
+
   /** Drop everything pending without writing. */
   discard() {
     const n = this.overlay.size;
@@ -368,12 +562,28 @@ export class Harness {
   }
 
   cancel() {
+    // A run parked on a gate must not stay parked: abort first so the run's own
+    // signal reads 'cancelled', then release the plan gate (resolved as a
+    // decline) and deny every permission question still open, so the run leaves
+    // the gate instead of waiting forever behind a window that may have reloaded
+    // and lost the modal.
     this.abort.abort();
+    this.answerPlan(false);
+    this.permissions.cancelPending();
     this.events.emit('cancelled', {});
   }
 
   pendingChanges() {
     return this.overlay.changes().map(({ file, added, removed, deleted, isNew }) => ({ file, added, removed, deleted, isNew }));
+  }
+
+  /** What the run is still waiting on the human for — used by a window that
+   *  just reloaded to put the modal back on screen. */
+  pendingAsks() {
+    return {
+      permissions: this.permissions.pendingList(),
+      plan: this.#planResolve !== null,
+    };
   }
 
   /* ------------------------------------------------------------- helpers */
@@ -397,7 +607,15 @@ export class Harness {
       // A verifier may RUN checks, but only where the run itself may: the
       // child narrows the parent's permissions, never widens them.
       const canRun = Boolean(spec?.run) && Boolean(this.options.allowRun);
-      const child = new Overlay(this.root);
+      // The helper reads through the parent's staged tree (Overlay.base): the
+      // work in progress is its starting point, so its edit builds on what the
+      // parent staged instead of re-deriving it from disk. Its own edits stay
+      // in `child.map` — the copy-back below merges them.
+      const child = new Overlay(this.root, { base: this.overlay });
+      // What the parent looked like when this helper started. The copy-back
+      // uses it to tell this helper's own edits apart from a version staged
+      // while it was running — by the parent itself or by a sibling helper.
+      const before = new Map(this.overlay.map);
       const childSession = this.store.create({ root: this.root, model: this.bridge.model, title: `${role ? `${role}: ` : 'helper: '}${task.slice(0, 60)}` });
       // The parent's path rules travel with the helper. They are statements
       // about the project (`.env*  deny`), not about which run is editing, so
@@ -440,18 +658,35 @@ export class Harness {
       }
 
       const prepared = [];
+      const skipped = [];
       for (const [abs, value] of child.map) {
+        const rel = path.relative(this.root, abs).split(path.sep).join('/');
+        // Last-write-wins is how a sibling's finished work disappears without
+        // a trace: when the parent staged something here after this helper
+        // started, the helper's version does not overwrite it — it is named
+        // in the reply instead, so it can be redone or merged deliberately.
+        const stagedSinceStart = this.overlay.map.has(abs)
+          ? this.overlay.map.get(abs) !== before.get(abs)
+          : before.has(abs);
+        if (stagedSinceStart && this.overlay.map.get(abs) !== value) {
+          skipped.push(rel);
+          continue;
+        }
         this.overlay.map.set(abs, value);
-        prepared.push(path.relative(this.root, abs).split(path.sep).join('/'));
+        prepared.push(rel);
       }
       if (prepared.length) {
         this.events.emit('diff_update', { changes: this.pendingChanges() });
         this.session?.append('note', { text: `helper prepared edits pending approval: ${prepared.join(', ')}` });
       }
-      this.events.emit('helper_end', { task, role: role || null, summary: result.summary ?? '', prepared });
+      if (skipped.length) {
+        this.session?.append('note', { text: `a newer version was already staged, so the helper's edits were not applied: ${skipped.join(', ')}` });
+      }
+      this.events.emit('helper_end', { task, role: role || null, summary: result.summary ?? '', prepared, skipped });
 
       const lines = [result.summary ?? 'The helper finished without a summary.'];
       if (prepared.length) lines.push(`Files prepared and waiting for approval: ${prepared.join(', ')}`);
+      if (skipped.length) lines.push(`Not applied — a newer version of these files was already staged by the parent run or a parallel helper, so this helper's edits were left alone: ${skipped.join(', ')}. Read them back if they still need changing.`);
       return lines.join('\n\n');
     };
   }

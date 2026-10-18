@@ -281,6 +281,33 @@ $('refresh').addEventListener('click', async () => {
 // The extension reload is harmless to a resting browser but kills any job the
 // worker is holding, so it waits for runs to finish; the tab reload is the
 // user's to time.
+// Paste the loopback token straight from the clipboard — `aipass setup`
+// copies it there, so this makes the manual paste one click.
+$('pasteToken').addEventListener('click', async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text) return toast('Clipboard is empty');
+    $('token').value = text.trim();
+    toast('Pasted from clipboard');
+  } catch {
+    toast('Could not read the clipboard');
+  }
+});
+
+// Verify the bridge actually accepts the saved URL + token before closing.
+$('testConn').addEventListener('click', async () => {
+  const url = ($('url').value.trim().replace(/\/+$/, '')) || bridge;
+  const token = $('token').value.trim();
+  try {
+    const res = await fetch(`${url}/status`, { cache: 'no-store', headers: token ? { authorization: `Bearer ${token}` } : {} });
+    if (res.ok) toast('Connection OK');
+    else if (res.status === 401 || res.status === 403) toast('Token rejected - paste ~/.aipass/.token');
+    else toast(`Bridge answered ${res.status}`);
+  } catch {
+    toast('Could not reach the bridge');
+  }
+});
+
 $('reloadExt').addEventListener('click', async () => {
   const srv = await bridgeStatus();
   if (srv?.activeJobs) return toast(`A run is active (${srv.activeJobs}) — wait for it before reloading`);

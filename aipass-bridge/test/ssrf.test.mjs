@@ -108,6 +108,10 @@ test('a redirect into a non-http scheme is refused', async () => {
 test('a hostname that resolves private is refused; a DNS failure fails open', async () => {
   assert.equal(await hostResolvesPrivate('localhost'), true, 'localhost resolves to loopback');
   assert.equal(await hostResolvesPrivate('93.184.216.34'), false, 'a public literal is not private');
+  // A literal private address answers without a DNS round trip, so the
+  // resolve-private path is covered on a machine with no network at all.
+  assert.equal(await hostResolvesPrivate('169.254.169.254'), true, 'the metadata address resolves private');
+  assert.equal(await hostResolvesPrivate('10.1.2.3'), true, 'so does RFC1918');
   // RFC 2606 reserves .invalid — resolution must fail, and a failure means the
   // literal-IP check stays the only guard (fails open by design: the literal
   // check above already ran).

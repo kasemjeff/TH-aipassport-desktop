@@ -1,8 +1,8 @@
 // The checker (docs/SPEC_CHECKER.md): one read-only child over the staged tree,
 // asked for a verdict before a DONE is accepted. A stub bridge with a reply
 // queue per conversation keeps the parent's exchanges and the checker's
-// apart — the parent's sends carry no conversation id (they use the bridge
-// pointer), the checker's carry its own conversation.
+// apart — the parent names the conversation it created (conv-1), the checker
+// names its own.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -23,7 +23,7 @@ class StubBridge extends BridgeClient {
   constructor(queues, { failCreateAfter = Infinity } = {}) {
     super('http://127.0.0.1:1');
     this.model = 'stub';
-    this.queues = queues;      // 'parent' | 'conv-<n>' → scripted replies, in order
+    this.queues = queues;      // conversation id ('conv-1' = the parent, 'conv-<n>' the children) → scripted replies, in order
     this.turns = new Map();
     this.prompts = [];         // every chat, for "what did the model hear"
     this.created = 0;          // conversations handed out (attempts included)
@@ -58,12 +58,12 @@ function makeHarness({ root, bridge, options = {} }) {
 }
 
 const statsOf = (h) => h.session.entries.find((e) => e.type === 'run_stats');
-const parentPrompts = (bridge) => bridge.prompts.filter((p) => p.conversation === null);
+const parentPrompts = (bridge) => bridge.prompts.filter((p) => p.conversation === 'conv-1');
 
 test('a stage-and-DONE reply is checked, and a failing check reaches the model', async () => {
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
-    parent: [
+    'conv-1': [
       // Read-first: CREATE over an existing file needs the file read this
       // run; the fix itself is still the stage-and-DONE reply R4 never sees.
       'NEED file math.mjs\n',
@@ -89,7 +89,7 @@ test('a stage-and-DONE reply is checked, and a failing check reaches the model',
 test('a passing check costs the model nothing', async () => {
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
-    parent: [
+    'conv-1': [
       'NEED file math.mjs\n',
       'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE fixed add\n',
     ],
@@ -116,7 +116,7 @@ test('a passing check costs the model nothing', async () => {
 test('the checker sees the projection, the disk does not move', async () => {
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
-    parent: [
+    'conv-1': [
       'NEED file math.mjs\n',
       'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE fixed add\n',
     ],
@@ -144,7 +144,7 @@ test('a staged delete is gone in the projection', async () => {
   const bridge = new StubBridge({
     // A code file rides along: the checker's gate is R4's — a docs-only
     // delete would skip both — so `app.mjs` is what makes this a claim.
-    parent: ['DELETE secret.txt\nCREATE app.mjs\nexport const ok = true;\nEND\nDONE dropped the secret\n'],
+    'conv-1': ['DELETE secret.txt\nCREATE app.mjs\nexport const ok = true;\nEND\nDONE dropped the secret\n'],
     'conv-2': ['RUN\nnode check.mjs\nEND\nDONE checked\n'],
   });
   const { h } = makeHarness({ root, bridge });
@@ -159,7 +159,7 @@ test('a staged delete is gone in the projection', async () => {
 test('writes are refused in the checker, and nothing is merged back', async () => {
   const root = tempDir({ 'check.mjs': "console.log('PASS');\n" });
   const bridge = new StubBridge({
-    parent: ['CREATE extra.mjs\nexport const x = 1;\nEND\nDONE staged extra\n'],
+    'conv-1': ['CREATE extra.mjs\nexport const x = 1;\nEND\nDONE staged extra\n'],
     'conv-2': ['CREATE helper.mjs\nexport const y = 2;\nEND\nDONE could not write\n'],
   });
   const { h, store } = makeHarness({ root, bridge });
@@ -179,7 +179,7 @@ test('writes are refused in the checker, and nothing is merged back', async () =
 test('a second DONE over the same tree does not check again', async () => {
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
-    parent: [
+    'conv-1': [
       'NEED file math.mjs\n',
       'CREATE math.mjs\nexport const add = (a, b) => a - b + 1;\nEND\nDONE staged a fix\n',
       'DONE fixed by hand\n',
@@ -202,7 +202,7 @@ test('a second DONE over the same tree does not check again', async () => {
 test('no RUN enabled, no check — the DONE is accepted as before', async () => {
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
-    parent: [
+    'conv-1': [
       'NEED file math.mjs\n',
       'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE staged the fix\n',
     ],
@@ -223,7 +223,7 @@ test('no RUN enabled, no check — the DONE is accepted as before', async () => 
 test('a checker conversation that will not open is skipped, never the parent one', async () => {
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
-    parent: [
+    'conv-1': [
       'NEED file math.mjs\n',
       'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE staged the fix\n',
     ],
@@ -251,7 +251,7 @@ test('a run that checked itself still earns the child check', async () => {
   // and the verdict is the child's own.
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
-    parent: [
+    'conv-1': [
       // Read-first: CREATE over an existing file needs the file read this run.
       'NEED file math.mjs\n',
       'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\n'
@@ -275,7 +275,7 @@ test('a run that checked itself still earns the child check', async () => {
 test('a fix after a failed check earns one re-check, and a pass ends it', async () => {
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
-    parent: [
+    'conv-1': [
       // Read-first, then the fix: the re-check below rides on the tree moving.
       'NEED file math.mjs\n',
       'CREATE math.mjs\nexport const add = (a, b) => a - b + 1;\nEND\nDONE staged a fix\n',
@@ -303,7 +303,7 @@ test('the check cap holds: two verdicts, then the DONE is taken as it stands', a
   // apply panel can say the change never passed.
   const root = tempDir({ 'math.mjs': BROKEN, 'check.mjs': CHECK });
   const bridge = new StubBridge({
-    parent: [
+    'conv-1': [
       'NEED file math.mjs\n',
       'CREATE math.mjs\nexport const add = (a, b) => a - b + 1;\nEND\nDONE attempt one\n',
       'CREATE math.mjs\nexport const add = (a, b) => a - b - 1;\nEND\nDONE attempt two\n',
@@ -334,7 +334,7 @@ test('the checker and its verdict name the staged test files', async () => {
     'math.test.mjs': "import { add } from './math.mjs';\nif (add(2, 3) !== 5) process.exit(1);\n",
   });
   const bridge = new StubBridge({
-    parent: [
+    'conv-1': [
       'NEED file math.mjs\nNEED file math.test.mjs\n',
       'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\n'
       + 'CREATE math.test.mjs\nimport { add } from \'./math.mjs\';\nif (add(2, 3) !== 5) process.exit(1);\nEND\n'
@@ -365,7 +365,7 @@ test('a declared check is run verbatim, read from disk', async () => {
     '.aipass/check.txt': '# the project check\nnode check.mjs\n',
   });
   const bridge = new StubBridge({
-    parent: [
+    'conv-1': [
       'NEED file math.mjs\n',
       'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE fixed add\n',
     ],
@@ -390,7 +390,7 @@ test('a declared check is run verbatim, read from disk', async () => {
 test('a run the chain guard skipped is not counted as a failed check', async () => {
   const root = tempDir({ 'a.mjs': 'export const a = 1;\n' });
   const bridge = new StubBridge({
-    parent: [
+    'conv-1': [
       'NEED file a.mjs\n',
       'CREATE a.mjs\nexport const a = 2;\nEND\nDONE staged the change\n',
     ],

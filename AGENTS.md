@@ -132,9 +132,12 @@ stay compatible:
   and the DONE checker.
 - `docs/DATA_FORMATS.md` — session/log formats. `docs/TROUBLESHOOTING.md` —
   failure playbook. `docs/RELIABILITY.md` — SLIs, the error budget, what
-  degrades and how. `docs/TECH_STACK.md`, `docs/RELEASE.md` — stack and
-  release procedure. `SECURITY.md` — auth model. `CHANGELOG.md` —
-  behavior-level changes; update it in the same change that changes behavior.
+  degrades and how. `docs/EXPERIMENTS.md` — the experiment queue and how one
+  ends; `docs/MATURITY.md` — capability status and owners;
+  `docs/TEST_PLAN.md` — the test design (layers L1–L5).
+  `docs/TECH_STACK.md`, `docs/RELEASE.md` — stack and release procedure.
+  `SECURITY.md` — auth model. `CHANGELOG.md` — behavior-level changes; update
+  it in the same change that changes behavior.
 - `docs/WORKLOG.md` — session handoff log (newest first): the same five items
   as the end-of-session report.
 - Rule: a change that invalidates any file above (or a rule here) updates it

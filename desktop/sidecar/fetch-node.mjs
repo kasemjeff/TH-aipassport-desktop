@@ -18,9 +18,12 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-/** Node's own name for the platform being built for — Tauri's triple. */
-function targetTriple() {
-  const { platform, arch } = process;
+/**
+ * Node's own name for the platform being built for — Tauri's triple.
+ * Exported with injectable platform/arch so the table (the two darwin rows
+ * included) is testable from any machine, the macOS one being the point.
+ */
+export function targetTriple(platform = process.platform, arch = process.arch) {
   const table = {
     'win32-x64': 'x86_64-pc-windows-msvc',
     'darwin-x64': 'x86_64-apple-darwin',
@@ -30,27 +33,36 @@ function targetTriple() {
   };
   const triple = table[`${platform}-${arch}`];
   if (!triple) {
-    console.error(`no sidecar name for ${platform}-${arch} — add it to the table in ${path.basename(fileURLToPath(import.meta.url))}`);
-    process.exit(1);
+    throw new Error(`no sidecar name for ${platform}-${arch} — add it to the table in ${path.basename(fileURLToPath(import.meta.url))}`);
   }
   return triple;
 }
 
-const node = process.execPath;
-const target = path.join(HERE, `node-${targetTriple()}${process.platform === 'win32' ? '.exe' : ''}`);
+// The copy only runs when the script is invoked, not when a test imports the
+// table: importing must never copy a ~90 MB binary or chmod anything.
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  let target;
+  try {
+    target = path.join(HERE, `node-${targetTriple()}${process.platform === 'win32' ? '.exe' : ''}`);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
 
-copyFileSync(node, target);
-if (process.platform !== 'win32') {
-  // A sidecar the OS cannot execute is a sidecar that might as well be absent,
-  // and a copy loses nothing by keeping the mode.
-  execFileSync('chmod', ['755', target]);
-}
-const version = execFileSync(node, ['--version'], { encoding: 'utf8' }).trim();
-console.log(`sidecar ready: ${target} (${Math.round(statSync(target).size / 1e6)} MB, node ${version})`);
+  copyFileSync(process.execPath, target);
+  if (process.platform !== 'win32') {
+    // A sidecar the OS cannot execute is a sidecar that might as well be absent,
+    // and a copy loses nothing by keeping the mode.
+    execFileSync('chmod', ['755', target]);
+  }
+  const version = execFileSync(process.execPath, ['--version'], { encoding: 'utf8' }).trim();
+  console.log(`sidecar ready: ${target} (${Math.round(statSync(target).size / 1e6)} MB, node ${version})`);
 
-if (!existsSync(target)) {
-  // Unreachable after a successful copy; the guard is here so a silent
-  // no-write failure can never look like success.
-  console.error('copy reported success but the file is not there');
-  process.exit(1);
+  if (!existsSync(target)) {
+    // Unreachable after a successful copy; the guard is here so a silent
+    // no-write failure can never look like success.
+    console.error('copy reported success but the file is not there');
+    process.exit(1);
+  }
 }

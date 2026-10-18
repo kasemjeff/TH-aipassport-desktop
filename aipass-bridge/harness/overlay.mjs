@@ -86,10 +86,16 @@ export function binaryKind(abs, pending = () => false) {
 }
 
 export class Overlay {
-  constructor(root, { clip = (s) => s } = {}) {
+  constructor(root, { clip = (s) => s, base = null } = {}) {
     this.root = path.resolve(root);
     this.map = new Map();
     this.clip = clip;
+    // A read-through layer: a parallel helper stages edits of its own but
+    // treats the parent's staged tree as its starting point (harness.mjs), so
+    // `read`, `exists` and listings see the work in progress. Only the read
+    // surfaces consult it — the staged map, keys and diffs never do, so what
+    // the helper proposes stays distinctly its own work.
+    this.base = base;
     // The window polls pending diffs after every step and on a timer, and each
     // poll used to re-read every staged file's disk copy and re-run the diff.
     // Two memos fix that: diskText keyed by the file's mtime+size, and the
@@ -114,8 +120,11 @@ export class Overlay {
     try { return this.safe(p); } catch { return null; }
   }
 
-  has(abs) { return this.map.has(abs); }
-  isDeleted(abs) { return this.map.get(abs) === DELETED; }
+  has(abs) { return this.map.has(abs) || (this.base?.has(abs) ?? false); }
+  isDeleted(abs) {
+    if (this.map.has(abs)) return this.map.get(abs) === DELETED;
+    return this.base?.isDeleted(abs) ?? false;
+  }
   keys() { return [...this.map.keys()]; }
   entries() { return [...this.map.entries()]; }
 
@@ -136,11 +145,13 @@ export class Overlay {
       if (val === DELETED) throw new Error(`file was deleted: ${posix(path.relative(this.root, abs))}`);
       return val;
     }
+    if (this.base) return this.base.readAt(abs);
     return fs.readFileSync(abs, 'utf8');
   }
 
   existsAt(abs) {
     if (this.map.has(abs)) return this.map.get(abs) !== DELETED;
+    if (this.base) return this.base.existsAt(abs);
     return fs.existsSync(abs);
   }
 
@@ -170,6 +181,9 @@ export class Overlay {
       const [first, ...rest] = rel.split(path.sep);
       names.add(rest.length ? `${first}/` : first);
     }
+    // A helper's listing must also carry what the parent staged: a file the
+    // parent just created exists in the run's view, even if not on disk yet.
+    this.base?.mergeIntoListing(abs, names);
   }
 
   /**
