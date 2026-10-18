@@ -6,6 +6,38 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-18 — opencode — the plan card: ticks that register, a bounded list, and what comes next
+
+- **Files**: `aipass-bridge/harness/protocol.mjs` (`parseTodo` now strips the
+  bullet before judging done — `- [x]` and `* [x]` tick like bare `[x]`; the
+  reported bug was the checklist never ticking in the shape models actually
+  write); `aipass-bridge/harness/loop.mjs` (`finished` and the run result
+  carry the run's final `todo` state); `desktop/ui/app.js` (the plan card is
+  one element per session: header `plan & todo · done/total`, `complete`
+  class, `clearTodo()` on new session / session open / deleting the open
+  session, `todo` entries replayed in `openSession`, and the `finished`
+  handler re-tallies from `todo` — a `done` ending with items open names how
+  many and offers the one-click carry-on, a clean one says the checklist
+  closed); `desktop/ui/styles.css` (`.panel ul` bounded at 26vh and scrolling;
+  `.panel.complete h4` green); `aipass-bridge/test/plan.test.mjs` (new — tick
+  forms, the once-per-run DONE checkpoint, `finished.todo`); 
+  `aipass-bridge/test/ui.test.mjs` (+6 card specs, and the compaction spec
+  stays); docs: `CHANGELOG.md`, `docs/LOOP_DESIGN.md` (DONE pipeline, steps
+  7/12, guards + tests tables), `desktop/README.md`.
+- **Tests**: `plan.test.mjs` 4 pass / 0 fail; `ui.test.mjs` 60 pass / 0 fail;
+  full `npm test` 630 pass / 0 fail / 2 skipped (both pre-existing); touched
+  `.mjs`/`.js` syntax-checked.
+- **Deferred**: un-ticking an item stays impossible (`mergeTodo` keeps `done`
+  sticky by design — the card is a closing record, and reopening was not
+  asked for); the 26vh bound is CSS with no headless test; the card's
+  horizontal alignment against the transcript column was left as found.
+- **Risks**: shared repo — the sibling `rpc.mjs` / `mcp.mjs` /
+  `plugins.test.mjs` WIP left untouched; `finished.todo` is a new field (a
+  consumer deep-equal'ing the whole payload would need it added — none does);
+  a second run in one session that writes no plan leaves the previous card
+  standing (the card is the session's checklist, not the run's).
+- **Cleanup**: none.
+
 ## 2026-10-18 — opencode — UX: design first, then the window and the popup
 
 - **Files**: `docs/UX.md` (new — principles, surfaces, ranked pain points

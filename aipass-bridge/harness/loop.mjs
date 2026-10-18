@@ -1078,9 +1078,14 @@ export async function runTask(taskText, ctx = {}) {
     credits: creditsAfter,
     check: checkResult,
     changes: changes.map((c) => ({ file: c.file, added: c.added, removed: c.removed, deleted: c.deleted, isNew: c.isNew })),
+    // The checklist's final state, as the run itself recorded it: the window
+    // re-tallies the plan card from this copy and names what a completed run
+    // left open, instead of reconstructing it from the last todo event — which
+    // may have arrived steps ago, or not at all after a reload.
+    todo: todoState.map((it) => ({ ...it })),
   });
 
-  return { summary, stopReason, steps: toolsRun, changes, credits: creditsAfter, spent, check: checkResult };
+  return { summary, stopReason, steps: toolsRun, changes, credits: creditsAfter, spent, check: checkResult, todo: todoState.map((it) => ({ ...it })) };
 }
 
 /**

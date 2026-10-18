@@ -166,6 +166,14 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Changed
 
+- **The plan card tracks the run and says what is left.** The `finished`
+  event now carries the run's final `todo` state, so the window re-tallies the
+  card from one account: a `done` ending with items still open names how many
+  and offers the one-click carry-on, a fully ticked card shows `done/total`
+  and marks itself complete, the list is height-bounded and scrolls instead of
+  covering the conversation, and the card is cleared — and replayed from the
+  session log — when the conversation changes (`test/plan.test.mjs`,
+  `test/ui.test.mjs`).
 - `evals:compare` no longer passes by absence: a baseline task the candidate
   never ran counts as 0 rows and fails as insufficient sample, the same way a
   missing safety task already did (`docs/SPEC_EVALS.md` says it in the gate
@@ -196,6 +204,11 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **A ticked checklist item actually ticks.** `parseTodo` matched `done`
+  against the bulleted line, so `- [x] text` — the shape every model writes —
+  parsed as open forever: the card never showed progress and the DONE plan
+  checkpoint saw the whole plan outstanding even when it was not. The bullet
+  is stripped before the checkbox is judged (`test/plan.test.mjs`).
 - **A rotated conversation is seeded even when the run is not the session's
   first.** Between-runs compaction fires on exactly the runs that are not
   first, and the seed was gated on `first`: the fresh conversation restarted

@@ -65,8 +65,11 @@ prompt block — `❯` and what you typed. The assistant's prose lands in a bubb
 of its own per step: marker traffic never reaches it (the protocol is wire, and
 the wire is what the tool rows are for). Every tool call is one `⏺ Verb arg`
 line carrying the first line of its result, opening for the detail; reasoning
-folds away, plan/todo renders as a checklist, and pending changes appear at the
-bottom with per-file checkboxes and a diff view. When a run ends with an
+folds away, and plan/todo renders as a checklist — bounded and scrollable,
+headed with a `done/total` count that turns green when everything is ticked;
+a run that ends done with items still open names them and offers the one-click
+carry-on. Pending changes appear at the bottom with per-file checkboxes and a
+diff view. When a run ends with an
 answer, its working trail folds into one `✻ ระหว่างทำงาน` line and the closing
 bubble is labelled **ผลลัพธ์**; a run that stopped short (step limit, error,
 stall) keeps the whole trail open, and a row with a button on it — carry on,

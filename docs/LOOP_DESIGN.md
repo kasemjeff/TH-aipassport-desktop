@@ -43,16 +43,21 @@ runTask(task):
   │   no calls   → nudge ×2, then the stall path                  │
   │   calls      → execute in order, behind the permission gate   │
   │                 plan gate · diff_update · budgets             │
-  │   DONE       → checker → language check → done_line → stop    │
+  │   DONE       → checker → plan checkpoint → language check →   │
+  │                done_line → stop                               │
   │ guards: repeat · stagnation · verify-nudge · compaction       │
   └──────────────────────────────────────────────────────────────┘
   │
   ▼
-run_stats + finished: summary, stopReason, changes, credits spent
+run_stats + finished: summary, stopReason, changes, credits spent,
+                       the final checklist (todo)
 ```
 
 The loop returns `{ summary, stopReason, steps, changes, credits, spent,
-check }`, records a `run_stats` line into the session, and emits `finished`.
+check, todo }`, records a `run_stats` line into the session, and emits
+`finished` (whose `todo` carries the run's final checklist state — `[]` when
+no plan was written — so the window can re-tally the plan card without
+replaying the run's todo events).
 `npm run stats` aggregates those lines: refusal rates, nudges, stagnation
 corrections, err-loop corrections, chain skips, verification nudges, firewall
 notes, the closing context estimate (`estTokens`), step timings, credits.
@@ -117,8 +122,10 @@ are pulled out; everything else is `work`. The first real prose line becomes
   answer. Emits `done_line` + `ask`. Stops: `ask`;
 - an effective DONE (an explicit `DONE`, or prose-only after tools have run):
   the finish pipeline — `finishCheck` when code is staged (always: a self-run
-  does not stand it down; at most two verdicts a run), then the language
-  check, then `done_line`. Stops: `done`;
+  does not stand it down; at most two verdicts a run), then the plan
+  checkpoint (once a run that wrote a PLAN/TODO: a DONE with items still open
+  names them and asks for a ticked TODO — the next DONE ends the run either
+  way), then the language check, then `done_line`. Stops: `done`;
 - otherwise the nudge pipeline: streaks 1–2 emit `nudge` and send a
   marker-shaped reminder; the third consecutive blank reply is the stall path
   — one last checker attempt if it can help, then `give_up`. Stops: `stalled`.
@@ -163,7 +170,10 @@ is not approved yet, `approvePlan()` runs: the facade emits `plan_request` and
 the run waits — however long the human takes. A decline stops the run **before
 anything is applied** (`plan-rejected`); an approve is remembered for the rest
 of the run. `PLAN`/`TODO` bodies update the todo card live (`todo`, merged per
-item); control markers never pass the permission gate.
+item); items tick in the ordinary markdown shapes (`- [x] text`, `* [x] text`,
+bare `[x] text`) — the bullet comes off before the checkbox is judged, or a
+ticked line parses as open forever. Control markers never pass the permission
+gate.
 
 **8. After the calls.** A changed overlay emits `diff_update`. A budget spent
 mid-step stops here — before the DONE handling, so a `DONE` riding the same
@@ -196,7 +206,9 @@ out (`error` emitted) — losing a step to a summariser fault would be worse.
 
 **12. Loop end.** `step_limit` when a set cap's last step runs; a spent budget becomes
 the stop reason; credits are diffed (`quota(true)`); `run_stats` and
-`finished` go out; the loop returns.
+`finished` go out — `finished.todo` carrying the run's final checklist state
+(empty when no plan was written), so the window can re-tally the plan card and
+say what a completed run left open; the loop returns.
 
 ## Guards at a glance
 
@@ -210,6 +222,7 @@ the stop reason; credits are diffed (`quota(true)`); `run_stats` and
 | stagnation | same step ×3, or two trading places ×2 | `stagnation` warn + "do something different" | `stagnation` |
 | budgets | tool count (300) and wall clock (30 min) — the only bound when no step cap is set; plus credits, only when set (`maxCredits`, 0 = off, checked against the cached quota) | `budget` event | `tools-limited` / `time-limited` / `credit-limited` |
 | plan gate | `PLAN` and no approval yet | `plan_request`, wait however long | decline → `plan-rejected` |
+| plan checkpoint | DONE with plan/TODO items still open | one nudge naming them and asking for a ticked TODO (`todoPrompts`); the finish pipeline reads: checker → checkpoint → language | — (the next DONE is honored either way) |
 | checker | DONE (or a stalled step) with staged code | read-only verifier runs it; a self-run does not stand it down; a re-check only when the tree moved | fail → a correcting step; pass → `done`; two verdicts a run, the last recorded |
 | verify nudge | staged code, nothing verified since the change | `verify_prompt` (once per run) | — |
 | language check | closing message under `minThaiRatio` (0.4) Thai — a reply with calls is judged on its closing line alone | `lang_prompt`, one rewrite | — |
@@ -309,6 +322,7 @@ the helper keeps its original behaviour.
 | `test/harness-fixes.test.mjs` · `test/harness-research.test.mjs` | the stagnation guard's warn-then-stop |
 | `test/compact.test.mjs` | rotation mid-run; the estimate's script-aware divisor |
 | `test/protocol.test.mjs` | markers, fences, the preamble |
+| `test/plan.test.mjs` | tick forms (`- [x]`, `* [x]`, bare `[x]`), the once-per-run DONE checkpoint, and `finished.todo` |
 | `test/stats.test.mjs` | `run_stats` and its aggregation |
 | `test/secret-screen.test.mjs` | the secret screen past the file tools — RUN bodies, GIT args, SEARCH walks |
 | `test/desktop-window.test.mjs` · `test/ui.test.mjs` | the whole run through the backend — plan gate, permissions, todos — and the window's handlers |

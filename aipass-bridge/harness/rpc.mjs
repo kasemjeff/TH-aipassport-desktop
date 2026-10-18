@@ -22,6 +22,11 @@ import { SessionStore } from './session.mjs';
 import { SkillLibrary } from './skills.mjs';
 import { Settings, aipassHome } from './settings.mjs';
 import { PluginManager } from './plugins.mjs';
+import {
+  inspectSource, installSource, finalizeInstall, removePlugin, readRegistry,
+  decorateDetails, materializeEnabledList, stripFromEnabled, knownNames, NONE_NAME,
+} from './install.mjs';
+import { loadConfig, addServer, removeServer, setServerEnabled, testServer } from './mcp.mjs';
 import { Emitter } from './events.mjs';
 // One resolver for "where the bridge is", shared with the harness's own client
 // and with desktop/main.mjs's probe: an explicit bridgeURL wins, otherwise
@@ -428,6 +433,39 @@ export function createRpc({
     staged.delete(id);
   };
 
+  /* ---------------------------------------------------- plugins & mcp helpers */
+
+  // The manager's view plus what the installer's registry remembers. Every
+  // plugin call that answers with details answers with this one shape — list,
+  // reload, install, remove and enable all end here, so the window never has
+  // to reconcile two versions of "installed".
+  const decoratedPlugins = () => decorateDetails(plugins.details(), readRegistry(plugins.defaultDir));
+
+  const mcpListing = () => ({ servers: current.mcp.status(), tools: current.mcp.toolTable() });
+
+  // The enabled-list rules live in install.mjs as one pure function; this is
+  // just the write + reload around it.
+  const pluginSetEnabled = async (name, enabled) => {
+    if (!name) throw new Error('name is required');
+    const names = knownNames(plugins.details(), readRegistry(plugins.defaultDir));
+    const list = appSettings.get('plugins');
+    if (!names.includes(name) && !(Array.isArray(list) && list.includes(name))) {
+      throw new Error(`no plugin named ${name} — see plugins.list for what is installed`);
+    }
+    const next = materializeEnabledList(list, names, name, enabled);
+    appSettings.set({ plugins: next });
+    await plugins.load();
+    const details = decoratedPlugins();
+    emit('plugins', details);
+    return { plugins: next, details };
+  };
+
+  const mcpSetEnabled = async (params, enabled) => {
+    setServerEnabled(params.name, enabled, { home: aipassHome(), root: current.root, scope: params.scope ?? null });
+    await current.mcp.reload();
+    return mcpListing();
+  };
+
   /* -------------------------------------------------------------------- methods */
 
   const methods = {
@@ -464,7 +502,7 @@ export function createRpc({
         // Context is invisible until it is not: this meter is the difference
         // between "it is handling that" and "why did it forget what I said".
         context: current.contextUsage(),
-        plugins: plugins.details(),
+        plugins: decoratedPlugins(),
         settings: appSettings.values,
       };
     },
@@ -628,7 +666,34 @@ export function createRpc({
 
     async 'mcp.list'() {
       await current.mcp.ensureLoaded();
-      return { servers: [...current.mcp.clients.keys()], tools: current.mcp.toolTable() };
+      return mcpListing();
+    },
+    async 'mcp.reload'() {
+      await current.mcp.reload();
+      return mcpListing();
+    },
+    async 'mcp.add'(params = {}) {
+      const server = addServer(params, { home: aipassHome(), root: current.root });
+      await current.mcp.reload();
+      return { server, ...mcpListing() };
+    },
+    async 'mcp.remove'(params = {}) {
+      const out = removeServer(params.name, { home: aipassHome(), root: current.root, scope: params.scope ?? null });
+      await current.mcp.reload();
+      return { ...out, ...mcpListing() };
+    },
+    async 'mcp.enable'(params = {}) { return mcpSetEnabled(params, true); },
+    async 'mcp.disable'(params = {}) { return mcpSetEnabled(params, false); },
+    /**
+     * Try a definition that may not be saved yet (a form's "test" button), or
+     * a name that is (the card's). A saved name resolves through the config,
+     * so the test runs exactly what is on disk — project override included.
+     */
+    async 'mcp.test'(params = {}) {
+      if (!params.name) return testServer(params, { root: current.root });
+      const known = loadConfig(current.root).find((s) => s.name === params.name && (!params.scope || s.scope === params.scope));
+      if (!known) throw new Error(`no server named ${params.name}`);
+      return testServer(known, { root: current.root });
     },
 
     /* ------------------------------------------------------------ projects */
@@ -809,12 +874,54 @@ export function createRpc({
     },
 
     /* ------------------------------------------------------------- plugins */
-    async 'plugins.list'() { return plugins.details(); },
+    async 'plugins.list'() { return decoratedPlugins(); },
     async 'plugins.reload'() {
       await plugins.load();
-      emit('plugins', plugins.details());
-      return plugins.details();
+      const details = decoratedPlugins();
+      emit('plugins', details);
+      return details;
     },
+    /** Report on a source (path, folder, URL) — size and hash, nothing runs. */
+    async 'plugins.inspect'(params = {}) {
+      return inspectSource(params.source, { base: current?.root ?? process.cwd() });
+    },
+    async 'plugins.install'(params = {}) {
+      const result = await installSource(params.source, {
+        name: params.name ?? null,
+        expectedSha256: params.expectedSha256 ?? null,
+        force: Boolean(params.force),
+        base: current?.root ?? process.cwd(),
+        pluginsDir: plugins.defaultDir,
+        installedBy: params.installedBy === 'cli' ? 'cli' : 'desktop-ui',
+      });
+      // A non-empty enabled-list is an exact list of what runs. Leaving the new
+      // plugin out of it would install it into silence, which reads as a failed
+      // install; adding it here is the same decision as enabling it.
+      const list = appSettings.get('plugins');
+      if (Array.isArray(list) && list.length && !list.includes(result.name)) {
+        appSettings.set({ plugins: [...list.filter((n) => n !== NONE_NAME), result.name] });
+      }
+      const details = await finalizeInstall(result, plugins);
+      const decorated = decorateDetails(details, readRegistry(plugins.defaultDir));
+      emit('plugins', decorated);
+      return { plugin: decorated.loaded.find((p) => p.name === result.name) ?? null, details: decorated };
+    },
+    async 'plugins.remove'(params = {}) {
+      const out = removePlugin(params.name, { pluginsDir: plugins.defaultDir, force: Boolean(params.force) });
+      // Removing a name from an explicit enabled-list keeps the list exact: a
+      // name that no longer exists would otherwise be the only thing standing
+      // between "these plugins" and "everything, now and later".
+      const list = appSettings.get('plugins');
+      if (Array.isArray(list) && list.includes(params.name)) {
+        appSettings.set({ plugins: stripFromEnabled(list, params.name) });
+      }
+      await plugins.load();
+      const details = decoratedPlugins();
+      emit('plugins', details);
+      return { ...out, details };
+    },
+    async 'plugins.enable'(params = {}) { return pluginSetEnabled(params.name, true); },
+    async 'plugins.disable'(params = {}) { return pluginSetEnabled(params.name, false); },
     async 'panel.render'(params = {}) { return plugins.renderPanel(params.id); },
 
     /* ----------------------------------------------------------------- fs */

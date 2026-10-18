@@ -628,7 +628,13 @@ details.run > *:not(summary) { margin-left: 2px; }
   max-width: 860px;
 }
 .panel h4 { margin: 0 0 6px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
-.panel ul { list-style: none; margin: 0; padding: 0; }
+/* A finished checklist says so at a glance. */
+.panel.complete h4 { color: var(--ok); }
+/* The list is bounded and scrolls: a plan with dozens of items used to grow
+   until it covered the conversation (reported live). The card stays between
+   the transcript and the pending strip and takes at most ~a third of the
+   window, however long the plan is. */
+.panel ul { list-style: none; margin: 0; padding: 0; max-height: 26vh; overflow: auto; }
 .panel li { padding: 2px 0; font-size: 13px; }
 .panel li.done { color: var(--dim); text-decoration: line-through; }
 .panel li .box { color: var(--dim); margin-right: 7px; }

@@ -379,22 +379,44 @@ function addTool({ kind, arg, ok, head, lines = [] }) {
 
 /* ------------------------------------------------------------------ panel */
 
+// The PLAN/TODO card is one element for the whole session: built on the first
+// todo, re-tallied after that, removed when the session changes. It lives
+// outside #log (directly before #pending), so folding the run's trail never
+// swallows it — and its list scrolls inside a bounded box (styles.css), so a
+// plan of fifty items no longer pushes the conversation off the screen.
+let todoPanel = null;
+let todoHead = null;
+let todoList = null;
+
+/** Drop the plan/todo card — a new session must not show the old one's plan. */
+function clearTodo() {
+  if (!todoPanel) return;
+  todoPanel.remove();
+  todoPanel = null;
+  todoHead = null;
+  todoList = null;
+}
+
 function renderTodo(items) {
-  let panel = $('todo-panel');
-  if (!panel) {
-    panel = el('div', 'panel');
-    panel.id = 'todo-panel';
-    panel.append(el('h4', null, 'plan & todo'));
-    const ul = el('ul');
-    panel.append(ul);
-    $('pending').before(panel);
+  if (!todoPanel) {
+    todoPanel = el('div', 'panel');
+    todoPanel.id = 'todo-panel';
+    todoHead = el('h4', null, 'plan & todo');
+    todoList = el('ul');
+    todoPanel.append(todoHead, todoList);
+    // #chat contains #pending, so this is the same slot as "before #pending" —
+    // spelled with insertBefore because the test suite's fake DOM has no before().
+    $('chat').insertBefore(todoPanel, $('pending'));
   }
-  const ul = panel.querySelector('ul');
-  ul.textContent = '';
+  const total = items.length;
+  const done = items.filter((it) => it.done).length;
+  todoHead.textContent = `plan & todo · ${done}/${total}`;
+  todoPanel.classList.toggle('complete', total > 0 && done === total);
+  todoList.textContent = '';
   for (const item of items) {
     const li = el('li', item.done ? 'done' : '');
     li.append(el('span', 'box', item.done ? '☑' : '☐'), el('span', null, item.text));
-    ul.append(li);
+    todoList.append(li);
   }
 }
 
@@ -771,7 +793,7 @@ onRun('plugin_call', (data) => {
   addNote(`plugin ${marker} ${arg}`.trim());
 });
 onRun('finished', async (data) => {
-  const { summary, stopReason, spent, credits, check } = data;
+  const { summary, stopReason, spent, credits, check, todo } = data;
   // The run's verdict rides the pending panel: the badge under the change
   // list says whether Apply is about to write something a check passed.
   state.lastCheck = check ?? null;
@@ -783,6 +805,21 @@ onRun('finished', async (data) => {
   refreshMeter();
   if (credits) addNote(`credits  ${credits.available?.toLocaleString?.() ?? credits.available} of ${credits.limit?.toLocaleString?.() ?? credits.limit} left${spent > 0 ? ` · ${spent.toLocaleString()} this run` : ''}`);
   if (stopReason !== 'done') addNote(`stopped: ${stopReason}`);
+  // The checklist's account of the run: the card re-tallies from the final
+  // state, and a completed run that still leaves items open says how many and
+  // offers the one-click way back in — a plan that ended "done" with open
+  // items used to just go quiet. A declined plan (plan-rejected) never gets
+  // the offer: that run did what it was told.
+  if (Array.isArray(todo) && todo.length) renderTodo(todo);
+  if (stopReason === 'done' && Array.isArray(todo) && todo.length) {
+    const open = todo.filter((it) => !it.done).length;
+    if (open) {
+      addNote(`เช็คลิสต์ยังเหลือ ${open} จาก ${todo.length} รายการ`);
+      offerCarryOn('แผนยังเหลือ — ');
+    } else {
+      addNote(`เช็คลิสต์ครบแล้ว (${todo.length}/${todo.length} รายการ)`);
+    }
+  }
   // Attachments belong to the message they were sent with.
   for (const id of state.attachments.keys()) rpc('attachment.remove', { id }).catch(() => {});
   state.attachments.clear();
@@ -2363,6 +2400,7 @@ async function clipPaste() {
 
 async function startNewSession() {
   log.textContent = '';
+  clearTodo();
   await rpc('session.new');
   await refreshSessions();
   await refreshReadiness();
@@ -2393,7 +2431,7 @@ function resumeSession() {
       del.onclick = async () => {
         if (!window.confirm(`ลบบทสนทนา "${s.title ?? s.id}"?`)) return;
         await rpc('session.delete', { id: s.id }).catch((err) => addNote(err.message));
-        if (state.sessionId === s.id) { state.sessionId = null; log.textContent = ''; }
+        if (state.sessionId === s.id) { state.sessionId = null; log.textContent = ''; clearTodo(); }
         await refreshSessions();
         resumeSession();
       };
@@ -2412,9 +2450,13 @@ async function openSession(id) {
   const entries = await rpc('session.open', { id });
   state.sessionId = id;
   log.textContent = '';
+  clearTodo();
   for (const entry of entries) {
     if (entry.type === 'task') addTask(entry.text);
     else if (entry.type === 'assistant') replayAssistant(entry.text ?? '');
+    // The session's checklist is replayed like any other entry, so an old
+    // conversation reopens with the plan card it was left with.
+    else if (entry.type === 'todo' && Array.isArray(entry.items)) renderTodo(entry.items);
     else if (entry.type === 'tool') { addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '' }); state.assistant = null; }
     else if (entry.type === 'note') addNote(entry.text);
   }

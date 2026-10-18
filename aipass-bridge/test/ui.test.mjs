@@ -493,6 +493,122 @@ test('a compaction shows what the model carried over', async () => {
   assert.match(card.textContent, /still to do: tests/);
 });
 
+/* The plan/todo card -------------------------------------------------------- */
+
+test('the plan card ticks items live and counts progress in its header', async () => {
+  // The card is the live view of the checklist: a ticked item reads as done
+  // and the header counts done/total. It also lives outside #log on purpose —
+  // the finished-run fold must never swallow it.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('todo', { items: [
+    { text: 'done one', done: true, kind: 'todo' },
+    { text: 'open two', done: false, kind: 'todo' },
+  ] });
+  await tick();
+  const panel = findById(node('chat'), 'todo-panel');
+  assert.ok(panel, 'the card appears with the first todo');
+  assert.match(panel.children[0].textContent, /plan & todo · 1\/2/, 'the header counts the ticks');
+  const rows = panel.children[1].children;
+  assert.ok(/\bdone\b/.test(rows[0].className), 'the ticked row is marked done');
+  assert.equal(/\bdone\b/.test(rows[1].className), false, 'the open row is not');
+  assert.equal(panel.classList.contains('complete'), false, 'and the card is not marked complete yet');
+  assert.equal(node('log').children.includes(panel), false, 'the card is outside the transcript fold');
+  assert.ok(node('chat').children.includes(panel), 'it sits in #chat, above the pending strip');
+});
+
+test('a finished run re-tallies the card from the final checklist and marks it complete', async () => {
+  // The live complaint: work finished and the checklist still showed open
+  // items. The finished event now carries the run's final todo state, and the
+  // card re-renders from it — the one account of what actually closed.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('todo', { items: [
+    { text: 'one', done: false, kind: 'todo' },
+    { text: 'two', done: false, kind: 'todo' },
+  ] });
+  globalThis.__stream.emit('done_line', { text: 'เสร็จแล้ว' });
+  globalThis.__stream.emit('finished', {
+    summary: 'เสร็จแล้ว', stopReason: 'done', spent: 1,
+    todo: [{ text: 'one', done: true, kind: 'todo' }, { text: 'two', done: true, kind: 'todo' }],
+  });
+  await tick(); await tick();
+  const panel = findById(node('chat'), 'todo-panel');
+  assert.match(panel.children[0].textContent, /plan & todo · 2\/2/, 'the final state re-tallies the header');
+  assert.ok(panel.classList.contains('complete'), 'and a fully ticked card is marked complete');
+  assert.match(node('log').textContent, /เช็คลิสต์ครบแล้ว/, 'the run says the checklist closed');
+  assert.equal(node('log').children.some((c) => /continue-row/.test(c.className)), false, 'nothing left to carry on with');
+});
+
+test('a done run with open items says how many and offers the one click back in', async () => {
+  // A run that ended "done" with items still open used to just go quiet. The
+  // card names the gap and the carry-on button turns it into the next run
+  // instead of a retyped task.
+  const { node, calls, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('finished', {
+    summary: 'stopped short', stopReason: 'done', spent: 1,
+    todo: [
+      { text: 'one', done: true, kind: 'todo' },
+      { text: 'two', done: false, kind: 'todo' },
+      { text: 'three', done: false, kind: 'todo' },
+    ],
+  });
+  await tick(); await tick();
+  const panel = findById(node('chat'), 'todo-panel');
+  assert.match(panel.children[0].textContent, /plan & todo · 1\/3/, 'the card shows the final tally');
+  assert.match(node('log').textContent, /เช็คลิสต์ยังเหลือ 2 จาก 3 รายการ/, 'the open count is named');
+  const row = node('log').children.find((c) => /continue-row/.test(c.className));
+  assert.ok(row, 'with the way back in');
+  const on = row.children.find((c) => c.tagName === 'BUTTON');
+  on.dispatch('click');
+  await tick();
+  assert.ok(calls.includes('run'), 'clicking it starts the continuation run');
+  assert.equal(node('log').children.some((c) => /continue-row/.test(c.className)), false, 'and the row is gone');
+});
+
+test('a declined plan never offers a carry-on', async () => {
+  // plan-rejected means the human said no to the plan; a "carry on" offer
+  // there would be the window arguing with the decision. The card still shows
+  // what was proposed — that is the record.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('finished', {
+    summary: '', stopReason: 'plan-rejected', spent: 1,
+    todo: [{ text: 'proposed step', done: false, kind: 'plan' }],
+  });
+  await tick(); await tick();
+  assert.equal(node('log').children.some((c) => /continue-row/.test(c.className)), false, 'no way back in is offered');
+  assert.ok(findById(node('chat'), 'todo-panel'), 'the proposed plan stays on the card');
+});
+
+test('a new session starts without the old session plan card', async () => {
+  // The card outlives a run on purpose — it is the session's checklist — but a
+  // new conversation must not open onto the old one's plan.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('todo', { items: [{ text: 'old work', done: false, kind: 'todo' }] });
+  await tick();
+  assert.ok(findById(node('chat'), 'todo-panel'), 'the card is up');
+  node('new-session').dispatch('click');
+  await tick(); await tick();
+  assert.equal(findById(node('chat'), 'todo-panel'), null, 'and gone with the session');
+});
+
+test('opening an old session replays its plan card', async () => {
+  const backend = {
+    ...BACKEND,
+    'session.open': () => [
+      { type: 'task', text: 'old task' },
+      { type: 'todo', items: [{ text: 'replayed one', done: true, kind: 'todo' }, { text: 'replayed two', done: false, kind: 'todo' }] },
+      { type: 'note', text: 'old note' },
+    ],
+  };
+  const { node, tick } = await bootApp(backend);
+  await tick();
+  node('sessions').children[0].dispatch('click');
+  await tick(); await tick();
+  const panel = findById(node('chat'), 'todo-panel');
+  assert.ok(panel, 'the checklist comes back with the session');
+  assert.match(panel.children[0].textContent, /plan & todo · 1\/2/);
+  assert.match(node('log').textContent, /old note/);
+});
+
 test('thinking streams into an open fold that closes when the turn ends', async () => {
   // The model's reasoning is its own channel: a box you can watch while it
   // thinks, which folds itself away and leaves one line when the turn ends —

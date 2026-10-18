@@ -117,7 +117,8 @@ const HELP = `aipass — de.aipass.net from your terminal
   aipass setup           first-run setup: Node, PATH, token, bridge, browser pages
   aipass memory          list/clear facts carried across sessions for this project
   aipass scale "task"    test-time scaling: run a task N times, keep the best
-  aipass mcp             list/call tools from configured MCP servers
+  aipass plugin          install/inspect/enable/disable/remove plugins
+  aipass mcp             add/remove/list MCP servers and call their tools
   aipass status          check node / bridge / extension status
   aipass stop            stop any lingering background bridge
 
@@ -176,6 +177,10 @@ switch (cmd) {
 
   case 'mcp':
     process.exit(await run('mcp.mjs', rest));
+    break;
+
+  case 'plugin':
+    process.exit(await run('plugin.mjs', rest));
     break;
 
   case 'status':

@@ -386,9 +386,13 @@ export function parseTodo(body) {
     if (!line) continue;
     if (/^PLAN$/i.test(line)) { inPlan = true; continue; }
     if (/^TODO$/i.test(line)) { inPlan = false; continue; }
-    const text = line.replace(/^[-*]\s*/, '').replace(/^\[[ xX]\]\s*/, '').trim();
+    // The bullet comes off before the checkbox is judged: a model that writes
+    // "- [x] text" (the normal markdown form) used to parse as not-done forever,
+    // because the done test ran against the bulleted line.
+    const rest = line.replace(/^[-*]\s*/, '');
+    const done = /^\[[xX]\]/.test(rest);
+    const text = rest.replace(/^\[[ xX]\]\s*/, '').trim();
     if (!text) continue;
-    const done = /^\[[xX]\]/.test(line);
     items.push({ text, done, kind: inPlan ? 'plan' : 'todo' });
   }
   return items;
