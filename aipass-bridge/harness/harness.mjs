@@ -15,7 +15,7 @@ import { BridgeClient, DEFAULT_BRIDGE_URL } from './bridge.mjs';
 import { createTools } from './tools.mjs';
 import { PermissionEngine } from './permissions.mjs';
 import { SessionStore } from './session.mjs';
-import { Compactor } from './compact.mjs';
+import { Compactor, DEFAULT_MODEL_BUDGETS } from './compact.mjs';
 import { runTask, applyOverlay, SUBAGENT_ROLES } from './loop.mjs';
 import { preamble as buildPreamble } from './protocol.mjs';
 import { RulesStore } from './rules.mjs';
@@ -121,7 +121,14 @@ export class Harness {
       onGrant: (kind, arg) => this.rulesStore.addGrant(this.root, kind, arg),
     });
     for (const g of persisted.grants) this.permissions.grants.set(`${g.kind}:${g.arg}`, 'allow');
-    this.compactor = new Compactor({ bridge: this.bridge, events: this.events, ...(opts.compaction ?? {}) });
+    const comp = opts.compaction ?? {};
+  // A per-model budget map, when one is supplied (or the default one when it is
+  // not), wins over the flat contextTokens default — flash-class runs no longer
+  // rotate every 9k tokens. An explicit budgets object always overrides.
+  const budgets = (comp.budgets && typeof comp.budgets === 'object' && !Array.isArray(comp.budgets) && Object.keys(comp.budgets).length)
+    ? comp.budgets
+    : DEFAULT_MODEL_BUDGETS;
+  this.compactor = new Compactor({ bridge: this.bridge, events: this.events, budgets, ...comp });
     this.session = null;
     this.conversation = null;
     this.abort = new AbortController();

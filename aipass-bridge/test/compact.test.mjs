@@ -4,7 +4,7 @@
 // prove a long task survives crossing its budget halfway.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { Compactor } from '../harness/compact.mjs';
+import { Compactor, DEFAULT_MODEL_BUDGETS } from '../harness/compact.mjs';
 import { Harness } from '../harness/harness.mjs';
 import { startBridge, FakeExtension, scripted, tempDir, run, AGENT } from './harness.mjs';
 
@@ -174,4 +174,11 @@ test('a manual compaction re-seeds with every marker the run has', async (t) => 
   assert.match(seedText, /-i first/, 'the SEARCH -i hint survives a manual compaction');
   assert.match(seedText, /ATTACH/, 'the ATTACH marker survives a manual compaction');
   assert.match(seedText, /ECHO/, "a plugin's marker survives a manual compaction");
+});
+
+test('the default per-model budget map covers the flash family and falls back for unknowns', () => {
+  const c = new Compactor({ keepRecentBytes: 0, budgets: DEFAULT_MODEL_BUDGETS });
+  assert.equal(c.budgetFor('gemini-3.5-flash-lite'), 100_000, 'flash-lite gets the flash budget, not the 24k flat default');
+  assert.equal(c.budgetFor('gemini-3.1-pro-preview'), 200_000, 'pro-class models get the pro budget');
+  assert.equal(c.budgetFor('some-unknown-model-xyz'), 24_000, 'an unknown model falls back to contextTokens (no guess)');
 });

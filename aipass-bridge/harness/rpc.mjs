@@ -279,6 +279,7 @@ export function createRpc({
         mode: appSettings.get('mode'),
         allowRun: appSettings.get('allowRun'),
         maxSteps: appSettings.get('maxSteps'),
+        maxResult: appSettings.get('maxResult'),
         maxToolCalls: appSettings.get('maxToolCalls'),
         maxWallClockMs: appSettings.get('maxWallClockMs'),
         plan: appSettings.get('plan'),

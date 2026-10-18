@@ -68,6 +68,12 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 - `docs/SPEC_EVALS.md` no longer claims the loop lacks wall-clock caps (it
   does not lack them; the credit cap was the missing one, and now ships
   opt-in). Open question 2 (attempt policy) is resolved as built.
+- **Per-model context budgets finally drive compaction.** `Compactor` already
+  knew how to pick a budget by model id (prefix match); the desktop path now
+  passes a curated map (flash 100k, pro/sonnet/opus/gpt 200k, deepseek/qwen/
+  llama/mistral/grok 128k, gemini 1M) instead of a flat 24k, and a new
+  `maxResult` setting (default 3000) reaches the tool context from the sheet
+  too (`test/compact.test.mjs`, `test/settings-clamp.test.mjs`).
 
 ### Fixed
 

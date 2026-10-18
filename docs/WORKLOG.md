@@ -6,6 +6,24 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-18 — opencode — per-model context budgets and a tunable tool-result cap
+
+- **Files**: `aipass-bridge/harness/compact.mjs` (exported `DEFAULT_MODEL_BUDGETS`),
+  `aipass-bridge/harness/harness.mjs` (fallback to it when compaction names none),
+  `aipass-bridge/harness/settings.mjs` (defaults + clamp for `maxResult` and
+  `compaction.budgets`), `aipass-bridge/harness/rpc.mjs` (passes `maxResult`
+  through), `desktop/ui/app.js` (a `maxResult` row + validation), `CHANGELOG.md`,
+  `docs/WORKLOG.md`, `aipass-bridge/test/compact.test.mjs` (one new test).
+- **Tests**: `npm test` green on this machine (one git-absent skip);
+  `npm run agents:lint` and `npm run evals:lint` green. `node --check` on every
+  touched file.
+- **Deferred**: listing-delta, elision tier, test-time scaling (best-of-N via
+  the checker), and a `maxResult`-aware run smoke once credits reset.
+- **Risks**: the curated budget map is conservative (well under real windows)
+  but still a guess — a model whose window is smaller than its entry would
+  rotate late. `AIPASS_CONTEXT_TOKENS` and the settings sheet still override.
+- **Cleanup**: none needed.
+
 ## 2026-10-17 — opencode — the playbook library is back in reach, and the run's two dead flags reach the tools
 
 - **Files**: `aipass-bridge/harness/harness.mjs` (the run's `maxResult` /

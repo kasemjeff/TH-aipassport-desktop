@@ -1,4 +1,4 @@
-// Settings — one JSON file, everything the window and the CLI share.
+// Settings â€” one JSON file, everything the window and the CLI share.
 //
 // It lives at `~/.aipass/settings.json` on purpose: the CLI, the backend and
 // every future surface read the same file, so a change made in the window is
@@ -8,6 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { DEFAULT_MODEL_BUDGETS } from './compact.mjs';
 
 /**
  * Where the app's state lives, whichever surface is asking.
@@ -30,13 +31,13 @@ export const DEFAULTS = {
   maxSteps: 0,
   // Per-run budgets, checked by the loop and recorded as stop reasons in
   // run_stats: the most tool calls one run may execute, and its wall-clock
-  // ceiling in ms. Generous by design — they catch a runaway reply (a hundred
+  // ceiling in ms. Generous by design â€” they catch a runaway reply (a hundred
   // markers in one message) or a stuck command, not ordinary work. A zero or
   // nonsense value falls back to the default; there is no off switch.
   maxToolCalls: 300,
   maxWallClockMs: 1_800_000,
   // The optional credit cap: stop a run once observed spend reaches this many
-  // credits. 0 (the default) means no cap — the one budget with an off switch.
+  // credits. 0 (the default) means no cap â€” the one budget with an off switch.
   // Checked against the bridge's cached quota, which upstream refreshes at
   // most every 30s, so it bounds a runaway run without a request per step.
   maxCredits: 0,
@@ -68,8 +69,11 @@ export const DEFAULTS = {
   // how many times the window may re-run a task whose checker reports the
   // staged tree still failing. 1 = never retry; each attempt costs a full run.
   attempts: 1,
+  // per-tool result cap in bytes; 0 is normalised to this default. spill keeps
+  // the rest on disk, so raising it cuts round trips without losing data.
+  maxResult: 3000,
   // when the context budget is close to full, summarise and rotate
-  compaction: { contextTokens: 24_000, reserveTokens: 4_096, keepRecentBytes: 6_000 },
+  compaction: { contextTokens: 24_000, reserveTokens: 4_096, keepRecentBytes: 6_000, budgets: DEFAULT_MODEL_BUDGETS },
   // rotate at this share of the budget. The upstream keeps its own history and
   // cannot be trimmed, so waiting until the budget is nearly spent means the
   // last stretch of a run is spent re-sending a context that no longer fits.
@@ -83,7 +87,7 @@ export const DEFAULTS = {
   // plugins to load, by name, from ~/.aipass/plugins
   plugins: [],
   // permission path rules, checked before the mode: [{pattern, decision, kinds?}]
-  // — `docs/** → allow` stops a run asking about its own docs, `.env* → deny`
+  // â€” `docs/** â†’ allow` stops a run asking about its own docs, `.env* â†’ deny`
   // keeps secrets out of every mode including yolo. First match wins.
   rules: [],
   // theme: 'dark' | 'light' | follow the system with 'auto'
@@ -105,11 +109,11 @@ export const DEFAULTS = {
  * editable one, and folding these into it would duplicate them into the file
  * on every save (Settings.set writes every key) and freeze a copy there. The
  * engine checks them after the user's own rules, so an explicit rule wins,
- * and only for mutation kinds — opening package.json is how the model answers
+ * and only for mutation kinds â€” opening package.json is how the model answers
  * most questions, and a question per read would make the tool unusable.
  *
  * Each name appears twice: a nested pattern keeps its leading `**` and a
- * separator, so it cannot also match the top-level spelling — each is a
+ * separator, so it cannot also match the top-level spelling â€” each is a
  * pattern of its own (globMatch has no implicit prefix).
  */
 const MUTATIONS = ['write', 'replace', 'delete', 'move'];
@@ -126,7 +130,7 @@ export const SAFETY_RULES = [
 /**
  * The secret floor: files that must never reach the model without an explicit
  * human override, in ANY mode including yolo. Unlike SAFETY_RULES (mutation
- * kinds only) these carry no `kinds`, so they match reads too — NEED/CREATE
+ * kinds only) these carry no `kinds`, so they match reads too â€” NEED/CREATE
  * with a .env path is denied before the mode is consulted.
  *
  * Each name appears twice (top-level plus a nested `**`-prefixed spelling)
@@ -193,10 +197,10 @@ export class Settings {
    * Clamp the values that can silently break a run.
    *
    * A negative or unparsable step count is the case that justifies this: it
-   * used to reach the loop and stop a run before its first step — the window
+   * used to reach the loop and stop a run before its first step â€” the window
    * accepted the message and answered nothing, no error anywhere. Zero no
    * longer belongs in that family (it means "no cap" by design), so only the
-   * values that break a run are clamped here — the one place the CLI, the
+   * values that break a run are clamped here â€” the one place the CLI, the
    * window and any future surface all write through.
    */
   static sane(values) {
@@ -218,6 +222,9 @@ export class Settings {
     const toolCalls = Number(next.maxToolCalls);
     next.maxToolCalls = Number.isFinite(toolCalls) && toolCalls > 0
       ? Math.min(10_000, Math.max(1, Math.round(toolCalls))) : DEFAULTS.maxToolCalls;
+  const maxResult = Number(next.maxResult);
+  next.maxResult = Number.isFinite(maxResult) && maxResult >= 500
+    ? Math.min(100_000, Math.max(500, Math.round(maxResult))) : DEFAULTS.maxResult;
     const wallClock = Number(next.maxWallClockMs);
     next.maxWallClockMs = Number.isFinite(wallClock) && wallClock > 0
       ? Math.min(86_400_000, Math.max(10_000, Math.round(wallClock))) : DEFAULTS.maxWallClockMs;
@@ -254,9 +261,9 @@ export class Settings {
         }))
         .slice(0, 100)
       : [];
-    // Path-shaped keys are resolved by whoever reads them first — the window's
+    // Path-shaped keys are resolved by whoever reads them first â€” the window's
     // project list, the backend's root pick, the uploads staging folder, the
-    // skill library's dirs — so a wrong-shaped value is not state, it is a
+    // skill library's dirs â€” so a wrong-shaped value is not state, it is a
     // crash waiting for the next call. Dropped here, like every other value
     // that cannot work.
     next.root = typeof next.root === 'string' && next.root.trim() ? next.root : null;
@@ -279,7 +286,9 @@ export class Settings {
     if (next.compaction) {
       const budget = num(next.compaction.contextTokens, 1000, 4_000_000, 24_000);
       const reserve = num(next.compaction.reserveTokens, 128, budget - 1, 4_096);
-      next.compaction = { ...next.compaction, contextTokens: budget, reserveTokens: reserve };
+    let budgets = next.compaction.budgets;
+    if (!budgets || typeof budgets !== 'object' || Array.isArray(budgets)) budgets = DEFAULT_MODEL_BUDGETS;
+    next.compaction = { ...next.compaction, contextTokens: budget, reserveTokens: reserve, budgets };
     }
     const share = Number(next.compactAtPercent);
     if (next.compactAtPercent != null) next.compactAtPercent = Number.isFinite(share) ? Math.min(100, Math.max(5, Math.round(share))) : 40;

@@ -11,6 +11,26 @@
 // continuous piece of work.
 import { outbound } from './waf.mjs';
 
+// Conservative per-model context budgets (tokens). Used as the default when a
+// surface does not name one, so a flash-class run no longer rotates every 9k
+// tokens while a pro-class run still gets room. Prefix-matched in budgetFor()
+// (key length >= 3), so more specific keys must come first.
+export const DEFAULT_MODEL_BUDGETS = {
+  'flash-lite': 100_000,
+  'flash': 100_000,
+  'pro': 200_000,
+  'sonnet': 200_000,
+  'opus': 200_000,
+  'gpt-5': 200_000,
+  'gpt-6': 200_000,
+  'deepseek': 128_000,
+  'qwen': 128_000,
+  'llama': 128_000,
+  'mistral': 128_000,
+  'grok': 128_000,
+  'gemini': 1_000_000,
+};
+
 // Scripts that do not separate words with spaces — Thai first among them —
 // cost a tokenizer roughly twice as many tokens per byte as English. When the
 // conversation's own text is mostly one of these, the byte estimate divides by

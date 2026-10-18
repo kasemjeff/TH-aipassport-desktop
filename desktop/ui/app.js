@@ -1312,6 +1312,7 @@ const SETTINGS_SECTIONS = [
       { key: 'maxToolCalls', label: 'สูงสุดกี่ tool call ต่อคำสั่ง', type: 'number', note: 'เพดานกันหลุด — คำตอบเดียวที่สั่งเครื่องมือร้อยครั้งจะหยุดเมื่อถึงตัวเลขนี้ (ค่าเริ่มต้น 300)' },
       { key: 'maxWallClockMin', label: 'เวลาสูงสุดต่อคำสั่ง (นาที)', type: 'number', note: 'เพดานเวลา — งานที่ค้างจะหยุดเอง (ค่าเริ่มต้น 30)' },
       { key: 'maxCredits', label: 'เพดานเครดิตต่อคำสั่ง', type: 'number', note: '0 = ไม่จำกัด — หยุดงานเมื่อใช้เครดิตถึงเพดาน (เช็คกับยอดที่แคชไว้ ~30 วิ ต่อครั้ง)' },
+      { key: 'maxResult', label: 'สูงสุดกี่ byte ต่อผลเครื่องมือ', type: 'number', note: '0 = ค่าเริ่มต้น (3000) — ที่เหลือ spill ลงดิสก์ให้อ่านต่อได้; ใหญ่ขึ้น = รอบน้อยลง' },
       { key: 'plan', label: 'plan mode', type: 'checkbox', note: 'โมเดลร่างแผนก่อนลงมือ' },
       { key: 'requirePlanApproval', label: 'รอให้อนุมัติแผนก่อนทำ', type: 'checkbox', note: 'ใช้ได้ก็ต่อเมื่อ plan mode เปิด' },
       { key: 'subagent', label: 'ให้เรียก helper ย่อย', type: 'checkbox', note: 'งานยาวถูกแบ่งให้ตัวช่วย แล้วรีพอร์ตกลับ' },
@@ -1649,6 +1650,10 @@ async function openSettings() {
       const creditCap = Number(draft.maxCredits);
       if (!Number.isFinite(creditCap) || creditCap < 0) problems.push('เพดานเครดิตต้องเป็น 0 (ไม่จำกัด) หรือตัวเลขบวก');
     }
+     if (draft.maxResult != null) {
+       const resultCap = Number(draft.maxResult);
+       if (!Number.isFinite(resultCap) || (resultCap !== 0 && resultCap < 500)) problems.push('สูงสุดกี่ byte ต่อผลเครื่องมือ ต้องเป็น 0 (ค่าเริ่มต้น) หรืออย่างน้อย 500');
+     }
     // The language keys are checked only when the payload carries them: a
     // window talking to a backend that predates them must still save (the
     // server's own sane() fills the defaults), and an absent key is not an
