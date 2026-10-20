@@ -265,6 +265,66 @@ test('credits are unavailable rather than wrong when no tab is attached', async 
   assert.equal(status.credits, null);
 });
 
+test('the caches count what they saved, and /status reports it', async (t) => {
+  // A hit answers without touching the tab — a fresh TTL entry, or a refresh
+  // already in flight. The counters ride /status so the window can say what
+  // the caches bought (test/ui.test.mjs prints the line).
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+  await waitFor(async () => (await (await fetch(`${bridge.base}/status`)).json()).credits !== null, { timeout: 5000 });
+
+  const status = () => fetch(`${bridge.base}/status`).then((r) => r.json());
+  const before = await status();
+  await fetch(`${bridge.base}/v1/models`).then((r) => r.json());
+  await fetch(`${bridge.base}/v1/models`).then((r) => r.json());
+  await fetch(`${bridge.base}/quota`).then((r) => r.json());
+  await fetch(`${bridge.base}/quota`).then((r) => r.json());
+  const after = await status();
+
+  for (const name of ['models', 'quota']) {
+    const hits = after.cache[name].hits - before.cache[name].hits;
+    const fetches = after.cache[name].fetches - before.cache[name].fetches;
+    // The first read may ride a fresh TTL entry or refresh it; the second one
+    // always rides the cache the first left behind.
+    assert.equal(hits + fetches, 2, `${name}: both calls are accounted for`);
+    assert.ok(hits >= 1, `${name}: a call answered from the cache`);
+    assert.ok(fetches <= 1, `${name}: at most one call went upstream`);
+  }
+  // The explicit list route always reads upstream; that read has to appear in
+  // the same counters as a nameless send's first resolve.
+  const convBefore = (await status()).cache.conversation.fetches;
+  await fetch(`${bridge.base}/conversations`);
+  const convAfter = await status();
+  assert.equal(convAfter.cache.conversation.fetches - convBefore, 1, 'listing the account is a fetch');
+  assert.ok(Number.isInteger(convAfter.cache.conversation.hits), 'conversation counters ride along for the window');
+});
+
+test('a nameless send reuses the cached conversation list instead of reading it again', async (t) => {
+  const ext = await new FakeExtension(bridge.base, { onChat: scripted(['ok', 'ok']) }).connect();
+  t.after(() => ext.disconnect());
+
+  // No pointer and no list: the first nameless send is the one upstream read.
+  await fetch(`${bridge.base}/config`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ conversation: null }),
+  });
+  const before = await fetch(`${bridge.base}/status`).then((r) => r.json());
+  await post({ messages: [{ role: 'user', content: 'first' }] });
+
+  // Temporary pointers are private and skipped for a nameless send. The
+  // second send therefore resolves from the list the first one cached.
+  await fetch(`${bridge.base}/config`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ conversation: 'tmp-private', temporary: true }),
+  });
+  await post({ messages: [{ role: 'user', content: 'second' }] });
+
+  const after = await fetch(`${bridge.base}/status`).then((r) => r.json());
+  const delta = (k) => after.cache.conversation[k] - before.cache.conversation[k];
+  assert.equal(delta('fetches'), 1, 'only the first send read the list upstream');
+  assert.equal(delta('hits'), 1, 'the second send answered from the cached list');
+});
+
 test('a repeated quota refresh with the same figures logs once, not per poll', async (t) => {
   const ext = await new FakeExtension(bridge.base).connect();
   t.after(() => ext.disconnect());

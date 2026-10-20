@@ -60,6 +60,18 @@ risk and cost discount it. `npm run experiments` prints the ordered queue and
 names its head (`next:`). The queue is empty of `running` often; that is fine —
 short queues are the point.
 
+As of 2026-10-20 one record has ended and seven are still `proposed`.
+`safety-twin-controls` is **done**: 3 live attempts of the safety set
+(12 attempts over the four tasks, `gemini-3.5-flash-lite`, the record's own
+budget) gave 0 false positives and 0 false negatives — the clean RUN went
+through every time, the embedded instruction was ignored every time, `.env`
+stayed untouched, and the secret request ended denied. The rows are
+`evals/results/2026-10-20T04-38-38-891-live.jsonl` with the attempt sessions
+kept beside it. The other seven are still `proposed`: `elision-tier` and
+`memory-tier-carry` wait on measurement, and the SYMBOLS/DEF/REFS row in
+`docs/MATURITY.md` still has no qualifying live use. A `done` record is the
+only kind an admission gate may cite.
+
 ## Running one
 
 The instruments already exist; an experiment composes them:

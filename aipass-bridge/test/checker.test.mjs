@@ -382,6 +382,94 @@ test('a declared check is run verbatim, read from disk', async () => {
   assert.match(checkerPrompt.message, /node check\.mjs/, 'the declared command is named verbatim');
   assert.equal(result.check?.verdict, 'pass');
   assert.equal(result.check?.declared, 'node check.mjs');
+  assert.equal(result.check?.declaredSource, 'project');
+  assert.equal(statsOf(h).checkCommand, 'node check.mjs');
+});
+
+test('a run-declared verifyCommand beats the project file and rides the verdict', async () => {
+  // The option is how a desktop session makes verdicts comparable before the
+  // project commits a check file: it wins over `.aipass/check.txt`, the
+  // prompt says whose command it is, and the command rides the verdict and
+  // run_stats so two runs are only compared when they ran the same thing.
+  const root = tempDir({
+    'math.mjs': BROKEN,
+    'check.mjs': CHECK,
+    '.aipass/check.txt': '# the project would rather run something else\nnode missing.mjs\n',
+  });
+  const bridge = new StubBridge({
+    'conv-1': [
+      'NEED file math.mjs\n',
+      'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE fixed add\n',
+    ],
+    'conv-2': [RUN_CHECK],
+  });
+  const { h } = makeHarness({ root, bridge, options: { verifyCommand: 'node check.mjs' } });
+
+  const result = await h.run('fix add()');
+
+  assert.equal(result.stopReason, 'done');
+  const checkerPrompt = bridge.prompts.find((p) => p.conversation === 'conv-2');
+  assert.ok(checkerPrompt, 'the checker was asked');
+  assert.match(checkerPrompt.message, /This run declares its own check command/);
+  assert.doesNotMatch(checkerPrompt.message, /node missing\.mjs/, 'the project file did not win');
+  assert.equal(result.check?.declared, 'node check.mjs');
+  assert.equal(result.check?.declaredSource, 'run');
+  assert.equal(statsOf(h).checkCommand, 'node check.mjs');
+});
+
+test('requireCheck refuses DONE while the declared check still fails', async () => {
+  // The strict gate (docs/SPEC_CHECKER.md open question 2): the first fail
+  // still earns the correction, but a later DONE over the same failing tree is
+  // terminal as `done-unverified`, not accepted and not silently retried.
+  const root = tempDir({
+    'math.mjs': BROKEN,
+    'check.mjs': CHECK,
+    '.aipass/check.txt': 'node check.mjs\n',
+  });
+  const bridge = new StubBridge({
+    'conv-1': [
+      'NEED file math.mjs\n',
+      'CREATE math.mjs\nexport const add = (a, b) => a - b + 1;\nEND\nDONE staged a fix\n',
+      'DONE leaving it failing\n',
+    ],
+    'conv-2': [RUN_CHECK],
+  });
+  const { h, events } = makeHarness({ root, bridge, options: { requireCheck: true } });
+  const notes = [];
+  events.on('note', (p) => notes.push(p.text));
+
+  const result = await h.run('fix add()');
+
+  assert.equal(result.stopReason, 'done-unverified');
+  assert.equal(result.check?.verdict, 'fail', 'the last verdict still rides the finished event');
+  assert.equal(statsOf(h).checks, 1, 'the second DONE earned no extra conversation');
+  assert.equal(statsOf(h).doneUnverified, 1);
+  assert.ok(parentPrompts(bridge).some((p) => /did not pass/.test(p.message)), 'the fail report did reach the model first');
+  assert.ok(notes.some((t) => /strict Verify/.test(t)), 'the stop says why');
+  assert.equal(bridge.created, 2);
+});
+
+test('requireCheck accepts a DONE once the declared check passes', async () => {
+  const root = tempDir({
+    'math.mjs': BROKEN,
+    'check.mjs': CHECK,
+    '.aipass/check.txt': 'node check.mjs\n',
+  });
+  const bridge = new StubBridge({
+    'conv-1': [
+      'NEED file math.mjs\n',
+      'CREATE math.mjs\nexport const add = (a, b) => a + b;\nEND\nDONE fixed add\n',
+    ],
+    'conv-2': [RUN_CHECK],
+  });
+  const { h } = makeHarness({ root, bridge, options: { requireCheck: true } });
+
+  const result = await h.run('fix add()');
+
+  assert.equal(result.stopReason, 'done');
+  assert.equal(result.check?.verdict, 'pass');
+  assert.equal(statsOf(h).doneUnverified, 0);
+  assert.equal(statsOf(h).checkVerdict, 'pass');
 });
 
 // The chain guard skips the calls after a failed change in the same reply.

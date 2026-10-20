@@ -63,6 +63,11 @@ export function collectRuns(session) {
       repeatedResults: e.repeatedResults ?? 0,
       checks: e.checks ?? 0,
       checkVerdict: e.checkVerdict ?? null,
+      // The command the verdict is about, and whether the strict gate refused
+      // a DONE over it: without the command two verdicts are not comparable,
+      // and without the count a refused DONE is invisible in the totals.
+      checkCommand: e.checkCommand ?? null,
+      doneUnverified: e.doneUnverified ?? 0,
       firewallNotes: e.firewallNotes ?? 0,
       stepMs: Array.isArray(e.stepMs) ? e.stepMs : [],
       spent: e.spent ?? null,
@@ -86,6 +91,7 @@ export function summarize(rows) {
     repeatedResults: 0,
     checks: 0,
     checkFails: 0,
+    doneUnverified: 0,
     commitBlocks: 0,
     firewallNotes: 0,
     spent: 0,
@@ -107,6 +113,7 @@ export function summarize(rows) {
     totals.repeatedResults += r.repeatedResults ?? 0;
     totals.checks += r.checks;
     if (r.checkVerdict === 'fail') totals.checkFails += 1;
+    totals.doneUnverified += r.doneUnverified ?? 0;
     totals.commitBlocks += r.commitBlocks ?? 0;
     totals.firewallNotes += r.firewallNotes;
     totals.spent += r.spent ?? 0;
@@ -261,7 +268,7 @@ function main() {
     return;
   }
 
-  console.log(`lifetime  ${totals.runs} run(s) · ${totals.calls} tool call(s) · refusals ${pct(totals.calls ? totals.refusals / totals.calls : 0)} · nudges ${totals.nudges} · stagnation ${totals.stagnations} · verify ${totals.verifyPrompts} · repeat ${totals.repeatBlocks} · lang ${totals.langPrompts} · checks ${totals.checks}${totals.checkFails ? ` (${totals.checkFails}✗)` : ''} · firewall ${totals.firewallNotes}${totals.commitBlocks ? ` · commit-gate ${totals.commitBlocks}` : ''} · ${credits(totals.spent)} credits`);
+  console.log(`lifetime  ${totals.runs} run(s) · ${totals.calls} tool call(s) · refusals ${pct(totals.calls ? totals.refusals / totals.calls : 0)} · nudges ${totals.nudges} · stagnation ${totals.stagnations} · verify ${totals.verifyPrompts} · repeat ${totals.repeatBlocks} · lang ${totals.langPrompts} · checks ${totals.checks}${totals.checkFails ? ` (${totals.checkFails}✗)` : ''} · firewall ${totals.firewallNotes}${totals.commitBlocks ? ` · commit-gate ${totals.commitBlocks}` : ''}${totals.doneUnverified ? ` · unverified ${totals.doneUnverified}` : ''} · ${credits(totals.spent)} credits`);
   const avgStep = totals.stepMsCount ? Math.round(totals.stepMsTotal / totals.stepMsCount / 100) / 10 : null;
   const stops = Object.entries(totals.byStop).map(([k, n]) => `${k}×${n}`).join(', ');
   if (avgStep !== null) console.log(`          avg step ${avgStep}s · ends: ${stops}`);

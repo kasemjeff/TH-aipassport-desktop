@@ -11,10 +11,12 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync, execSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { tempDir } from './harness.mjs';
 import {
   planInstall, inspectSource, installSource, finalizeInstall, removePlugin,
-  readRegistry, decorateDetails, materializeEnabledList, stripFromEnabled, knownNames, NONE_NAME,
+  readRegistry, decorateDetails, materializeEnabledList, stripFromEnabled, knownNames, NONE_NAME, updateSourceFor,
 } from '../harness/install.mjs';
 import { PluginManager } from '../harness/plugins.mjs';
 
@@ -46,8 +48,6 @@ test('plan names what it refuses, and touches nothing doing it', () => {
   assert.throws(() => planInstall(''), /no source given/);
   assert.throws(() => planInstall('ftp://example.com/x.mjs'), /unsupported scheme/);
   assert.throws(() => planInstall('http://example.com/plugin.mjs'), /http:\/\/ is refused/);
-  assert.throws(() => planInstall('npm:some-plugin'), /not installed yet/);
-  assert.throws(() => planInstall('git+https://example.com/x.git'), /not installed yet/);
 
   // The one plain-http exception: a loopback host, named so tests can serve.
   assert.equal(planInstall('http://127.0.0.1:8799/x.mjs').kind, 'url');
@@ -60,6 +60,37 @@ test('plan names what it refuses, and touches nothing doing it', () => {
   const home = planInstall('~/plugins/notes.mjs');
   assert.equal(home.kind, 'path');
   assert.ok(home.ref.startsWith(os.homedir()), '~ expands to the home directory');
+});
+
+test('a git or npm source is named, not refused', () => {
+  // These used to be refused outright ("not installed yet"). They are fetched
+  // by a tool instead of read from disk — and fetching is not running.
+  const npm = planInstall('npm:some-plugin');
+  assert.equal(npm.kind, 'npm');
+  assert.equal(npm.pkg, 'some-plugin');
+  assert.equal(npm.version, null);
+
+  const scoped = planInstall('npm:@scope/pkg@1.2.3');
+  assert.equal(scoped.pkg, '@scope/pkg', 'the scope is not the version');
+  assert.equal(scoped.version, '1.2.3');
+
+  const gh = planInstall('github:acme/plugins');
+  assert.equal(gh.kind, 'git');
+  assert.equal(gh.url, 'https://github.com/acme/plugins.git');
+  assert.equal(gh.rev, null);
+
+  const pinned = planInstall('github:acme/plugins#main');
+  assert.equal(pinned.rev, 'main');
+
+  const sub = planInstall('github:acme/plugins#main::path:packages/one');
+  assert.equal(sub.subdir, 'packages/one', 'the sub-folder of the repository is kept');
+
+  const remote = planInstall('git+ssh://git@github.com/acme/plugin.git#main');
+  assert.equal(remote.url, 'ssh://git@github.com/acme/plugin.git', 'the git+ marker is the transport, not part of the url');
+  assert.equal(remote.rev, 'main');
+
+  assert.throws(() => planInstall('git+not-a-url'), /not a git source/);
+  assert.throws(() => planInstall('github:noowner'), /not a github source/);
 });
 
 test('inspect knows only size and hash, and runs nothing', async (t) => {
@@ -262,4 +293,138 @@ test('an install refuses names that would leave the plugins directory or break W
     await assert.rejects(installSource(source, { home, name: 'trailing.' }), /ends with a dot/);
     assert.equal(fs.existsSync(path.join(home, '..', 'escape')), false);
   })();
+});
+
+test('update re-fetches the recorded source, and refuses a name it never installed', async () => {
+  const home = tempDir({ 'settings.json': '{}' });
+  const dir = tempDir();
+  const source = path.join(dir, 'keeper.mjs');
+  fs.writeFileSync(source, pluginFile('keeper'));
+  await installSource(source, { home });
+
+  const record = updateSourceFor(readRegistry(path.join(home, 'plugins')), 'keeper');
+  assert.equal(record.name, 'keeper');
+  assert.equal(record.source.ref, source, 'the recorded ref is what update re-reads');
+  assert.equal(record.sha256.length, 16, 'the recorded hash rides along');
+
+  assert.throws(() => updateSourceFor(readRegistry(path.join(home, 'plugins')), 'handmade'),
+    /no recorded source for handmade/);
+});
+
+test('the trash keeps one previous copy per name — a third install prunes the first', async () => {
+  const home = tempDir({ 'settings.json': '{}' });
+  const dir = tempDir();
+  const manager = managerFor(home);
+  const trash = path.join(home, 'plugins', '.trash');
+  const copies = () => (fs.existsSync(trash) ? fs.readdirSync(trash).filter((n) => n.startsWith('keeper-')) : []);
+  const write = (tag) => {
+    const file = path.join(dir, `keeper-${tag}.mjs`);
+    fs.writeFileSync(file, `${pluginFile('keeper')}// ${tag}\n`);
+    return file;
+  };
+  const trashedBody = () => fs.readFileSync(path.join(trash, copies()[0], 'plugin.mjs'), 'utf8');
+
+  await finalizeInstall(await installSource(write('one'), { home }), manager);
+  assert.deepEqual(copies(), [], 'a first install has nothing to keep');
+
+  await finalizeInstall(await installSource(write('two'), { home }), manager);
+  assert.match(trashedBody(), /\/\/ one\n/, 'the replaced version is kept');
+
+  await finalizeInstall(await installSource(write('three'), { home }), manager);
+  assert.equal(copies().length, 1, 'still one copy per name');
+  assert.match(trashedBody(), /\/\/ two\n/, 'the newest previous version is the one kept');
+});
+
+/* ------------------------------------------------------------------- git */
+
+const hasGit = () => {
+  try {
+    execFileSync('git', ['--version'], { stdio: 'ignore', windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const git = (cwd, args) => execFileSync('git', args, { cwd, stdio: 'pipe', windowsHide: true });
+
+const hasNpm = () => {
+  try {
+    // npm is a .cmd shim on Windows; the shell is fine in a test.
+    execSync('npm --version', { stdio: 'ignore', windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** A repository with one commit holding a plugin. */
+function gitRepoWithPlugin(body) {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'plugin.mjs'), body);
+  git(dir, ['init', '--quiet']);
+  git(dir, ['add', '.']);
+  git(dir, ['-c', 'user.email=test@example.com', '-c', 'user.name=test', 'commit', '--quiet', '-m', 'plugin']);
+  return dir;
+}
+
+test('a git source is cloned, validated and swapped — the registry remembers where it came from', async (t) => {
+  if (!hasGit()) return t.skip('git is not on this machine');
+  const home = tempDir({ 'settings.json': '{}' });
+  const repo = gitRepoWithPlugin(pluginFile('cloned'));
+  const spec = `git+${pathToFileURL(repo).href}`;
+
+  const info = await inspectSource(spec);
+  assert.equal(info.kind, 'git');
+  assert.equal(info.entry, 'plugin.mjs');
+  assert.equal(info.sha256.length, 64, 'the hash of what would run is known before it runs');
+
+  const result = await installSource(spec, { home, expectedSha256: info.sha256 });
+  assert.equal(result.name, 'cloned');
+  assert.ok(fs.existsSync(path.join(home, 'plugins', 'cloned', 'plugin.mjs')), 'it landed as a plugin folder');
+
+  const registry = readRegistry(path.join(home, 'plugins'));
+  assert.equal(registry.plugins.cloned.source.type, 'git');
+  assert.equal(registry.plugins.cloned.source.ref, spec, 'the recorded source is what update re-reads');
+});
+
+test('a git source that moved since it was inspected refuses the swap', async (t) => {
+  if (!hasGit()) return t.skip('git is not on this machine');
+  const home = tempDir({ 'settings.json': '{}' });
+  const repo = gitRepoWithPlugin(pluginFile('moving'));
+  const spec = `git+${pathToFileURL(repo).href}`;
+
+  const info = await inspectSource(spec);
+  // The branch moves: the repository changes after the person saw the hash.
+  fs.writeFileSync(path.join(repo, 'plugin.mjs'), pluginFile('moving', 'ctx.log("changed");'));
+  git(repo, ['add', '.']);
+  git(repo, ['-c', 'user.email=test@example.com', '-c', 'user.name=test', 'commit', '--quiet', '-m', 'moved']);
+
+  await assert.rejects(installSource(spec, { home, expectedSha256: info.sha256 }), /changed since it was inspected/);
+  assert.equal(fs.existsSync(path.join(home, 'plugins', 'moving')), false, 'nothing was swapped in');
+});
+
+test('an npm source is installed by npm — with its scripts switched off', async (t) => {
+  if (!hasNpm()) return t.skip('npm is not on this machine');
+  const home = tempDir({ 'settings.json': '{}' });
+  // A local package: npm installs it like any other dependency, and the
+  // scripts in it are the thing that must not run.
+  const pkg = tempDir();
+  fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'local-plugin', version: '2.0.0' }));
+  fs.writeFileSync(path.join(pkg, 'plugin.mjs'), pluginFile('localplugin'));
+  fs.writeFileSync(path.join(pkg, 'postinstall.js'), 'throw new Error("the install script ran");\n');
+  fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({
+    name: 'local-plugin', version: '2.0.0', scripts: { postinstall: 'node postinstall.js' },
+  }));
+
+  const spec = `npm:${pkg}`;
+  const info = await inspectSource(spec);
+  assert.equal(info.kind, 'npm');
+  assert.equal(info.entry, 'plugin.mjs');
+  assert.equal(info.sha256.length, 64);
+
+  const result = await installSource(spec, { home, expectedSha256: info.sha256 });
+  assert.equal(result.name, 'localplugin', 'the plugin declares its own name');
+  assert.ok(fs.existsSync(path.join(home, 'plugins', 'localplugin', 'plugin.mjs')), 'it landed as a plugin folder');
+  assert.equal(readRegistry(path.join(home, 'plugins')).plugins.localplugin.source.type, 'npm');
 });

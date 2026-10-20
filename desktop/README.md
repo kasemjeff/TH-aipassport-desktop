@@ -50,15 +50,22 @@ So the harness works *around* it rather than pretending otherwise:
 | the upstream cannot be trimmed | summarises, then **rotates**: a fresh temporary conversation seeded with the summary | the server's history cannot be trimmed |
 | the bridge holds one conversation | saves the conversation, runs the helper on its own, restores | a second session would clobber the current one |
 | there are no native tool calls | the protocol has a permission gate; writes never touch disk until approved | writes are CREATE/EDIT/DELETE/MOVE in prose |
-| playbooks and extensions | `~/.aipass/skills`, `<project>/.aipass/skills`, then the shipped library | plain markdown, no manifest |
+| playbooks and extensions | the folders named in `skillsDirs`, then `<project>/.aipass/skills`, `~/.aipass/skills`, then the shipped library | plain markdown, no manifest — and the same order the terminal uses |
 
 The session log borrows its JSONL-per-session, tree-of-entries shape from the pi
 coding agent; everything else above is our own design. (Influence, not code.)
 
 ## The window
 
-Left column: sessions (click to open, fork from the session menu), playbooks
-(click to read), and the project's files.
+Left column: the work. **แชทใหม่** starts a conversation, the search field
+filters the history under it, the history opens a session, and the project's
+files sit below that. The foot of the column holds **ตั้งค่า** and **วิธีใช้** —
+the two doors to the rest of the app, written out instead of left as a 15px
+gear in the header. Sections with nothing in them (no playbooks, no plugin
+panels) are not shown at all: a row that leads nowhere is not a feature.
+Everything that *configures* the app — the model, the rules, the plugins, the
+MCP servers, what the app remembers about you — lives in the settings sheet,
+one click from the foot of this column.
 
 Centre: the conversation, read like a harness. Your messages come back as a
 prompt block — `❯` and what you typed. The assistant's prose lands in a bubble
@@ -79,7 +86,7 @@ the theme, and the choice is written through.
 Header: project, model, permission mode — three controls, one thin row.
 
 Keys: `Enter` sends, `Shift+Enter` is a newline, `Shift+Tab` cycles the mode (ask → auto → plan), `Esc` cancels a running turn
-(or closes a dialog).
+(or closes a dialog), `Ctrl+K` goes to the sidebar's search.
 
 ### `/` — every command, from the keyboard
 
@@ -90,6 +97,7 @@ Typing `/` in the composer opens the palette: arrows move, `Enter`/`Tab` picks,
 |---|---|
 | `/help` | the guide, including everything in this table |
 | `/model` `/model <id>` | pick a model, or set one by id |
+| `/provider` `/provider <id>` | switch who answers the run — AiPASS or an added API provider |
 | `/models` | list the models that can hold a conversation, with the current one marked |
 | `/mode` `/mode ask\|auto\|yolo` | permission level, with what each one means |
 | `/status` | bridge, extensions, model, credits, pending count |
@@ -102,6 +110,7 @@ Typing `/` in the composer opens the palette: arrows move, `Enter`/`Tab` picks,
 | `/file` `/image <path>` | attach a file by path, relative to the project or absolute |
 | `/open` `/open <path>` | read a file in the project |
 | `/skills` | the playbooks on disk |
+| `/memory` | the facts the app carries between sessions (`/memory clear` forgets them) — the same list as the sheet's page |
 | `/diff` `/apply` `/discard` | the pending-change buffer |
 | `/project` | switch or remove a project folder (removing never deletes the folder) |
 | `/settings` | the settings sheet |
@@ -130,12 +139,51 @@ here is what it chose to carry". `/compact` runs the same path on demand.
 
 ### The settings sheet
 
-`/settings` (or the gear) opens a grouped sheet: chat and model, context, the
-window, playbooks, and plugins. Edits are **staged** and Save applies them, with
-validation that names the problem instead of writing a bad number (a step limit
-of zero, a budget under its reserve, a chat URL without a scheme). The context
-section carries a live meter, and the theme is applied the moment it is picked.
-`คืนค่าเดิม` resets everything except the project you are working in.
+`/settings` (or the gear, or **ตั้งค่า** at the foot of the rail) opens a
+grouped sheet: chat and model, context, what the app remembers between
+sessions, the window, playbooks, the file rules, the health check, plugins and
+MCP. Edits are **staged** and Save applies them, with validation that names
+the problem instead of writing a bad number (a step limit of zero, a budget
+under its reserve, a chat URL without a scheme). The context section carries a
+live meter, and the theme is applied the moment it is picked. `คืนค่าเดิม`
+resets everything except the project you are working in.
+
+The **ความจำข้ามเซสชัน** page is where the facts the app carries between
+sessions are listed, with the button that makes it forget them. It used to be a
+row folded away in the rail, under a heading nobody could place — the one thing
+you want to find when you ask "what does this app remember about me?" is where
+you look when you ask what an app is doing.
+
+### The providers
+
+The picker next to the model one says **who answers the run**. AiPASS is the
+built-in provider — the local bridge and the tab you are signed in to — and it
+stays the default. The **ผู้ให้บริการ** page in the settings sheet adds
+another: an OpenAI-compatible endpoint (OpenAI, OpenRouter, Groq, Together,
+Ollama, vLLM — anything that speaks `/v1/chat/completions`) or Anthropic's own
+Messages API.
+
+```
+id            a safe word: openai, my-gateway, ollama
+label         what the window shows
+kind          openai | anthropic
+base url      https://api.openai.com/v1  ·  http://localhost:11434/v1
+env var       OPENAI_API_KEY — the environment answers first, the file is the fallback
+models        comma separated, or leave it empty and the provider is asked at run time
+api key       written once, to ~/.aipass/credentials.json (owner-only)
+```
+
+A key is never put in `settings.json` — that file is shared by every surface
+and holds no secret. The environment variable wins over the stored key, so a
+shell that exports the key never has it written down at all.
+
+The switch is machine-wide, not a per-window thing: it lands in the settings
+file, so the terminal sees it too (`aipass providers use openai`, or
+`agent.mjs --provider openai` for one run). Two things change with it — the
+model list is rebuilt, because a model of one provider means nothing to
+another, and the AiPASS firewall no longer applies: the text another provider
+receives is exactly the text on your disk, not the encoded copy the site's
+edge needs.
 
 ### The two kinds of "conversation"
 
@@ -146,19 +194,38 @@ get lost:
   held by de.aipass.net. One per browser tab, and it cannot be trimmed, so
   switching is the only way to start clean.
 - **window session** (`/new`, `/resume`, `/fork`) — the local transcript on
-  disk, tied to the project folder. Opening an old session re-reads what was
-  said; the bridge conversation it used is whatever the bridge is on now.
+  disk, tied to the project folder. Each session owns the bridge conversation
+  it worked in, recorded in its file: reopening it reattaches to that
+  conversation when the site still holds it (a warm resume), and when it does
+  not — an expired temporary, a fresh machine — the new conversation is
+  seeded with a digest of the session's own transcript (its tasks, the
+  model's last words, the open checklist, the facts carried between
+  sessions), so the work continues instead of restarting blind. `/new` and
+  `/resume` never continue in another session's conversation; `/fork` starts
+  a branch with its own.
 
 ### The panels
 
-- **บทสนทนา** — newest first, each row showing when it was last touched, with a
-  filter box that matches title or id (99 sessions on the machine this was
-  written on: a list nobody can filter is a list nobody uses). Rename and delete
-  live in `/resume`.
+The rail on the left is the work, and each of its lists scrolls in its own box
+so one long list cannot push the others out of the column.
+
+- **ประวัติการสนทนา** — newest first, each row showing when it was last
+  touched, with the search field above it matching title or id (99 sessions on
+  the machine this was written on: a list nobody can filter is a list nobody
+  uses). The header counts them; when there are more than forty, a one-click
+  **เก็บ 24+ บทสนทนาเก่า** moves the quiet ones to `archive/` (nothing is
+  deleted). Rename and delete live in `/resume`.
 - **ไฟล์ในโปรเจกต์** — walks into folders, names the directory it is in, and
   every file row carries a *แนบ* button so a file can be attached without a
   picker. Switching a project returns it to that project's root.
 - **คู่มือ / ปลั๊กอิน** — playbooks from disk, and the panels plugins render.
+  Both are hidden until they have something to show: the plugin row appears
+  when a plugin draws a panel, and opens by itself the first time it does.
+  The playbook list is read from disk on every ask, so a part dropped into a
+  library folder is there the next time the window comes back to the front —
+  no restart, and no prose to edit: a folder's `index.md` is a preamble about
+  what each playbook is *for*, and the list of what is actually on disk is
+  generated and always follows it.
 
 ### When a run ends badly
 
@@ -231,7 +298,9 @@ Methods: `status`, `models`, `credits`, `conversations`, `config.set`,
 `session.list|new|open|entries|fork|rename|delete`, `run`, `cancel`,
 `permission.answer`, `plan.answer`, `pending`, `diff`, `apply`, `discard`,
 `skills.list|index|load`, `fs.list`, `fs.read`,
-`attachment.stage|list|remove`, `plugins.list|reload`, `panel.render`,
+`attachment.stage|list|remove`,
+`plugins.list|reload|inspect|install|remove|enable|disable`,
+`mcp.list|reload|add|remove|enable|disable|test`, `panel.render`,
 `projects.list|add|remove|switch`, `settings.get|set`, `rules.get|set`,
 `browser.open`, `snapshot`.
 
@@ -357,7 +426,12 @@ whether a plan waits for approval), helpers on/off, the compaction budget
 (**budget**, **reserve**, and the share at which it rotates —
 `compactAtPercent`, 40 by default), playbook folders, the project list, the
 current root, enabled plugins, theme, the chat tab URL and whether a run that
-needs one opens it.
+needs one opens it — and the **declared check**: `verifyCommand` (the one
+command the checker must treat as the project's check, replacing
+`.aipass/check.txt` when set) and `requireCheck` (refuse a DONE while that
+check is still failing; the run ends as `done-unverified` instead of accepting
+it). Both are off by default, so the checker stays advisory until a project
+or a person asks for the gate.
 
 The sheet validates before it writes, and `settings.reset` returns everything to
 the shipped defaults while keeping the project you are in.
@@ -428,14 +502,78 @@ directly — the choice is the plugin author's, made where the tool is
 registered.
 
 Panels are rendered across the process boundary, so a plugin returns markup
-(`render: async () => ({ html })`) rather than DOM nodes. Plugins run in the
-backend with the same access the harness has, including the filesystem — they
-are code you chose to install, not sandboxed. Load only what you have read.
+(`render: async () => ({ html })`) rather than DOM nodes. The window draws the
+panel's title (the `title` you register) and the rail's **ปลั๊กอิน** row, so
+the markup you return is the body — return the title again and it is printed
+twice. Plugins run in the backend with the same access the harness has,
+including the filesystem — they are code you chose to install, not sandboxed.
+Load only what you have read.
 
-What was actually loaded is recorded, not assumed: `plugins.list` reports each
-plugin with its content hash, size and mtime, so "did that plugin change
-since it last behaved?" is an answerable question instead of a re-read of
-every file by hand.
+### Installing, enabling, removing
+
+Installing is the consent moment: the code is about to run with the app's
+rights, so the surfaces show first and ask second. Settings → ปลั๊กอิน has an
+install box (a path, an `https://` URL, a git spec such as
+`github:owner/repo#main`, or an npm package such as `npm:<package>`);
+`[ตรวจสอบ]` prints kind, size and sha256 **without executing anything**, and
+only `[ติดตั้ง]` proceeds: the source is staged under `.staging/`, validated by
+loading it with the real loader, then swapped in — the previous version moves
+to `.trash/`, which keeps one copy per name, and is never deleted (pruning
+only ever removes earlier generations of the same name). A git or npm source
+is *fetched* to answer the report (a shallow clone, or an `npm install` with
+`--ignore-scripts`, so no package script runs), and the hash of the entry file
+is checked again at install time — a branch that moved since the report is
+refused. The box says what it is doing while it does it, and a refusal names
+the step that closed the door (`ขั้นตอน: ดึงไฟล์ / ตรวจโค้ด / ชื่อปลั๊กอิน /
+สลับไฟล์`). `aipass plugin update <name>` re-fetches the recorded source
+and runs the same chain; it leaves the enable state as the person set it.
+The same lifecycle is on the CLI: `aipass plugin list|inspect|install|update
+<name>|remove|enable|disable` (it asks a running window to do the work, so the
+open sheet updates live), and every mutation emits the `plugins` event.
+
+`~/.aipass/plugins/.registry.json` records where each managed plugin came from
+(source, sha256, installedAt, surface). It is advisory — deleting it loses the
+"where did this come from" answer, never the plugin. A file the installer did
+not put there is *unmanaged*: it still loads, and replacing or removing it
+needs an explicit `--force` (a second confirm in the window), because unmanaged
+work is the user's.
+
+Which plugins run is `settings.plugins`: empty = master on (everything found
+now and later); the first ปิด materializes the list as every known name minus
+that one; disabling the last one writes the sentinel `(none)`, so `[]` cannot
+read as "everything" and turn it back on; and enabling collapses back to `[]`
+only when the list covers every **known** name — counting only loaded ones
+would silently re-enable an installed, disabled plugin the moment a different
+one is enabled. `plugins.list` also reports each loaded plugin's content hash
+and whether it changed since install, so "did that plugin change since it last
+behaved?" has an answer on its card.
+
+## MCP
+
+MCP servers are external tool processes spoken to over stdio; their tools
+appear to the model as `MCP__server__tool`. Config is `~/.aipass/mcp.json` (all
+projects) plus `<project>/.aipass/mcp.json` (that project — a same-named server
+there wins whole-entry over the home one). Hand-editing stays legal; the
+settings sheet's 🔌 MCP section and the CLI do the same job with live state:
+
+```
+aipass mcp                        list servers: connected / error / disabled
+aipass mcp add <name> [--scope home|project] [--risk write|read]
+             [--env K=V]... [--cwd dir] -- <command> [args...]
+aipass mcp test <name>            connect once, list its tools, exit
+aipass mcp enable|disable <name>  the entry stays; enabled:false stops the spawn
+aipass mcp remove <name>          config and its env values go together
+```
+
+Per-server fields: `enabled` (default true), `risk` — the declared risk its
+tools ride through the permission gate, defaulting to `"write"` so an MCP
+filesystem server *is* asked about in ask mode; `"read"` is your explicit
+"never ask for this server", a trust statement rather than a verification —
+and `cwd` for servers that read relative paths. `env` values are secrets:
+rendered as `KEY = •••••` after save, never logged, gone when the server is
+removed. `[ทดสอบ]` in the add form runs the command once and lists the tools it
+offers before saving. A server that fails to connect stays listed with its
+error and never blocks a run.
 
 
 1. ~~Tauri shell~~ **done** — `desktop/src-tauri` wraps the same `ui/` folder

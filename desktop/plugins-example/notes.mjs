@@ -36,13 +36,13 @@ export default {
     }, { description: 'remember a line in the shared scratchpad, or read it' });
 
     // A panel: markup the window drops into its sidebar. It can call back into
-    // the backend with rpc() to keep itself fresh.
+    // the backend with rpc() to keep itself fresh. The window draws the
+    // panel's title (the `title` below), so the markup is the body only.
     ctx.panel({
       id: 'notes',
       title: 'scratchpad',
       render: async () => ({
-        html: `<h5>scratchpad</h5>
-<ul><li>${(read() || '(empty — NOTE something in a chat)').replace(/</g, '&lt;').split('\n').filter(Boolean).join('</li><li>')}</li></ul>`,
+        html: `<ul><li>${(read() || '(empty — NOTE something in a chat)').replace(/</g, '&lt;').split('\n').filter(Boolean).join('</li><li>')}</li></ul>`,
       }),
     });
 

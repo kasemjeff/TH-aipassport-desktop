@@ -57,3 +57,58 @@ test('a project folder that exists stays the project, and wins the shared name',
     for (const d of [home, root]) fs.rmSync(d, { recursive: true, force: true });
   }
 });
+
+test('the curated index is a preamble — a part added later is still named', () => {
+  // The curated index.md used to BE the index, so a part added yesterday
+  // stayed invisible until someone remembered to edit the prose. A playbook
+  // that exists but is never named is a playbook that never runs.
+  const home = scratch();
+  const root = scratch();
+  const prev = process.env.AIPASS_HOME;
+  process.env.AIPASS_HOME = home;
+  try {
+    fs.mkdirSync(path.join(home, 'skills'), { recursive: true });
+    fs.writeFileSync(path.join(home, 'skills', 'index.md'), 'the library, described by a person\n');
+    fs.writeFileSync(path.join(home, 'skills', 'plan-01.md'), '# plan\n');
+
+    const lib = SkillLibrary.default({ root });
+    const text = lib.index();
+    assert.match(text, /described by a person/, 'the curated text leads');
+    assert.match(text, /plan-01/, 'and the list of what is on disk follows it');
+
+    // A part dropped in while the app is open: the folders are read on every
+    // call, so the next read names it — no restart, no prose to edit.
+    fs.writeFileSync(path.join(home, 'skills', 'debug-01.md'), '# debug\n');
+    const later = lib.index();
+    assert.match(later, /debug-01/, 'a new part shows up on the next read');
+    assert.match(later, /described by a person/, 'the preamble is still there');
+  } finally {
+    if (prev === undefined) delete process.env.AIPASS_HOME; else process.env.AIPASS_HOME = prev;
+    for (const d of [home, root]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('one order for every surface: a configured folder wins over the project one', () => {
+  // The window and the CLI used to disagree about where a configured folder
+  // sits, so a name in two libraries loaded a different file depending on who
+  // asked. The settings file is the one source of truth both read.
+  const home = scratch();
+  const root = scratch();
+  const configured = scratch();
+  const prev = process.env.AIPASS_HOME;
+  process.env.AIPASS_HOME = home;
+  try {
+    fs.mkdirSync(path.join(home, 'skills'), { recursive: true });
+    fs.writeFileSync(path.join(home, 'settings.json'), JSON.stringify({ skillsDirs: [configured] }));
+    fs.writeFileSync(path.join(configured, 'shared.md'), '# configured copy\n');
+    fs.mkdirSync(path.join(root, '.aipass', 'skills'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.aipass', 'skills', 'shared.md'), '# project copy\n');
+
+    const lib = SkillLibrary.default({ root });
+    assert.equal(lib.load('shared').text, '# configured copy\n', 'the folder a person configured wins');
+    assert.match(lib.index(), /shared {2}\(configured\)/, 'and it says so, not "built-in"');
+  } finally {
+    if (prev === undefined) delete process.env.AIPASS_HOME; else process.env.AIPASS_HOME = prev;
+    for (const d of [home, root, configured]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});

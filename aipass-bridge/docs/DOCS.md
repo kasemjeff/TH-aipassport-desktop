@@ -120,6 +120,7 @@ aipass-bridge/
 │   ├── popup.html/.js   status panel + bridge-URL + default-model picker
 ├── chat.mjs            interactive / one-shot terminal client (the TUI)
 ├── agent.mjs           local file-editing agent driven by the model
+├── providers.mjs       the provider registry from the terminal (`aipass providers`)
 ├── list.mjs            small printers for `npm run models` / `npm run conversations`
 ├── handoff.html        a standalone styled "field guide" (same content, prettier)
 ├── jsconfig.json       type-check config for `chat.mjs` (`// @ts-check`), no build
@@ -482,6 +483,72 @@ sent **once** as the first message, plus the top-level directory listing.
 carries the protocol. `--watch` keeps the conversation open for follow-up tasks,
 so the model retains everything it has read while each new task stays a small
 message.
+
+---
+
+## The provider layer (`harness/providers.mjs`, `harness/provider-client.mjs`)
+
+AiPASS is the provider the app was built around, and it stays the default: the
+bridge, the extension and the logged-in tab are still the path it takes. The
+provider layer is what lets the same app point at another one — an
+OpenAI-compatible endpoint, an Anthropic key — without the bridge learning
+about it.
+
+### Two files, and neither of them is `settings.json`
+
+| file | what is in it |
+|---|---|
+| `~/.aipass/providers.json` | the specs: `id`, `label`, `kind` (`openai` / `anthropic`), `baseUrl`, `apiKeyEnv`, `models`, `defaultModel`. Nothing secret. |
+| `~/.aipass/credentials.json` | the keys, `0600`. A spec may name an environment variable instead, and **that wins** — so the key never has to touch the disk. |
+
+`settings.json` is shared by the window, the CLI and the backend, and its own
+header says no credential belongs in it. The provider specs are machine
+configuration; the key is a secret; the two live apart.
+
+### One client contract, two kinds of upstream
+
+The harness talks to exactly one contract — `BridgeClient`'s: `chat`, `models`,
+`quota`, `config`, `createConversation`, plus a `model` property. AiPASS
+answers it through the local bridge; `ApiProviderClient` answers it for a
+provider that is a plain HTTP API. The loop, the tools, the compactor and the
+window never learn which one they got: a provider is a **swap**, not a second
+loop.
+
+Three things differ, and each one is a rule the rest of the app already knows:
+
+1. **The history.** de.aipass.net keeps the conversation and accepts one user
+   message per request, so the bridge owns the history. An API provider is
+   given the whole list, so `ApiProviderClient` keeps one array per
+   conversation id — the same id the harness already passes around.
+2. **The firewall.** The WAF table (`harness/waf.mjs`) exists because the edge
+   in front of de.aipass.net refuses ordinary source code. No other provider
+   has that firewall, and encoding for it would hand the model `CONSOLE-LOG`
+   where its file said `console.log`. A provider client sets `waf = false`,
+   and `loop.mjs` asks once per run. The end-of-turn reminder follows: it
+   names the wire spellings, so a provider gets the reminder without that
+   sentence (`harness/protocol.mjs` keeps it in three pieces).
+3. **The refusal chain.** A 429 is a rate limit everywhere, so it is waited
+   out. A 403 on another provider is a permission error, not a refused
+   payload — so nothing is redacted, split or dropped there.
+
+### The switch
+
+`settings.defaultProvider` names the provider a run uses; the registry is the
+judge of which ids exist, so a provider that was deleted falls back to AiPASS
+rather than leaving every run without a client. The switch is machine-wide:
+the window writes it through the backend, the CLI reads the same file.
+
+```
+aipass providers                            list
+aipass providers add openai --base-url https://api.openai.com/v1 \
+    --api-key-env OPENAI_API_KEY --model gpt-4o
+aipass providers use openai                  make it the default
+aipass providers test openai                 ask it whether it answers
+```
+
+`agent.mjs --provider <id>` overrides it for one run. The desktop's picker
+sits next to the model one, and the model list is rebuilt from scratch when
+the provider moves — a model of one provider means nothing to another.
 
 ---
 

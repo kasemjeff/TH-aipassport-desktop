@@ -15,17 +15,19 @@
 
 ## What this repo is
 
-- **`aipass-bridge/`** — the product: a zero-dependency Node bridge plus a
-  Chrome MV3 extension that lets a terminal talk to `de.aipass.net`'s chat,
-  with streaming, through an already-logged-in tab. `harness/` is the pi-style
-  session agent the desktop window drives; `bin/aipass.mjs` is the CLI
-  dispatcher.
-- **`desktop/`** — wraps the same `.mjs` files in a Tauri window; `desktop/ui/`
-  is a zero-build plain-JS chat UI.
+- **`desktop/` + `aipass-bridge/harness/`** — the product, and this repository's
+  own work: the window (a zero-build plain-JS chat UI in a Tauri shell) and the
+  agent core it drives (the session agent, its tools, protocol, permissions, WAF).
+- **`aipass-bridge/` (bridge, extension, CLI)** — upstream, from
+  niawjunior/aipass-bridge, continued here under niawjunior's copyright
+  (`LICENSE`): the zero-dependency bridge and the Chrome MV3 extension that
+  reach `de.aipass.net` through a logged-in tab; `bin/aipass.mjs` is the CLI.
 - Not to be confused with `aipass.alkinum.io` — different product. Runtime
   truth lives in `~/.aipass` (sessions, logs, `bridge.pid`, `.token`).
-- Everything imports `node:*` builtins only. `npm install` installs nothing
-  and that is deliberate. The root `package.json` is a script runner.
+- Runtime code imports `node:*` builtins only. `npm install` installs only
+  the devDependencies behind `npm run typecheck` (`typescript`, `@types/node`),
+  never a runtime package; running the app needs no install. The root
+  `package.json` is a script runner.
 
 ## Run & verify
 
@@ -50,13 +52,20 @@ Format: rule — why — `Verify:` anchor naming the exact test that enforces it
 
 1. **The overlay is the only write surface of a run.** Edits land in memory;
    only an explicit apply (`--apply`, or the window's apply button) writes real
-   files. Sandbox projections junction heavy dirs and copy the rest — nothing
-   real is ever written mid-run.
+   files. Sandbox projections junction heavy dirs and copy the rest — the
+   projection itself lives OUTSIDE the project (`~/.aipass/run/`), so a copy of
+   the user's source can never be committed by accident. The heavy dirs are
+   shared with the real tree, and the RUN says so in its result.
    Verify: "dry run shows a diff but writes nothing; --apply writes"
    Verify: "a heavy directory is linked, not copied, and staged files sit beside it"
+   Verify: "the projection lives outside the project"
 2. **Every tool path is confined to the project root** (`safe()`/`trySafe()`);
-   a path that escapes answers `err:` and touches nothing.
+   a path that escapes answers `err:` and touches nothing. The boundary is
+   LEXICAL (`path.relative`, not a string prefix — Windows does not care about
+   case) and PHYSICAL (a link out of the project is a link out of the root).
    Verify: "refuses to touch anything outside the project root"
+   Verify: "a path that differs only in case is inside the project"
+   Verify: "a link out of the project is a link out of the root"
 3. **A tool failure starts with `err:`** — the loop keys on that one word.
    Never invent a new failure phrase a regex somewhere has to learn.
    Verify: "failures carry the err: prefix the loop keys on"
@@ -71,7 +80,10 @@ Format: rule — why — `Verify:` anchor naming the exact test that enforces it
    conversation history. Design around it, never against it.
 6. **Credentials never reach the bridge.** Authenticated fetches happen in
    `page.js` (MAIN world) with `credentials: 'include'`; the bridge and CLIs
-   speak to localhost only. Don't add a path that carries cookies.
+   speak to localhost only. Don't add a path that carries cookies. A command's
+   OUTPUT is screened too (`harness/output-scrub.mjs`): `set`/`env` prints the
+   whole environment, and the transcript is what goes upstream.
+   Verify: "a command output is screened for secrets"
 7. **Loopback auth is on by default.** Token at `~/.aipass/.token`;
    `AIPASS_REQUIRE_AUTH=0` is for tests/transition only (it warns at boot).
    The window fetches `/token` and sends it on both transports.
@@ -96,6 +108,29 @@ Format: rule — why — `Verify:` anchor naming the exact test that enforces it
     DONE is said exactly once.
     Verify: "the bubble holds the prose, never the wire — calls live in their rows"
     Verify: "a DONE is said once — streamed prose and the harvested summary never double"
+13. **A stop ends the work, not just the conversation.** The stop signal
+    reaches every wait: the tools of the reply that was running (a stopped
+    run stages no more edits), the command in flight (killed with its tree),
+    the projection a RUN waits for, the web search, the MCP call, and the run
+    that had only just started (its abort controller is created before the
+    first `await`, so a stop can never be lost). The window says what the
+    stop found.
+    Verify: "a stop ends the tools that were still queued in the reply"
+    Verify: "a RUN in flight is killed when the run is stopped"
+    Verify: "a stop that lands right after the run started is not lost"
+    Verify: "a stopped run stages no more edits"
+    Verify: "a stop ends the projection a RUN waits for"
+    Verify: "a stop ends an mcp call the server never answers"
+    Verify: "a stop is answered on screen — the window says the run is stopping"
+14. **A provider is a client, not a second loop.** The harness talks to one
+    contract (`harness/bridge.mjs`): chat, models, quota, config,
+    createConversation. AiPASS answers it through the local bridge; any other
+    provider answers it through `harness/provider-client.mjs`. A provider that
+    is not the AiPASS edge gets the bytes as they are — the WAF table is that
+    edge's own. A key lives in `~/.aipass/credentials.json` (owner-only) or an
+    env var, never in settings.json.
+    Verify: "a provider is not encoded for a firewall that is not there"
+    Verify: "the key comes from the environment first and the credentials file second"
 
 ## Working with other sessions
 

@@ -1,6 +1,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { startBridge, FakeExtension, run, DOCTOR, freePort } from './harness.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { startBridge, FakeExtension, run, DOCTOR, freePort, tempDir } from './harness.mjs';
 
 let bridge;
 before(async () => { bridge = await startBridge(); });
@@ -69,6 +71,32 @@ test('doctor --json emits a machine-readable summary', async (t) => {
   assert.equal(last.failed, 0);
   assert.equal(last.warned, 0);
   assert.equal(last.ok, true);
+});
+
+// The extension checks read local files, so they hold without a window: a
+// plugin that fails to load is named, and untested MCP config is a warning
+// rather than silence. A dead desktop port keeps the MCP path deterministic.
+test('a plugin that fails to load is named, and MCP config reads without a backend', async () => {
+  const home = tempDir({
+    'settings.json': '{}',
+    'mcp.json': JSON.stringify({ servers: [{ name: 'dead', command: 'node', args: ['-e', ''] }] }),
+  });
+  fs.mkdirSync(path.join(home, 'plugins'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'plugins', 'ok.mjs'),
+    "export default { name: 'ok', version: '1.0.0', setup() {} };\n");
+  const env = { AIPASS_HOME: home, AIPASS_DESKTOP_PORT: '1' };
+
+  const good = await run(DOCTOR, ['--bridge', bridge.base, '--no-chat'], { env });
+  assert.match(good.out, /✓ plugins\s+1 loaded/);
+  assert.match(good.out, /! mcp\s+1 enabled server\(s\) — not tested/, good.out);
+
+  fs.writeFileSync(path.join(home, 'plugins', 'broken.mjs'),
+    "export default { name: 'broken', version: '1.0.0', setup() { throw new Error('nope'); } };\n");
+  const bad = await run(DOCTOR, ['--bridge', bridge.base, '--no-chat'], { env });
+  assert.equal(bad.code, 1, bad.out);
+  assert.match(bad.out, /✗ plugins\s+1 failed to load/);
+  assert.match(bad.out, /broken\.mjs/);
+  assert.match(bad.out, /aipass plugin list/);
 });
 
 // Asking for help is not an error, and `npm run models -- --help` puts the flag

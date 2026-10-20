@@ -2,10 +2,14 @@
 // aipass plugin — install, inspect, enable, disable and remove plugins.
 //
 //   aipass plugin                             list what is installed and live
-//   aipass plugin inspect <path|url>          size + sha256 of what would run
-//   aipass plugin install <path|url> [--name <id>] [--force] [--yes]
+//   aipass plugin inspect <path|url|git|npm>   size + sha256 of what would run
+//   aipass plugin install <src> [--name <id>] [--force] [--yes]
+//   aipass plugin update <name> [--force] [--yes]  re-install from the recorded source
 //   aipass plugin remove <name> [--force]
 //   aipass plugin enable|disable <name>
+//
+// A source is a path, an https:// URL, a git repository (`github:owner/repo`,
+// `git+https://…`) or an npm package (`npm:<package>`).
 //
 // Install is the consent moment: the hash of the bytes is printed and
 // confirmed before any plugin code runs — validation imports the staged copy,
@@ -18,7 +22,7 @@ import { createInterface } from 'node:readline/promises';
 import { aipassHome, Settings } from './harness/settings.mjs';
 import { PluginManager } from './harness/plugins.mjs';
 import {
-  inspectSource, installSource, finalizeInstall, removePlugin, readRegistry,
+  inspectSource, installSource, finalizeInstall, removePlugin, readRegistry, updateSourceFor,
   decorateDetails, materializeEnabledList, stripFromEnabled, knownNames, NONE_NAME, pluginsDirFor,
 } from './harness/install.mjs';
 import { tryDesktopRpc } from './harness/desktop-rpc.mjs';
@@ -53,11 +57,18 @@ async function liveManager() {
 }
 
 const usage = () => {
-  console.log('usage: aipass plugin [list|inspect <src>|install <src> [--name id] [--force] [--yes]|remove <name> [--force]|enable <name>|disable <name>]');
+  console.log('usage: aipass plugin [list|inspect <src>|install <src> [--name id] [--force] [--yes]|update <name> [--force] [--yes]|remove <name> [--force]|enable <name>|disable <name>]');
+  console.log('       a source is a path, an https:// URL, github:owner/repo, git+https://… or npm:<package>');
   process.exit(1);
 };
 
 const say = (line) => console.log(line);
+
+/** A refusal names the step it closed: fetch, validate, swap. */
+const refuse = (error, stage) => {
+  console.error(`err: ${error}${stage ? ` (${stage})` : ''}`);
+  process.exit(1);
+};
 
 try {
   if (cmd === 'list' || cmd === 'ls') {
@@ -94,6 +105,7 @@ try {
     if (!source) usage();
     const info = await inspectSource(source, { base: process.cwd() });
     say(`source: ${info.ref}`);
+    say(`kind:   ${info.kind}${info.kind === 'path' ? '' : ' (fetched to read it — nothing ran)'}`);
     say(`entry:  ${info.entry}`);
     say(`size:   ${info.size} bytes`);
     say(`sha256: ${info.sha256}`);
@@ -101,14 +113,25 @@ try {
     process.exit(0);
   }
 
-  if (cmd === 'install') {
-    const source = positional[0];
-    if (!source) usage();
+  if (cmd === 'install' || cmd === 'update') {
+    const update = cmd === 'update';
+    const target = update ? positional[0] : positional.name;
+    let source = positional[0];
+    if (update) {
+      if (!target) usage();
+      // The recorded source or a named refusal — update never guesses a path.
+      const record = updateSourceFor(registryOf(), target);
+      source = record.source.ref;
+      say(`updating ${target} — re-installing from ${record.source.ref}`);
+    } else if (!source) {
+      usage();
+    }
 
     // 1. Report first: the hash is what the person is consenting to.
     const info = await inspectSource(source, { base: process.cwd() });
-    say(`install into ${pluginsDir}`);
+    say(`${update ? 'update' : 'install'} into ${pluginsDir}`);
     say(`  source: ${info.ref}`);
+    say(`  kind:   ${info.kind}${info.kind === 'path' ? '' : ' (fetched from there)'}`);
     say(`  entry:  ${info.entry} (${info.size} bytes)`);
     say(`  sha256: ${info.sha256}`);
     say('  installing loads this code in the backend process — plugins are not sandboxed.');
@@ -128,29 +151,32 @@ try {
     //    live. Its refusal is final; falling back would do the same work
     //    behind the answer the person just received.
     const viaBackend = await tryDesktopRpc('plugins.install', {
-      source: info.ref, name: positional.name, expectedSha256: info.sha256, force, installedBy: 'cli',
+      source: info.ref, name: target, expectedSha256: info.sha256, force, installedBy: 'cli',
     });
-    if (viaBackend && !viaBackend.ok) { console.error(`err: ${viaBackend.error}`); process.exit(1); }
+    if (viaBackend && !viaBackend.ok) refuse(viaBackend.error, viaBackend.stage);
     if (viaBackend?.ok) {
       const p = viaBackend.result.plugin;
-      say(`installed ${p.name} ${p.version} — the open window already has it`);
+      say(`${update ? 'updated' : 'installed'} ${p.name} ${p.version} — the open window already has it`);
       process.exit(0);
     }
 
     const result = await installSource(info.ref, {
-      pluginsDir, name: positional.name, expectedSha256: info.sha256, force, installedBy: 'cli',
+      pluginsDir, name: target, expectedSha256: info.sha256, force, installedBy: 'cli',
       log: (line) => say(`  ${line}`),
     });
-    // An explicit enabled-list names what runs; the newcomer joins it, the
-    // same decision the window makes when it installs into a pinned list.
-    const list = settings.get('plugins');
-    if (Array.isArray(list) && list.length && !list.includes(result.name)) {
-      settings.set({ plugins: [...list.filter((n) => n !== NONE_NAME), result.name] });
+    // An explicit enabled-list names what runs. A fresh install joins it (the
+    // same decision the window makes when installing into a pinned list); an
+    // update leaves the enable/disable state exactly as the person left it.
+    if (!update) {
+      const list = settings.get('plugins');
+      if (Array.isArray(list) && list.length && !list.includes(result.name)) {
+        settings.set({ plugins: [...list.filter((n) => n !== NONE_NAME), result.name] });
+      }
     }
     const manager = new PluginManager({ dir: pluginsDir, settings, log: () => {} });
     const details = await finalizeInstall(result, manager);
     const p = decorateDetails(details, registryOf()).loaded.find((x) => x.name === result.name);
-    say(`installed ${p?.name} ${p?.version ?? ''} — the desktop app will load it at its next start`);
+    say(`${update ? 'updated' : 'installed'} ${p?.name} ${p?.version ?? ''} — the desktop app will load it at its next start`);
     process.exit(0);
   }
 
@@ -158,7 +184,7 @@ try {
     const name = positional[0];
     if (!name) usage();
     const viaBackend = await tryDesktopRpc('plugins.remove', { name, force });
-    if (viaBackend && !viaBackend.ok) { console.error(`err: ${viaBackend.error}`); process.exit(1); }
+    if (viaBackend && !viaBackend.ok) refuse(viaBackend.error, viaBackend.stage);
     if (viaBackend?.ok) {
       say(`removed ${viaBackend.result.name} — the previous copy is in ${viaBackend.result.trashed}`);
       process.exit(0);
@@ -176,7 +202,7 @@ try {
     const enabled = cmd === 'enable';
 
     const viaBackend = await tryDesktopRpc(`plugins.${cmd}`, { name });
-    if (viaBackend && !viaBackend.ok) { console.error(`err: ${viaBackend.error}`); process.exit(1); }
+    if (viaBackend && !viaBackend.ok) refuse(viaBackend.error, viaBackend.stage);
     if (viaBackend?.ok) {
       const live = viaBackend.result.details.loaded.some((p) => p.name === name);
       say(live ? `${name} is enabled` : `${name} is disabled`);
@@ -204,6 +230,6 @@ try {
 
   usage();
 } catch (err) {
-  console.error(`err: ${err.message ?? err}`);
+  console.error(`err: ${err.message ?? err}${err.stage ? ` (${err.stage})` : ''}`);
   process.exit(1);
 }

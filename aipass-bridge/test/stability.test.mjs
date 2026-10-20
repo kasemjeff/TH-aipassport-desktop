@@ -1,9 +1,10 @@
 // Stability pins: the parts that keep a long-running install from rotting.
 //
-// Three failure modes with one test each:
+// Four failure modes with one test each:
 //   - logs that grow with no cap            (harness/log-file.mjs)
 //   - session files lost to a crash mid-write (harness/session.mjs, atomic swap)
 //   - spill files piling up per project      (harness/tools.mjs, pruneSpill)
+//   - a command's process tree outliving its timeout (harness/tools.mjs, runShell)
 //
 // Plus the entry-point guard: importing the bridge or the backend in-process
 // must NOT install process-level crash handlers, because a handler that calls
@@ -15,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { openLogFile, LOG_MAX_BYTES } from '../harness/log-file.mjs';
 import { SessionStore, HEADER_EVERY } from '../harness/session.mjs';
-import { pruneSpill } from '../harness/tools.mjs';
+import { pruneSpill, runShell } from '../harness/tools.mjs';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-stability-'));
 
@@ -147,6 +148,33 @@ test('spill files are pruned to the newest N, foreign files untouched', () => {
     assert.deepEqual(fs.readdirSync(dir), ['keep.md'], 'a cap of zero clears every spill');
 
     pruneSpill(path.join(dir, 'missing'), 5); // must not throw on a missing directory
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a command past its timeout takes its whole process tree down', async () => {
+  // `exec`'s timeout killed the shell alone; the command's own children — a
+  // server it started, a watcher — survived and kept holding the files they
+  // had open (a later RUN met EBUSY from a process nobody could see). The
+  // tree is killed now, so the grandchild never gets to write its marker.
+  const dir = tmp();
+  try {
+    const marker = path.join(dir, 'alive.txt');
+    const script = path.join(dir, 'wrapper.cjs');
+    const write = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'alive'), 1200)`;
+    fs.writeFileSync(script, [
+      "const { spawn } = require('node:child_process');",
+      `spawn(process.execPath, ['-e', ${JSON.stringify(write)}], { stdio: 'ignore' });`,
+      'setTimeout(() => {}, 5000); // the parent outlives the timeout, so the tree must be killed',
+    ].join('\n'));
+
+    const err = await runShell(`"${process.execPath}" "${script}"`, { cwd: dir, timeoutMs: 600 })
+      .then(() => null, (e) => e);
+    assert.ok(err, 'the timeout rejects with the captured output');
+    assert.equal(err.signal, 'SIGTERM', 'and it says the command was killed');
+    await new Promise((r) => setTimeout(r, 1800));
+    assert.equal(fs.existsSync(marker), false, 'nothing in the tree survived to write');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

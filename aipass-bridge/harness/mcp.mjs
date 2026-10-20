@@ -254,6 +254,7 @@ class StdioClient {
           const p = this.pending.get(msg.id);
           this.pending.delete(msg.id);
           clearTimeout(p.timer);
+          if (p.signal && p.onAbort) p.signal.removeEventListener('abort', p.onAbort);
           if (msg.error) p.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
           else p.resolve(msg.result);
         }
@@ -294,7 +295,7 @@ class StdioClient {
     return initResult;
   }
 
-  request(method, params, timeout = CALL_TIMEOUT) {
+  request(method, params, timeout = CALL_TIMEOUT, { signal = null } = {}) {
     return new Promise((resolve, reject) => {
       if (!this.proc || this.proc.killed) { reject(new Error('server not running')); return; }
       const id = this.nextId++;
@@ -302,7 +303,21 @@ class StdioClient {
         this.pending.delete(id);
         reject(new Error(`timeout: ${method}`));
       }, timeout);
-      this.pending.set(id, { resolve, reject, timer });
+      // (stop) A stop ends the call: the server may keep working, but the run
+      // is not waiting for an answer nobody asked for. The server itself stays
+      // up — it belongs to the harness, not to this one call.
+      const onAbort = () => {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        const err = new Error('the run was stopped');
+        err.name = 'AbortError';
+        reject(err);
+      };
+      if (signal) {
+        if (signal.aborted) { onAbort(); return; }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+      this.pending.set(id, { resolve, reject, timer, onAbort, signal });
       try {
         this.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
       } catch (e) {
@@ -316,8 +331,8 @@ class StdioClient {
     this.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
   }
 
-  async callTool(name, args) {
-    const result = await this.request('tools/call', { name, arguments: args || {} }, CALL_TIMEOUT);
+  async callTool(name, args, { signal = null } = {}) {
+    const result = await this.request('tools/call', { name, arguments: args || {} }, CALL_TIMEOUT, { signal });
     // MCP result: { content: [{type, text}], isError? }
     const parts = Array.isArray(result?.content) ? result.content : [];
     const text = parts.map((p) => (p.type === 'text' ? p.text : JSON.stringify(p))).join('\n');
@@ -428,7 +443,7 @@ export class McpManager {
     return this.tools.some((t) => t.marker === marker);
   }
 
-  async runTool(marker, { arg = '', body = '' } = {}) {
+  async runTool(marker, { arg = '', body = '', signal = null } = {}) {
     const t = this.tools.find((x) => x.marker === marker);
     if (!t) return `no such mcp tool: ${marker}`;
     const client = this.clients.get(t.server);
@@ -450,8 +465,9 @@ export class McpManager {
       }
     }
     try {
-      return await client.callTool(t.tool, args);
+      return await client.callTool(t.tool, args, { signal });
     } catch (e) {
+      if (e?.name === 'AbortError') return 'err: the run was stopped before the mcp tool answered';
       return `err: ${e.message}`;
     }
   }

@@ -21,9 +21,11 @@ import { McpManager } from './mcp.mjs';
 import { runTask, applyOverlay, SUBAGENT_ROLES } from './loop.mjs';
 import { preamble as buildPreamble } from './protocol.mjs';
 import { RulesStore } from './rules.mjs';
+import { sweepSandboxes } from './sandbox.mjs';
+import { loadGitignore } from './gitignore.mjs';
 // One address for "where this app keeps its state", shared with the rpc layer:
 // AIPASS_HOME when a surface (a test) names one, ~/.aipass otherwise.
-import { aipassHome } from './settings.mjs';
+import { aipassHome, DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_WALL_CLOCK_MS } from './settings.mjs';
 
 const REPO_SKILLS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills');
 
@@ -53,13 +55,25 @@ export class Harness {
    * (an explicit id, or one resolved from the bridge's own pointer).
    */
   #conversationTemporary = null;
+  /** The session id the in-memory conversation belongs to, or null (no session yet). */
+  #conversationBoundTo = null;
+  /**
+   * (resume) The boundary a resume seed folds away, waiting for the seed's
+   * first accepted send — commiting it earlier would reset the budget
+   * estimate against a digest the model never received.
+   */
+  #pendingResumeBoundary = null;
+  /** Ids of the conversations this run made (vs adopted from the session). */
+  #madeThisRun = new Set();
+  /** The spill warning is said once per harness, not once per run. */
+  #warnedSpill = false;
 
   /**
    * @param {object} opts
    * @param {string} opts.root           directory the agent may touch
    * @param {string} opts.bridgeURL      base URL of the local bridge
    * @param {string} [opts.model]        default model id
-   * @param {object} [opts.options]      {maxSteps, allowRun, mode, slim, plan, subagent, requirePlanApproval, conversation, reuse, permanent, assistant}
+   * @param {object} [opts.options]      {maxSteps, allowRun, mode, slim, plan, subagent, requirePlanApproval, verifyCommand, requireCheck, conversation, reuse, permanent, assistant}
    * @param {Array}  [opts.rules]        permission path rules
    * @param {Emitter}[opts.events]
    * @param {SessionStore} [opts.store]
@@ -69,8 +83,8 @@ export class Harness {
     this.events = opts.events ?? new Emitter();
     this.options = {
       maxSteps: 0,   // no cap — settings.mjs ships the same default
-      maxToolCalls: 300,
-      maxWallClockMs: 1_800_000,
+      maxToolCalls: DEFAULT_MAX_TOOL_CALLS,
+      maxWallClockMs: DEFAULT_MAX_WALL_CLOCK_MS,
       maxCredits: 0,
       allowRun: false,
       mode: 'ask',
@@ -85,11 +99,17 @@ export class Harness {
       attach: false,
       webScratch: false,
       parallelHelpers: false,
+      // The declared check (docs/SPEC_CHECKER.md): a caller-named command that
+      // replaces `.aipass/check.txt` when set, and the strict gate that refuses
+      // a DONE while that check is failing. Both off by default — the checker
+      // stays advisory unless a project or a person asks for the gate.
+      verifyCommand: null,
+      requireCheck: false,
       ...(opts.options ?? {}),
     };
     this.bridge = opts.bridge instanceof BridgeClient
       ? opts.bridge
-      : new BridgeClient(opts.bridgeURL ?? DEFAULT_BRIDGE_URL, {
+      : (opts.client ?? new BridgeClient(opts.bridgeURL ?? DEFAULT_BRIDGE_URL, {
           model: opts.model ?? this.options.model ?? null,
           // A 429 wait must read as a pause, not a stuck run: the client's
           // note rides the same dim-note channel as the firewall notes.
@@ -98,7 +118,13 @@ export class Harness {
           // belongs in the transcript as a visible note line, not folded
           // into the reasoning beside the tool churn.
           onStreamNote: (text) => this.events.emit('note', { text }),
-        });
+        }));
+    // Which provider this harness talks to. The client is the thing that
+    // knows; this is the label the window and the session header carry.
+    this.providerId = this.bridge.providerId ?? 'aipass';
+    // A client from outside (a provider) raises its notes the same way the
+    // bridge client does — they are harness events, not client trivia.
+    if (opts.client) this.#wireNotes(this.bridge);
     this.skills = opts.skills ?? SkillLibrary.default({ root: this.root, repoDir: REPO_SKILLS });
     this.store = opts.store === 'off' ? null : (opts.store ?? new SessionStore(path.join(home(), 'sessions')));
     this.overlay = new Overlay(this.root);
@@ -156,6 +182,44 @@ export class Harness {
     });
     this.running = false;
     this.#planResolve = null;
+    // (janitor) A backend that was killed mid-RUN leaves the whole projection
+    // behind, and nothing else ever collected it. This harness is the first
+    // thing that touches this project again, so it sweeps what no run can
+    // still own.
+    try { sweepSandboxes(this.root); } catch { /* best effort */ }
+  }
+
+  /**
+   * Point this harness at another provider.
+   *
+   * The client is swapped, not the harness: everything below this line — the
+   * loop, the tools, the compactor — talks to `this.bridge` and to nothing
+   * else, so a client that answers the same contract is the whole of the
+   * change. The compactor keeps its own reference (it summarises with the
+   * client), so it moves with it.
+   */
+  setProvider(client) {
+    if (!client) return this.bridge;
+    this.#wireNotes(client);
+    this.bridge = client;
+    this.compactor.bridge = client;
+    this.providerId = client.providerId ?? 'aipass';
+    return this.bridge;
+  }
+
+  /**
+   * The notes a client raises — a wait, a mid-reply switch — are the harness's
+   * own events, wherever the client came from. A client that already has them
+   * (the bridge client does) keeps its own.
+   */
+  #wireNotes(client) {
+    if (!client) return;
+    if (typeof client.onNote !== 'function') {
+      client.onNote = (text) => this.events.emit('firewall_note', { text });
+    }
+    if (typeof client.onStreamNote !== 'function') {
+      client.onStreamNote = (text) => this.events.emit('note', { text });
+    }
   }
 
   /**
@@ -185,6 +249,10 @@ export class Harness {
       readLines: this.options.readLines,
       events: this.events,
       log: (_level, text) => this.events.emit('note', { text }),
+      // This run's stop switch: a RUN that is in flight when the person
+      // presses stop is killed with the tree, instead of running to its own
+      // timeout while the window says the run has stopped.
+      signal: this.abort.signal,
       // WEB on a scratch conversation (P2-B), when the run opts in.
       webConversation: this.options.webScratch ? () => this.#scratchConversation() : null,
     });
@@ -195,10 +263,41 @@ export class Harness {
   async startSession({ title = null, sessionId = null } = {}) {
     // Another session's rotation must not seed this one.
     this.#pendingSummary = null;
+    this.#pendingResumeBoundary = null;
     if (!this.store) { this.session = null; return null; }
+    const prevSessionId = this.session?.id ?? null;
     this.session = sessionId ? this.store.load(sessionId) : null;
     if (!this.session) {
       this.session = this.store.create({ root: this.root, model: this.bridge.model, title });
+    }
+    // A session owns its conversation. Adopting the session's own binding is
+    // what makes reopening one a warm resume — the upstream still holds the
+    // history the transcript was written against. A fresh session gets none,
+    // and what must never happen is the PREVIOUS session's conversation
+    // riding along: that is how one session's messages used to land in
+    // another session's history. A conversation made before any session
+    // existed (the CLI's prepareConversation) belongs to the harness, not to
+    // a session, and is kept; a caller that pinned a conversation (or asked
+    // to reuse the bridge's own) is left to #ensureConversation, which honors
+    // and records it.
+    if (this.options.conversation || this.options.reuse) {
+      this.conversation = null;
+      this.#conversationTemporary = null;
+      this.#conversationBoundTo = null;
+    } else if (this.session.header.conversation) {
+      this.conversation = this.session.header.conversation;
+      this.#conversationTemporary = this.session.header.conversationTemporary ?? null;
+      this.#conversationBoundTo = this.session.id;
+    } else if (this.#conversationBoundTo && this.#conversationBoundTo !== this.session.id) {
+      this.conversation = null;
+      this.#conversationTemporary = null;
+      this.#conversationBoundTo = null;
+    } else if (this.running && prevSessionId && prevSessionId !== this.session.id) {
+      // Switching sessions under a live run: the in-flight conversation is
+      // that run's, and the new session must not inherit it.
+      this.conversation = null;
+      this.#conversationTemporary = null;
+      this.#conversationBoundTo = null;
     }
     this.events.emit('session', { id: this.session.id, title: this.session.title, file: this.session.file });
     return this.session;
@@ -207,7 +306,7 @@ export class Harness {
   /* ---------------------------------------------------------- conversation */
 
   /** Bring the bridge onto a conversation this run can talk to. */
-  async #ensureConversation() {
+  async #ensureConversation({ resume = false } = {}) {
     if (this.conversation) return;
     if (this.options.conversation) {
       await this.bridge.config({ conversation: this.options.conversation });
@@ -229,18 +328,52 @@ export class Harness {
       model: this.bridge.model ?? undefined,
       assistant: this.options.assistant ?? undefined,
       temporary: !this.options.permanent,
-      message: 'Starting a new working session.',
+      message: resume ? 'Continuing earlier work.' : 'Starting a new working session.',
     }).catch((err) => {
       if (/no extension connected/i.test(err.message)) return null;
       throw err;
     });
     this.conversation = made?.id ?? null;
     this.#conversationTemporary = made?.id ? !this.options.permanent : null;
+    // Binding happens on the first accepted send (#settleConversation), not
+    // here: a conversation that never heard anything is not this session's,
+    // and a run that dies before sending must leave the next one free to
+    // start from the transcript again.
+    if (made?.id) this.#madeThisRun.add(made.id);
     this.events.emit('conversation', { id: this.conversation, temporary: !this.options.permanent });
   }
 
   /** Bring the bridge onto a conversation this run can talk to. */
   async prepareConversation() { return this.#ensureConversation(); }
+
+  /**
+   * The conversation a session adopted turned out to be gone upstream — a
+   * temporary that expired, one deleted by hand. Forget it everywhere (the
+   * session header included), make a fresh one, and hand back the transcript
+   * digest so the loop can continue instead of starting blind. The fresh
+   * conversation becomes the session's on its first accepted send
+   * (#settleConversation), not before. Null — the loop keeps its error — when
+   * the bridge cannot make one (no tab, bridge down), and also when the
+   * caller pinned a conversation or asked to reuse one: those are its to own.
+   */
+  async replaceDeadConversation(task = '') {
+    if (this.options.conversation || this.options.reuse || !this.session) return null;
+    this.conversation = null;
+    this.#conversationTemporary = null;
+    this.session.bindConversation(null);
+    const made = await this.bridge.createConversation({
+      model: this.bridge.model ?? undefined,
+      assistant: this.options.assistant ?? undefined,
+      temporary: !this.options.permanent,
+      message: 'Continuing earlier work.',
+    }).catch(() => null);
+    if (!made?.id) return null;
+    this.conversation = made.id;
+    this.#conversationTemporary = !this.options.permanent;
+    this.#madeThisRun.add(made.id);
+    this.events.emit('conversation', { id: this.conversation, temporary: this.#conversationTemporary, resumed: true });
+    return { conversation: this.conversation, temporary: this.#conversationTemporary, seedText: this.#resumeSeed(task) };
+  }
 
   /**
    * Change who may write what, mid-session. Both the options and the engine
@@ -287,6 +420,88 @@ export class Harness {
     return entry?.items ?? null;
   }
 
+  /**
+   * The bounded digest of a session's own transcript, for a fresh conversation
+   * that has to continue it. Entries the newest compaction already folded away
+   * stay folded (its summary stands in for them); what happened since rides as
+   * the tasks that were given and the model's own last words — the two facts
+   * that say where the work stood. The open checklist is not repeated here:
+   * seed() renders the full one from the same source.
+   */
+  #resumeDigest() {
+    const entries = this.session?.entries ?? [];
+    const lastCompaction = [...entries].reverse().find((e) => e.type === 'compaction' && e.summary);
+    const boundary = lastCompaction?.lastSummarizedEntryId ?? lastCompaction?.firstKeptEntryId ?? null;
+    const at = boundary ? entries.findIndex((e) => e.id === boundary) : -1;
+    const live = at >= 0 ? entries.slice(at + 1) : entries;
+    const tasks = live.filter((e) => e.type === 'task')
+      .map((e) => String(e.text ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+    const last = [...live].reverse().find((e) => e.type === 'assistant' && String(e.text ?? '').trim());
+    const lines = [];
+    if (lastCompaction) lines.push(String(lastCompaction.summary));
+    if (tasks.length) {
+      const shown = tasks.slice(-3).map((t) => (t.length > 240 ? `${t.slice(0, 240)}…` : t));
+      lines.push(`Tasks given to this session since (newest last):\n${shown.map((t) => `- ${t}`).join('\n')}`);
+    }
+    const words = last ? String(last.text).replace(/\s+/g, ' ').trim() : '';
+    if (words) lines.push(`The model's own last words in this session:\n${words.length > 600 ? `${words.slice(0, 600)}…` : words}`);
+    return lines.join('\n\n');
+  }
+
+  /**
+   * The first message a resumed session's fresh conversation gets, instead of
+   * starting blind. Built only when the transcript has something to say; the
+   * boundary it folds away is committed by #settleConversation once the seed
+   * was accepted — the budget estimate measures from there on, and a later
+   * seed reuses this digest as the narrative instead of re-reading what it
+   * already covers.
+   */
+  #resumeSeed(task) {
+    const digest = this.#resumeDigest();
+    if (!digest) return null;
+    const summary = `This session's earlier conversation is no longer attached — the digest below is what its local transcript records of it.\n\n${digest}`;
+    const seedText = this.compactor.seed({
+      summary,
+      memory: this.#crossSessionMemory,
+      task,
+      preambleText: buildPreamble({
+        allowRun: Boolean(this.options.allowRun),
+        plan: Boolean(this.options.plan),
+        subagent: Boolean(this.options.subagent),
+        searchI: Boolean(this.options.searchI),
+        attach: Boolean(this.options.attach),
+        plugins: this.options.pluginTools ?? [],
+        lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
+      }),
+      staged: this.#stagedList(),
+      todo: this.#sessionTodo(),
+    });
+    this.#pendingResumeBoundary = { summary: digest, entryId: this.session?.entries.at(-1)?.id ?? null };
+    return seedText;
+  }
+
+  /**
+   * A conversation just took its first accepted word of this session: it is
+   * the session's now (persisted, so a reopen adopts it), and a resume seed
+   * that rode that send has its boundary committed. Called by the loop after
+   * every accepted send — idempotent, so the calls after the first cost a
+   * string compare and nothing else. The session is passed in, not read off
+   * `this`: a run must stay bound to its own session even if the window opens
+   * another one mid-flight.
+   */
+  #settleConversation(session, conversation, temporary) {
+    if (!session || !conversation) return;
+    this.#conversationBoundTo = session.id;
+    try {
+      if (session.header?.conversation !== conversation) session.bindConversation(conversation, temporary);
+    } catch { /* best effort: a header that will not rewrite must not end a run */ }
+    const pending = this.#pendingResumeBoundary;
+    this.#pendingResumeBoundary = null;
+    if (pending?.entryId) {
+      try { session.append('compaction', { summary: pending.summary, lastSummarizedEntryId: pending.entryId }); } catch { /* best effort */ }
+    }
+  }
+
   async #rotate(summary, task) {
     // The id the create just returned, not a re-read of the bridge's shared
     // pointer: another harness may adopt its own conversation in the gap
@@ -295,7 +510,11 @@ export class Harness {
     const made = await this.bridge.createConversation({ temporary: true, message: 'Continuing earlier work.' });
     this.conversation = made?.id ?? this.conversation;
     this.#conversationTemporary = true;
+    if (made?.id) this.#madeThisRun.add(made.id);
     this.events.emit('conversation', { id: this.conversation, temporary: true, rotated: true });
+    // The session binding follows the first accepted send into the new
+    // conversation (#settleConversation): a rotation the run dies before
+    // using must not make a reopen adopt a conversation nothing ever entered.
     // The loop re-binds its own send target from this: its copy of the id is
     // what names every message until the run ends.
     return { conversation: this.conversation, temporary: this.#conversationTemporary };
@@ -408,6 +627,22 @@ export class Harness {
 
   /* ------------------------------------------------------------------ run */
 
+  /**
+   * The harness's own directories live inside the project (`.aipass/spill`
+   * holds the long tool results a run reads back). A project that is a git
+   * repository and does not ignore `.aipass/` can commit them — so say so,
+   * once, where the person is looking.
+   */
+  #warnSpillOnce() {
+    if (this.#warnedSpill) return;
+    this.#warnedSpill = true;
+    try {
+      if (!fs.existsSync(path.join(this.root, '.git'))) return; // not a repository
+      if (loadGitignore(this.root).ignored('.aipass', true)) return;
+      this.events.emit('note', { text: "this project is a git repository and does not ignore .aipass/ — the harness's own spill files could end up in a commit; add /.aipass/ to .gitignore" });
+    } catch { /* best effort */ }
+  }
+
   async run(task, { first = null, runPluginTool = null } = {}) {
     if (!task?.trim()) throw new Error('no task given');
     // One run per harness. The bridge holds exactly one current conversation
@@ -417,9 +652,21 @@ export class Harness {
     // must not both squeeze past the check while `startSession` is pending.
     if (this.running) throw new Error('a run is already in flight - cancel it first (/stop)');
     this.running = true;
+    // A resume seed's boundary and the conversations this run may make are
+    // facts about THIS run; nothing from an earlier one may leak into it.
+    this.#pendingResumeBoundary = null;
+    this.#madeThisRun = new Set();
+    // This run's stop switch, created BEFORE the first await. It used to be
+    // created after `startSession()` — a stop that landed in that window
+    // aborted the previous run's controller, and the run that had just started
+    // went on with a fresh, un-aborted one: the stop was simply lost, and the
+    // person watched the work carry on after they had told it to stop.
+    this.abort = new AbortController();
     try {
+      this.#warnSpillOnce();
       if (!this.session) await this.startSession();
-      this.abort = new AbortController();
+      const runSession = this.session;
+      const settled = new Set();
 
       // MCP: lazy-load configured servers once per harness, then merge their
       // tools into the plugin tool table so the preamble and the loop see them.
@@ -430,13 +677,30 @@ export class Harness {
 
       const isFirst = first ?? this.session.entries.every((e) => e.type !== 'task');
 
+      // (resume) A session reopened with no conversation of its own — a file
+      // written before bindings existed, one whose conversation was dropped —
+      // would otherwise continue blind: the model never saw this session's
+      // history and "the project is still open" reads as a lie. The new
+      // conversation is made first (the digest needs somewhere to land), then
+      // seeded from the transcript. Before the budget check below, on purpose:
+      // the estimate describes a conversation that no longer exists.
+      let seedText = null;
+      if (!isFirst && !this.conversation && !this.options.conversation && !this.options.reuse) {
+        await this.#ensureConversation({ resume: true });
+        if (this.conversation) {
+          seedText = this.#resumeSeed(task);
+          if (seedText) {
+            this.events.emit('note', { text: "this session's earlier conversation is not attached anymore - the fresh one is seeded from the local transcript" });
+          }
+        }
+      }
+
       // Context is a rotating resource here, so check it before the turn, not after.
       // A manual rotation's summary rides the next run (rememberSummary): the
       // seed is built here, against this run's own task — at rotation time
       // nobody knew it yet. Consumed once: a second run must not repeat the
       // seed into a conversation that already carries it.
-      let seedText = null;
-      if (this.#pendingSummary) {
+      if (!seedText && this.#pendingSummary) {
         const { summary, memory } = this.#pendingSummary;
         this.#pendingSummary = null;
         seedText = this.compactor.seed({
@@ -456,7 +720,7 @@ export class Harness {
           todo: this.#sessionTodo(),
         });
       }
-      if (this.compactor.needsCompaction(this.session)) {
+      if (!seedText && this.compactor.needsCompaction(this.session)) {
         this.events.emit('note', { text: 'context is filling up - summarising earlier work and starting a fresh conversation' });
         seedText = (await this.compactNow(task)).seedText;
       }
@@ -471,43 +735,75 @@ export class Harness {
         ? `Facts carried from earlier sessions (durable; re-check anything that may have gone stale):\n${this.#crossSessionMemory.map((f) => '- ' + f).join('\n')}\n\nTask: ${task}`
         : task;
 
-      return await runTask(effectiveTask, {
-        bridge: this.bridge,
-        // The run talks in its own conversation, named on every send: with
-        // several projects running at once the bridge's shared pointer can be
-        // moved by any of them, and a nameless send would land wherever it
-        // happens to point. The temporary flag rides along because every turn
-        // of a temporary conversation has to repeat it.
-        conversation: this.conversation,
-        conversationTemporary: this.conversation ? this.#conversationTemporary : null,
-        tools: this.#makeTools(),
-        overlay: this.overlay,
-        session: this.session,
-        permissions: this.permissions,
-        events: this.events,
-        subagent: this.options.subagent ? this.#makeHelper() : null,
-        check: this.#makeChecker(task),
-        runPluginTool: (marker, args) => {
-          if (this.mcp.hasTool(marker)) return this.mcp.runTool(marker, args);
-          const pluginRunner = runPluginTool ?? this.runPluginTool ?? null;
-          if (pluginRunner) return pluginRunner(marker, args);
-          return `no such tool: ${marker}`;
-        },
-        approvePlan: this.options.requirePlanApproval
-          ? () => new Promise((resolve) => { this.events.emit('plan_request', {}); this.#planResolve = resolve; })
-          : null,
-        compactor: this.compactor,
-        rotate: (summary) => this.#rotate(summary, task),
-        // (listing delta) The per-conversation listing memory the loop reads
-        // and updates; see #listingShown.
-        listingShown: this.#listingShown,
-        options: {
-          ...this.options,
-          signal: this.abort.signal,
-          seedText,
-        },
-        first: isFirst,
-      });
+      try {
+        return await runTask(effectiveTask, {
+          bridge: this.bridge,
+          // The run talks in its own conversation, named on every send: with
+          // several projects running at once the bridge's shared pointer can be
+          // moved by any of them, and a nameless send would land wherever it
+          // happens to point. The temporary flag rides along because every turn
+          // of a temporary conversation has to repeat it.
+          conversation: this.conversation,
+          conversationTemporary: this.conversation ? this.#conversationTemporary : null,
+          tools: this.#makeTools(),
+          overlay: this.overlay,
+          session: runSession,
+          permissions: this.permissions,
+          events: this.events,
+          subagent: this.options.subagent ? this.#makeHelper() : null,
+          check: this.#makeChecker(task),
+          runPluginTool: (marker, args) => {
+            // The stop rides the call: an MCP tool the person stopped does not
+            // keep the run waiting for the server's answer.
+            if (this.mcp.hasTool(marker)) return this.mcp.runTool(marker, { ...args, signal: this.abort.signal });
+            const pluginRunner = runPluginTool ?? this.runPluginTool ?? null;
+            if (pluginRunner) return pluginRunner(marker, args);
+            return `no such tool: ${marker}`;
+          },
+          approvePlan: this.options.requirePlanApproval
+            ? () => new Promise((resolve) => { this.events.emit('plan_request', {}); this.#planResolve = resolve; })
+            : null,
+          compactor: this.compactor,
+          rotate: (summary) => this.#rotate(summary, task),
+          // (resume) The conversation this session adopted can be gone upstream
+          // (a temporary that expired, one deleted by hand). The loop only asks
+          // on the run's first send, before anything of this run entered it;
+          // the answer carries the fresh conversation and the transcript digest
+          // it must be started with. See replaceDeadConversation.
+          onConversationDead: () => this.replaceDeadConversation(task),
+          // (resume) A conversation that just took one of this session's
+          // messages is the session's now (persisted for a reopen), and a
+          // resume seed's boundary is committed once it went out. The loop
+          // calls this after every accepted send; the work itself is
+          // idempotent.
+          onConversationSettled: ({ conversation, temporary } = {}) => {
+            if (conversation) settled.add(conversation);
+            this.#settleConversation(runSession, conversation, temporary);
+          },
+          // (listing delta) The per-conversation listing memory the loop reads
+          // and updates; see #listingShown.
+          listingShown: this.#listingShown,
+          options: {
+            ...this.options,
+            signal: this.abort.signal,
+            seedText,
+          },
+          first: isFirst,
+        });
+      } finally {
+        // (resume) A conversation this run made that never took a message —
+        // the first send died, or a rotation's seed never went out — is
+        // dropped: the next run starts from the transcript again instead of
+        // talking into a tab that never heard who it is. Adopted conversations
+        // (bound, or pinned by the caller) are not this run's to drop, and the
+        // drop is in-memory only: nothing was persisted for them yet.
+        const current = this.conversation;
+        if (current && !settled.has(current) && this.#madeThisRun.has(current) && this.session === runSession) {
+          this.conversation = null;
+          this.#conversationTemporary = null;
+          this.#conversationBoundTo = null;
+        }
+      }
     } finally {
       // Every failure before the loop - a session that will not open, a
       // compaction that fails - has to clear the flag too, or one bad run
@@ -567,10 +863,13 @@ export class Harness {
     // decline) and deny every permission question still open, so the run leaves
     // the gate instead of waiting forever behind a window that may have reloaded
     // and lost the modal.
+    // `running` says whether there was anything to stop: the window shows the
+    // difference between "stopped" and "there was no run here".
+    const running = this.running;
     this.abort.abort();
     this.answerPlan(false);
     this.permissions.cancelPending();
-    this.events.emit('cancelled', {});
+    this.events.emit('cancelled', { running });
   }
 
   pendingChanges() {
@@ -641,6 +940,7 @@ export class Harness {
             readOnly: Boolean(spec),
             readOnlyNote: spec ? 'this helper is read-only — report it in your summary instead.' : null,
             conversation: helperConversation, temporary: true,
+            signal: this.abort.signal,
           }),
           overlay: child,
           session: childSession,
@@ -732,20 +1032,29 @@ export class Harness {
 
       const childSession = this.store?.create({ root: this.root, model: this.bridge.model, title: `check: ${label.slice(0, 60)}` });
 
-      // (declared check) A project can name the one command that decides
-      // correctness: the first non-comment line of `.aipass/check.txt`. Read
-      // from DISK, not the overlay — a value staged in this run must not bend
-      // the command that judges it. Absent, the checker infers the project's
-      // checks the way it always has.
+      // (declared check) A run can name the one command that decides
+      // correctness — `verifyCommand`, so two runs' verdicts are comparable by
+      // construction — and a project can name it in the first non-comment line
+      // of `.aipass/check.txt`. The option wins; the file is read from DISK,
+      // not the overlay, so a value staged in this run cannot bend the command
+      // that judges it. Absent both, the checker infers the project's checks
+      // the way it always has.
       let declared = null;
-      try {
-        const declaredFile = path.join(this.root, '.aipass', 'check.txt');
-        if (fs.existsSync(declaredFile)) {
-          const line = fs.readFileSync(declaredFile, 'utf8').split('\n')
-            .map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
-          if (line) declared = line.slice(0, 300);
-        }
-      } catch { declared = null; }
+      let declaredSource = null;
+      const configured = String(this.options.verifyCommand ?? '').trim();
+      if (configured) {
+        declared = configured.split('\n')[0].trim().slice(0, 300);
+        declaredSource = 'run';
+      } else {
+        try {
+          const declaredFile = path.join(this.root, '.aipass', 'check.txt');
+          if (fs.existsSync(declaredFile)) {
+            const line = fs.readFileSync(declaredFile, 'utf8').split('\n')
+              .map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
+            if (line) { declared = line.slice(0, 300); declaredSource = 'project'; }
+          }
+        } catch { declared = null; declaredSource = null; }
+      }
       // The parent's path rules travel, as they do to a helper. The engine is
       // permissive because the readOnly tools are the real gate: the checker
       // cannot write even where a rule would have allowed it.
@@ -758,7 +1067,7 @@ export class Harness {
           ? `Note: this pending set includes test files: ${touchedTests.slice(0, 8).join(', ')}. Treat test edits as part of the change under review, and say plainly what you ran.`
           : '',
         declared
-          ? `The project declares its own check command. Run exactly this, as one command, and let its output decide:\n${declared}`
+          ? `${declaredSource === 'run' ? 'This run declares its own check command' : 'The project declares its own check command'}. Run exactly this, as one command, and let its output decide:\n${declared}`
           : `Run the project's own checks against them — the test command, a build, a typecheck, node --check on the changed files. Prefer the smallest command that would prove or disprove the change.`,
         `You cannot edit anything, and a fix is not yours to make. Say DONE with one line on what you ran and what it showed; if nothing can be run from here, say exactly that.`,
       ].filter(Boolean).join('\n\n');
@@ -777,6 +1086,7 @@ export class Harness {
             root: this.root, overlay: staged, skills: this.skills, bridge: this.bridge,
             model: this.bridge.model, allowRun: true, events: childEvents,
             conversation: checkerConversation, temporary: true, readOnly: true,
+            signal: this.abort.signal,
           }),
           overlay: new Overlay(this.root),
           session: childSession,
@@ -815,7 +1125,14 @@ export class Harness {
       const noteAbout = touchedTests.length
         ? `\n\nnote: this run modified test files: ${touchedTests.slice(0, 8).join(', ')} — the check above ran against the staged copies.`
         : '';
-      return { verdict, text: (text + noteAbout).slice(0, 4400), ran: runs.length, testsTouched: touchedTests.length, declared };
+      return {
+        verdict,
+        text: (text + noteAbout).slice(0, 4400),
+        ran: runs.length,
+        testsTouched: touchedTests.length,
+        declared,
+        declaredSource,
+      };
     };
   }
 }

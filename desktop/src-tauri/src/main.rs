@@ -214,7 +214,7 @@ impl Backend {
         // try_wait consumes the exit status, so read it here: the note names
         // the code (or the signal) instead of just "exited", which is what
         // turns "restart attempt 1 × 40" from a mystery into a diagnosis.
-        let status: Option<std::process::ExitStatus> = None;
+        let mut status: Option<std::process::ExitStatus> = None;
         let exited = match guard.as_mut() {
             Some(kid) => match kid.try_wait() {
                 Ok(s) => {

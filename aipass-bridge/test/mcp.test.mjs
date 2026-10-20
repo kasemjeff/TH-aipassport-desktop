@@ -49,6 +49,31 @@ process.stdin.on('data', () => {});
 setInterval(() => {}, 1000);
 `;
 
+/** A server that answers the handshake and lists its tools, but never answers
+ *  a tool call — the shape a stop has to end. */
+const SILENT_CALL = `
+process.stdin.setEncoding('utf8');
+let buf = '';
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let idx;
+  while ((idx = buf.indexOf('\\n')) !== -1) {
+    const line = buf.slice(0, idx).trim();
+    buf = buf.slice(idx + 1);
+    if (!line) continue;
+    const msg = JSON.parse(line);
+    const send = (result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }) + '\\n');
+    if (msg.method === 'initialize') send({ protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'silent-call', version: '1.0.0' } });
+    else if (msg.method === 'tools/list') send({ tools: [
+      { name: 'echo', description: 'never answers', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
+    ] });
+    else if (msg.method === 'tools/call') { /* the call is never answered */ }
+    else if (msg.id !== undefined) send({});
+  }
+});
+setInterval(() => {}, 1000);
+`;
+
 function writeFixture(dir, name, body) {
   const file = path.join(dir, `${name}.mjs`);
   fs.writeFileSync(file, body);
@@ -152,6 +177,29 @@ test('a broken server is a status row, never a dead harness — and every tool c
 
     assert.equal(await manager.runTool('MCP__readonly__echo', { body: '{"text":"hi"}' }), 'echo: hi');
     assert.equal(await manager.runTool('MCP__off__echo', {}), 'no such mcp tool: MCP__off__echo');
+  } finally {
+    manager.close();
+  }
+}));
+
+test('a stop ends an mcp call the server never answers', () => withHome(async (home) => {
+  const dir = tempDir();
+  const root = tempDir();
+  writeJson(path.join(root, '.aipass', 'mcp.json'), {
+    servers: [{ name: 'silent', ...fixtureArgs(dir, 'silent', SILENT_CALL) }],
+  });
+
+  const manager = new McpManager({ root, log: () => {} });
+  try {
+    await manager.ensureLoaded();
+    const controller = new AbortController();
+    const started = Date.now();
+    const pending = manager.runTool('MCP__silent__echo', { body: '{"text":"hi"}', signal: controller.signal });
+    setTimeout(() => controller.abort(), 150);
+    const out = await pending;
+    const took = Date.now() - started;
+    assert.match(out, /err: the run was stopped/, 'the call ended with the stop');
+    assert.ok(took < 5_000, `and it did not wait for the server's timeout (it took ${took} ms)`);
   } finally {
     manager.close();
   }

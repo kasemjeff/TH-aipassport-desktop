@@ -27,7 +27,7 @@ import { SessionStore } from '../harness/session.mjs';
 import { createTools } from '../harness/tools.mjs';
 import { Emitter } from '../harness/events.mjs';
 import { runTask } from '../harness/loop.mjs';
-import { parseTodo } from '../harness/protocol.mjs';
+import { parseTodo, mergeTodo } from '../harness/protocol.mjs';
 
 // Nothing here may touch the real ~/.aipass.
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-plan-home-'));
@@ -79,6 +79,28 @@ test('every markdown shape of a ticked item parses as done', () => {
     { text: 'star four', done: true, kind: 'todo' },
     { text: 'plain five', done: false, kind: 'todo' },
   ]);
+});
+
+/* The merge ---------------------------------------------------------------- */
+
+test('a line repeated in one update is one item, and nothing duplicates on re-merge', () => {
+  // The model sometimes lists the same step twice, or a reconnect delivers an
+  // update again. Two rows for one step make the count lie and the tick read
+  // as half done, so the merge keeps one item per text.
+  const once = mergeTodo([], parseTodo('TODO\n- [ ] alpha\n- alpha'));
+  assert.deepEqual(once, [{ text: 'alpha', done: false, kind: 'todo' }], 'the repeated line is one item');
+  const carried = mergeTodo(once, []);
+  assert.deepEqual(carried, once, 'and a re-merge without changes does not stack a copy');
+});
+
+test('a tick sticks, and a duplicate an older build wrote collapses', () => {
+  const first = mergeTodo([], parseTodo('TODO\n- one'));
+  const ticked = mergeTodo(first, parseTodo('TODO\n- [x] one'));
+  assert.equal(ticked[0].done, true, 'the tick registers');
+  const again = mergeTodo(ticked, parseTodo('TODO\n- [ ] one'));
+  assert.equal(again[0].done, true, 'done is sticky — an open line never un-ticks closed work');
+  const legacyDup = [...first, { ...first[0] }];
+  assert.deepEqual(mergeTodo(legacyDup, []), first, 'a duplicate already in the state reads as one item');
 });
 
 /* The DONE checkpoint ------------------------------------------------------ */

@@ -244,7 +244,7 @@ export class Compactor {
    * one started, and a summary request is the one message that must land in
    * the conversation it is summarising.
    */
-  async summarize(session, { task = '', model = null, conversation = null, temporary = null } = {}) {
+  async summarize(session, { task = '', model = null, conversation = null, temporary = null, signal = null } = {}) {
     const sent = session.sentMessages().slice(-40);
     const transcript = this.transcriptFor(sent);
     const memoryAsk = this.carryMemory
@@ -257,7 +257,14 @@ Capture, in under 400 words: what was asked, what was found, what files were rea
 Conversation so far, oldest first:
 ${transcript}`;
 
-    const res = await this.bridge.chat({ message: outbound(prompt), model, ...(conversation ? { conversation, temporary } : {}) });
+    // The signal rides the call like it rides a run's send: a run that was
+    // stopped while the summary was being asked for must not wait for the
+    // answer — the abort ends the fetch, and the run ends with it.
+    const res = await this.bridge.chat({
+      message: outbound(prompt), model,
+      ...(conversation ? { conversation, temporary } : {}),
+      ...(signal ? { signal } : {}),
+    });
     return res.text.trim();
   }
 

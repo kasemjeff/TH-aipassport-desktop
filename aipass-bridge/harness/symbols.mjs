@@ -14,8 +14,6 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import { aipassHome } from './settings.mjs';
 
-const INDEX_DIR = path.join(aipassHome(), 'symbols');
-
 const EXT_LANG = {
   '.js': 'js', '.mjs': 'js', '.cjs': 'js', '.jsx': 'js',
   '.ts': 'ts', '.tsx': 'ts', '.mts': 'ts', '.cts': 'ts',
@@ -140,7 +138,15 @@ export function extractSymbols(text, file) {
 }
 
 function projectHash(root) { return crypto.createHash('sha1').update(path.resolve(root)).digest('hex').slice(0, 12); }
-function indexDir() { try { fs.mkdirSync(INDEX_DIR, { recursive: true }); } catch {} return INDEX_DIR; }
+// The index lives under the state home, and the home is read at call time —
+// like every other surface here. AIPASS_HOME can be pointed elsewhere after
+// this module is loaded (a test does exactly that), and a module-level
+// capture would write the index into the real ~/.aipass instead.
+function indexDir() {
+  const dir = path.join(aipassHome(), 'symbols');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  return dir;
+}
 function indexPath(root) { return path.join(indexDir(), projectHash(root) + '.json'); }
 
 function loadIndex(root) {

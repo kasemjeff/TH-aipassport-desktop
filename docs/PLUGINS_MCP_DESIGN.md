@@ -2,10 +2,23 @@
 
 Design of record for **installing, enabling, updating and removing** the two
 extension channels: local plugins (`~/.aipass/plugins`) and MCP servers
-(`~/.aipass/mcp.json`). Written ahead of implementation; **today** marks what
-already exists in code. Related reading: `SECURITY.md` (the trust model this
+(`~/.aipass/mcp.json`). Related reading: `SECURITY.md` (the trust model this
 must not change silently), `docs/HARNESS_DESIGN.md` (the harness these extend),
 `docs/UX.md` (surfaces and voice), `desktop/README.md` § Plugins.
+
+**Status (2026-10-18).** P1 is implemented as designed: `harness/install.mjs`
+(plan → inspect → consent → stage → validate → swap → registry → reload), the
+MCP config/lifecycle rewrite in `harness/mcp.mjs`, the RPC methods in §6–§7,
+`aipass plugin` / `aipass mcp` (§8; backend-first through
+`harness/desktop-rpc.mjs`), and the two settings sections (§9). §2 is kept as
+the "before" snapshot. The four open questions in §13 were resolved with this
+document's own defaults; §4's collapse rule was tightened during
+implementation. P2's upkeep half also landed (2026-10-18): `aipass plugin
+update`, one-copy-per-name trash pruning, and the `aipass doctor` extension
+lines. P2's fetch half landed (2026-10-20): `npm:` and `git+`/`github:`
+sources are installed by fetching them, with the fetch capped, the hash of the
+entry file re-checked at install time, and npm's install scripts switched off
+so no code runs before the person says yes. P3 remains a sketch.
 
 ## 1. Scope
 
@@ -18,9 +31,11 @@ contract), MCP protocol breadth (resources, prompts, HTTP/SSE transport),
 sandboxing (the trust statement is the answer — `SECURITY.md`), and a hosted
 marketplace (a phase-3 sketch only).
 
-## 2. Today
+## 2. Before this change
 
-| Piece | State |
+The state P1 started from; the implementations above resolved every row.
+
+| Piece | State before P1 |
 |---|---|
 | Discovery | `~/.aipass/plugins/*.mjs` and `<dir>/plugin.mjs`; `PluginManager.load()` at backend boot, `plugins.reload` RPC. |
 | Enable | `settings.plugins` — a name allowlist read **before** setup runs; empty = everything found. |
@@ -115,11 +130,18 @@ marketplace (a phase-3 sketch only).
 - **Plugins enabled list** (`settings.plugins`). Semantics made precise because
   the install surface starts writing it:
   - `[]` = master switch on: every plugin found now and later is enabled.
-  - The **first** disable while the list is empty materializes it as the
-    currently loaded names minus the disabled one.
-  - `enable` adds the name back; if the resulting list covers every loaded
+  - The **first** disable while the list is empty materializes it as every
+    known name (loaded plus registry) minus the disabled one. Disabling the
+    last name leaves the sentinel `(none)`, because `[]` would read as
+    "everything" and turn the plugin back on; nothing materializes `[]` again
+    except a collapse, and no plugin can be named `(none)`.
+  - `enable` adds the name back; if the resulting list covers every **known**
     name it **collapses to `[]`** — an explicit list that equals everything
-    would silently turn *off* the next install.
+    would silently turn *off* the next install, while counting only *loaded*
+    names would silently turn *on* an installed, currently-disabled plugin the
+    moment a different one is enabled.
+  - `remove` strips the name from an explicit list the same way (`(none)` when
+    it was the last one), and its registry record goes with the folder.
 
 ## 5. The installer — `harness/install.mjs`
 
@@ -143,13 +165,24 @@ source ─▶ plan (pure) ─▶ inspect (read-only) ─▶ consent ─▶ stage
 |---|---|---|
 | `C:\path\notes.mjs` or `./folder/` (with `plugin.mjs`) | `path` | P1 |
 | `https://…/plugin.mjs` (≤ 1 MB, `https` only) | `url` | P1 |
-| `npm:<pkg>[@range]` — package root must ship `plugin.mjs` | `npm` | P2 |
-| `git+https://…#<ref>` — repo root must ship `plugin.mjs` | `git` | P2 |
+| `npm:<pkg>[@version]` — package root must ship `plugin.mjs`; a local folder is a spec too (`npm:./my-plugin`) | `npm` | P2 ✓ |
+| `git+https://…#<ref>`, `git+ssh://…#<ref>`, `github:owner/repo[#ref][::path:sub]` — the folder must ship `plugin.mjs` | `git` | P2 ✓ |
 
 Refusals are named, not shrugged: `http://` (unless a literal loopback
 host), a `..` in the resolved path, a single file over the cap, a name failing
 `/^[a-z0-9][a-z0-9._-]*$/`, an `npm`/`git` source with that tool not on PATH
-(the error names the tool and the alternative source kind).
+(the error names the tool and the alternative source kind), and a fetched tree
+over the 8 MB cap.
+
+**Fetching is not running.** A `git` source is cloned shallow; an `npm`
+source is installed with `--ignore-scripts`, so a package's install scripts
+never run. The consent hash is the entry file's, and it is compared again
+after the fetch — a branch that moved since the inspection is refused, and the
+person is asked to look again. The npm package's own dependencies are copied
+beside the plugin, so an import inside it resolves from its final home, and
+the package's own entry is left out of that copy: npm links a local folder,
+and a link in the plugins directory would point back to wherever it was
+written.
 
 **The one subtle rule:** validation *is* execution — `import()` runs top-level
 code, which is also how `load()` has always worked. So consent sits **before**
@@ -168,15 +201,17 @@ working version survives both failure points.
 
 **Update = install over.** `install` resolving to an existing managed name is
 the update path: stage the new, validate, swap, keep the old in `.trash`.
-There is no separate updater until P2 records the source well enough to
-re-fetch it.
+`aipass plugin update <name>` is the named entry point now that the registry
+records the source: it re-reads that record (a refusal when there is none),
+prints the same report and consent sentence, and repeats the same chain. An
+update never touches the enabled-list — the on/off choice survives it.
 
 ## 6. Plugins — RPC surface
 
 | method | params | returns |
 |---|---|---|
-| `plugins.inspect` | `{source}` | `{kind, name?, size, sha256, hasPackageJson, files?}` or `{error}` |
-| `plugins.install` | `{source, expectedSha256?, name?}` | the loaded detail, or `{error}` — never throws for a refused source |
+| `plugins.inspect` | `{source}` | `{kind, ref, size, sha256, entry, hasPackageJson, files?}` or `{error}` |
+| `plugins.install` | `{source, expectedSha256?, name?, force?}` | the loaded detail, or `{error}` — never throws for a refused source. A refusal carries the step it closed (`plan`, `fetch`, `validate`, `name`, `swap`, `finalize`), so the window can say which door shut instead of only that something did |
 | `plugins.remove` | `{name, force?}` | `{removed, trashed?}` |
 | `plugins.enable` / `plugins.disable` | `{name}` | the new `settings.plugins` list |
 | `plugins.reload` | — | **today:** `details()` |
@@ -185,7 +220,13 @@ re-fetch it.
 `enable`/`disable` write through `settings.set`, so the existing live-reload
 path (`void plugins.load()`) is the one that fires — no second mechanism.
 `install`/`remove` end with `plugins.load()` and emit the existing `plugins`
-event, so an open window's section can refresh from one subscription.
+event, so an open window's section can refresh from one subscription. Every
+plugin method that answers with details answers with the *same decorated
+shape*: the manager's `details()` plus each loaded plugin's
+`installed`/`hashChanged`, and — for the window — `known` (loaded plus
+registry names) and `registry` (the raw records), which is what lets a
+disabled-but-installed plugin render as a row with a switch instead of a name
+that silently vanished.
 
 ## 7. MCP — config and lifecycle
 
@@ -202,9 +243,10 @@ event, so an open window's section can refresh from one subscription.
 
 ```json
 { "servers": [
-    { "name": "filesystem", "scope": "home", "enabled": true, "risk": "write",
-      "connected": true, "error": null, "tools": 12,
-      "toolMarkers": ["MCP__filesystem__read_file", "…"] }
+    { "name": "filesystem", "scope": "home", "file": "…/mcp.json",
+      "enabled": true, "risk": "write", "command": "npx", "args": ["…"],
+      "cwd": null, "envKeys": ["LOG_LEVEL"], "connected": true,
+      "error": null, "tools": 12 }
   ],
   "tools": [ "…unchanged shape…" ] }
 ```
@@ -236,11 +278,12 @@ event, so an open window's section can refresh from one subscription.
 aipass plugin                        list (installed + hand-dropped, enabled state)
 aipass plugin inspect <source>       size + sha256, no execution
 aipass plugin install <source>       [--name x] [--yes] [--force]
+aipass plugin update <name>          [--yes] [--force]   (recorded source)
 aipass plugin remove <name>          [--force]   (unmanaged needs --force)
 aipass plugin enable|disable <name>
-aipass mcp                           list with status dots (today: tools only)
+aipass mcp                           list with status dots
 aipass mcp add <name> [--scope home|project] [--risk write|read]
-             [--env K=V]… [-C dir] -- <command> [args…]
+             [--env K=V]… [--cwd dir] -- <command> [args…]
 aipass mcp test|remove|enable|disable <name>
 aipass mcp call <marker> [json] — unchanged
 ```
@@ -250,8 +293,10 @@ token from `~/.aipass/.token`), the CLI *is* a client and calls the RPC — the
 running window updates live and in-memory state cannot go stale. With no
 backend up, the CLI writes the same files directly; the next backend start
 reads them. `--yes` exists so scripts can install without the interactive
-confirm, and it prints the trust sentence either way. `aipass doctor` gains
-one line: plugins that failed to load, MCP servers that failed to connect.
+confirm, and it prints the trust sentence either way. `aipass doctor` carries
+both extension channels now: plugins that failed to load (named, with the fix)
+and MCP servers — live connect state when a desktop backend is running,
+otherwise the enabled-config count marked "not tested" rather than spawned.
 
 ## 9. The window
 
@@ -259,11 +304,14 @@ Two settings sections, matching the sheet's existing shape:
 
 **ปลั๊กอิน** — installed cards gain a state line (`ที่มา: npm:… / URL / ไฟล์วาง
 เอง`, hash 8 chars), a toggle (เปิด/ปิด), and ลบ behind a destructive confirm.
-An install box takes a path or URL: `[ตรวจสอบ]` → a preview card (kind, size,
-sha256, `"ติดตั้งเฉพาะโค้ดที่คุณอ่านแล้ว — ปลั๊กอินรันด้วยสิทธิ์เดียวกับตัวแอป
-(เขียนไฟล์และรันคำสั่งได้)"`) → `[ติดตั้ง]`. Failure renders as the existing
-`failed` card shape with the error text. Install implies enable: a non-empty
-allowlist gains the name.
+An install box takes a path, a URL, a git spec or an npm package: `[ตรวจสอบ]`
+→ a preview card (kind, size, sha256, `"ติดตั้งเฉพาะโค้ดที่คุณอ่านแล้ว — ปลั๊กอินรันด้วยสิทธิ์เดียวกับตัวแอป
+(เขียนไฟล์และรันคำสั่งได้)"`) → `[ติดตั้ง]`. The box says what it is doing
+while it does it — a source that has to be fetched is not one that is already
+on disk — and a refusal names the step that closed the door
+(`ขั้นตอน: ดึงไฟล์ / ตรวจโค้ด / ชื่อปลั๊กอิน / สลับไฟล์`), not only that
+something did. Failure renders as the existing `failed` card shape with the
+error text. Install implies enable: a non-empty allowlist gains the name.
 
 **MCP** (new, 🔌) — server rows with a status dot (green connected / red error
 + reason / grey ปิด), tool count, risk word, and `[ทดสอบ] [ปิด|เปิด] [ลบ]`. The
@@ -310,6 +358,13 @@ Proposed test titles (the `Verify:` anchors, per the repo's rule format):
   and only then installs"* · *"the MCP section masks env values and shows a
   status row per server"*.
 
+All four landed with P1 (titles adjusted where the code named things more
+precisely, per the files' own test names). P2's upkeep tests landed in the
+same files: *"update re-fetches the recorded source, and refuses a name it
+never installed"* · *"the trash keeps one previous copy per name"*
+(`test/install.test.mjs`) · *"a plugin that fails to load is named, and MCP
+config reads without a backend"* (`test/doctor.test.mjs`).
+
 Docs updated in the same change: `SECURITY.md`, `desktop/README.md` § Plugins
 (+ a MCP section), `docs/MATURITY.md` rows (plugins, MCP — evidence and
 status), `CHANGELOG.md` `[Unreleased]`.
@@ -320,24 +375,31 @@ status), `CHANGELOG.md` `[Unreleased]`.
   sources; plugins RPC + CLI + settings-section actions; MCP config fields
   (`enabled`, `risk`, `cwd`), dedup fix, `windowsHide`, lifecycle RPC + CLI,
   MCP settings section; the tests above.
-- **P2 — sources and upkeep.** `npm:` and `git+` sources (dependencies via
-  `npm install`, default `--ignore-scripts` with a named opt-out, because an
-  install script would run code the user has not chosen to load yet); update =
-  install over the recorded source; trash pruning (last copy per name);
-  `aipass doctor` line.
+- **P2 — sources and upkeep.** **Landed 2026-10-18:** update = install over
+  the recorded source (`aipass plugin update`); trash pruning (last copy per
+  name); the `aipass doctor` lines. **Remaining:** `npm:` and `git+` sources
+  (dependencies via `npm install`, default `--ignore-scripts` with a named
+  opt-out, because an install script would run code the user has not chosen to
+  load yet).
 - **P3 — named, not designed here.** A curated index (JSON: name, version,
   url, sha256, apiVersion) and `aipass plugin search`; MCP HTTP/SSE transport;
   resources and prompts; signed artifacts.
 
 ## 13. Open questions
 
-1. `npm:` / `git+` in P1 or P2? This design assumes P2 — the spine and the
-   surfaces are the expensive part, sources are additive.
+Resolved with this document's own defaults; listed as answered, not deleted.
+
+1. `npm:` / `git+` in P1 or P2? **P2** — the spine and the surfaces were the
+   expensive part; sources are additive. P1 shipped `path` and `url`.
 2. MCP default `risk: "write"` — accept, or ask once per server at add time?
-   (This design defaults to write and keeps the add form as the place to say
-   otherwise.)
+   **Accept at `"write"`, ask in the add form** — the default is the safe
+   answer, and the form is the place to say otherwise.
 3. Should the CLI poke a running desktop backend (best-effort RPC) after a
-   file-level operation? This design says yes; the alternative is "restart or
-   press reload".
-4. Trash policy: one previous version per name (this design) or timestamped
-   history with a cap?
+   file-level operation? **Yes** — every mutating CLI command tries
+   `harness/desktop-rpc.mjs` first; a refusal from the backend is final, and
+   only "nothing is listening" falls back to editing the files directly.
+4. Trash policy: one previous version per name or timestamped history with a
+   cap? **Timestamped copies now** (nothing is ever deleted), with pruning to
+   the last copy per name in P2, as §12 already said — pruning landed
+   2026-10-18: the newest previous copy stays, earlier generations of the same
+   name go.

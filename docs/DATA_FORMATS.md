@@ -65,19 +65,29 @@ install, nothing to migrate. `reset()` deliberately keeps `root` and
 One JSONL file per session, one entry per line. Line 1 is the header; every
 later line carries `id` + `parentId`, so a session is a chain — and a fork is
 a copied chain (`Session.fork()`). Files live in a per-project directory whose
-name is the project path slugified (`C:\Users\me\proj` → `C-Users-me-proj`).
+name is the project path slugified (`C:\Users\me\proj` → `C-Users-me-proj`) —
+an absolute-path key, like the memory file's hash and the `rules.json` entry,
+which is what `aipass relocate` rewrites after a project moves (Recovery).
 
 Header (`type: "header"`) — the fields the window's picker reads without
 parsing the rest:
 
 ```json
 {"type":"header","id":"a1b2c3d4","parentId":null,"title":"…","root":"…",
- "model":…,"created":…,"updated":…,"entryCount":…,"forkedFrom":…,"app":…,"schema":1}
+ "model":…,"created":…,"updated":…,"entryCount":…,"forkedFrom":…,"app":…,"schema":1,
+ "conversation":"…","conversationTemporary":true}
 ```
 
 `schema: 1` is the format version of the file itself; `app` names the build
 that created it — additive, absent in older files, carried through forks and
-header rewrites by anything that does not know it. Entry types:
+header rewrites by anything that does not know it. `conversation` (+
+`conversationTemporary`) is the model-side conversation the session works in:
+written when a conversation accepts the session's first message, adopted when
+the session is reopened, and removed when that conversation turns out to be
+gone upstream — absent in files written before bindings existed, where a
+reopen is answered with a transcript digest instead (`Session#bindConversation`,
+`Harness#resumeSeed`). A `fork()` strips both: a branch is a new writer.
+Entry types:
 
 | type | carries |
 |---|---|
@@ -89,11 +99,22 @@ header rewrites by anything that does not know it. Entry types:
 | `compaction` | `summary`, `lastSummarizedEntryId`, optional `memory` (durable facts carried across rotations) |
 | `note` | free text (helpers, bookkeeping) |
 
-The header is presentation state (`title`, `updated`, `entryCount`). It is
-rewritten on the first append and then once per 25 appends (`HEADER_EVERY` in
-`harness/session.mjs`); `rename()` and `fork()` rewrite it unconditionally.
-Everything a run needs is in the appended lines, so a header that lags (or a
-torn one) costs a picker line, not a session.
+The header is presentation state (`title`, `updated`, `entryCount`) plus one
+functional field: the conversation binding. It is rewritten on the first
+append and then once per 25 appends (`HEADER_EVERY` in `harness/session.mjs`);
+`rename()` and `fork()` rewrite it unconditionally. Everything a run executes
+from is in the appended lines, so a header that lags costs a picker line — or
+one resume's warmth, the next seed covers it — not a session.
+
+Because that rewrite is an in-place 2 KB overwrite, it has one crash window
+the atomic swap does not: a torn first line. The rewrite writes the same
+header to a sibling `session-<id>.jsonl.hdr` breadcrumb (atomically) before
+touching the file, and deletes it once the write completed. Readers fall back
+to the breadcrumb when the first line does not parse, and `load()` writes it
+back so the next open reads the file the ordinary way. A crash therefore
+leaves either the old header or the new one plus its breadcrumb — never a
+session nobody can open. A leftover breadcrumb next to a healthy header is
+ignored and cleaned up on the next load.
 
 Sessions are machine-local and sensitive: they contain your own text
 verbatim. Delete a project's directory to be done with it — `SECURITY.md`
@@ -147,9 +168,13 @@ write was interrupted — the promises below are pinned by
 
 - **A torn line is skipped, the session survives.** A crash mid-append costs
   the unfinished line, never the file. The same rule covers the header: a
-  first line that does not parse to a header object makes `list()` skip the
-  file and `load()` return null, so a half-written file cannot reach the
-  picker as a row you can click.
+  first line that does not parse falls back to the `.hdr` breadcrumb an
+  interrupted header rewrite left behind (previous section); with no
+  breadcrumb either, `list()` skips the file and `load()` returns null, so a
+  half-written file cannot reach the picker as a row you can click. A first
+  line only counts as a header when it says `type: "header"` — an entry line
+  carries a string `id` too, and used to list as a session that then refused
+  to open.
 - **A duplicated entry loads once.** Appends are id-keyed; if the same entry
   id appears twice (a retried write), the second copy is dropped on load and
   every `parentId` chain still resolves.
@@ -235,7 +260,9 @@ is encrypted at rest — sessions and uploads are created owner-only
 (0o700/0o600) where the OS has modes, but a copy inherits the permissions of
 whatever copied it. Moving `~/.aipass` whole moves the install's memory, logs
 and identity together — move that folder (including `.token`) only to a
-machine you trust as much as this one.
+machine you trust as much as this one. The per-project keys are absolute
+paths, though, so when the projects themselves live somewhere new on the
+receiving machine, `aipass relocate` reconnects them (Recovery, below).
 
 ## Recovery (RTO/RPO)
 
@@ -248,7 +275,18 @@ machine you trust as much as this one.
   `~/.aipass` and starting the app: readers merge, nothing migrates —
   minutes, no server. The app itself comes back from the previous installer
   or the previous tag (`docs/RELEASE.md` rollback).
+- **A machine move re-keys the paths.** Sessions, cross-session memory, path
+  rules and the project list are keyed by the project's *absolute* path, so a
+  home restored onto a machine whose project paths differ shows empty pickers,
+  no facts and no rules until the keys are rewritten. `aipass relocate <old>
+  <new>` (`harness/relocate.mjs`, once per moved project) rewrites all four
+  onto the new path, merging with anything already stored there; run it with
+  the desktop app closed — a running backend holds the old paths and its open
+  sessions in memory. The old folder does not need to exist anymore; the new
+  one must, and a session torn before the move is repaired by it (the
+  breadcrumb rule above still applies).
 - **A backup is a folder copy**, and the drill runs in the suite:
   `aipass-bridge/test/restore-drill.test.mjs` copies a live home into a
   second environment on every run and proves sessions, settings and the
-  token read the same there.
+  token read the same there — including the cross-machine case, where the
+  project lives at a new path and `relocate` reconnects it.

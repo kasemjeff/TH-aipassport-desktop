@@ -33,5 +33,7 @@ export async function tryDesktopRpc(method, params = {}, { port = desktopPort(),
   if (!res.ok) return null;
   const body = await res.json().catch(() => null);
   if (body?.ok) return { ok: true, result: body.result };
-  return { ok: false, error: String(body?.error ?? 'the backend refused the call') };
+  // `stage` is the step that failed, when the failure knows it — the CLI
+  // reports it so a refusal names the door it closed.
+  return { ok: false, error: String(body?.error ?? 'the backend refused the call'), stage: body?.stage ?? null };
 }

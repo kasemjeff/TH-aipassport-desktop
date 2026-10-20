@@ -10,7 +10,8 @@ import { createTools } from '../harness/tools.mjs';
 import { Emitter } from '../harness/events.mjs';
 import { BridgeClient } from '../harness/bridge.mjs';
 import { Harness } from '../harness/harness.mjs';
-import { runTask } from '../harness/loop.mjs';
+import { normalizeOptions, runTask } from '../harness/loop.mjs';
+import { DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_WALL_CLOCK_MS } from '../harness/settings.mjs';
 
 /** A bridge that answers from a list and records what was sent. */
 function scriptedLoop(replies) {
@@ -25,6 +26,43 @@ function scriptedLoop(replies) {
     async quota() { return { available: 1 }; },
   };
 }
+
+test('normalizeOptions clamps the option sheet before the loop sees it', () => {
+  const defaults = normalizeOptions();
+  assert.equal(defaults.maxSteps, Infinity, '0 means no cap');
+  assert.equal(defaults.maxStepsWire, 0, 'Infinity never rides the wire');
+  assert.equal(defaults.maxToolCalls, DEFAULT_MAX_TOOL_CALLS);
+  assert.equal(defaults.maxWallClockMs, DEFAULT_MAX_WALL_CLOCK_MS);
+  assert.equal(defaults.maxCredits, 0, 'the credit cap is off by default');
+  assert.equal(defaults.thinking, null, 'no thinking level unless asked');
+  assert.equal(defaults.temperature, null, 'the site decides by default');
+  assert.equal(defaults.replyLanguage, 'th');
+  assert.equal(defaults.langCheck, false);
+  assert.equal(defaults.minThaiRatio, 0.4);
+  assert.equal(defaults.repeatGuard, false);
+  assert.equal(defaults.repeatGuardMax, 4);
+
+  const custom = normalizeOptions({
+    maxSteps: '3.9', maxToolCalls: '5.9', maxWallClockMs: '1500.9', maxCredits: '2.5',
+    thinking: 'HIGH', temperature: 5, slim: 1, seedText: 'seed', pluginTools: ['x'],
+    replyLanguage: 'en', langCheck: 1, minThaiRatio: '2', repeatGuard: 1, repeatGuardMax: '2.9',
+  });
+  assert.equal(custom.maxSteps, 3);
+  assert.equal(custom.maxStepsWire, 3);
+  assert.equal(custom.maxToolCalls, 5);
+  assert.equal(custom.maxWallClockMs, 1500);
+  assert.equal(custom.maxCredits, 2.5);
+  assert.equal(custom.thinking, 'high');
+  assert.equal(custom.temperature, 2);
+  assert.equal(custom.useSlim, true);
+  assert.equal(custom.seedText, 'seed');
+  assert.deepEqual(custom.pluginTools, ['x']);
+  assert.equal(custom.replyLanguage, 'en');
+  assert.equal(custom.langCheck, true);
+  assert.equal(custom.minThaiRatio, 1);
+  assert.equal(custom.repeatGuard, true);
+  assert.equal(custom.repeatGuardMax, 2);
+});
 
 test('a run with no step cap is not stopped by ten steps', async () => {
   // Eleven steps of real work, then a DONE. The shipped default used to end

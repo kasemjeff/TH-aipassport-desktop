@@ -46,6 +46,15 @@ export function loadOrMintToken(home = aipassHome()) {
   try { fs.chmodSync(home, 0o700); } catch { /* best effort on Windows */ }
   fs.writeFileSync(file, fresh + '\n', { mode: 0o600 });
   try { fs.chmodSync(file, 0o600); } catch { /* best effort on Windows */ }
+  // Cache the token just written, from the recreated file's own stat. Without
+  // this the stale pre-delete entry survives with its old mtime:size stamp,
+  // and a recreate landing in the same tick (Windows' clock) reports that
+  // exact stamp — the next check would then answer "no" to the very token the
+  // file now holds (the 2026-10-17 auth flake).
+  try {
+    const st = fs.statSync(file);
+    tokenCache = { file, stamp: `${st.mtimeMs}:${st.size}`, value: fresh };
+  } catch { tokenCache = { file: null, stamp: '', value: null }; }
   return fresh;
 }
 

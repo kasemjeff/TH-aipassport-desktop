@@ -21,9 +21,10 @@
 | `harness/session.mjs` | session JSONL: append-only, padded fixed-width header (2048 B) rewritten in place, `HEADER_EVERY = 25` batches the rewrite. |
 | `harness/protocol.mjs` | marker grammar; compiled regexes cached. `harness/compact.mjs` compacts context. `harness/waf.mjs` is the substitution table. |
 | `harness/authtoken.mjs` | mint/cache `~/.aipass/.token` (memo revalidated on mtime+size). |
+| `harness/providers.mjs` | the provider registry: the specs (`~/.aipass/providers.json`) and the keys (`~/.aipass/credentials.json`, owner-only; an env var named by a spec wins). `harness/provider-client.mjs` is the other half — the OpenAI-compatible and Anthropic adapters that answer the same client contract as the bridge. A provider is a swap, not a second loop. |
 | `harness/permissions.mjs`, `rules.mjs`, `plugins.mjs`, `skills.mjs`, `settings.mjs`, `events.mjs`, `log-file.mjs`, `log-line.mjs`, `argguard.mjs`, `gitignore.mjs`, `bridge.mjs`, `lang.mjs` | supporting systems; the deep reference is `docs/DOCS.md` (below). |
 | `bin/aipass.mjs` | CLI dispatcher (`aipass dev\|agent\|models\|status\|stop\|…`); everything but `dev` auto-starts a detached bridge and writes `~/.aipass/bridge.pid` — that is the file `aipass stop` reads. Install via `install.sh` / `install.ps1`. |
-| `chat.mjs`, `agent.mjs`, `list.mjs`, `stats.mjs`, `doctor.mjs`, `setup-assistant.mjs`, `assistant-prompt.mjs`, `difflib.mjs` | terminal clients and helpers. |
+| `chat.mjs`, `agent.mjs`, `list.mjs`, `stats.mjs`, `doctor.mjs`, `setup-assistant.mjs`, `assistant-prompt.mjs`, `difflib.mjs`, `providers.mjs` | terminal clients and helpers. `providers.mjs` is the registry from the terminal (`aipass providers list|add|remove|use|test`). |
 
 The full internals reference is `aipass-bridge/docs/DOCS.md` — job hub,
 extension contexts, TUI mechanics, WAF encoding, HTTP API, end-to-end trace.
@@ -62,6 +63,13 @@ Read it before non-trivial bridge changes and keep it current with them.
 - **`sayResilient()`**: on a 403, halve the message and resend the halves in
   order (recursively, down to ~300 bytes); last resort `redact()` blanks lines
   matching `RISKY_LINE`. Tool results are capped at `--max-result` bytes.
+  Both the WAF encoding and that rewrite chain are the AiPASS edge's own: a
+  provider client sets `waf = false`, so its bytes go out as they are and its
+  403 is a permission error, not a payload to split.
+- **A provider client owns the history.** de.aipass.net keeps the conversation
+  and takes one user message per request; an API provider is given the whole
+  list, so `harness/provider-client.mjs` keeps one array per conversation id —
+  the same id the harness already passes around.
 - **Overlay FS**: edits land in an in-memory Map so the model can read back its
   own pending work; apply flushes to disk. `EDIT` refuses a `FIND` block that
   isn't unique.

@@ -463,6 +463,18 @@ let modelCache = { at: 0, models: [] };
 let modelRefresh = null;
 const MODEL_TTL_MS = 60_000;
 
+/* What the caches saved. A hit is a caller answered without starting upstream
+ * work — a fresh TTL entry, a refresh already in flight that this call joined,
+ * or the last-known figures while no tab is attached. A fetch is the call that
+ * actually went to the browser. `/status` reports them under `cache` and the
+ * window prints the line, so "why is it poking my tab" has an answer with
+ * numbers (test/bridge.test.mjs). */
+const cacheStats = {
+  models: { hits: 0, fetches: 0 },
+  quota: { hits: 0, fetches: 0 },
+  conversation: { hits: 0, fetches: 0 },
+};
+
 const cachedModels = () =>
   modelCache.models.length
     ? modelCache.models
@@ -478,9 +490,19 @@ function thinkingLevelFor(modelId, level) {
 }
 
 async function listModels({ force = false } = {}) {
-  if (!force && modelCache.models.length && Date.now() - modelCache.at < MODEL_TTL_MS) return modelCache.models;
-  if (!extClients.size) return cachedModels();
-  if (modelRefresh) return modelRefresh; // several callers can race; only one should hit the API
+  if (!force && modelCache.models.length && Date.now() - modelCache.at < MODEL_TTL_MS) {
+    cacheStats.models.hits += 1;
+    return modelCache.models;
+  }
+  if (!extClients.size) {
+    if (modelCache.models.length) cacheStats.models.hits += 1;
+    return cachedModels();
+  }
+  if (modelRefresh) { // several callers can race; only one should hit the API
+    cacheStats.models.hits += 1;
+    return modelRefresh;
+  }
+  cacheStats.models.fetches += 1;
   modelRefresh = (async () => {
     try {
       const models = extractModels(decodeTurboStream(await fetchLoader(LOADERS.models)));
@@ -529,9 +551,19 @@ function extractQuota(payload) {
 // Returns the last known figures rather than throwing when nothing is attached,
 // so a caller can render "unknown" instead of an error.
 async function getQuota({ force = false } = {}) {
-  if (!force && quotaCache.value && Date.now() - quotaCache.at < QUOTA_TTL_MS) return quotaCache.value;
-  if (!extClients.size) return quotaCache.value;
-  if (quotaRefresh) return quotaRefresh; // several callers can race; only one should hit the API
+  if (!force && quotaCache.value && Date.now() - quotaCache.at < QUOTA_TTL_MS) {
+    cacheStats.quota.hits += 1;
+    return quotaCache.value;
+  }
+  if (!extClients.size) {
+    if (quotaCache.value) cacheStats.quota.hits += 1;
+    return quotaCache.value;
+  }
+  if (quotaRefresh) { // several callers can race; only one should hit the API
+    cacheStats.quota.hits += 1;
+    return quotaRefresh;
+  }
+  cacheStats.quota.fetches += 1;
   quotaRefresh = (async () => {
     try {
       const value = extractQuota(JSON.parse(await fetchLoader(LOADERS.quota)));
@@ -572,6 +604,10 @@ let conversationIndex = 0;
 
 async function loadConversations() {
   if (!extClients.size) throw new Error('no extension connected — cannot look up a conversation');
+  // One upstream list read, wherever it was asked for: resolving a nameless
+  // send or the explicit GET /conversations route. Counting it here keeps the
+  // two paths from drifting (and a call with no tab attached is not a fetch).
+  cacheStats.conversation.fetches += 1;
   const decoded = decodeTurboStream(await fetchLoader(LOADERS.conversations));
   const list = [];
   const walk = (v) => {
@@ -640,12 +676,20 @@ async function resolveConversation() {
   // conversation of its own must not be handed it: its send would land inside
   // another session's private conversation, reading context it never saw
   // written. Such a caller resolves from the account's own list instead.
-  if (conversationCache && !conversationIsTemporary) return conversationCache;
-  if (!conversationList.length) await loadConversations();
+  if (conversationCache && !conversationIsTemporary) {
+    cacheStats.conversation.hits += 1;
+    return conversationCache;
+  }
+  // A temporary pointer is private to the session that made it, so a nameless
+  // caller falls through to the account's list. That list is itself a cache:
+  // after the first load, picking from it is a hit, not another upstream read.
+  const fromCachedList = conversationList.length > 0;
+  if (!fromCachedList) await loadConversations();
   const pick = conversationList[conversationIndex];
   if (!pick) {
     throw new Error('no usable conversation — open https://de.aipass.net/chat, start one, then POST /config {"conversation":null}');
   }
+  if (fromCachedList) cacheStats.conversation.hits += 1;
   conversationCache = pick.id;
   conversationIsTemporary = pick.isTemporary === true;
   log(`conversation ${conversationCache} (${pick.title ?? 'untitled'})`);
@@ -1586,6 +1630,7 @@ const server = http.createServer(async (req, res) => {
         aspectRatio,
         models: cachedModels(),
         credits: quotaCache.value,
+        cache: cacheStats,
       });
     }
 

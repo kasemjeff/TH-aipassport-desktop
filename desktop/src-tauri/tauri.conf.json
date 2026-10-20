@@ -58,6 +58,8 @@
       "../../aipass-bridge/mcp.mjs": "aipass-bridge/mcp.mjs",
       "../../aipass-bridge/memory.mjs": "aipass-bridge/memory.mjs",
       "../../aipass-bridge/plugin.mjs": "aipass-bridge/plugin.mjs",
+      "../../aipass-bridge/providers.mjs": "aipass-bridge/providers.mjs",
+      "../../aipass-bridge/relocate.mjs": "aipass-bridge/relocate.mjs",
       "../../aipass-bridge/scale.mjs": "aipass-bridge/scale.mjs",
       "../../aipass-bridge/setup.mjs": "aipass-bridge/setup.mjs",
       "../../aipass-bridge/setup-assistant.mjs": "aipass-bridge/setup-assistant.mjs",

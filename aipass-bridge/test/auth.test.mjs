@@ -162,3 +162,36 @@ test('deleting the token file revokes it — the next load mints a different one
     if (prevFlag === undefined) delete process.env.AIPASS_REQUIRE_AUTH; else process.env.AIPASS_REQUIRE_AUTH = prevFlag;
   }
 });
+
+// Windows' clock is coarse enough that delete + mint can land in the same
+// tick: the recreated file reports the same mtime:size stamp the memo holds.
+// That collision made the check answer "no" to the token the file itself had
+// just been given (the 2026-10-17 Windows flake) — the disk must win.
+test('a recreated token file with a colliding stamp is still the file, not the memo', () => {
+  const home = mkhome();
+  const prevToken = process.env.AIPASS_TOKEN;
+  const prevFlag = process.env.AIPASS_REQUIRE_AUTH;
+  delete process.env.AIPASS_TOKEN;
+  process.env.AIPASS_REQUIRE_AUTH = '1';
+  try {
+    const req = (t) => ({ headers: { authorization: `Bearer ${t}` } });
+    const first = loadOrMintToken(home);
+    // Normalize to a whole second first, so the same utimes input below lands
+    // on bit-identical stamps for both files.
+    const whole = Math.floor(Date.now() / 1000);
+    fs.utimesSync(tokenPath(home), whole, whole);
+    const stamp = fs.statSync(tokenPath(home)).mtimeMs;
+    assert.equal(authorized(req(first), home), true, 'and fills the memo with that stamp');
+
+    fs.rmSync(tokenPath(home));
+    const second = loadOrMintToken(home);
+    assert.notEqual(second, first, 'the delete minted a fresh token');
+    fs.utimesSync(tokenPath(home), stamp / 1000, stamp / 1000); // the collision the tick would cause
+    assert.equal(fs.statSync(tokenPath(home)).mtimeMs, stamp, 'the fixture reproduces the colliding stamp');
+    assert.equal(loadOrMintToken(home), second, 'the file is the truth when the stamp collides');
+    assert.equal(authorized(req(second), home), true, 'and the new token is what authorizes');
+  } finally {
+    if (prevToken === undefined) delete process.env.AIPASS_TOKEN; else process.env.AIPASS_TOKEN = prevToken;
+    if (prevFlag === undefined) delete process.env.AIPASS_REQUIRE_AUTH; else process.env.AIPASS_REQUIRE_AUTH = prevFlag;
+  }
+});

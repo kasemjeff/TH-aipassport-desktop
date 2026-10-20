@@ -19,9 +19,22 @@ import { DEFAULT_MODEL_BUDGETS } from './compact.mjs';
  */
 export const aipassHome = () => process.env.AIPASS_HOME?.trim() || path.join(os.homedir(), '.aipass');
 
+/**
+ * The shipped per-run budgets. `loop.mjs` and `harness.mjs` import these for
+ * their option fallbacks, so the settings file is the one place the numbers
+ * live; changing one here changes every surface.
+ */
+export const DEFAULT_MAX_TOOL_CALLS = 300;
+export const DEFAULT_MAX_WALL_CLOCK_MS = 1_800_000;
+
 export const DEFAULTS = {
   // the model a new run starts on; the window can still switch per session
   defaultModel: null,
+  // which provider the runs talk to: 'aipass' (the local bridge and its tab)
+  // or an id from ~/.aipass/providers.json. The provider itself — its
+  // endpoint, its protocol and where its key comes from — lives in that file
+  // and nowhere else, so this stays a single word.
+  defaultProvider: 'aipass',
   // who may write: 'ask' (confirm every change), 'auto' (the old --apply),
   // 'yolo' (writes and shell both go through)
   mode: 'ask',
@@ -34,8 +47,8 @@ export const DEFAULTS = {
   // ceiling in ms. Generous by design â€” they catch a runaway reply (a hundred
   // markers in one message) or a stuck command, not ordinary work. A zero or
   // nonsense value falls back to the default; there is no off switch.
-  maxToolCalls: 300,
-  maxWallClockMs: 1_800_000,
+  maxToolCalls: DEFAULT_MAX_TOOL_CALLS,
+  maxWallClockMs: DEFAULT_MAX_WALL_CLOCK_MS,
   // The optional credit cap: stop a run once observed spend reaches this many
   // credits. 0 (the default) means no cap â€” the one budget with an off switch.
   // Checked against the bridge's cached quota, which upstream refreshes at
@@ -75,6 +88,12 @@ export const DEFAULTS = {
   // how many times the window may re-run a task whose checker reports the
   // staged tree still failing. 1 = never retry; each attempt costs a full run.
   attempts: 1,
+  // (docs/SPEC_CHECKER.md) The declared check: one command that replaces the
+  // project's `.aipass/check.txt` for every run on this machine, so a verdict
+  // carries the command it is about; and the strict gate that refuses a DONE
+  // while that check is failing. Null/false keeps the checker advisory.
+  verifyCommand: null,
+  requireCheck: false,
   // per-tool result cap in bytes; 0 is normalised to this default. spill keeps
   // the rest on disk, so raising it cuts round trips without losing data.
   maxResult: 3000,
@@ -264,6 +283,14 @@ export class Settings {
     next.repeatGuard = Boolean(next.repeatGuard);
     next.repeatGuardMax = num(next.repeatGuardMax, 1, 50, DEFAULTS.repeatGuardMax);
     next.attempts = num(next.attempts, 1, 5, DEFAULTS.attempts);
+    // The declared check is a command line, and only a command line: a value
+    // with a newline would reach the checker prompt as several commands, which
+    // is exactly what "comparable across runs" must not allow. First line,
+    // trimmed, capped like the checker's own 300-char read.
+    next.verifyCommand = typeof next.verifyCommand === 'string' && next.verifyCommand.trim()
+      ? next.verifyCommand.split(/\r?\n/)[0].trim().slice(0, 300)
+      : null;
+    next.requireCheck = Boolean(next.requireCheck);
     // Path rules are policy, and policy that a typo silently disables is worse
     // than no policy: a rule with no pattern would never match anything, and a
     // decision of "yes" would never be honoured by the engine. Both are dropped
@@ -310,6 +337,15 @@ export class Settings {
     const share = Number(next.compactAtPercent);
     if (next.compactAtPercent != null) next.compactAtPercent = Number.isFinite(share) ? Math.min(100, Math.max(5, Math.round(share))) : 40;
     if (next.chatUrl && !/^https?:\/\//.test(String(next.chatUrl))) delete next.chatUrl;
+    // The provider id is a word, not a URL: it names a row in the provider
+    // registry. An unknown one is kept as it is — the registry is the judge of
+    // which ids exist, and a provider that was removed from the file must not
+    // make the whole settings file unreadable.
+    if (typeof next.defaultProvider !== 'string' || !next.defaultProvider.trim()) {
+      next.defaultProvider = DEFAULTS.defaultProvider;
+    } else {
+      next.defaultProvider = next.defaultProvider.trim();
+    }
     return next;
   }
 
@@ -361,6 +397,33 @@ export class Settings {
     const projects = (this.values.projects ?? []).filter((p) => p.path !== abs);
     const root = path.resolve(this.values.root ?? '') === abs ? null : this.values.root;
     return this.set({ projects, root });
+  }
+
+  /**
+   * Re-key the project list (and the startup root) after a folder moved to a
+   * new absolute path. A list entry the person renamed keeps the name they
+   * typed; a default name follows the folder. Returns whether anything
+   * pointed at the old path at all — a project the list never held has
+   * nothing to rewrite here.
+   */
+  moveProject(from, to) {
+    const oldAbs = path.resolve(from);
+    const newAbs = path.resolve(to);
+    if (oldAbs === newAbs) return false;
+    let found = false;
+    const projects = (this.values.projects ?? []).map((p) => {
+      if (path.resolve(p.path ?? '') !== oldAbs) return p;
+      found = true;
+      const name = p.name && p.name !== path.basename(oldAbs) ? p.name : path.basename(newAbs);
+      return { ...p, name, path: newAbs };
+    });
+    // root null must not be read as "the current directory": only an actual
+    // setting that pointed at the old path moves.
+    const root = this.values.root && path.resolve(this.values.root) === oldAbs ? newAbs : this.values.root;
+    if (root !== this.values.root) found = true;
+    if (!found) return false;
+    this.set({ projects, root });
+    return true;
   }
 
   /** Upload staging area: ~/.aipass/uploads by default. */
