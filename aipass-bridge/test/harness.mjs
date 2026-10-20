@@ -19,7 +19,14 @@ export const DOCTOR = path.join(HERE, '..', 'doctor.mjs');
 // files that want their own home still set AIPASS_HOME before importing this
 // module; this default is the floor, not the ceiling.
 if (!process.env.AIPASS_HOME?.trim()) {
-  process.env.AIPASS_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-harness-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-harness-'));
+  process.env.AIPASS_HOME = home;
+  // The floor is scratch space, and it goes when the process does. A suite
+  // that left one behind per file filled the temp directory with thousands of
+  // them — 6,000+ directories and 170 MB in a week of runs.
+  process.on('exit', () => {
+    try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
 }
 // The loopback bearer gate (authtoken.mjs) is ON in prod. The suite pins the
 // pre-token surface in hundreds of existing tests, so the floor here opts the
@@ -27,6 +34,14 @@ if (!process.env.AIPASS_HOME?.trim()) {
 // the new behavior there instead of churning every helper.
 if (!process.env.AIPASS_REQUIRE_AUTH?.trim()) {
   process.env.AIPASS_REQUIRE_AUTH = '0';
+}
+// The proactive token bucket paces real sends at nine per four minutes (the
+// measured edge envelope); the suite talks to a fake extension on loopback and
+// must not pay that wall clock. A test that pins pacing builds a TokenBucket
+// directly or passes an explicit `rateBucket` to BridgeClient, so the default
+// stays off here.
+if (process.env.AIPASS_RATE_BUCKET === undefined) {
+  process.env.AIPASS_RATE_BUCKET = 'off';
 }
 
 /** Loopback bearer headers for the spawned bridge/RPC, from the suite HOME. */
@@ -395,8 +410,27 @@ export function scripted(replies, { reject, gap } = {}) {
   return handler;
 }
 
+// The scratch trees the suite makes go when the process does. A run that left
+// one behind per tempDir() filled the temp directory with 147,000 of them, and
+// nothing ever swept them. One exit hook, one list — the per-call hook would
+// trip Node's listener warning long before the suite finished.
+const scratchDirs = [];
+let scratchHooked = false;
+function scratch(dir) {
+  scratchDirs.push(dir);
+  if (!scratchHooked) {
+    scratchHooked = true;
+    process.on('exit', () => {
+      for (const d of scratchDirs) {
+        try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
+    });
+  }
+  return dir;
+}
+
 export function tempDir(files = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-test-'));
+  const dir = scratch(fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-test-')));
   for (const [name, content] of Object.entries(files)) {
     const p = path.join(dir, name);
     fs.mkdirSync(path.dirname(p), { recursive: true });

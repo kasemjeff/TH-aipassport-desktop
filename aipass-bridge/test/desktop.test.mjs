@@ -111,6 +111,39 @@ test('a run writes nothing until apply, then writes exactly the accepted files',
   assert.equal((await env.call('pending')).length, 0);
 });
 
+test('a desktop run ships the bootstrap snapshot in turn 1', async (t) => {
+  // The window's user never sees a --snapshot flag, and the same discovery
+  // round trips are just as expensive there; the RPC-built harness turns the
+  // snapshot on, and its label no longer claims a CLI flag asked for it.
+  const env = await startRpc({
+    files: {
+      'a.txt': 'hello',
+      'package.json': JSON.stringify({ name: 'snapshot-probe', scripts: { test: 'node --test' } }, null, 2),
+    },
+    replies: ['DONE looked around'],
+  });
+  t.after(() => env.stop());
+
+  const before = env.ext.chats.length;
+  await env.call('run', { task: 'look around', mode: 'auto', title: 'snapshot' });
+  const first = env.ext.chats.slice(before)[0];
+  assert.ok(first, 'the run sent a first message');
+  assert.match(first.text, /Snapshot of where this project stands right now \(bootstrap snapshot\)/);
+  assert.match(first.text, /package scripts:/);
+  assert.match(first.text, /test: node --test/);
+});
+
+test('settings.set carries verifyCommand and requireCheck into the harness', async (t) => {
+  const env = await startRpc({ files: { 'a.txt': 'hello' } });
+  t.after(() => env.stop());
+
+  const next = await env.call('settings.set', { verifyCommand: 'node check.mjs', requireCheck: true });
+  assert.equal(next.verifyCommand, 'node check.mjs');
+  assert.equal(next.requireCheck, true);
+  assert.equal(env.rpc.harness.options.verifyCommand, 'node check.mjs');
+  assert.equal(env.rpc.harness.options.requireCheck, true);
+});
+
 test('discard drops the pending change without touching the disk', async (t) => {
   const env = await startRpc({
     files: { 'a.txt': 'hello' },
@@ -156,6 +189,114 @@ test('ask mode holds the write until the window answers, and honours a denial', 
   const r2 = await run2;
   assert.equal(r2.pending.length, 0);
   assert.ok(env2.seen.some((e) => e.type === 'tool' && /declined/.test(JSON.stringify(e.payload))));
+});
+
+test('the stop really stops: a run in flight ends as cancelled, not as done', async (t) => {
+  // A reply that never comes: the run sits in the fetch, and the window's stop
+  // has to end it there and then — the person pressed stop, so the work stops.
+  const env = await startRpc({ files: { 'a.txt': 'hello\n' }, replies: [] });
+  t.after(() => env.stop());
+  onChat = async (_job, e) => { await e.text('still working on it'); /* never done */ };
+
+  const run = env.call('run', { task: 'a long task', mode: 'auto' });
+  await waitForEvent(env, 'task_start');
+
+  const stopped = await env.call('cancel', { root: env.root });
+  assert.equal(stopped.ok, true, 'the stop was accepted');
+
+  const result = await run;
+  assert.equal(result.stopReason, 'cancelled', 'the run ended as cancelled');
+  assert.equal(result.steps, 0, 'and it did no work after the stop');
+});
+
+test("run frames carry the run's own session, even when another is opened mid-run", async (t) => {
+  const env = await startRpc({
+    files: { 'a.txt': 'hello' },
+    replies: ['EDIT a.txt\nFIND\nhello\nNEW\ngoodbye\nEND', 'DONE done'],
+  });
+  t.after(() => env.stop());
+
+  // Two sessions exist; the backend's current one is where the run will go.
+  const browsed = await env.call('session.new', { title: 'browsed' });
+  const runSession = await env.call('session.new', { title: 'run session' });
+
+  // The tagged bus — exactly what the window's SSE carries.
+  const bus = [];
+  env.rpc.events.on('*', (type, payload) => bus.push({ type, payload }));
+
+  const run = env.call('run', { task: 'change the greeting', mode: 'ask' });
+  const asked = await waitForEvent(env, 'permission_request');
+  assert.ok(asked, 'the run paused at the permission gate');
+
+  // The human browses another session while the run is still going.
+  await env.call('session.open', { id: browsed.id });
+  await env.call('permission.answer', { id: asked.id, decision: 'allow' });
+  await run;
+
+  const snap = await env.call('snapshot');
+  assert.equal(snap.session.id, browsed.id, 'the backend now shows the browsed session');
+  const runFrames = bus.filter((e) => e.payload?.session);
+  assert.ok(runFrames.length >= 3, `expected run frames, saw: ${JSON.stringify(bus.map((e) => e.type))}`);
+  for (const f of runFrames) {
+    assert.equal(f.payload.session, runSession.id, `${f.type} carried the run's session`);
+  }
+  assert.equal(bus.find((e) => e.type === 'task_start')?.payload.session, runSession.id);
+  assert.equal(bus.find((e) => e.type === 'finished')?.payload.session, runSession.id);
+});
+
+test('switching projects closes the mcp clients of the idle harness left behind', async (t) => {
+  const env = await startRpc({ files: {} });
+  t.after(() => env.stop());
+
+  const idle = env.rpc.harness; // the harness the backend opened on
+  const idleClosed = [];
+  const origIdle = idle.mcp.close.bind(idle.mcp);
+  idle.mcp.close = () => { idleClosed.push('x'); return origIdle(); };
+
+  const other = tempDir();
+  await env.call('projects.switch', { path: other });
+  assert.equal(idleClosed.length, 1, 'the harness left behind has its mcp clients closed');
+
+  const entered = env.rpc.current;
+  const enteredClosed = [];
+  const origEntered = entered.mcp.close.bind(entered.mcp);
+  entered.mcp.close = () => { enteredClosed.push('x'); return origEntered(); };
+
+  // A run in flight keeps its servers: the run may still call an MCP tool.
+  entered.running = true;
+  await env.call('projects.switch', { path: env.root });
+  assert.equal(enteredClosed.length, 0, 'a running harness keeps its clients');
+  assert.equal(idleClosed.length, 1, 'the project being entered is not closed');
+
+  entered.running = false;
+  await env.call('projects.switch', { path: other });
+  assert.equal(idleClosed.length, 2, 'once idle, it is closed on the next visit away');
+});
+
+test('a project switch mid-run cannot repoint the run it did not start', async (t) => {
+  // Two windows, one backend: the run lands on the project its window named,
+  // and everything after its awaits — the returned pending list included —
+  // still belongs to that harness when another window makes another project
+  // current while the run is paused at its permission gate.
+  const env = await startRpc({
+    files: { 'notes.md': 'line one\nline two\n' },
+    replies: ['EDIT notes.md\nFIND\nline two\nNEW\nline 2\nEND', 'DONE patched the notes'],
+  });
+  t.after(() => env.stop());
+
+  const run = env.call('run', { task: 'fix the second line', mode: 'ask', root: env.root });
+  const asked = await waitForEvent(env, 'permission_request');
+  assert.ok(asked, 'the run paused at the permission gate');
+
+  const elsewhere = tempDir({ 'other.txt': 'b\n' });
+  await env.call('projects.switch', { path: elsewhere });
+  await env.call('permission.answer', { id: asked.id, decision: 'allow', project: env.root });
+  const result = await run;
+
+  assert.equal(result.pending.length, 1, "the returned pending list is the run's own project");
+  assert.equal(result.pending[0].file, 'notes.md');
+  assert.equal(env.types('finished').length, 1, 'the run reported on the harness it started on');
+  assert.deepEqual(await env.call('pending'), [], 'the project switched to has nothing pending');
 });
 
 test('plan mode parses PLAN and TODO, and stops the run until the plan is approved', async (t) => {
@@ -549,6 +690,21 @@ test('the backend serves the window files in every layout', async (t) => {
 
   const missing = await fetch(`http://127.0.0.1:${env.rpc.port}/no-such-file.js`);
   assert.equal(missing.status, 404);
+});
+
+test('every top-level aipass-bridge cli is in the packaged resources', async (t) => {
+  // tauri.conf.json enumerates resources file-by-file: a new CLI at
+  // aipass-bridge/*.mjs that nobody adds there ships a window whose command
+  // is missing. The dirs (bin/, bridge/, harness/, extension/, deploy/) ride
+  // as whole trees, so only the loose files need this pin.
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const conf = JSON.parse(fs.readFileSync(path.join(repo, 'desktop', 'src-tauri', 'tauri.conf.json'), 'utf8'));
+  const resources = conf.bundle.resources ?? {};
+  const shipped = new Set(Object.values(resources).map((v) => String(v).replace(/\/$/, '')));
+  const loose = fs.readdirSync(path.join(repo, 'aipass-bridge'))
+    .filter((f) => f.endsWith('.mjs'));
+  const missing = loose.filter((f) => !shipped.has(`aipass-bridge/${f}`));
+  assert.deepEqual(missing, [], `packaged resources miss: ${missing.join(', ')} — add them to desktop/src-tauri/tauri.conf.json`);
 });
 
 test('reading helpers: file listing, file text, and the playbook library', async (t) => {

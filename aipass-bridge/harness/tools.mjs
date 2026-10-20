@@ -13,19 +13,17 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { exec, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn } from 'node:child_process';
 import { SKIP, binaryKind, posix, stripGutter } from './overlay.mjs';
-import { createSandbox, materializeTree, restorePaths } from './sandbox.mjs';
+import { createSandbox, materializeTree, restorePaths, sharedDirs } from './sandbox.mjs';
 import { outbound, inbound } from './waf.mjs';
 import { secretHit, scrubSecretDiff } from './permissions.mjs';
+import { scrubOutput } from './output-scrub.mjs';
 import { isPrivateHost, hostResolvesPrivate } from '../bridge/private-hosts.mjs';
 import { loadGitignore } from './gitignore.mjs';
 import { stripInvisibles } from './lang.mjs';
 import { extractSymbols, indexProject, listSymbols, findDefinition, findReferences, formatSymbols, formatDefs, formatRefs } from './symbols.mjs';
 import { MAX_ATTACHMENT_BYTES, mimeOf, isAllowedAttachment } from '../bridge/attachment-types.mjs';
-
-const execP = promisify(exec);
 
 // A file past this size is data, not source: SEARCH used to read 500 MB logs
 // line by line, synchronously, in the backend's process.
@@ -90,8 +88,14 @@ function spill(text, cap, root, tailShare = 0) {
         + `are on disk at ${rel} - read them with: NEED file ${rel} ${elidedStart}-${elidedEnd}. `
         + `Do not ask for it again; it is already saved.\n${tail}`;
     }
-    return `${text.slice(0, cap)}\n. ${text.length - cap} more bytes, ${lines} lines in total. `
-      + `The rest is on disk at ${rel} - read it with: NEED file ${rel} ${Math.ceil(cap / 80) + 1}-${lines}. `
+    // The head's own line count, not a guess from the byte cap: the cap says
+    // nothing about how long the lines are. Guessing 80 characters a line
+    // skipped the lines between the head and the range on long-lined files
+    // (the model never saw them again) and re-read them on short-lined ones.
+    const head = text.slice(0, cap);
+    const firstMissing = head.split('\n').length;
+    return `${head}\n. ${text.length - cap} more bytes, ${lines} lines in total. `
+      + `The rest is on disk at ${rel} - read it with: NEED file ${rel} ${firstMissing}-${lines}. `
       + `Do not ask for it again; it is already saved.`;
   } catch {
     // A read-only project still deserves the head of the result.
@@ -120,6 +124,88 @@ function runChild(cmd, args, timeoutMs) {
     const t = setTimeout(() => { try { child.kill(); } catch { /* already gone */ } }, timeoutMs);
     t.unref?.();
   });
+}
+
+/**
+ * Run one shell command to completion, and take the whole process tree down
+ * when the timeout runs out. `exec`'s timeout kills the shell alone: on
+ * Windows the command's own children — a server it started, a watcher —
+ * survived the timeout and kept holding the files they had open, so a later
+ * RUN met "EBUSY" from a process nobody could see. taskkill /T (or a POSIX
+ * process-group signal) ends the tree instead.
+ *
+ * Rejects the way `exec` did — an Error carrying `code`, `signal`, `stdout`
+ * and `stderr` — so callers keep formatting `err: exit …` the same way.
+ */
+export function runShell(cmd, { cwd, timeoutMs, maxBuffer = 10 * 1024 * 1024, signal = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, {
+      cwd,
+      shell: true,
+      windowsHide: true,
+      // A POSIX group leader is what lets `kill(-pid)` below reach the
+      // grandchildren; on Windows the tree is addressed by taskkill /T.
+      detached: process.platform !== 'win32',
+    });
+    let stdout = '';
+    let stderr = '';
+    let done = false;
+    const cap = (s, d) => (s.length >= maxBuffer ? s : s + String(d));
+    child.stdout?.on('data', (d) => { stdout = cap(stdout, d); });
+    child.stderr?.on('data', (d) => { stderr = cap(stderr, d); });
+    const finish = (fn, v) => {
+      if (done) return;
+      done = true;
+      clearTimeout(t);
+      // The listener is dropped with the child: a stop that lands after the
+      // command is over must not go and kill a tree that is already gone.
+      if (signal) signal.removeEventListener('abort', onAbort);
+      fn(v);
+    };
+    const t = setTimeout(() => {
+      killTree(child);
+      finish(reject, Object.assign(new Error(`timed out after ${timeoutMs} ms`), {
+        code: null, signal: 'SIGTERM', killed: true, stdout, stderr,
+      }));
+    }, timeoutMs);
+    t.unref?.();
+    // (stop) A stop kills the command, tree and all. The command used to run
+    // to its own timeout (two minutes) after the person pressed stop: the
+    // window said the run was stopping while the build kept going, holding
+    // the files it needed and the next task waiting behind it.
+    function onAbort() {
+      killTree(child);
+      finish(reject, Object.assign(new Error('the run was stopped'), {
+        code: null, signal: 'SIGTERM', killed: true, stdout, stderr,
+      }));
+    }
+    if (signal) {
+      if (signal.aborted) return onAbort();
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    child.on('error', (error) => finish(reject, Object.assign(error, { stdout, stderr })));
+    child.on('close', (code, killedBy) => {
+      if (code === 0 && !killedBy) finish(resolve, { stdout, stderr });
+      else finish(reject, Object.assign(new Error(`exited with ${code ?? killedBy}`), { code, signal: killedBy, stdout, stderr }));
+    });
+  });
+}
+
+/** The tree, not the shell alone — see runShell for why. */
+function killTree(child) {
+  if (process.platform === 'win32') {
+    // Spawned, not run inline: the kill must not block the backend's event
+    // loop. /T walks the tree while it is still linked, so the shell is left
+    // standing here — killing it first orphans the children that taskkill
+    // would otherwise have walked to (the first version did exactly that,
+    // and the grandchild outlived its timeout).
+    const tk = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+    tk.on('error', () => { try { child.kill(); } catch { /* already gone */ } });
+    tk.on('close', (code) => { if (code !== 0) { try { child.kill(); } catch { /* already gone */ } } });
+    return;
+  }
+  try { process.kill(-child.pid, 'SIGKILL'); } catch { /* the tree is already gone */ }
+  try { child.kill(); } catch { /* already gone */ }
 }
 
 // Awaited, not spawnSync: this runs in the backend's process, and a blocked
@@ -250,6 +336,9 @@ export function createTools(ctx) {
     webConversation = null,
     onReasoning = () => {},
     log = () => {},
+    // (stop) The run's stop switch. A RUN in flight when the person pressed
+    // stop is killed with its tree instead of running to its own timeout.
+    signal = null,
   } = ctx;
 
   // A result past the inline cap is spilled to disk rather than truncated: the
@@ -408,6 +497,9 @@ export function createTools(ctx) {
       return clip(numbered) + note;
     },
     async write(arg, rawBody) {
+      // (stop) A stopped run stages no more edits: the person said stop, and
+      // a half-finished change is worse than none.
+      if (signal?.aborted) return 'err: the run was stopped before this change was staged';
       const abs = safe(arg);
       // (read-first, Claude Code's rule) CREATE over a file that already
       // exists is the accidental-overwrite shape: allowed once this run has
@@ -433,6 +525,7 @@ export function createTools(ctx) {
       return `wrote ${arg}, ${wrote.length} lines${note ? '\n' + note : ''}${readBack}`;
     },
     async replace(arg, rawBody) {
+      if (signal?.aborted) return 'err: the run was stopped before this change was staged';
       const abs = safe(arg);
       if (!existsAt(abs)) return `err: no such file: ${arg}`;
       const before = inbound(stripGutter(rawBody[0]));
@@ -565,27 +658,51 @@ export function createTools(ctx) {
       // the project's, so the output reads as if it ran where the model
       // thinks it did.
       let sandbox = null;
+      const tooBig = [];
       if (overlay.size) {
         try {
           sandbox = createSandbox(root);
-          await materializeTree(root, overlay, sandbox);
-        } catch {
+          await materializeTree(root, overlay, sandbox, { signal, onSkip: (rel, bytes) => tooBig.push(`${rel} (${Math.round(bytes / 1024 / 1024)} MB)`) });
+        } catch (err) {
           if (sandbox) { try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* left under .aipass */ } }
+          // A stop during the projection ends the run: the copy is the longest
+          // wait a RUN has, and it used to finish while the window said the
+          // run was stopping.
+          if (err?.name === 'AbortError') return 'err: the run was stopped before the command could start';
           sandbox = null; // a projection that cannot be built must not block the run
         }
       }
       const scrub = (text) => (sandbox ? restorePaths(text, sandbox, root) : text);
+      // The honest limit of the projection, said out loud: the heavy
+      // directories are shared with the real project (a copy of node_modules
+      // would cost a minute per RUN), so a write into one of them lands in the
+      // user's project. The model is never surprised by a change it did not
+      // make.
+      const sharedNote = (where, projectRoot) => {
+        if (!where) return '';
+        const shared = sharedDirs(projectRoot);
+        if (!shared.length) return '';
+        return `\n\nnote: ${shared.join(', ')} — in this projection those are the REAL folders, not copies: a write there changes your project.`;
+      };
+      // What the projection left out, said out loud: a command that trips
+      // over a missing file deserves to know it was left out on purpose.
+      const skippedNote = () => (tooBig.length
+        ? `\n\nnote: not copied into this projection (too large): ${tooBig.slice(0, 5).join(', ')}${tooBig.length > 5 ? `, and ${tooBig.length - 5} more` : ''}.`
+        : '');
       try {
         // Async, not execSync: this runs in the backend's process, and a
         // blocked event loop there freezes every window call for the length
         // of the command. The platform shell is picked for us: /bin/sh on
         // POSIX, cmd.exe on Windows.
-        const { stdout } = await execP(body, {
-          cwd: sandbox ?? root, timeout: 120_000, windowsHide: true, maxBuffer: 10 * 1024 * 1024,
-        });
-        return clipRun(scrubSecretDiff(scrub(stdout)));
+        const { stdout } = await runShell(body, { cwd: sandbox ?? root, timeoutMs: 120_000, signal });
+        return clipRun(scrubSecretDiff(scrub(scrubOutput(stdout)))) + sharedNote(sandbox, root) + skippedNote();
       } catch (err) {
-        return clipRun(scrubSecretDiff(scrub(`err: exit ${err.code ?? err.signal ?? '?'}\n${String(err.stdout ?? '')}${String(err.stderr ?? '')}`)));
+        // A stop that killed the command says so: "exit SIGTERM" would read as
+        // the command's own failure, and the person did ask for it.
+        if (err?.killed && /stopped/i.test(String(err.message ?? ''))) {
+          return clipRun(scrubSecretDiff(scrub('err: the run was stopped before the command finished')));
+        }
+        return clipRun(scrubSecretDiff(scrub(scrubOutput(`err: exit ${err.code ?? err.signal ?? '?'}\n${String(err.stdout ?? '')}${String(err.stderr ?? '')}`))));
       } finally {
         if (sandbox) { try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* left under .aipass */ } }
       }
@@ -653,7 +770,7 @@ export function createTools(ctx) {
       // Shell punctuation first: whether this string is one command at all is a
       // question about the transport, and `status; echo pwned` is answered more
       // honestly by this refusal than by the allowlist's. Without it, whatever
-      // reaches execP could ride a second command on the platform shell.
+      // reaches the shell could ride a second command on the platform shell.
       // Newlines/NUL ride along in tool args, so they are punctuation too.
       if (/[;&|`$<>\r\n\0]/.test(sub))
         return `err: one read-only git subcommand, no shell punctuation. Got: ${sub}`;
@@ -666,10 +783,8 @@ export function createTools(ctx) {
       try {
         // Async for the same reason `run` is: a slow `git log` must not stop
         // the backend's event loop while the window waits on it.
-        const { stdout } = await execP(`git ${sub}`, {
-          cwd: root, timeout: 15_000, windowsHide: true, maxBuffer: 10 * 1024 * 1024,
-        });
-        return clip(scrubSecretDiff(stdout));
+        const { stdout } = await runShell(`git ${sub}`, { cwd: root, timeoutMs: 15_000 });
+        return clip(scrubSecretDiff(scrubOutput(stdout)));
       } catch (err) {
         const detail = String(err.stderr ?? err.stdout ?? '');
         // `git diff` outside a repository answers with a page of option help
@@ -678,7 +793,7 @@ export function createTools(ctx) {
         // phrasing varies by git build (sandbox projections: "gitfile does
         // not point to a valid repository" on the CI runners), so match both.
         if (/not a git repository|gitfile does not point to a valid repository/i.test(detail)) return 'err: not a git repository — GIT only works inside one. Run git init first, or skip git here.';
-        return clip(scrubSecretDiff(`err: exit ${err.code ?? err.status ?? 1}\n${detail}`));
+        return clip(scrubSecretDiff(scrubOutput(`err: exit ${err.code ?? err.status ?? 1}\n${detail}`)));
       }
     },
     async fetch(url) {
@@ -716,7 +831,10 @@ export function createTools(ctx) {
           res = await globalThis.fetch(current, {
             redirect: 'manual',
             headers: { 'user-agent': 'aipass-agent/1.0', 'accept': 'text/plain,text/html,*/*' },
-            signal: AbortSignal.timeout(20_000),
+            // The fetch's own ceiling and the run's stop switch, together: a
+            // fetch the person stopped does not keep the run waiting for its
+            // twenty seconds.
+            signal: signal ? AbortSignal.any([AbortSignal.timeout(20_000), signal]) : AbortSignal.timeout(20_000),
           });
         } catch (err) {
           return `err: fetch error: ${err.message}`;
@@ -761,6 +879,7 @@ export function createTools(ctx) {
       }
     },
     delete(arg) {
+      if (signal?.aborted) return 'err: the run was stopped before this change was staged';
       const rel = arg.trim();
       if (!rel) return 'err: give me a file path to delete.';
       const abs = safe(rel);
@@ -773,6 +892,7 @@ export function createTools(ctx) {
       return `marked ${rel} for deletion. Will be removed on disk when applied.`;
     },
     move(arg) {
+      if (signal?.aborted) return 'err: the run was stopped before this change was staged';
       const parts = arg.trim().split(/\s+/);
       if (parts.length < 2) return 'err: usage: MOVE <from> <to>';
       const [fromRel, toRel] = parts;
@@ -845,8 +965,12 @@ export function createTools(ctx) {
         res = await bridge.chat({
           message: prompt, model, onReasoning,
           ...(target ? { conversation: target, temporary: temporary === true } : {}),
+          // The search is a model call like any other: a stop ends it instead
+          // of waiting for an answer nobody asked for.
+          ...(signal ? { signal } : {}),
         });
       } catch (err) {
+        if (err?.name === 'AbortError') return 'err: the run was stopped during the web search';
         return `err: web search failed: ${err.message}`;
       }
       let sources = '';

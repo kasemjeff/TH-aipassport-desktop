@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { unifiedDiff } from '../difflib.mjs';
+import { writeFileAtomic } from './atomic-write.mjs';
 
 export const SKIP = new Set([
   'node_modules', '.git', '.next', 'dist', 'build', '.cache',
@@ -33,6 +34,33 @@ export const DELETED = '\x00DELETE\x00';
 // Windows path.relative yields `src\a.ts`, so normalise to one separator
 // everywhere rather than teaching the model two shapes.
 export const posix = (p) => p.split(path.sep).join('/');
+
+/**
+ * The path as the filesystem really has it: every link on the way followed.
+ *
+ * For a path that does not exist yet — a file this run has not written — the
+ * nearest existing ancestor is resolved and the rest of the path is put back
+ * on top. That is the directory the file would land in, which is what the
+ * containment question is actually about.
+ *
+ * Returns null when nothing on the path exists at all (a root that is not
+ * there yet), so the caller can fall back to the lexical answer.
+ */
+export function realPath(abs) {
+  let cur = path.resolve(abs);
+  const tail = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync(cur);
+      return tail.length ? path.join(real, ...tail) : real;
+    } catch {
+      const parent = path.dirname(cur);
+      if (!parent || parent === cur) return null;
+      tail.unshift(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
 
 // read() shows a line-number gutter so the model can reference ranges. Those
 // numbers are display only; strip them off a FIND block in case the model
@@ -103,14 +131,50 @@ export class Overlay {
     // immutable, so reference identity is a sound cache key for them.
     this.diskMemo = new Map();    // abs → { stamp, text }
     this.changeMemo = new Map();  // abs → { next, stamp, record }
+    // The root as the filesystem really has it — the answer to "where does
+    // this project really live", which the containment check needs (see
+    // safe()): a project reached through a junction has two names, and only
+    // the real one is worth comparing against.
+    this.realRoot = realPath(this.root);
   }
 
   get size() { return this.map.size; }
 
+  /**
+   * The one path check every tool goes through: a model-supplied path must
+   * stay inside the project.
+   *
+   * Two boundaries, because one is not enough:
+   *
+   *   - the LEXICAL one: `path.relative`, not a string prefix. A prefix test
+   *     compares case, and Windows does not: `d:\proj\file.txt` IS inside
+   *     `D:\proj` on that filesystem, and the prefix test refused it. The
+   *     same reasoning (and the same fix) is already in rpc.mjs's
+   *     `staticFileFor`.
+   *   - the PHYSICAL one: the path must still be inside the root after the
+   *     filesystem has followed every link on the way. A junction inside the
+   *     project that points elsewhere is a way out of the root that a
+   *     resolved string cannot see — `NEED file link/away/secret.txt` used
+   *     to read a file outside the project, which is exactly what the
+   *     confinement exists to prevent.
+   */
   safe(p) {
     const abs = path.resolve(this.root, p);
-    if (abs !== this.root && !abs.startsWith(this.root + path.sep)) {
+    const rel = path.relative(this.root, abs);
+    const outside = rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+    if (outside) {
       throw new Error(`outside project root: ${p} — this run can only read and write inside the project; if the human named this path, tell them instead of moving it.`);
+    }
+    // The real path of the target — or of the nearest ancestor that exists,
+    // for a file this run has not written yet. Compared against the real root.
+    const realRoot = this.realRoot ?? this.root;
+    const real = realPath(abs);
+    if (real) {
+      const realRel = path.relative(realRoot, real);
+      const out = realRel === '..' || realRel.startsWith(`..${path.sep}`) || path.isAbsolute(realRel);
+      if (out) {
+        throw new Error(`outside project root: ${p} — this path leaves the project through a link; this run can only read and write inside the project.`);
+      }
     }
     return abs;
   }
@@ -245,7 +309,15 @@ export class Overlay {
         if (fs.existsSync(abs)) { fs.unlinkSync(abs); deleted++; }
       } else {
         fs.mkdirSync(path.dirname(abs), { recursive: true });
-        fs.writeFileSync(abs, text);
+        // Temp file plus rename in the same directory: a crash mid-apply
+        // leaves the old file or the new one, never a half-written user file
+        // — and nothing here keeps a backup, the overlay is it. An existing
+        // file's mode is the one thing a replacement would otherwise change
+        // (the exec bit on a script must survive the swap), so it is read
+        // and pinned on the temp before the rename.
+        let mode = null;
+        try { mode = fs.statSync(abs).mode & 0o777; } catch { /* a new file */ }
+        writeFileAtomic(abs, text, { mode });
         written++;
       }
       files.push(posix(path.relative(this.root, abs)));

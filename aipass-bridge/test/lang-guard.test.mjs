@@ -27,7 +27,7 @@ import { Overlay } from '../harness/overlay.mjs';
 import { SessionStore } from '../harness/session.mjs';
 import { createTools } from '../harness/tools.mjs';
 import { Emitter } from '../harness/events.mjs';
-import { runTask } from '../harness/loop.mjs';
+import { errKindOf, runTask } from '../harness/loop.mjs';
 import { parse, preamble, MARKER_LINE } from '../harness/protocol.mjs';
 import { pathVariants, beYearNote } from '../harness/argguard.mjs';
 import { Settings } from '../harness/settings.mjs';
@@ -218,6 +218,15 @@ test('a failure streak past the cap stops the run as stalled', async () => {
   assert.equal(result.stopReason, 'stalled');
   assert.equal(b.stats().errLoops, 1, 'one correction at three; the cap stopped it at five');
   assert.ok(b.session.entries.some((e) => e.type === 'note' && /err-loop guard/.test(e.text)), 'the stop says why');
+});
+
+test('a short or embedded argument does not blur two failure signatures', () => {
+  // "not" is a whole word in both messages but too short to be a reliable
+  // marker; "read" is longer, yet must not be cut out of "already".
+  assert.equal(errKindOf({ kind: 'read', arg: 'not' }, 'err: file not found'), 'read::err: file not found');
+  assert.equal(errKindOf({ kind: 'read', arg: 'read' }, 'err: already handled'), 'read::err: already handled');
+  // A path-shaped argument is still masked, so three missing files stay one kind.
+  assert.equal(errKindOf({ kind: 'read', arg: 'no1.txt' }, 'err: no1.txt not found'), 'read::err: <arg> not found');
 });
 
 /* Test 8: the reply-language hook ------------------------------------------- */

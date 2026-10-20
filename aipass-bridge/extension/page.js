@@ -37,11 +37,49 @@
   // attempts until `RATE_MEMORY_MS` has passed), so the burst that drew the
   // refusal cannot immediately draw another. The ladders live in sendWithRetry
   // below.
+  //
+  // The two gaps are the edge's own envelope, measured (docs/HARNESS_DESIGN.md):
+  // about ten messages in four minutes.
+  //
+  //   SEND_GAP_MS is the floor under every send in this tab: two attempts
+  //   never start within it of each other. It is what stops a helper, the
+  //   chat pane and a second project from putting four requests on the wire
+  //   inside one second — the shape the edge scores worst. It costs nothing
+  //   in the common case, because a model answer takes longer than the gap.
+  //
+  //   RATE_PACE_GAP_MS is the pace for a while after any refusal: one send
+  //   every 20s, about twelve in four minutes. It used to be 3s — eight times
+  //   faster than the envelope the edge enforces — so one refusal left the
+  //   tab inside the window that had just said no: every send drew the next
+  //   refusal, each one re-armed the same 3s pace, and the episode repeated
+  //   until the run was cancelled. The refusal now cools the tab to the
+  //   envelope instead of to a pace the edge has already refused.
   let rateQuietUntil = 0;   // wall-clock time before which no send may start
   let rateMemoryUntil = 0;  // after a refusal, pace every send until this time
   let lastSendAt = 0;       // when the last attempt actually left
   const RATE_MEMORY_MS = 5 * 60_000;
-  const RATE_PACE_GAP_MS = 3000;
+  const RATE_PACE_GAP_MS = 20_000;
+  const SEND_GAP_MS = 2000;
+
+  // A pause that a stop can land inside. The tab's clock is used by the
+  // create as well as by the sends, so it lives here.
+  const abortError = () => { const err = new Error('aborted'); err.name = 'AbortError'; return err; };
+  const sleep = (ms, signal) => new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(abortError()); return; }
+    const onAbort = () => { clearTimeout(timer); reject(abortError()); };
+    const timer = setTimeout(() => { signal?.removeEventListener?.('abort', onAbort); resolve(); }, ms);
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+  });
+
+  // How long the next attempt in this tab has to wait: the refusal pause, the
+  // job's own ladder, and the tab's pace. One place, so every sender in the
+  // tab reads the same clock.
+  const tabWaitFor = (extra = 0) => {
+    const now = Date.now();
+    const gap = rateMemoryUntil > now ? RATE_PACE_GAP_MS : SEND_GAP_MS;
+    const floor = lastSendAt ? lastSendAt + gap : 0;
+    return Math.max(rateQuietUntil, extra, floor);
+  };
 
   // How many bytes of media may be carried back inline as a data URI; above
   // this it goes back as a link. The bridge accepts an extension post up to
@@ -109,6 +147,14 @@
       // Bind to a custom assistant when one is configured. The field name comes
       // from the bridge so it can be corrected without touching the extension.
       if (job.assistant && job.assistantField) params.set(job.assistantField, job.assistant);
+      // A create is a wire request too, and the edge counts it: it waits out
+      // the tab's clock like any other send, and the send that follows it
+      // waits the same gap behind it. Without this the conversation is
+      // created and its first message posted back-to-back, which is the
+      // shape the edge refuses most.
+      const until = tabWaitFor();
+      if (until > Date.now()) await sleep(until - Date.now(), null);
+      lastSendAt = Date.now();
       const res = await fetch('/chat.data', {
         method: 'POST',
         credentials: 'include',
@@ -240,31 +286,32 @@
     // client must never resend past (harness/bridge.mjs reads the note field,
     // not the echo).
     //
-    // 403 rides the same pause-and-resend, with its own shorter budget (5s →
-    // 15s) on the shared clocks: the edge 403s by pace score as well as by
-    // content, so it is the same hot window, and the identical bytes go
-    // through a moment later — recorded live, Oct 17 2026, a run's 214-byte
-    // tool result refused whole and then accepted unchanged
-    // (harness/bridge.mjs EDGE_WAITS_MS has the recording). Content-shaped
-    // refusals are deterministic: they survive these waits too, and the
-    // rewrite chain above this layer takes over then.
+    // 403 rides the same pause-and-resend, on the same shared clocks: the edge
+    // 403s by pace score as well as by content, so it is the same hot window,
+    // and the identical bytes go through a moment later — recorded live,
+    // Oct 17 2026, a run's 214-byte tool result refused whole and then
+    // accepted unchanged (harness/bridge.mjs EDGE_WAITS_MS has the recording).
+    // Content-shaped refusals are deterministic: they survive these waits too,
+    // and the rewrite chain above this layer takes over then.
+    //
+    // The waits themselves were the bug. 5s then 15s is not a pause, it is a
+    // probe: each retry is another request inside the very window it is
+    // waiting for, so a hot window never drained and the refusal repeated —
+    // the run sat in "[403] refused at the edge — waiting 5s" over and over
+    // until someone cancelled it (recorded live, Oct 20 2026: one benign tool
+    // result, 90 seconds of refusals, four probes of the edge and two more
+    // from the client above). The ladder now waits like the 429 ladder does:
+    // 15s then 60s — long enough for the window to actually cool, few enough
+    // probes that the wait itself does not keep the limiter hot.
     const RETRY_WAITS_MS = [10_000, 45_000, 120_000];
-    const EDGE_WAITS_403_MS = [5000, 15000];
-    const aborted = () => { const err = new Error('aborted'); err.name = 'AbortError'; return err; };
-    const sleep = (ms, signal) => new Promise((resolve, reject) => {
-      if (signal?.aborted) { reject(aborted()); return; }
-      const onAbort = () => { clearTimeout(timer); reject(aborted()); };
-      const timer = setTimeout(() => { signal?.removeEventListener?.('abort', onAbort); resolve(); }, ms);
-      signal?.addEventListener?.('abort', onAbort, { once: true });
-    });
+    const EDGE_WAITS_403_MS = [15_000, 60_000];
     // This job's own next-attempt time (the 403 ladder) and the waits its own
     // notes already announced; the tab-wide clocks are at module scope.
     let localUntil = 0;
     let announcedUntil = 0;
     const paceBuffer = async (signal) => {
       const now = Date.now();
-      const floor = rateMemoryUntil > now ? lastSendAt + RATE_PACE_GAP_MS : 0;
-      const until = Math.max(rateQuietUntil, localUntil, floor);
+      const until = tabWaitFor(localUntil);
       if (until > now) {
         if (until > announcedUntil && until - now >= 1000) {
           push('note', `the edge is pacing sends — waiting ${Math.ceil((until - now) / 1000)}s before this one`);
@@ -278,7 +325,13 @@
       let edgeTries = 0;
       for (;;) {
         await paceBuffer(signal);
-        const res = await fetch(url, init);
+        // A resend is a resend: the site marks one with x-ai-retry (its own
+        // client does the same when a person retries a message), so the server
+        // can recognise the repeat instead of taking it for a second turn.
+        const attempt = rateTries + edgeTries;
+        const res = await fetch(url, attempt > 0
+          ? { ...init, headers: { ...(init.headers ?? {}), 'x-ai-retry': 'true' } }
+          : init);
         if (res.ok) return res;
         const waiting = res.status === 429 || res.status === 503
           ? { list: RETRY_WAITS_MS, tried: rateTries, kind: 'rate' }

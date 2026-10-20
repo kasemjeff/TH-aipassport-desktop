@@ -20,6 +20,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Harness } from './harness/harness.mjs';
 import { SkillLibrary } from './harness/skills.mjs';
+// The provider registry: who this run talks to. The machine's default comes
+// from the settings file, so a switch made in the window is the switch the
+// terminal makes too.
+import { ProviderStore, AIPASS_PROVIDER } from './harness/providers.mjs';
+import { clientFor } from './harness/provider-client.mjs';
+import { Settings } from './harness/settings.mjs';
 import { parseArgs } from './argv.mjs';
 
 const argv = process.argv.slice(2);
@@ -35,6 +41,7 @@ if (argv.includes('--version') || argv.includes('-v')) {
 const VALUE_FLAGS = new Set([
   'root', 'bridge', 'model', 'max', 'max-result', 'read-lines', 'thinking',
   'temperature', 'conversation', 'assistant', 'skills', 'rule',
+  'verify-command', 'provider',
 ]);
 const { positional, flag, has } = parseArgs(argv, VALUE_FLAGS);
 
@@ -67,8 +74,17 @@ const PERMANENT = has('permanent');
 // and sending it again is just extra payload for the edge to inspect.
 const SLIM = has('slim');
 // Quote git status and package.json scripts into the first message so a fresh
-// run starts oriented — off by default so the tuned turn-1 bytes stay identical.
+// run starts oriented — off by default so the tuned turn-1 bytes stay identical
+// (the desktop harness turns the same snapshot on for its own runs).
 const SNAPSHOT = has('snapshot');
+// A declared check command for this run (docs/SPEC_CHECKER.md): it replaces
+// `.aipass/check.txt` in the checker prompt, rides back in the verdict, and
+// arms the red-test commit gate — comparable verdicts before a project commits
+// the file.
+const VERIFY_COMMAND = flag('verify-command', null);
+// Refuse DONE while the declared check is failing. Off by default: the checker
+// stays advisory unless a run asks for the hard gate.
+const REQUIRE_CHECK = has('require-check');
 // Stay open after the first task and take follow-ups on the same conversation,
 // so the model keeps everything it has already read in context.
 const WATCH = has('watch');
@@ -125,6 +141,7 @@ if (!task || HELP) {
   --root DIR      project root the agent may touch   (default: cwd)
   --skills DIR    playbook library for SKILL         (default: one level above the repo)
   --model ID      model id                           (default: bridge default)
+  --provider ID   who answers the run               (default: the machine's provider)
   --thinking LVL  model thinking: off|low|medium|high|max  (default: low)
   --temperature N sampling temperature: a number 0..2      (default: the site's per-model default)
   --apply         write without asking               (default: ask after the diff)
@@ -135,6 +152,8 @@ if (!task || HELP) {
   --file PATH     attach a document or image to the session
   --slim          send only the task, without the built-in preamble
   --snapshot      quote git status and package.json scripts into turn 1
+  --verify-command CMD  declared check command for the checker (replaces .aipass/check.txt)
+  --require-check refuse DONE while the declared check is failing
   --watch         stay open for follow-up tasks on the same conversation
   --reuse         continue the most recent conversation instead of a new one
   --permanent     keep the conversation in your chat history (default: temporary)
@@ -324,6 +343,27 @@ function showDiff(overlay) {
 
 /* ------------------------------------------------------------ the harness */
 
+// Who answers this run. The machine's default comes from the settings file —
+// one file for the whole machine, so a switch made in the window is the switch
+// the terminal makes — and `--provider` overrides it for this run only.
+//
+// A provider that is not there falls back to the bridge rather than failing
+// the run before it starts: the name is a typo, and a typo must not look like
+// a broken agent.
+const providerStore = new ProviderStore();
+const providerId = String(flag('provider', new Settings().get('defaultProvider') ?? AIPASS_PROVIDER)).trim().toLowerCase();
+const providerSpec = providerStore.get(providerId);
+const providerClient = providerSpec && providerSpec.kind !== 'aipass'
+  ? clientFor(providerSpec, {
+      bridgeURL: BRIDGE,
+      model: MODEL ?? providerSpec.defaultModel,
+      key: providerStore.keyFor(providerSpec.id),
+    })
+  : null;
+if (providerId !== AIPASS_PROVIDER && !providerSpec) {
+  console.log(dim(`no provider "${providerId}" — this run uses the bridge instead (aipass providers list)`));
+}
+
 // The CLI keeps the original end-of-run gate: writes collect in the overlay and
 // one question at the end decides whether they reach the disk. The desktop app
 // asks per write; both are the same permission engine in a different mode.
@@ -341,6 +381,8 @@ const harness = new Harness({
     mode: 'auto',
     slim: SLIM || Boolean(ASSISTANT),
     snapshot: SNAPSHOT,
+    verifyCommand: VERIFY_COMMAND,
+    requireCheck: REQUIRE_CHECK,
     plan: has('plan'),
     searchI: SEARCH_I,
     attach: ATTACH,
@@ -357,6 +399,10 @@ const harness = new Harness({
   store: has('no-session') ? 'off' : undefined,
   events: undefined,
 });
+// The provider client is moved in after the harness exists, so the notes it
+// raises can ride the harness's own events. The bridge client stays in place
+// for the AiPASS provider — that is the path this file was built around.
+if (providerClient) harness.setProvider(providerClient);
 
 const { events } = harness;
 

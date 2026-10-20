@@ -1,12 +1,13 @@
-# ✳ TH-aipassport harness
+# ✳ aipass
 
-> The **aipass desktop**: use [de.aipass.net](https://de.aipass.net/chat) from your terminal, your editor, or the Tauri window — live streaming, an autonomous file-editing agent, and an OpenAI-compatible API bridge.
+> **The desktop window and the agent harness for [de.aipass.net](https://de.aipass.net/chat)** —
+> a file-editing agent you can watch, approve and resume — running on top of the
+> community bridge that reaches the site through your own logged-in browser tab.
 
 <p align="left">
-  <img src="https://github.com/kasemjeff/TH-aipassport-harness/actions/workflows/test.yml/badge.svg" alt="test" />
   <img src="https://img.shields.io/badge/node-%E2%89%A522-blue?logo=node.js&style=flat-square" alt="Node >= 22" />
   <img src="https://img.shields.io/badge/dependencies-zero-success?style=flat-square" alt="Zero Dependencies" />
-  <img src="https://img.shields.io/badge/tests-601%20passing-brightgreen?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-npm%20test-blue?style=flat-square" alt="Tests: run npm test" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgray?style=flat-square" alt="Platforms" />
 </p>
 
@@ -16,57 +17,90 @@
 
 ## Contents
 
-- [Where this stands](#where-this-stands)
+- [What this repo is](#what-this-repo-is)
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
 - [The desktop window](#the-desktop-window)
-- [The terminal](#the-terminal)
-- [The agent](#the-agent)
-- [The bridge](#the-bridge)
+- [The harness](#the-harness)
+- [The bridge and the CLI](#the-bridge-and-the-cli)
 - [Configuration](#configuration)
 - [Documentation](#documentation)
 - [Repo layout](#repo-layout)
 - [Development](#development)
 - [Credits & license](#credits--license)
 
-## Where this stands
+## What this repo is
 
-This project builds on work that came before it. The original bridge, Chrome
-extension and terminal client are
+aipass is two layers, and it matters which is which.
+
+**Our work — the desktop window and the harness.** This is the product.
+
+- **`desktop/`** — the window: projects, a chat list, transcripts that resume
+  and fork, per-file diff approval, plan cards, permission modes, a file panel,
+  playbooks, plugins. Thai-first, dark and light.
+- **`aipass-bridge/harness/`** — the agent core: the run loop, the file tools,
+  the marker protocol, sessions on disk, the compaction budget, permissions and
+  path rules, the WAF, providers, plugins, MCP. The window drives the harness;
+  `aipass agent` drives the same one, so the two can never drift apart.
+
+**The bridge, the Chrome extension and the CLI are upstream, and we extend
+them.** They started life as
 **[niawjunior/aipass-bridge](https://github.com/niawjunior/aipass-bridge)** by
-[niawjunior](https://github.com/niawjunior). This repository continues that
-codebase; its own work sits on top:
+[niawjunior](https://github.com/niawjunior) — an MIT-licensed project this
+repository continues. That code stays under niawjunior's copyright, credited in
+[LICENSE](./LICENSE). Here we keep it running, extend it where the harness
+needs more of it (loopback auth, the WAF table, the provider contract, the
+doctor), and stay compatible with it. The bridge is the transport; the harness
+is the product.
 
-- a **desktop window** — a full app around the same bridge: projects, a chat
-  list, transcripts that resume, per-file diff approval, playbooks, plugins, a
-  file panel. Thai-first, dark and light.
-- a **longer-lived harness** — sessions on disk, plan cards, helpers, a
-  compaction budget you can see, permission path rules, plugins.
-- **one settings file** — `~/.aipass/settings.json`, shared by the window, the
-  CLI and the agent, so a change is true everywhere immediately.
+One settings file — `~/.aipass/settings.json` — is shared by the window, the
+CLI and the agent, so a change is true everywhere immediately.
+
+Influences beyond that: the session storage borrows its JSONL-per-session shape
+from the pi coding agent, and the permission/hook vocabulary and the
+tool-writing guidance (token-efficient results, head+tail clipping) follow the
+published agent-tool literature. Those are influences on the design, not code
+taken from anywhere.
 
 ## Architecture
 
 ```text
-desktop window ─┐
-terminal ───────┼──HTTP + SSE──▶ bridge (node, zero dependencies) 127.0.0.1:8787
-any /v1 client ─┘                    │  SSE: jobs out, POST: deltas back
-                                     ▼
-                      Chrome extension (MV3) + offscreen keepalive
-                                     │  chrome.runtime
-                                     ▼
-                      de.aipass.net tab ──▶ /actions/send-message/<id>
+      ┌───────────────────── ours ─────────────────────┐
+      │  desktop window  ──┐                            │
+      │                    ├──▶ harness                  │
+      │  aipass agent (CLI)┘    loop · tools · protocol │
+      │                           sessions · permissions │
+      │                           WAF · providers        │
+      └────────────────────┬────────────────────────────┘
+                           │ HTTP + SSE, loopback token
+      ┌──────── upstream, continued ─────────┐
+      │  bridge  127.0.0.1:8787               │
+      │  Chrome MV3 extension + keepalive     │
+      └────────────────────┬───────────────────┘
+                           ▼
+             de.aipass.net tab ──▶ /actions/send-message/<id>
 ```
 
 No credentials are stored anywhere. Every request runs as ordinary page
 JavaScript inside your own logged-in tab, so the site's session cookie rides
 along by itself — the bridge never sees your aipass password. (It has a
-loopback token of its own; see *The bridge*, below.)
+loopback token of its own; see *The bridge and the CLI*, below.)
 
 ## Quick start
 
-Node ≥ 20. Nothing to install: the bridge, the harness, the window and the
-tests run on node builtins alone.
+Node ≥ 22. Nothing to install to run it: the bridge, the harness, the window
+and the tests run on node builtins alone.
+
+The fastest path on a fresh machine is one command:
+
+```bash
+aipass setup            # or: npm run setup
+```
+
+It checks Node, puts `aipass` on your PATH, mints the loopback token (and copies
+it to your clipboard), starts the bridge, and opens the extension and site pages
+so you can finish the one-time browser steps. Re-run it any time — it is
+idempotent. The manual steps below are what it automates.
 
 ### 1. The extension (once)
 
@@ -81,13 +115,23 @@ tests run on node builtins alone.
 4. Recommended: Chrome **Settings → Performance → Always keep these sites
    active → add `de.aipass.net`**, so a long run is never frozen mid-stream.
 
-### 2. A client
+### 2. The window
 
 ```bash
 npm run desktop     # the desktop window (starts the bridge itself if needed)
 # or
+aipass desktop
+```
+
+It starts the bridge if it is not already up, starts the backend on
+`127.0.0.1:8790`, and opens the window. See *The desktop window*.
+
+### 3. The terminal (optional)
+
+```bash
 aipass dev          # the bridge alone, logs in this terminal (Ctrl+C to stop)
 aipass              # the chat TUI, in a second terminal
+aipass agent "task" # the file agent from the command line
 ```
 
 `aipass` lives at `aipass-bridge/bin/aipass.mjs`; without putting it on your
@@ -123,26 +167,14 @@ What it holds:
 Settings live in `~/.aipass/settings.json`; the gear in the header edits them as
 a form, and `settings.get` / `settings.set` do the same thing from a script.
 
-## The terminal
+The window is where the harness becomes usable: every capability below is
+reachable from it, and the window is what the harness was built to serve.
 
-`aipass` opens the chat TUI. Streaming markdown, reasoning folds, prompt
-queueing while a run is going, `Esc` to stop, attachments, and a slash palette
-that opens the moment you type `/`.
+## The harness
 
-| Slash command | Does |
-|---|---|
-| `/model`, `/models` | switch model / list what the account can talk to |
-| `/thinking` | reasoning level: `off` · `low` · `medium` · `high` · `max` |
-| `/conversations`, `/switch`, `/new` | move between conversations |
-| `/tone`, `/format`, `/language` | how replies are written |
-| `/image`, `/file`, `/clip` | attach media to the next message |
-| `/styles`, `/image-style`, `/video-style` | generation style presets |
-| `/credits`, `/quota` | credit quota of the account |
-| `/agent`, `/agent-root` | hand the turn to the file agent / set its root |
-| `/doctor`, `/status` | diagnostics and connection status |
-| `/help`, `/clear`, `/stop` | palette help / clear the screen / stop the run |
-
-## The agent
+The harness is the agent core — the part that turns a model into an agent that
+can work in your project. The window drives it; `aipass agent` drives the same
+one.
 
 `aipass agent "task"` — or a run in the window — turns the model into a file
 agent working in the current project. The model asks, the harness acts:
@@ -152,22 +184,56 @@ agent working in the current project. The model asks, the harness acts:
 | `NEED dir <path>` · `NEED file <path> [start-end]` | list a directory / read a file, a screen at a time |
 | `SEARCH <text>` | grep-style search, `.gitignore` aware, big files skipped |
 | `GLOB <pattern>` | find files by pattern |
+| `SYMBOLS <file>` · `DEF <name>` · `REFS <name>` | code navigation: list a file's declarations, find a definition, find references (zero-dependency regex index) |
 | `GIT <subcommand>` | read-only git inspection |
 | `FETCH <url>` | read a URL — private and internal hosts refused |
 | `WEB <query>` | live web search with citations |
 | `CREATE` · `EDIT` · `DELETE` · `MOVE` | staged file changes — only applied per your approval |
 | `RUN … END` | a shell command — only when shell is allowed |
 | `ATTACH <file>` | send a file along with the message |
-| `DONE <summary>` | end the task with a summary |
+| `SUBAGENT ... END` | hand a self-contained piece to a helper (`role: verifier/reviewer/summariser`); add `background: true` to run it beside you, then poll with `JOBS` |
+| `MCP__<server>__<tool>` | a tool from a configured MCP server (stdio) — see `~/.aipass/mcp.json` |
 
-Guardrails that keep long tasks honest: writes are staged into an overlay and
-shown as diffs before they land; `RUN` is gated by the permission mode and
-`allowRun`; per-run caps on steps, tool calls and wall-clock; path rules (the
-**กฎไฟล์** page in the window) can veto reads and writes by glob; and the WAF
-module keeps risky spellings shortened on the way out and restores them on the
-way in, so an upstream block doesn't silently kill a run.
+What the harness itself owns:
 
-## The bridge
+- **The run loop** — with guards for repeats, errors, stagnation and unfinished
+  work, and budgets on steps, tool calls and wall-clock.
+- **The file tools and the overlay** — every edit is staged in memory first;
+  nothing lands on disk without an explicit apply.
+- **Sessions on disk** — JSONL, one file per session, replayable, resumable,
+  forkable; headers are honest about what they hold.
+- **Compaction** — a per-model context budget you can see, summarise-and-rotate
+  when it fills, and a tier of facts carried across rotations.
+- **Permissions** — `ask` / `auto` / `yolo`, path rules that can veto reads and
+  writes by glob (the **กฎไฟล์** page in the window), and a secret floor that
+  holds in every mode.
+- **Providers** — AiPASS through the local bridge, or any other API provider
+  (`~/.aipass/providers.json`; keys in `~/.aipass/credentials.json`, owner-only,
+  or in the environment).
+- **The WAF** — risky spellings are shortened on the way out and restored on
+  the way in, so an upstream block doesn't silently kill a run.
+
+Guardrails that keep long tasks honest: nothing lands on disk before you
+approve it, `RUN` needs the permission mode and `allowRun`, and every run
+carries caps on steps, tool calls and wall-clock.
+
+Extra capabilities available to the agent: **code navigation**
+(`SYMBOLS`/`DEF`/`REFS` over a zero-dependency regex index), **MCP tools**
+(`MCP__<server>__<tool>` from servers in `~/.aipass/mcp.json`), **background
+helpers** (`SUBAGENT` with `background: true`, polled via `JOBS`), **cross-session
+memory** (facts persisted per project, loaded into the next session's first
+turn), and **test-time scaling** (`aipass scale "task" --n N`). Each has an
+off-switch or is opt-in; see `docs/MATURITY.md`.
+
+The design of record is [`docs/HARNESS_DESIGN.md`](./docs/HARNESS_DESIGN.md)
+(the system end to end) and [`docs/LOOP_DESIGN.md`](./docs/LOOP_DESIGN.md) (the
+loop itself: stage map, guards, stop reasons, the event stream).
+
+## The bridge and the CLI
+
+This layer is upstream — **[niawjunior/aipass-bridge](https://github.com/niawjunior/aipass-bridge)**
+— and this repository continues it. The harness talks to it through one
+contract; the window and the CLI sit on the same contract.
 
 The bridge is OpenAI-compatible, so anything that speaks the API can use your
 AIPASS account through your browser session:
@@ -181,6 +247,32 @@ It binds `127.0.0.1:8787` by default. Every route except the health probes
 popup (**Advanced**) takes the token once. The CLI and the desktop backend
 read the file themselves. `AIPASS_TOKEN` sets an explicit value;
 `AIPASS_REQUIRE_AUTH=0` goes back to tokenless, loopback-only operation.
+
+### The terminal
+
+`aipass` opens the chat TUI. Streaming markdown, reasoning folds, prompt
+queueing while a run is going, `Esc` to stop, attachments, and a slash palette
+that opens the moment you type `/`.
+
+| Slash command | Does |
+|---|---|
+| `/model`, `/models` | switch model / list what the account can talk to |
+| `/thinking` | reasoning level: `off` · `low` · `medium` · `high` · `max` |
+| `/temperature` | sampling temperature `0..2`, or `default` |
+| `/conversations`, `/new` | switch conversation / start a fresh one |
+| `/tone`, `/format` | response tone / response format |
+| `/styles`, `/image-style`, `/video-style` | generation style presets |
+| `/credits` | credit quota of the account |
+| `/doctor` | diagnostics for the bridge, the extension and the models |
+| `/assistant` | select a custom assistant |
+| `/agent`, `/agent-root` | hand the turn to the file agent / set its root |
+| `/file`, `/image`, `/clip` | attach media to the next message |
+| `/clear`, `/help` | clear the screen / palette help |
+
+The CLI is also the way into the harness: `aipass agent "task"`, `aipass scale`,
+`aipass providers`, `aipass memory`, `aipass mcp`, `aipass plugin`. The full
+command list, the conversation rules and the known limits live in
+[`aipass-bridge/README.md`](./aipass-bridge/README.md).
 
 ## Configuration
 
@@ -196,7 +288,7 @@ read the file themselves. `AIPASS_TOKEN` sets an explicit value;
 | `AIPASS_TOOL_VISIBILITY` | `reasoning` | `reasoning` · `text` · `off` |
 | `AIPASS_IDLE_TIMEOUT_MS` | `180000` | when a quiet run counts as idle |
 | `AIPASS_MEDIA_TIMEOUT_MS` | `900000` | how long a generation may take |
-| `AIPASS_TOKEN` / `AIPASS_REQUIRE_AUTH` | `~/.aipass/.token` / on | loopback bearer token (see *The bridge*) |
+| `AIPASS_TOKEN` / `AIPASS_REQUIRE_AUTH` | `~/.aipass/.token` / on | loopback bearer token (see *The bridge and the CLI*) |
 | `AIPASS_CORS_ORIGIN` | — | allow one browser origin (off by default) |
 
 The window and the CLI keep their state in `~/.aipass/` (settings, sessions,
@@ -208,22 +300,25 @@ The design and operations docs live in [`docs/`](./docs/):
 
 | Doc | What it holds |
 |---|---|
-| [`docs/HARNESS_DESIGN.md`](./docs/HARNESS_DESIGN.md) | the system end to end: bridge, window, backend, harness — who wires what and why |
+| [`docs/HARNESS_DESIGN.md`](./docs/HARNESS_DESIGN.md) | the harness end to end: loop, tools, protocol, permissions, WAF — and how it sits on the bridge and the window |
 | [`docs/LOOP_DESIGN.md`](./docs/LOOP_DESIGN.md) | the agent loop itself: stage map, guards, stop reasons, the event stream |
 | [`docs/SPEC_CHECKER.md`](./docs/SPEC_CHECKER.md) | the checker: the read-only pass a `DONE` earns, verdicts, the declared check |
 | [`docs/SPEC_EVALS.md`](./docs/SPEC_EVALS.md) | the eval runner: task fixtures, live and replay modes, scoring |
+| [`docs/EXPERIMENTS.md`](./docs/EXPERIMENTS.md) | the experiment queue: sources, records, budgets, when an experiment ends |
 | [`docs/TECH_STACK.md`](./docs/TECH_STACK.md) | what runs where, and the reasons each piece is what it is |
 | [`docs/DATA_FORMATS.md`](./docs/DATA_FORMATS.md) | what lands on disk: settings, session JSONL, the token, uploads, eval results |
 | [`docs/TROUBLESHOOTING.md`](./docs/TROUBLESHOOTING.md) | when something is broken: doctor, the common failures, where the logs are |
 | [`docs/RELIABILITY.md`](./docs/RELIABILITY.md) | what healthy means: the SLIs and their targets, the error budget, degradation modes |
 | [`docs/RELEASE.md`](./docs/RELEASE.md) | versioning, the release checklist, upgrade and rollback, dependency review |
+| [`docs/MATURITY.md`](./docs/MATURITY.md) | capability status — production vs experimental, owners, what changes a status |
+| [`docs/TEST_PLAN.md`](./docs/TEST_PLAN.md) | the test design: layers L1–L5, cases, pass criteria, what each layer cannot prove |
 
 The behavior-level change history is [`CHANGELOG.md`](./CHANGELOG.md); it is
 what release notes are cut from.
 
 Component-level docs sit next to their code:
-[`aipass-bridge/README.md`](./aipass-bridge/README.md) (bridge, CLI, protocol),
-[`aipass-bridge/docs/DOCS.md`](./aipass-bridge/docs/DOCS.md) and
+[`aipass-bridge/README.md`](./aipass-bridge/README.md) (the upstream bridge and
+CLI), [`aipass-bridge/docs/DOCS.md`](./aipass-bridge/docs/DOCS.md) and
 [`desktop/README.md`](./desktop/README.md) (the window and native builds). For
 contributing see [`CONTRIBUTING.md`](./CONTRIBUTING.md); for reporting a
 vulnerability, [`SECURITY.md`](./SECURITY.md).
@@ -232,28 +327,31 @@ vulnerability, [`SECURITY.md`](./SECURITY.md).
 
 ```text
 aipass/
-├─ aipass-bridge/       the bridge, the CLI and the harness
-│  ├─ bridge/           local HTTP + SSE server (zero dependencies)
-│  ├─ harness/          agent core: loop, tools, protocol, permissions, waf
-│  ├─ extension/        Chrome MV3 worker + content script + keepalive
-│  ├─ bin/aipass.mjs    the `aipass` command
-│  ├─ chat.mjs          the terminal chat client
-│  └─ agent.mjs         the file agent
-├─ desktop/             the window
-│  ├─ main.mjs          bridge (if needed) + backend on :8790 + window
-│  ├─ ui/               plain HTML/CSS/JS — no build step
-│  ├─ src-tauri/        native shell: tray, sidecar node, bundles
-│  └─ plugins-example/  a plugin worth copying
-├─ docs/                design and operations docs — see Documentation above
-├─ evals/               task fixtures — smoke set, holdout, Thai/English pairs
-├─ scripts/             test runner, QA loop, verify, evals
-├─ public/              static pages and the README image
-└─ package.json         npm run shortcuts — nothing to install
+├─ desktop/                 the window — ours
+│  ├─ main.mjs              bridge (if needed) + backend on :8790 + window
+│  ├─ ui/                   plain HTML/CSS/JS — no build step
+│  ├─ src-tauri/            native shell: tray, sidecar node, bundles
+│  └─ plugins-example/      a plugin worth copying
+├─ aipass-bridge/           the upstream layer, continued
+│  ├─ harness/              the agent core — ours
+│  │                        loop · tools · overlay · protocol · waf
+│  │                        sessions · compaction · permissions · providers
+│  ├─ bridge/               local HTTP + SSE server (upstream)
+│  ├─ extension/            Chrome MV3 worker + content script + keepalive
+│  ├─ bin/aipass.mjs        the `aipass` command (upstream)
+│  ├─ chat.mjs              the terminal chat client (upstream)
+│  └─ agent.mjs             the file agent — a thin front for the harness
+├─ docs/                    design and operations docs — see Documentation above
+├─ evals/                   task fixtures — smoke set, holdout, Thai/English pairs
+├─ scripts/                 test runner, QA loop, verify, evals
+├─ public/                  static pages and the README image
+└─ package.json             npm run shortcuts — nothing to install
 ```
 
 ## Development
 
 ```bash
+npm run setup   # first-run machine setup: Node, PATH, token, bridge, browser pages
 npm test        # the whole suite (bridge, extension, harness, window logic)
 npm run check   # npm test and npm run qa in one go — the pre-push pair
 npm run qa      # static checks + suite + fake-DOM window + live status
@@ -265,6 +363,13 @@ The tests are plain `node --test` — no framework, no dependencies.
 
 ## Credits & license
 
-Original project: **[niawjunior/aipass-bridge](https://github.com/niawjunior/aipass-bridge)**
-by [niawjunior](https://github.com/niawjunior). This continuation is released
-under the [MIT License](./LICENSE).
+**Our work** — the desktop window (`desktop/`), the harness
+(`aipass-bridge/harness/`), the sessions, the agent protocol, the eval and
+experiment tooling, and the docs.
+
+**Upstream, continued** — the bridge, the Chrome extension and the CLI, from
+**[niawjunior/aipass-bridge](https://github.com/niawjunior/aipass-bridge)** by
+[niawjunior](https://github.com/niawjunior). That code stays under
+niawjunior's copyright, credited in the [MIT License](./LICENSE).
+
+This continuation is released under the [MIT License](./LICENSE).

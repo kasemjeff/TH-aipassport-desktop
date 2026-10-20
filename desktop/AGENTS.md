@@ -44,6 +44,16 @@
   Verify: "a run with no chat tab gets a banner with a one-click fix"
 - Every palette command must map to a real handler.
   Verify: "every command in the palette has a handler that resolves"
+- **A stop says what it stopped.** The window answers the stop at once — the
+  button reads "stopping" while the run winds down, the ending says "stopped"
+  — and a stop that found no run says so instead of pretending.
+  Verify: "a stop is answered on screen — the window says the run is stopping"
+- **The provider switch is machine-wide.** The picker's choice goes through
+  the backend and lands in the settings file, so the terminal sees it too, and
+  the model list is rebuilt from scratch when it moves — a model of one
+  provider means nothing to another. A provider without a key says so in the
+  picker rather than failing on the first run.
+  Verify: "the provider picker offers every provider and switches the one in use"
 
 ## Testing the UI
 

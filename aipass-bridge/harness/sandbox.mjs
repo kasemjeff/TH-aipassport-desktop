@@ -18,7 +18,9 @@
 // into the project; restorePaths() puts the project root back in the output.
 import fs from 'node:fs';
 import path from 'node:path';
-import { SKIP } from './overlay.mjs';
+import crypto from 'node:crypto';
+import { SKIP, realPath } from './overlay.mjs';
+import { aipassHome } from './settings.mjs';
 
 // Directories that are junctioned instead of copied. `.aipass` is excluded
 // below: it holds the spill directory and the sandbox itself, and a run has no
@@ -27,11 +29,71 @@ import { SKIP } from './overlay.mjs';
 // skips `.git` entirely, and a boundary marker is written instead (below).
 const HEAVY = new Set([...SKIP].filter((name) => name !== '.aipass' && name !== '.git'));
 
+/**
+ * Where a project's sandboxes live.
+ *
+ * Under the home, NOT under the project: the projection is a copy of the
+ * project's source — and of whatever secrets the project holds — and a copy
+ * that sits inside the project can be committed by a `git add -A` the user
+ * never thought about. The hash keeps two projects with the same folder name
+ * apart (the slug alone would not), so one project's sweep can never touch
+ * another's live sandbox.
+ */
+export function sandboxRoot(root) {
+  const abs = path.resolve(root);
+  const slug = abs.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'root';
+  const hash = crypto.createHash('sha1').update(abs.toLowerCase()).digest('hex').slice(0, 8);
+  return path.join(aipassHome(), 'run', `${slug}-${hash}`);
+}
+
 /** A fresh sandbox directory for one RUN. */
 export function createSandbox(root) {
-  const runRoot = path.join(root, '.aipass', 'run');
-  fs.mkdirSync(runRoot, { recursive: true });
-  return fs.mkdtempSync(path.join(runRoot, 'run-'));
+  const dir = sandboxRoot(root);
+  fs.mkdirSync(dir, { recursive: true });
+  return fs.mkdtempSync(path.join(dir, 'run-'));
+}
+
+/**
+ * Remove the sandboxes no run owns any more.
+ *
+ * A RUN removes its own sandbox when it ends, but a backend that was killed
+ * mid-command leaves the whole copy behind — and nothing else ever collected
+ * it. The age is the safety margin: a live run's wall-clock budget is half an
+ * hour by default, so six hours is well past any run that could still be
+ * using one.
+ */
+export function sweepSandboxes(root, { maxAgeMs = 6 * 60 * 60 * 1000 } = {}) {
+  const dir = sandboxRoot(root);
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { return 0; }
+  const now = Date.now();
+  let removed = 0;
+  for (const name of names) {
+    if (!name.startsWith('run-')) continue;
+    const target = path.join(dir, name);
+    try {
+      const st = fs.statSync(target);
+      if (now - st.mtimeMs < maxAgeMs) continue; // a run may still own it
+      fs.rmSync(target, { recursive: true, force: true });
+      removed++;
+    } catch { /* already gone */ }
+  }
+  return removed;
+}
+
+/**
+ * The heavy directories this project has — the ones the projection SHARES
+ * with the real tree instead of copying.
+ *
+ * They are the honest limit of the sandbox: a command that writes into one of
+ * them writes into the user's project, because that is the only way to keep a
+ * `node_modules` from costing a minute per RUN. The RUN tool says so in its
+ * result, so the model is never surprised by a change it did not make.
+ */
+export function sharedDirs(root) {
+  return [...HEAVY].filter((name) => {
+    try { return fs.statSync(path.join(root, name)).isDirectory(); } catch { return false; }
+  });
 }
 
 // Copies run a bounded number in flight: a big tree should saturate the disk,
@@ -39,6 +101,14 @@ export function createSandbox(root) {
 const COPY_GATE = 16;
 let activeCopies = 0;
 const copyWaiters = [];
+
+/**
+ * The biggest file the projection copies. A check command reads source, not
+ * binaries: a 300 MB model file or a video is copied in full for every RUN and
+ * is never what the command needed. Over the cap the file is left out and
+ * named in the command's result.
+ */
+const copyCap = () => Number(process.env.AIPASS_SANDBOX_MAX_FILE_MB ?? 64) * 1024 * 1024;
 async function gatedCopy(src, dst) {
   if (activeCopies >= COPY_GATE) await new Promise((r) => copyWaiters.push(r));
   activeCopies++;
@@ -64,13 +134,24 @@ async function gatedCopy(src, dst) {
  * fixed-width gate, and a command's in-place writes still land in the throwaway
  * copy rather than the project.
  */
-export async function materializeTree(root, overlay, dest) {
+export async function materializeTree(root, overlay, dest, { signal = null, onSkip = null } = {}) {
+  // (stop) The projection is the longest wait a RUN has before its command
+  // even starts, and the copy used to run to the end while the window said
+  // the run was stopping. A stop ends it here, mid-walk.
+  const stopped = () => {
+    if (!signal?.aborted) return;
+    const err = new Error('the run was stopped');
+    err.name = 'AbortError';
+    throw err;
+  };
+  stopped();
   const staged = overlay.keys();
   const underStaged = (abs) => staged.some((p) => p.startsWith(abs + path.sep));
 
   // Staged paths first, creation order: a staged new file whose directory does
   // not exist on disk yet still has to appear.
   for (const abs of staged) {
+    stopped();
     const rel = path.relative(root, abs);
     if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue; // outside the tree
     if (rel.split(path.sep)[0] === '.git') continue; // never projected: see below
@@ -81,12 +162,17 @@ export async function materializeTree(root, overlay, dest) {
   }
 
   const skip = new Set(staged);
+  // Where the project really is, for the link check below: a link that points
+  // somewhere else is not part of the project, whatever its name says.
+  const realRoot = realPath(root) ?? path.resolve(root);
   const walk = async (srcDir, dstDir) => {
+    stopped();
     await fs.promises.mkdir(dstDir, { recursive: true });
     let entries;
     try { entries = await fs.promises.readdir(srcDir, { withFileTypes: true }); } catch { return; }
     const jobs = [];
     for (const e of entries) {
+      stopped();
       if (e.name === '.aipass' || e.name === '.git') continue;
       const src = path.join(srcDir, e.name);
       const dst = path.join(dstDir, e.name);
@@ -98,11 +184,30 @@ export async function materializeTree(root, overlay, dest) {
         jobs.push(walk(src, dst));
         continue;
       }
-      if (e.isFile()) { jobs.push(gatedCopy(src, dst)); continue; }
+      if (e.isFile()) {
+        // (cap) A file this big is not what a check command reads, and
+        // copying it costs a RUN seconds every time. It is left out — and
+        // named, so the command that trips over its absence says why.
+        try {
+          const size = fs.statSync(src).size;
+          if (size > copyCap()) {
+            onSkip?.(path.relative(root, src).split(path.sep).join('/'), size);
+            continue;
+          }
+        } catch { /* unreadable: the copy will report it */ }
+        jobs.push(gatedCopy(src, dst));
+        continue;
+      }
       // Symlinks and anything exotic: recreate what it points at, the cheapest
-      // honest shape. A broken link is left out.
+      // honest shape. A broken link is left out — and so is one that points
+      // OUTSIDE the project: the projection mirrors the project, and copying a
+      // file from elsewhere into it would put that file where the run can read
+      // it (the tools themselves refuse such a path — overlay.safe()).
       try {
         const target = path.resolve(srcDir, fs.readlinkSync(src));
+        const realTarget = realPath(target) ?? target;
+        const rel = path.relative(realRoot, realTarget);
+        if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) continue;
         if (fs.statSync(target).isDirectory()) fs.symlinkSync(target, dst, 'junction');
         else jobs.push(gatedCopy(target, dst));
       } catch { /* left out */ }
@@ -123,7 +228,7 @@ export async function materializeTree(root, overlay, dest) {
   // the CI runners). Written only when a repository
   // is actually reachable, so a project with none keeps today's sandbox,
   // `git init` included.
-  if (repositoryAbove(root)) {
+  if (repositoryAbove(root) || repositoryAbove(dest)) {
     try { fs.writeFileSync(path.join(dest, '.git'), 'gitdir: no-repository\n'); } catch { /* the projection still has no .git of its own */ }
   }
   return dest;
@@ -156,5 +261,15 @@ export function restorePaths(text, from, to) {
   };
   swap(from, to);
   swap(from.split(path.sep).join('/'), to.split(path.sep).join('/'));
+  // macOS reports a canonical path to the child (`/private/var/…` for anything
+  // under the `/var` symlink), so a plain `process.cwd()` names a spelling the
+  // literal `from` never matches. Swap the resolved spelling too; a sandbox
+  // that is already gone (or cannot resolve) falls back to the literal swap.
+  let resolved = null;
+  try { resolved = fs.realpathSync(from); } catch { /* removed, or unresolvable */ }
+  if (resolved && resolved !== from) {
+    swap(resolved, to);
+    swap(resolved.split(path.sep).join('/'), to.split(path.sep).join('/'));
+  }
   return text;
 }

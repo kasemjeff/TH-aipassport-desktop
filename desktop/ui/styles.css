@@ -283,7 +283,14 @@ main { flex: 1; display: grid; grid-template-columns: var(--side-w) minmax(0, 1f
   padding: 10px 10px 8px;
   overflow: hidden;
 }
-.side-top { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
+.side-top {
+  flex: 1; min-height: 0; overflow: auto;
+  display: flex; flex-direction: column; gap: 12px;
+}
+/* The sections keep the height they asked for. Without this the browser
+   squeezes the lists to nothing to make everything fit — a history you can
+   see three rows of is worse than a rail you scroll. */
+.side-top > * { flex: none; }
 
 .side-brand { display: flex; align-items: center; gap: 8px; padding: 2px 2px 0; }
 .logo { flex: none; }
@@ -321,7 +328,6 @@ main { flex: 1; display: grid; grid-template-columns: var(--side-w) minmax(0, 1f
 }
 .btn-dashed:hover { border-color: var(--accent); color: var(--accent); }
 
-.side-nav { display: flex; flex-direction: column; gap: 2px; }
 .nav-item {
   display: flex;
   align-items: center;
@@ -335,6 +341,15 @@ main { flex: 1; display: grid; grid-template-columns: var(--side-w) minmax(0, 1f
   transition: background-color .12s ease, color .12s ease;
 }
 .nav-item:hover { background: var(--bg-3); color: var(--fg); }
+/* A rail row can be a <summary>, a <label> or a <button>. The button has to
+   lose its own chrome so the three read as one list. */
+button.nav-item {
+  width: 100%;
+  background: none;
+  border: none;
+  text-align: left;
+}
+button.nav-item:hover { border-color: transparent; }
 .nav-ico { width: 18px; flex: none; display: grid; place-items: center; color: inherit; }
 .nav-ico svg { width: 15px; height: 15px; display: block; }
 
@@ -363,16 +378,58 @@ summary.nav-item::after {
 }
 
 /* The session filter: 99 sessions and counting, so the sidebar is searchable
-   rather than a scroll nobody does. */
-#session-filter {
-  width: 100%;
-  font-size: 12px;
-  padding: 5px 9px;
-  margin: 0 0 4px;
+   rather than a scroll nobody does. It is a field that is always on screen —
+   a row that pointed at a box folded away somewhere else was a control that
+   looked broken, because clicking it did nothing you could see. */
+.side-search { position: relative; display: flex; align-items: center; }
+.side-search .nav-ico {
+  position: absolute; left: 8px; top: 50%; transform: translateY(-50%);
+  pointer-events: none; color: var(--dim);
 }
-#session-filter:focus { outline: none; border-color: var(--accent); }
+.side-search input {
+  width: 100%;
+  font-size: 12.5px;
+  padding: 5px 9px 5px 30px;
+  margin: 0;
+}
+.side-search input:focus { outline: none; border-color: var(--accent); }
+.side-search input::-webkit-search-cancel-button { cursor: pointer; }
+
+/* Sections: a label, then its list. The label says what the list is, so a
+   column of timestamps does not have to be guessed at. */
+.side-section { display: flex; flex-direction: column; min-height: 0; }
+/* A hairline between the sections: without it the second label reads like
+   another row of the list above it. */
+.side-section + .side-section .side-h {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  margin-top: 2px;
+}
+.side-h {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10.5px;
+  letter-spacing: .06em;
+  color: var(--dim);
+  margin: 8px 4px 3px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.side-count {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: .75;
+}
 
 .list { list-style: none; margin: 0; padding: 0; }
+/* One long list scrolls inside its own box: a folder with 300 files must not
+   push the history out of the rail, and the history must not push the search
+   out of the rail either. */
+#sessions { max-height: 30vh; overflow: auto; }
+#files { max-height: 22vh; overflow: auto; }
 .list li {
   padding: 5px 8px;
   border-radius: 8px;
@@ -386,30 +443,30 @@ summary.nav-item::after {
   gap: 6px;
   color: var(--fg);
 }
+/* The name is the part that gives way: it shrinks and ends in an ellipsis,
+   while the day on the right keeps its place. A title that runs under the
+   date (or off the edge) is a row nobody can read. */
+.list li .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list li:hover { background: var(--bg-3); }
 .list li.active { background: var(--accent-soft); color: var(--fg); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
 .list li .sub { color: var(--dim); font-size: 11px; margin-left: auto; padding-left: 6px; flex: none; }
 .list li.up { color: var(--accent); }
 /* A file row carries its own attach button; it only shows when you mean to. */
-.list li > button { opacity: 0; flex: none; }
-.list li:hover > button { opacity: 1; }
+#files li > button { opacity: 0; flex: none; }
+#files li:hover > button { opacity: 1; }
 .list.dim li { color: var(--dim); }
-
-.new-conv {
-  background: none;
-  border: none;
-  color: var(--dim);
-  font-size: 12px;
-  font-style: italic;
-  padding: 5px 8px;
-  text-align: left;
-  border-radius: 6px;
-  cursor: pointer;
-  width: 100%;
+/* The one-click archive sits above the history when there is more history
+   than the list shows. Its button is the whole point of the bar, so it stays
+   visible — the hover-to-reveal belongs to the file rows' แนบ button only. */
+.list li.archive-bar {
+  padding: 4px 0 6px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--line);
 }
-.new-conv:hover { color: var(--fg); background: var(--bg-3); border-color: transparent; }
+.list li.archive-bar > button { opacity: 1; flex: 1; text-align: left; }
 
-.side-foot { flex: none; border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
+/* The foot: the two doors to the rest of the app, written out. */
+.side-foot { flex: none; border-top: 1px solid var(--line); padding-top: 6px; margin-top: 4px; }
 .user-card { display: flex; align-items: center; gap: 9px; padding: 2px; }
 .avatar {
   width: 32px; height: 32px; border-radius: 50%; flex: none;
@@ -532,6 +589,30 @@ summary.nav-item::after {
 .msg .body h4 { font-size: 13.5px; }
 .msg .body table { border-collapse: collapse; margin: 0 0 10px; font-size: 12.5px; }
 .msg .body th, .msg .body td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; }
+.msg .body .md-table-wrap { max-width: 100%; margin: 0 0 10px; overflow-x: auto; }
+.msg .body .md-table-wrap table { margin: 0; }
+.msg .body th.al-center, .msg .body td.al-center { text-align: center; }
+.msg .body th.al-right, .msg .body td.al-right { text-align: right; }
+.msg .body .md-figure { margin: 2px 0 12px; }
+.msg .body .md-image {
+  max-width: 100%;
+  max-height: 520px;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--code-bg);
+}
+.msg .body .md-figure .md-image { display: block; }
+.msg .body .md-image-inline { display: inline-block; max-height: 260px; vertical-align: middle; margin: 2px 0; }
+.msg .body .md-video {
+  display: block;
+  width: 100%;
+  max-width: 720px;
+  height: auto;
+  border-radius: 10px;
+  background: #000;
+}
+.msg .body .md-figure figcaption { margin-top: 6px; color: var(--dim); font-size: 12px; line-height: 1.4; }
 
 /* One line per tool call, expandable — the whole point is that a ten-step run
    reads as ten lines, not ten screens. The "⏺" mark carries the state, so the
@@ -628,7 +709,13 @@ details.run > *:not(summary) { margin-left: 2px; }
   max-width: 860px;
 }
 .panel h4 { margin: 0 0 6px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
-.panel ul { list-style: none; margin: 0; padding: 0; }
+/* A finished checklist says so at a glance. */
+.panel.complete h4 { color: var(--ok); }
+/* The list is bounded and scrolls: a plan with dozens of items used to grow
+   until it covered the conversation (reported live). The card stays between
+   the transcript and the pending strip and takes at most ~a third of the
+   window, however long the plan is. */
+.panel ul { list-style: none; margin: 0; padding: 0; max-height: 26vh; overflow: auto; }
 .panel li { padding: 2px 0; font-size: 13px; }
 .panel li.done { color: var(--dim); text-decoration: line-through; }
 .panel li .box { color: var(--dim); margin-right: 7px; }
@@ -1057,6 +1144,18 @@ details.run > *:not(summary) { margin-left: 2px; }
   font-size: 11.5px;
 }
 .set-group { display: flex; flex-direction: column; gap: 13px; margin-bottom: 16px; }
+/* The facts the app carries: whole sentences, wrapped. A list that clips a
+   fact in half hides the very thing you came to check. */
+.memory-list { display: flex; flex-direction: column; gap: 2px; margin: 6px 0 10px; padding-left: 0 !important; }
+.memory-list li {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.5;
+  cursor: default;
+}
+.memory-list li .fact { min-width: 0; white-space: normal; overflow: visible; text-overflow: clip; }
+.memory-list li:hover { background: none; }
 .set-row { display: grid; grid-template-columns: minmax(0, 1fr) 208px; gap: 14px; align-items: center; }
 .set-row.stack { grid-template-columns: minmax(0, 1fr); }
 .set-info { min-width: 0; }
@@ -1099,6 +1198,18 @@ details.run > *:not(summary) { margin-left: 2px; }
 .plugin-name { font-size: 12.5px; font-weight: 600; }
 .plugin-desc { font-size: 12px; color: var(--dim); margin-top: 2px; }
 .plugin-markers { font-size: 12px; color: var(--dim); margin: 0 0 10px; }
+
+/* Provider cards inside the settings sheet — the same shape as a plugin card,
+   because they answer the same question: what is installed, and is it the one
+   being used. */
+.provider-list { margin-bottom: 12px; }
+.provider-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-2);
+  padding: 9px 11px;
+  margin-bottom: 8px;
+}
 
 /* Path-rule rows inside the settings sheet: pattern, verdict, scope, remove —
    one line per rule, because a rule is one idea. */

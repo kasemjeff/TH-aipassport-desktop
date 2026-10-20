@@ -16,35 +16,46 @@
      LAYOUT
        #bar    thin top row: project · permission · status · context · help ·
                theme · settings.
-       #side   264px sidebar: brand, "แชทใหม่", nav, chat list, files, playbooks,
-               plugins, user card. Collapses via the ☰ labels (pure CSS, no JS).
+       #side   264px sidebar: brand, "แชทใหม่", the search field, then the
+               work — history, the project's files — and, only when they have
+               something in them, the playbooks and the plugin panels. The foot
+               holds the two doors to the rest of the app (ตั้งค่า / วิธีใช้).
+               Collapses via the ☰ labels (pure CSS, no JS).
         #chat   one grid, rows stacked: #meta, then the stage (#log), then
                 #pending, #attachments and #composer. The composer carries the
                 model and the effort level — both ride the next message.
 
      IDS app.js ALREADY OWNS (kept, same handlers) — do not rename:
        bar, project, add-project, model, thinking, mode, status, context,
-       help-btn, settings-btn, side, sessions, files, files-head, plugin-panels,
-       skills, session-filter, new-session, chat, meta, log, pending,
+       help-btn, settings-btn, side, sessions, session-count, files, files-head,
+       plugin-panels, plugins-group, skills, skills-group, session-filter,
+       new-session, side-settings, side-help, chat, meta, log, pending,
        pending-count, pending-list, apply, discard, composer, task, slash,
        slash-list, attachments, attachment-list, attach-btn, slash-btn,
        file-picker, send, hint, modal, modal-title, modal-body, modal-actions.
 
      The reference-design extras that stayed:
        #theme-toggle    flips dark/light and writes the choice through settings.set.
-       #new-conv        the "New Conversation" line under the chat list — the same
-                        startNewSession as #new-session.
        #new-chat-quick  a <label for="file-picker">, so it opens the picker —
                         attach, then type.
 
-     The sidebar nav rows are real controls without a line of JS:
-       ค้นหาแชท              label → #session-filter   (focuses the search box)
-       พรีพรอมต์            details → #skills          (playbooks / prompts)
-       พูดคุยสิ่งที่บันทึกไว้  details → #session-filter, #sessions (รายการแชท)
-       คลัง                   details → #files-head, #files
-       เรียนรู้เกี่ยวกับ AI   details → #plugin-panels
-       ผู้ช่วยอัจฉริยะ        label → #task             (focuses the composer)
-       ไฟล์เดี่ยว            label → #file-picker      (opens the file picker)
+     THE SIDEBAR IS THE WORK, NOT THE CONFIGURATION.
+       The rail answers three questions — what am I working on, what did I work
+       on, what is in this folder — and nothing else. Anything that *configures*
+       the app (the model, the rules, the plugins, the MCP servers, what the
+       app remembers about you) lives in the settings sheet, one click away
+       from the foot of this column. A row that leads nowhere is not a feature,
+       so the sections that have nothing to show are hidden outright.
+
+     Every row here does something you can see:
+       แชทใหม่              #new-session   → a fresh session
+       ＋                   #file-picker   → attach a file, then ask about it
+       the search field     #session-filter → filters the history below it
+       a history row        → opens that session
+       a file row           → opens the file (and แนบ stages it)
+       คู่มือ               the playbooks on disk (hidden when there are none)
+       ปลั๊กอิน              the panels plugins draw (hidden when there are none)
+       ตั้งค่า / วิธีใช้    the settings sheet and the guide
 
      ============================================================================ -->
 
@@ -98,80 +109,64 @@
         <label class="icon-btn side-burger" for="nav-toggle" title="พับเมนู">☰</label>
       </div>
 
+      <!-- The one thing you do most: start a conversation. Attach sits beside
+           it because "here is a file, ask about it" is the other half of it. -->
       <div class="new-row">
         <button type="button" id="new-session" class="btn-new" title="เริ่มบทสนทนาใหม่">
           <span class="pencil" aria-hidden="true">✎</span>แชทใหม่
         </button>
-        <label class="btn-dashed" id="new-chat-quick" for="file-picker" title="แนบไฟล์แล้วเริ่มคุย">＋</label>
+        <label class="btn-dashed" id="new-chat-quick" for="file-picker" title="แนบไฟล์ แล้วคุยต่อได้เลย" aria-label="แนบไฟล์">＋</label>
       </div>
 
-      <nav class="side-nav" aria-label="เมนูข้าง">
-        <label class="nav-item" for="session-filter" title="ค้นหาบทสนทนา">
-          <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20.2 20.2 16 16"/></svg></span>ค้นหาแชท
-        </label>
+      <!-- The search is a field, not a row that points at one. It used to live
+           folded away inside another row, so clicking it focused a box you
+           could not see: a control that looked broken because it was. -->
+      <div class="side-search">
+        <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20.2 20.2 16 16"/></svg></span>
+        <input type="search" id="session-filter" placeholder="ค้นหาบทสนทนา…" aria-label="ค้นหาบทสนทนา" title="ค้นหาบทสนทนา (Ctrl+K)" />
+      </div>
 
-        <details class="nav-group">
-          <summary class="nav-item" title="facts ที่จำข้าม session">
-            <span class="nav-ico" aria-hidden="true">🧠</span>ความจำ
-          </summary>
-          <div class="nav-body">
-            <h3 class="side-h" id="memory-head">facts ข้าม session</h3>
-            <ul id="memory" class="list dim"></ul>
-            <button type="button" id="memory-clear" class="mini" title="ลืม facts ทั้งหมด">ลืมทั้งหมด</button>
-          </div>
-        </details>
+      <!-- What the rail is for: the work. -->
+      <section class="side-section">
+        <h3 class="side-h">ประวัติการสนทนา<span class="side-count" id="session-count"></span></h3>
+        <ul id="sessions" class="list"></ul>
+      </section>
 
-        <details class="nav-group">
-          <summary class="nav-item" title="แม่แบบคำสั่ง / คู่มือที่บันทึกไว้">
-            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5h5.6a4.4 4.4 0 0 1 4.4 4.4V21a3.4 3.4 0 0 0-3.4-3.4H2z"/><path d="M22 4.5h-5.6A4.4 4.4 0 0 0 12 8.9V21a3.4 3.4 0 0 1 3.4-3.4H22z"/></svg></span>พรีพรอมต์
-          </summary>
-          <div class="nav-body">
-            <h3 class="side-h">คู่มือ</h3>
-            <ul id="skills" class="list"></ul>
-          </div>
-        </details>
+      <section class="side-section">
+        <h3 class="side-h" id="files-head">ไฟล์ในโปรเจกต์</h3>
+        <ul id="files" class="list dim"></ul>
+      </section>
 
-        <details class="nav-group" open>
-          <summary class="nav-item" title="บทสนทนาที่คุยกันมา">
-            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.4 8.6 8.6 0 0 1-3.3-.7L3.5 20.5l1.5-4.6a8.4 8.4 0 0 1-1.5-4.4A8.4 8.4 0 0 1 12 3.1a8.4 8.4 0 0 1 9 8.4z"/></svg></span>พูดคุยสิ่งที่บันทึกไว้
-          </summary>
-          <div class="nav-body">
-            <h3 class="side-h">รายการแชท</h3>
-            <input type="search" id="session-filter" placeholder="ค้นหาบทสนทนา…" />
-            <ul id="sessions" class="list"></ul>
-            <button type="button" id="new-conv" class="new-conv" title="เริ่มบทสนทนาใหม่">New Conversation</button>
-          </div>
-        </details>
+      <!-- Only when there is something in them: a section with nothing in it is
+           a row that leads nowhere. -->
+      <details class="nav-group" id="skills-group" hidden>
+        <summary class="nav-item" title="คู่มือ (playbook) ที่บันทึกไว้ — คลิกเพื่ออ่าน">
+          <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5h5.6a4.4 4.4 0 0 1 4.4 4.4V21a3.4 3.4 0 0 0-3.4-3.4H2z"/><path d="M22 4.5h-5.6A4.4 4.4 0 0 0 12 8.9V21a3.4 3.4 0 0 1 3.4-3.4H22z"/></svg></span>คู่มือ
+        </summary>
+        <div class="nav-body">
+          <ul id="skills" class="list"></ul>
+        </div>
+      </details>
 
-        <details class="nav-group">
-          <summary class="nav-item" title="ไฟล์ในโปรเจกต์ที่ agent แตะได้">
-            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 18.5a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2h4.6l2 2.6h8.4a2 2 0 0 1 2 2z"/></svg></span>คลัง
-          </summary>
-          <div class="nav-body">
-            <h3 class="side-h" id="files-head">ไฟล์ในโปรเจกต์</h3>
-            <ul id="files" class="list dim"></ul>
-          </div>
-        </details>
-
-        <details class="nav-group">
-          <summary class="nav-item" title="สิ่งที่ติดตั้งเพิ่มเข้ามา">
-            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.6l1.7 4.4 4.5 1.7-4.5 1.7L12 15.8l-1.7-4.4-4.5-1.7 4.5-1.7z"/><path d="M18.6 15.9l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg></span>เรียนรู้เกี่ยวกับ AI
-          </summary>
-          <div class="nav-body">
-            <section id="plugin-panels" class="hidden"></section>
-          </div>
-        </details>
-
-        <label class="nav-item" for="task" title="ถามผู้ช่วยได้เลย">
-          <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 2.5 5 13.3h5.8L10.8 21.5 19 10.7h-5.8z"/></svg></span>ผู้ช่วยอัจฉริยะ
-        </label>
-        <label class="nav-item" for="file-picker" title="แนบไฟล์เดี่ยวมาคุย">
-          <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21.2 11.2l-8.9 8.9a5.8 5.8 0 0 1-8.2-8.2l9-9a3.9 3.9 0 0 1 5.5 5.5l-9 9a1.9 1.9 0 0 1-2.7-2.7l8.3-8.3"/></svg></span>ไฟล์เดี่ยว
-        </label>
-      </nav>
+      <details class="nav-group" id="plugins-group" hidden>
+        <summary class="nav-item" title="แผงที่ปลั๊กอินวาดไว้ให้ดู">
+          <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.6l1.7 4.4 4.5 1.7-4.5 1.7L12 15.8l-1.7-4.4-4.5-1.7 4.5-1.7z"/><path d="M18.6 15.9l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg></span>ปลั๊กอิน
+        </summary>
+        <div class="nav-body">
+          <section id="plugin-panels"></section>
+        </div>
+      </details>
     </div>
 
+    <!-- The two doors to the rest of the app, written out: a 15px gear in the
+         header is easy to miss, and this is where people look for it. -->
     <div class="side-foot">
+      <button type="button" id="side-settings" class="nav-item" title="ตั้งค่าทั้งหมด">
+        <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.5a1.7 1.7 0 0 0 .34 1.87l.06.06a2.06 2.06 0 1 1-2.91 2.91l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2.06 2.06 0 0 1-4.12 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2.06 2.06 0 1 1-2.91-2.91l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2.06 2.06 0 0 1 0-4.12h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2.06 2.06 0 1 1 2.91-2.91l.06.06a1.7 1.7 0 0 0 1.87.34h.08a1.7 1.7 0 0 0 1.03-1.56V3a2.06 2.06 0 0 1 4.12 0v.09a1.7 1.7 0 0 0 1.03 1.56h.08a1.7 1.7 0 0 0 1.87-.34l.06-.06a2.06 2.06 0 1 1 2.91 2.91l-.06.06a1.7 1.7 0 0 0 .34 1.87v.08a1.7 1.7 0 0 0 1.56 1.03H21a2.06 2.06 0 0 1 0 4.12h-.09a1.7 1.7 0 0 0-1.51 1.18z"/></svg></span>ตั้งค่า
+      </button>
+      <button type="button" id="side-help" class="nav-item" title="วิธีใช้ทั้งหมด">
+        <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.4a2.8 2.8 0 0 1 5.5.8c0 1.8-2.8 2-2.8 3.4"/><path d="M12 17.1h.01"/></svg></span>วิธีใช้
+      </button>
     </div>
   </aside>
 
@@ -210,6 +205,9 @@
           <input type="file" id="file-picker" multiple hidden />
           <button type="button" id="attach-btn" class="round-btn" title="แนบรูป/ไฟล์/วิดีโอ">+</button>
           <button type="button" id="slash-btn" class="hint-pill" title="ดูคำสั่งทั้งหมด">/ คำสั่ง</button>
+          <span class="model-chip" title="ผู้ให้บริการ — ใครตอบรันนี้ (สลับได้ที่นี่)">
+            <select id="provider" title="ผู้ให้บริการ — AiPASS หรือ API อื่น"></select>
+          </span>
           <span class="model-chip" title="โมเดลที่ใช้คุย">
             <select id="model" title="โมเดล"></select>
           </span>

@@ -313,7 +313,7 @@ test('a rate refusal pauses the whole tab, not just the refused job', async () =
   const second = await page.settled('j2');
   assert.equal(second.kind, 'done', 'the second job waited the first job\'s clock out, not its own');
   assert.ok(
-    page.parts('j2').some((p) => p.kind === 'note' && /pacing sends — waiting [45]s/.test(p.text)),
+    page.parts('j2').some((p) => p.kind === 'note' && /pacing sends — waiting 20s/.test(p.text)),
     'the tab-wide wait is reported for the job that did not draw the 429',
   );
 });
@@ -332,7 +332,7 @@ test('after a rate refusal the tab paces its sends apart', async () => {
   assert.equal(end.kind, 'done');
   assert.equal(page.requests.length, 2, 'the retry still happened');
   assert.ok(
-    page.parts('j1').some((p) => p.kind === 'note' && /pacing sends — waiting [23]s/.test(p.text)),
+    page.parts('j1').some((p) => p.kind === 'note' && /pacing sends — waiting 20s/.test(p.text)),
     'the retry after a refusal is itself paced, so the burst cannot re-draw the limiter',
   );
 });
@@ -357,9 +357,103 @@ test('a 403 refusal pauses the whole tab, not just the refused job', async () =>
   assert.equal(second.kind, 'done', 'the second job waited the first job\'s clock out, not its own');
   assert.equal(page.requests.length, 3, 'the refusal, its identical resend, and the next job');
   assert.ok(
-    page.parts('j2').some((p) => p.kind === 'note' && /pacing sends — waiting [45]s/.test(p.text)),
+    page.parts('j2').some((p) => p.kind === 'note' && /pacing sends — waiting 20s/.test(p.text)),
     'the tab-wide wait is reported for the job that did not draw the 403',
   );
+});
+
+// The pace the tab falls back to after a refusal is the edge's own envelope
+// (about ten messages in four minutes, docs/HARNESS_DESIGN.md), not a third
+// of a second: a 3s gap is eight times faster than the limiter allows, so one
+// refusal kept the tab inside the window that had just said no and the next
+// send drew the next refusal. The gap is what makes the refusal an episode
+// stop being one.
+test('a refusal slows the whole tab to the edge\'s envelope, not to a third of a second', async () => {
+  const page = loadPage({
+    fastTimers: true,
+    onFetch: async (_url, _init, n) => (n === 1
+      ? new Response('', { status: 403, statusText: 'Forbidden', headers: { server: 'cloudflare' } })
+      : sseResponse(textFrames('ok'))),
+  });
+  page.run(chatJob());
+  await page.settled('j1');
+  const notes = page.parts('j1').filter((p) => p.kind === 'note').map((p) => p.text);
+  assert.ok(
+    notes.some((t) => /403/.test(t) && /waiting 15s/.test(t)),
+    'the first refusal waits long enough to matter, not 5s',
+  );
+  assert.ok(
+    !notes.some((t) => /waiting 5s/.test(t)),
+    'a five-second pause was a probe, not a wait: it re-heated the window it was waiting for',
+  );
+});
+
+// Two senders in one tab (a helper, the chat pane, a second project) used to
+// put their requests on the wire inside the same second. The edge scores that
+// shape worst, and it is the one the harness makes on every step: a tool
+// result goes back to the model the moment the answer ends.
+test('two sends in one tab never start inside the same second', async () => {
+  const page = loadPage({
+    fastTimers: true,
+    onFetch: async () => sseResponse(textFrames('ok')),
+  });
+  page.run(chatJob());
+  await page.settled('j1');
+  page.run(chatJob({ jobId: 'j2' }));
+  await page.settled('j2');
+  const sends = page.requests.filter((r) => r.url.includes('/actions/send-message/'));
+  assert.equal(sends.length, 2);
+  assert.ok(
+    page.parts('j2').some((p) => p.kind === 'note' && /pacing sends/.test(p.text)),
+    'the second send is held off until the gap has passed',
+  );
+});
+
+// The conversation create is a wire request like any other. It used to fire
+// outside the tab's clock entirely, so a run could create its conversation and
+// post its first message back-to-back — the shape the edge refuses most.
+test('a create waits out the tab\'s clock like any other send', async () => {
+  const page = loadPage({
+    fastTimers: true,
+    onFetch: async (url) => (url.includes('/chat.data')
+      ? { conversationId: 'conv9' }
+      : sseResponse(textFrames('ok'))),
+  });
+  page.run({ jobId: 'c1', kind: 'create', temporary: true, modelId: 'm1' });
+  // A create answers with a loader, not a reply, so it is watched directly.
+  const started = Date.now();
+  while (!page.replies('c1').some((m) => m.kind === 'loader') && Date.now() - started < 4000) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.ok(page.replies('c1').some((m) => m.kind === 'loader'), 'the conversation was created');
+  page.run(chatJob({ jobId: 'j2' }));
+  await page.settled('j2');
+  assert.ok(
+    page.parts('j2').some((p) => p.kind === 'note' && /pacing sends/.test(p.text)),
+    'the send after a create waits the same gap behind it',
+  );
+});
+
+// A resend is a resend. The site marks one with x-ai-retry (its own client
+// sends the header when a person retries a message), so the server can tell
+// the repeat from a second turn instead of taking the message twice.
+test('a resent message carries x-ai-retry, so the server can tell it from a new turn', async () => {
+  let sends = 0;
+  const page = loadPage({
+    fastTimers: true,
+    onFetch: async (url) => {
+      if (url.includes('/actions/send-message/') && ++sends === 1) {
+        return new Response('', { status: 403, statusText: 'Forbidden', headers: { server: 'cloudflare' } });
+      }
+      return sseResponse(textFrames('ok'));
+    },
+  });
+  page.run(chatJob());
+  await page.settled('j1');
+  const posts = page.requests.filter((r) => r.url.includes('/actions/send-message/'));
+  assert.equal(posts.length, 2);
+  assert.equal(posts[0].init.headers['x-ai-retry'], undefined, 'the first attempt is a first attempt');
+  assert.equal(posts[1].init.headers['x-ai-retry'], 'true', 'the resend says it is one');
 });
 
 // The extension owns which paths and intents the bridge may reach. A job asking

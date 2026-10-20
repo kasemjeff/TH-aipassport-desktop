@@ -1,9 +1,9 @@
 {
-  "name": "th-aipassport-harness",
+  "name": "aipass-desktop",
   "version": "0.2.0",
   "private": true,
   "license": "MIT",
-  "description": "The aipass desktop: terminal chat, the file-editing agent harness, and the Tauri window — over a local OpenAI-compatible bridge.",
+  "description": "AiPASS in a desktop window — bridge, chat and a file agent with a pi-style harness.",
   "bin": {
     "aipass": "aipass-bridge/bin/aipass.mjs"
   },
@@ -44,7 +44,7 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "typescript": "^7.0.2",
-    "@types/node": "^26.6.5"
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
   }
 }

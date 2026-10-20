@@ -193,3 +193,24 @@ test('a corrupt project record is repaired on the next write, not thrown at', ()
   store.addGrant(root, 'write', 'y.txt');
   assert.deepEqual(store.forRoot(root).grants, [{ kind: 'write', arg: 'y.txt' }]);
 });
+
+test('a rules save that cannot complete leaves the previous rules intact', () => {
+  const file = path.join(tempDir(), 'rules.json');
+  const root = tempDir();
+  const store = new RulesStore(file);
+  store.addGrant(root, 'write', 'a.txt');
+  const before = fs.readFileSync(file, 'utf8');
+  assert.match(before, /a\.txt/);
+
+  // A directory where the temp file would go: the write fails before the
+  // swap, the way a full disk or a dead handle would. The old rules — every
+  // project's, not just this one's — must be exactly as they were: the direct
+  // overwrite this replaces could lose the whole file to one bad moment.
+  fs.mkdirSync(file + '.tmp');
+  assert.throws(() => store.addGrant(root, 'shell', 'rm -rf /'));
+  assert.equal(fs.readFileSync(file, 'utf8'), before, 'a failed save changes nothing');
+
+  fs.rmSync(file + '.tmp', { recursive: true, force: true });
+  store.addGrant(root, 'shell', 'rm -rf /');
+  assert.deepEqual(store.forRoot(root).grants.map((g) => g.kind).sort(), ['shell', 'write'], 'and the next save lands');
+});

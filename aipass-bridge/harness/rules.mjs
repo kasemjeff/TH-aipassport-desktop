@@ -18,6 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { aipassHome } from './settings.mjs';
+import { writeFileAtomic } from './atomic-write.mjs';
 
 const isRule = (r) => r && typeof r === 'object'
   && typeof r.pattern === 'string' && r.pattern
@@ -60,7 +61,10 @@ export class RulesStore {
 
   save(data) {
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    fs.writeFileSync(this.file, JSON.stringify(data, null, 2) + '\n');
+    // Temp file plus rename: a crash mid-save leaves the previous rules — the
+    // whole file used to be overwritten in place, so one bad moment lost
+    // every project's rules AND grants, and the app asked for them all again.
+    writeFileAtomic(this.file, JSON.stringify(data, null, 2) + '\n');
   }
 
   forRoot(root) {
@@ -92,5 +96,37 @@ export class RulesStore {
     entry.rules = (Array.isArray(rules) ? rules : []).filter(isRule);
     if (!entry.rules.length && !entry.grants?.length) delete data.projects[key];
     this.save(data);
+  }
+
+  /**
+   * Re-key one project's rules and grants to a new absolute root — the half
+   * of a folder move the file cannot do by itself, because the key IS the
+   * path. Anything already stored at the destination is merged into, never
+   * replaced: both projects' rules were real. Returns what moved.
+   */
+  moveRoot(from, to) {
+    const data = this.load();
+    const oldKey = path.resolve(from);
+    const newKey = path.resolve(to);
+    if (oldKey === newKey) return { rules: 0, grants: 0 };
+    const entry = data.projects[oldKey];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return { rules: 0, grants: 0 };
+    const rules = Array.isArray(entry.rules) ? entry.rules.filter(isRule) : [];
+    const grants = Array.isArray(entry.grants) ? entry.grants.filter(isGrant) : [];
+    const dest = entryOf(data, newKey);
+    const mergedRules = Array.isArray(dest.rules) ? dest.rules.filter(isRule) : [];
+    for (const rule of rules) {
+      if (!mergedRules.some((r) => JSON.stringify(r) === JSON.stringify(rule))) mergedRules.push(rule);
+    }
+    const mergedGrants = Array.isArray(dest.grants) ? dest.grants.filter(isGrant) : [];
+    for (const grant of grants) {
+      if (!mergedGrants.some((g) => g.kind === grant.kind && g.arg === grant.arg)) mergedGrants.push(grant);
+    }
+    dest.rules = mergedRules;
+    dest.grants = mergedGrants;
+    if (!mergedRules.length && !mergedGrants.length) delete data.projects[newKey];
+    delete data.projects[oldKey];
+    this.save(data);
+    return { rules: rules.length, grants: grants.length };
   }
 }

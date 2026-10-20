@@ -13,7 +13,7 @@ the checker is the piece that puts a verdict behind every DONE.
 
 ## 1. Contract
 
-`ctx.check({ files }) -> Promise<{ verdict: 'pass' | 'fail' | 'none', text, ran }>`
+`ctx.check({ files }) -> Promise<{ verdict: 'pass' | 'fail' | 'none', text, ran, declared, declaredSource }>`
 — wired by the facade exactly where `subagent` is wired today
 (`harness.mjs:290`), implemented as `#makeChecker()` beside `#makeHelper()`
 (`harness.mjs:351`). No new marker: the preamble (`protocol.mjs:26`) does not
@@ -127,8 +127,10 @@ the whole point, and a checker that delegates is neither.
   that fallback and accepts a verdict that may reflect the disk; the report
   names the command, so the human can tell.
 - **Sandbox cleanup** is `tools.run`'s `finally` (`tools.mjs:307`); a killed
-  process can leave `.aipass/run/run-*`, which `SKIP` already hides from every
-  walk. No startup sweep in v1.
+  process used to leave the whole copy behind, under `.aipass/run/run-*`,
+  with nothing to collect it. Since 2026-10-20 the projection lives under
+  `~/.aipass/run/` and a janitor (`sweepSandboxes`, called when a harness
+  opens a project) collects what no run can still own.
 - **Missing tab / no helper conversation.** If `createConversation` fails, skip
   the check — never fall back to the parent's conversation. DONE is accepted,
   a note says why, `checks: 0`. `needs_tab` stays the parent's own path
@@ -168,23 +170,39 @@ asserted separately; `Emitter` for events.
 8. **Checker conversation unavailable** — `createConversation` answers null:
    DONE accepted, skip note in the session, `checks: 0`, no checker prompt in
    the parent conversation.
+9. **A run-declared `verifyCommand` beats the project file** — the checker
+   prompt says "This run declares…", the other command is absent, and the
+   verdict carries `declared: 'node check.mjs'`, `declaredSource: 'run'` and
+   the same `run_stats.checkCommand`.
+10. **`requireCheck` refuses a later DONE** — a failing first verdict still
+    earns its correction; the next DONE over the unchanged tree ends as
+    `done-unverified` with `doneUnverified: 1` and no extra checker
+    conversation. A passing check still ends as `done`.
+11. **The commit gate reads the same declared command** — with
+    `verifyCommand` and no `.aipass/check.txt`, a `git commit` is refused and
+    the message names `--verify-command: node check.mjs`; after the command
+    passes, the same commit reaches git (`test/gates.test.mjs`).
 
 ## 5. Open questions
 
 1. **Model-invocable?** v1 is loop-only. Should a `VERIFY` marker let the model
    ask for exactly this mid-run? The generic SUBAGENT cannot be told "verify",
    which is the gap this design is built around.
-2. **One continuation, or a hard gate?** The spine's stronger reading is "done
-   means a runnable check passed". As shipped, a fail earns one continuation
-   and a fix earns one re-check (two verdicts a run, max); a DONE over the
-   tree the check already judged is accepted with the verdict recorded.
-   Whether the first verdict can block `done` outright — a `done-unverified`
-   bucket in `byStop` — is a decision for after `checks`/`checkVerdict` have
-   data.
+2. **One continuation, or a hard gate?** Answered 2026-10-20 as an opt-in:
+   `requireCheck` refuses a DONE over a declared check that is still failing and
+   ends the run as `done-unverified`. The default stays advisory — a fail earns
+   one continuation and a fix earns one re-check (two verdicts a run, max), so
+   the existing behavior and its tests are unchanged unless a caller asks for
+   the gate. The gate fires only when a declared check exists and the checker
+   actually ran (`subagent` and `allowRun` on, a staged tree); with no verdict
+   there is nothing to enforce.
 3. **Where does "the project's check" come from?** Answered 2026-10-16 with the
    declared check below: `.aipass/check.txt` names the command when the project
-   wants verdicts to be comparable; without it the checker keeps inferring from
-   the tree (package.json scripts, test files).
+   wants verdicts to be comparable. Since 2026-10-20 `verifyCommand` names the
+   same command for a run (or every run, from the settings sheet) before the
+   project commits the file; the option wins, and the verdict records
+   `declaredSource: 'run' | 'project'`. Without either, the checker keeps
+   inferring from the tree (package.json scripts, test files).
 
 ## As shipped (2026-10-16)
 
@@ -219,3 +237,30 @@ Two changes from the Thai pack round:
    and the gate itself is one exported function (`isGitCommit`) shared with
    the command-risk classifier, so the two cannot drift. Pinned in
    `test/gates.test.mjs`.
+
+## As shipped (2026-10-20)
+
+The two open questions above closed, with the default behavior left alone:
+
+1. **`verifyCommand` — a declared check without a project file.** One command
+   string on the run (CLI `--verify-command`, RPC `run`, settings sheet) wins
+   over `.aipass/check.txt`; the checker prompt names whose command it is, and
+   the verdict carries `declared` and `declaredSource`. The same option arms
+   the commit gate, whose refusal names the source (`--verify-command` or
+   `.aipass/check.txt`). `run_stats.checkCommand` records the command beside
+   `checkVerdict`, so two runs are only compared when they ran the same thing.
+   The settings sanitizer keeps one line and 300 characters; a pasted second
+   line never reaches a shell. Pinned in `checker.test.mjs`,
+   `gates.test.mjs`, `settings-clamp.test.mjs` and `desktop.test.mjs`.
+2. **`requireCheck` — the hard gate is opt-in.** A first failing verdict still
+   rides back as the correction; a later DONE over the same failing tree (or a
+   DONE with no step left to carry the report) is terminal as
+   `done-unverified`. The gate requires a declared check and a checker that
+   actually ran; without a verdict there is nothing to enforce, so existing
+   runs and their tests are unchanged. `run_stats.doneUnverified` counts the
+   refusal. Pinned in `checker.test.mjs`.
+3. **One shape check before dispatch.** Not checker-specific, but it changes
+   what a bad checker reply sees: `validateCall()` (`harness/validate.mjs`)
+   runs before every built-in, plugin and MCP call, so an empty `RUN` or a
+   blank `SEARCH` is one `err: …` sentence no matter which surface would have
+   handled it. Pinned in `test/validate.test.mjs`.

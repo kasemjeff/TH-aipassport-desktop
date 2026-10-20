@@ -5,6 +5,7 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { startBridge, FakeExtension, scripted, tempDir, run, AGENT } from './harness.mjs';
 import { outbound, inbound } from '../harness/waf.mjs';
+import { bootstrapSnapshot } from '../harness/loop.mjs';
 
 let bridge;
 before(async () => { bridge = await startBridge(); });
@@ -114,6 +115,18 @@ test('--snapshot quotes git status and package.json scripts into turn 1', async 
   } else {
     assert.doesNotMatch(first, /git status:/, 'no repository, no git line');
   }
+});
+
+test('the snapshot reads package.json without a synchronous file read', async (t) => {
+  const dir = tempDir({ 'package.json': JSON.stringify({ scripts: { test: 'node --test' } }) });
+  const readFileSync = fs.readFileSync;
+  // The backend serves every window call: a sync read here would block it.
+  fs.readFileSync = () => { throw new Error('the snapshot used a blocking read'); };
+  t.after(() => { fs.readFileSync = readFileSync; });
+
+  const snapshot = await bootstrapSnapshot({ git: async () => '' }, dir);
+  assert.match(snapshot, /package scripts:/, 'the async read still finds the scripts');
+  assert.match(snapshot, /test: node --test/, 'and quotes them');
 });
 
 test('without --snapshot turn 1 carries no snapshot bytes', async (t) => {

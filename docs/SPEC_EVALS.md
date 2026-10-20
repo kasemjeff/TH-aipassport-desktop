@@ -111,10 +111,11 @@ by `stats.mjs` `collectRuns`; the raw JSONL under
 | metric | field | notes |
 |---|---|---|
 | outcome | check exit code | new; `stopReason: 'done'` is never success |
-| stop | `run_stats.stopReason` | done / steps / stalled / stagnation / error / plan-rejected |
+| stop | `run_stats.stopReason` | done / done-unverified / steps / stalled / stagnation / error / plan-rejected |
 | calls | `run_stats.tools` (`{n, fail, ms}` per kind); `run_stats.steps` = executed marker calls (`toolsRun`) | refusal rate = Σfail/Σn |
 | turns | `run_stats.turns` (older lines: `stepMs.length`) | one entry per conversation turn |
 | nudges / stagnations / verify / firewall | `nudges`, `stagnations`, `verifyPrompts`, `firewallNotes` | direct |
+| checker | `checks`, `checkVerdict`, `checkCommand`, `doneUnverified` | compare verdicts only when `checkCommand` matches; `done-unverified` is never counted as `done` |
 | spend | `run_stats.spent` (credits delta; `null` when quota fails) | the observable denominator — tokens are not exposed |
 | wall | new, around run + apply | Σ`stepMs` is model wait only |
 

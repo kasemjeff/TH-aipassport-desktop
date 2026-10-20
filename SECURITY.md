@@ -92,6 +92,14 @@ Then restart the bridge and reload the extension.
   screen can catch is a command that builds the name at runtime (`node -e`
   tricks) — that is arbitrary code, `--allow-run` is the gate, and ask mode
   shows every command before it runs.
+- **A command's OUTPUT is screened too** (`harness/output-scrub.mjs`): the
+  screen above looks at the command and at the files it names, but a command
+  can also PRINT a credential — `set`/`env` prints the whole environment, and
+  that environment is what the transcript carries upstream. Known token shapes
+  (`sk-…`, `ghp_…`, `AKIA…`, `Bearer …`) and any assignment whose name says
+  it carries a credential (`API_KEY=…`, `GITHUB_TOKEN=…`, `?_authToken=…`)
+  are replaced with `[redacted]` before the output enters the transcript. The
+  command still ran; the value does not leave.
 - **The bridge refuses to bind off-loopback** (`bridge/server.mjs`): setting
   `AIPASS_HOST` to anything but `127.0.0.1`/`localhost`/`::1` without
   `AIPASS_ALLOW_REMOTE=1` exits instead of listening with no auth.
@@ -114,6 +122,24 @@ Then restart the bridge and reload the extension.
   stores it once; the CLI and the desktop backend read the file themselves; the
   window bootstraps it from a same-origin-only `/token` endpoint. `AIPASS_TOKEN`
   overrides, `AIPASS_REQUIRE_AUTH=0` disables (with a boot warning).
+- **Plugins and MCP servers are trusted, not sandboxed** (Oct 2026,
+  `harness/install.mjs`, `harness/mcp.mjs`): installing a plugin, or adding an
+  MCP server, means running someone else's code in the backend process with the
+  app's rights — which is why install is the consent moment. `aipass plugin
+  inspect` (and the window's install box) prints size and sha256 **without
+  executing anything**; staging copies are validated only after that report is
+  confirmed (`--yes` exists for scripts and still prints the trust sentence),
+  and validation *is* the first execution. The recorded hash is **provenance,
+  not protection**: it answers "did this change since it behaved?", while the
+  stops remain the file system, the permission gate and the person. MCP tools
+  carry their server's declared `risk` (default `"write"`) into the same
+  verdict a built-in of that kind faces — an MCP filesystem server may write,
+  and in ask mode it is asked about; `"read"` is the operator's trust statement,
+  not a verification. `env` values in `mcp.json` are secret-class: never
+  rendered back (`KEY = •••••`), never logged, the file written owner-only, and
+  a removed server takes its values with it. Nothing in the install path ever
+  deletes: a replaced or removed copy moves to `.trash/`, and an unmanaged file
+  or folder needs an explicit `--force` to be touched at all.
 - **The session and upload stores are owner-only where the OS has modes**
   (`harness/session.mjs`, `harness/settings.mjs`): the sessions directory, its
   per-project directories and every session file are created 0o700/0o600, a
@@ -184,7 +210,13 @@ change. The honest residuals are the "Known limits" below.
   by default for that reason.
 - `RUN` runs on this machine's terms: a 120-second cap per command, 10 MB of
   captured output, no CPU or memory cage, and the sandbox (when edits are
-  staged) is a projection for honest checks, not a jail. Network access is
+  staged) is a projection for honest checks, not a jail. The projection is a
+  copy of your project with the staged edits in it, and the heavy directories
+  (`node_modules`, `dist`, …) are SHARED with the real tree rather than
+  copied — a write into one of them lands in your project, and the command's
+  result says which folders are shared. The projection lives under
+  `~/.aipass/run/`, outside the project, so it cannot be committed by
+  accident. Network access is
   not filtered — FETCH's private-address guard does not apply to a shell
   command.
 - Remote image URLs are fetched server-side behind a private-address guard. The

@@ -32,9 +32,9 @@ it to your clipboard), starts the bridge, and opens the extension and site pages
 so you can finish the one-time browser steps. Re-run it any time — it is
 idempotent. The manual steps below are what it automates.
 
-There is nothing to build and nothing to `npm install`. Everything under
-`aipass-bridge/` is `node:*` builtins, so on **any machine with Node ≥ 20** the
-same three steps apply — copy the repo over and run them again.
+There is nothing to build and nothing to `npm install` to run it. Everything
+under `aipass-bridge/` is `node:*` builtins, so on **any machine with Node ≥ 22**
+the same three steps apply — copy the repo over and run them again.
 
 ### 1. Get the `aipass` command on your PATH
 
@@ -75,7 +75,7 @@ for everything except the health probes; `AIPASS_REQUIRE_AUTH=0` disables it.
 ### Check it
 
 ```bash
-aipass status     # node ≥ 20? bridge up? extension connected?
+aipass status     # node ≥ 22? bridge up? extension connected?
 ```
 
 Then:
@@ -99,6 +99,8 @@ aipass "question" # one-shot answer from CLI
 | `aipass styles` | list video & image style presets |
 | `aipass credits` | check credit quota |
 | `aipass doctor` | node / bridge / extension / model diagnostics |
+| `aipass memory` | list/clear the facts carried across sessions for this project |
+| `aipass relocate` | re-key a project's stored data after its folder moved |
 | `aipass setup-assistant` | configure custom coding assistant |
 | `aipass status` | node / bridge / extension check |
 
@@ -207,8 +209,8 @@ Type `/` to open the command menu — **↑/↓** to choose, **Tab** to fill it 
 | `npm run qa` | one QA pass: static wiring, suite, window logic, live backend |
 
 The desktop app is the same bridge and the same agent with a window on top —
-see `desktop/README.md`. Nothing in this repo needs `npm install`: every file
-imports only `node:*` builtins.
+see `desktop/README.md`. Nothing in this repo needs `npm install` to run: every
+file imports only `node:*` builtins.
 
 ## What you get
 
@@ -499,6 +501,28 @@ most recent.
 The bridge also serves `POST /v1/chat/completions` and `GET /v1/models`, so any
 OpenAI-compatible client can point at `http://127.0.0.1:8787/v1` for plain
 chat. Only the last user message is forwarded.
+
+### Another provider
+
+The bridge is for AiPASS. The **harness** — the agent, and the desktop window
+that drives it — can also talk to a provider that is a plain API:
+
+```bash
+aipass providers                                        # list
+aipass providers add openai \
+    --base-url https://api.openai.com/v1 \
+    --api-key-env OPENAI_API_KEY --model gpt-4o
+aipass providers use openai                             # a run now answers with it
+aipass providers test openai                            # ask it whether it answers
+```
+
+`--kind anthropic` speaks Anthropic's Messages API instead of the
+OpenAI-compatible shape. The specs live in `~/.aipass/providers.json`; the
+keys live in `~/.aipass/credentials.json` (owner-only) — and a named
+environment variable wins over the stored key, so the key never has to be
+written down. `settings.json` holds no secret.
+
+One run on another provider: `npm run agent -- "…" --provider openai`.
 
 ## Tests
 

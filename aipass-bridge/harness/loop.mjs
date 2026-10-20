@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { outbound } from './waf.mjs';
 import {
-  REMINDER, prose, parse, parseTodo, mergeTodo, READING, attemptedMarker,
+  REMINDER, REMINDER_HEAD, REMINDER_TAIL, prose, parse, parseTodo, mergeTodo, READING, attemptedMarker,
   preamble as buildPreamble,
 } from './protocol.mjs';
 import { resilientSay, decode, recoverWaits, sendRecoverable, waitLabel } from './bridge.mjs';
@@ -24,6 +24,8 @@ import { classify, isGitCommit } from './permissions.mjs';
 import { posix } from './overlay.mjs';
 import { thaiRatio } from './lang.mjs';
 import { PATHY, pathVariants, beYearNote } from './argguard.mjs';
+import { validateCall } from './validate.mjs';
+import { DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_WALL_CLOCK_MS } from './settings.mjs';
 
 /** A pause the loop itself takes — the recovery waits between send attempts. */
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -46,13 +48,22 @@ const SURVIVES_FAILURE = (kind) => !MUTATING.has(kind) && kind !== 'run';
  * command) masked out, then any path-shaped tokens. Three different missing
  * files — or three spellings of the same broken command — collapse to one
  * key; a genuinely different failure keeps its own.
+ *
+ * Only whole tokens of at least four characters are masked. A short, ordinary
+ * argument ("not", "the") must not erase that word from the error text, or two
+ * unrelated failures could be counted as the same kind.
  */
-function errKindOf(call, text) {
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+export function errKindOf(call, text) {
   let line = String(text).split('\n')[0].toLowerCase().slice(0, 200);
   const bits = [String(call.arg ?? ''), call.kind === 'run' ? String(call.body ?? '').split('\n')[0] : '']
     .map((b) => b.trim().toLowerCase())
-    .filter((b) => b.length >= 3);
-  for (const b of bits) line = line.split(b).join('<arg>');
+    .filter((b) => b.length >= 4);
+  for (const b of bits) {
+    const token = new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(b)}(?![\\p{L}\\p{N}_])`, 'gu');
+    line = line.replace(token, '<arg>');
+  }
   return `${call.kind}::${line.replace(/[\w.\\/:-]*[\\/][\w.\\/:-]*/g, '<path>').replace(/\s+/g, ' ').trim()}`;
 }
 
@@ -63,13 +74,14 @@ const previewOf = (call) => {
 };
 
 /**
- * (bootstrap snapshot, `--snapshot`) What a run otherwise learns one round trip
- * at a time: the git working-tree state (read-only, through the same GIT tool
- * the model has) and the package.json scripts. Both reads are bounded and both
- * failures are silent — a head start, never a blocker — and the caller places
- * the result in turn 1 only.
+ * (bootstrap snapshot) What a run otherwise learns one round trip at a time:
+ * the git working-tree state (read-only, through the same GIT tool the model
+ * has) and the package.json scripts. Both reads are bounded and both failures
+ * are silent — a head start, never a blocker — and the caller places the result
+ * in turn 1 only. The desktop harness enables it by default; the CLI offers
+ * `--snapshot`.
  */
-async function bootstrapSnapshot(tools, root) {
+export async function bootstrapSnapshot(tools, root) {
   const parts = [];
   try {
     const status = String(await tools.git('status --short')).trim();
@@ -82,12 +94,74 @@ async function bootstrapSnapshot(tools, root) {
     }
   } catch { /* not a repository, or git is absent — the snapshot skips it */ }
   try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    const pkg = JSON.parse(await fs.promises.readFile(path.join(root, 'package.json'), 'utf8'));
     const scripts = Object.entries(pkg.scripts ?? {}).filter(([, v]) => typeof v === 'string').slice(0, 12);
     if (scripts.length) parts.push(`package scripts:\n${scripts.map(([k, v]) => `  ${k}: ${v}`).join('\n')}`);
   } catch { /* no package.json — the snapshot skips it */ }
   const text = parts.join('\n');
   return text.length > 1500 ? `${text.slice(0, 1500)}…` : text;
+}
+
+/**
+ * Normalize the loose option sheet once, before a run touches state. Pure:
+ * every clamp and default lives here, so the loop body reads typed values and
+ * a test can pin the policy without a bridge, a tool set or a session.
+ */
+export function normalizeOptions(options = {}) {
+  // The step cap, or no cap at all: 0 (the shipped default) means the
+  // run goes until it is DONE, a guard stops it, or a budget below is spent. A
+  // positive number caps the run, and the last step says so (step_limit).
+  const rawCap = Number(options.maxSteps ?? 0);
+  const maxSteps = Number.isFinite(rawCap) && rawCap > 0 ? Math.floor(rawCap) : Infinity;
+  // 0 on the wire means "no cap" — Infinity does not survive JSON, so events
+  // carry the option as the surfaces know it.
+  const maxStepsWire = Number.isFinite(maxSteps) ? maxSteps : 0;
+  // Per-run budgets — the defaults are imported from the settings file so the
+  // fallback and the shipped setting can never drift apart. A reply full of
+  // markers used to execute every one of them, and a yolo RUN can hold one
+  // step open for minutes; either budget spent stops the run with its own stop
+  // reason in run_stats — the real bound once the step cap is off.
+  const maxToolCalls = Number(options.maxToolCalls) > 0
+    ? Math.floor(Number(options.maxToolCalls)) : DEFAULT_MAX_TOOL_CALLS;
+  const maxWallClockMs = Number(options.maxWallClockMs) > 0
+    ? Math.floor(Number(options.maxWallClockMs)) : DEFAULT_MAX_WALL_CLOCK_MS;
+  // (credit cap) Optional ceiling on observed spend, in credits. 0 = no cap.
+  // The check rides the bridge's cached quota (its own 30s TTL), so it bounds
+  // a runaway run without turning into an upstream request per step.
+  const maxCredits = Number(options.maxCredits) > 0 ? Number(options.maxCredits) : 0;
+  const model = options.model ?? null;
+  // How hard the model thinks before each reply. 'off' (or nothing) means the
+  // request never asks; the level that does go out is checked by the bridge
+  // against the model, so a level it lacks never breaks a run.
+  const thinking = options.thinking && String(options.thinking).toLowerCase() !== 'off'
+    ? String(options.thinking).toLowerCase() : null;
+  // Sampling temperature: a number 0..2 rides every send; anything else (the
+  // null default included) never asks, so the server's own default stands.
+  const temperature = typeof options.temperature === 'number' && Number.isFinite(options.temperature)
+    ? Math.min(2, Math.max(0, options.temperature)) : null;
+  const useSlim = Boolean(options.slim);
+  const seedText = options.seedText ?? null;
+  const pluginTools = options.pluginTools ?? [];
+  // (Thai pack) Language policy. `replyLanguage` is what the preamble tells
+  // the model; `langCheck` is the stop hook that measures it — the closing
+  // message's share of Thai letters (code and URLs excluded) must reach
+  // `minThaiRatio`, or the run rewrites it once. Tool vocabulary stays
+  // English regardless; that separation is the whole point.
+  const replyLanguage = options.replyLanguage === 'en' ? 'en' : 'th';
+  const langCheck = Boolean(options.langCheck);
+  const minThaiRatio = Number.isFinite(Number(options.minThaiRatio))
+    ? Math.min(1, Math.max(0, Number(options.minThaiRatio))) : 0.4;
+  // (Thai pack) The pre-tool guard. repeatGuard refuses an identical call
+  // (same kind, argument and body) already made twice with nothing staged in
+  // between — a loop, not a step; repeatGuardMax is how many such refusals
+  // one run may collect before it is stopped as stalled.
+  const repeatGuard = Boolean(options.repeatGuard);
+  const repeatGuardMax = Number(options.repeatGuardMax) > 0 ? Math.floor(Number(options.repeatGuardMax)) : 4;
+  return {
+    maxSteps, maxStepsWire, maxToolCalls, maxWallClockMs, maxCredits,
+    model, thinking, temperature, useSlim, seedText, pluginTools,
+    replyLanguage, langCheck, minThaiRatio, repeatGuard, repeatGuardMax,
+  };
 }
 
 /**
@@ -119,61 +193,28 @@ export async function runTask(taskText, ctx = {}) {
     bridge, tools, overlay, session = null, permissions = null, events = null,
     subagent = null, check = null, approvePlan = null, options = {}, first = true,
     runPluginTool = null, compactor = null, rotate = null, listingShown = null,
+    onConversationDead = null, onConversationSettled = null,
   } = ctx;
   let conversation = ctx.conversation ?? null;
   let conversationTemporary = ctx.conversationTemporary ?? null;
-  // The step cap, or no cap at all: 0 (the shipped default) means the
-  // run goes until it is DONE, a guard stops it, or a budget below is spent. A
-  // positive number caps the run, and the last step says so (step_limit).
-  const rawCap = Number(options.maxSteps ?? 0);
-  const maxSteps = Number.isFinite(rawCap) && rawCap > 0 ? Math.floor(rawCap) : Infinity;
-  // 0 on the wire means "no cap" — Infinity does not survive JSON, so events
-  // carry the option as the surfaces know it.
-  const maxStepsWire = Number.isFinite(maxSteps) ? maxSteps : 0;
-  // Per-run budgets — the same defaults the settings file ships. A reply full
-  // of markers used to execute every one of them, and a yolo RUN can hold one
-  // step open for minutes; either budget spent stops the run with its own stop
-  // reason in run_stats — the real bound once the step cap is off.
-  const maxToolCalls = Number(options.maxToolCalls) > 0 ? Math.floor(Number(options.maxToolCalls)) : 300;
-  const maxWallClockMs = Number(options.maxWallClockMs) > 0 ? Math.floor(Number(options.maxWallClockMs)) : 1_800_000;
-  // (credit cap) Optional ceiling on observed spend, in credits. 0 = no cap.
-  // The check rides the bridge's cached quota (its own 30s TTL), so it bounds
-  // a runaway run without turning into an upstream request per step.
-  const maxCredits = Number(options.maxCredits) > 0 ? Number(options.maxCredits) : 0;
+  const {
+    maxSteps, maxStepsWire, maxToolCalls, maxWallClockMs, maxCredits,
+    model, thinking, temperature, useSlim, seedText, pluginTools,
+    replyLanguage, langCheck, minThaiRatio, repeatGuard, repeatGuardMax,
+  } = normalizeOptions(options);
+  // (stop) The run's own stop switch. `options.signal` is the harness's
+  // AbortController, and a stop aborts it. The signal used to reach only the
+  // next send (the fetch rejected with an AbortError), so the tools of the
+  // reply that was running went on one after another, and a RUN kept its
+  // child process alive — the person had pressed stop and the run carried on
+  // as if nothing had happened. Every place the loop can wait checks it now.
+  const stopped = () => options.signal?.aborted === true;
   const runStart = Date.now();
-  const model = options.model ?? null;
-  // How hard the model thinks before each reply. 'off' (or nothing) means the
-  // request never asks; the level that does go out is checked by the bridge
-  // against the model, so a level it lacks never breaks a run.
-  const thinking = options.thinking && String(options.thinking).toLowerCase() !== 'off'
-    ? String(options.thinking).toLowerCase() : null;
-  // Sampling temperature: a number 0..2 rides every send; anything else (the
-  // null default included) never asks, so the server's own default stands.
-  const temperature = typeof options.temperature === 'number' && Number.isFinite(options.temperature)
-    ? Math.min(2, Math.max(0, options.temperature)) : null;
-  const useSlim = Boolean(options.slim);
-  const seedText = options.seedText ?? null;
-  const pluginTools = options.pluginTools ?? [];
   // Background helper jobs: spawned by a SUBAGENT with `background: true`, run
   // without blocking the step, and report when polled (JOBS) or when their
   // result is injected into a later turn.
   const backgroundJobs = new Map();
   const reportedBg = new Set();
-  // (Thai pack) Language policy. `replyLanguage` is what the preamble tells
-  // the model; `langCheck` is the stop hook that measures it — the closing
-  // message's share of Thai letters (code and URLs excluded) must reach
-  // `minThaiRatio`, or the run rewrites it once. Tool vocabulary stays
-  // English regardless; that separation is the whole point.
-  const replyLanguage = options.replyLanguage === 'en' ? 'en' : 'th';
-  const langCheck = Boolean(options.langCheck);
-  const minThaiRatio = Number.isFinite(Number(options.minThaiRatio))
-    ? Math.min(1, Math.max(0, Number(options.minThaiRatio))) : 0.4;
-  // (Thai pack) The pre-tool guard. repeatGuard refuses an identical call
-  // (same kind, argument and body) already made twice with nothing staged in
-  // between — a loop, not a step; repeatGuardMax is how many such refusals
-  // one run may collect before it is stopped as stalled.
-  const repeatGuard = Boolean(options.repeatGuard);
-  const repeatGuardMax = Number(options.repeatGuardMax) > 0 ? Math.floor(Number(options.repeatGuardMax)) : 4;
 
   overlay.clear();
   const todoState = [];
@@ -207,6 +248,20 @@ export async function runTask(taskText, ctx = {}) {
   let sendRecoveries = 0;  // (stats) refused sends the loop paused and tried again
   const stepMs = [];
 
+  // The WAF table is the AiPASS edge's own: it exists because that edge
+  // refuses ordinary source code, and it rewrites a README's `localhost` into
+  // a placeholder so the payload gets through. A provider that is a plain API
+  // has no such firewall, and encoding for it would hand the model
+  // `CONSOLE-LOG` where its file said `console.log`. The client says which
+  // world this run is in; everything below asks it once.
+  const waf = bridge?.waf !== false;
+
+  // The reminder names the wire spellings, and those exist only when the WAF
+  // is on — they are the placeholders the AiPASS edge needs. A provider gets
+  // the reminder without that sentence: it would be describing tokens that
+  // never appear in what the model gets back.
+  const reminder = waf ? REMINDER : REMINDER_HEAD + REMINDER_TAIL;
+
   const say = async (text, withParts = null) => {
     const res = await bridge.chat({
       message: text,
@@ -233,21 +288,23 @@ export async function runTask(taskText, ctx = {}) {
   const saySafe = (text, parts = null) => resilientSay(say, text, (_level, t) => {
     firewallNotes++;
     events?.emit('firewall_note', { text: t });
-  }, parts);
+  }, parts, 0, { encode: waf, firewall: waf });
 
   let listing = '';
-  try { listing = outbound(tools.list('.')); } catch { /* ignore */ }
+  try { listing = waf ? outbound(tools.list('.')) : tools.list('.'); } catch { /* ignore */ }
 
-  // (bootstrap snapshot, opt-in via `--snapshot`) The head start a fresh run
-  // otherwise spends round trips discovering: whether the project is a repo
-  // and what is uncommitted, and which scripts package.json carries. It rides
-  // the turn-1 listing slot — before the task, only on the first message, only
-  // when asked for — so the tuned bytes stay identical while the flag is off.
+  // (bootstrap snapshot) The head start a fresh run otherwise spends round
+  // trips discovering: whether the project is a repo and what is uncommitted,
+  // and which scripts package.json carries. It rides the turn-1 listing slot —
+  // before the task, only on the first message, only when asked for — so the
+  // tuned bytes stay identical while the option is off. The CLI asks with
+  // `--snapshot`; the desktop harness ships it on, because the window's user
+  // pays the same round trips and never sees the flag.
   const snapshot = first && !seedText && options.snapshot
     ? await bootstrapSnapshot(tools, overlay.root)
     : '';
   const listingBlock = snapshot
-    ? `${listing}\n\nSnapshot of where this project stands right now (asked for with --snapshot):\n${snapshot}`
+    ? `${listing}\n\nSnapshot of where this project stands right now (bootstrap snapshot):\n${snapshot}`
     : listing;
   // (listing delta) A follow-up task used to paste the whole top level again
   // even when not one entry had moved — the conversation already holds the
@@ -333,20 +390,31 @@ export async function runTask(taskText, ctx = {}) {
   let repeatTrip = false;    // the refusal ceiling was hit — stop after this step
   const repeatSeen = new Map(); // call signature → { count, mark }
   let mutations = 0;         // staged changes this run — the guard's clock
-  // (red-test gate) The project's declared check (.aipass/check.txt,
-  // docs/SPEC_CHECKER.md): the first non-comment line, read lazily once. The
-  // gate bars a `git commit` RUN until that exact command has *passed* at the
-  // current mutation count — a commit of a tree nobody verified is how a red
-  // test lands in history. Any later change moves the clock and re-arms it;
-  // no declared check, no gate.
+  // (red-test gate) The run's declared check (docs/SPEC_CHECKER.md): a
+  // `verifyCommand` option when the caller names one, otherwise the first
+  // non-comment line of `.aipass/check.txt`, read lazily once. The option makes
+  // the verdict comparable across runs even before a project commits the file,
+  // and it is what the checker prompt and the gate both use. The gate bars a
+  // `git commit` RUN until that exact command has *passed* at the current
+  // mutation count — a commit of a tree nobody verified is how a red test lands
+  // in history. Any later change moves the clock and re-arms it; no declared
+  // check, no gate.
   let declaredCheck = null;   // null = not read yet; '' = absent (or unreadable)
+  let declaredCheckSource = null; // 'run' (--verify-command) or 'project' (the file)
   let declaredPassAt = -1;    // the mutation count the declared check passed at
   let commitBlocks = 0;       // (stats) git commits the gate refused
   const declaredCheckCommand = () => {
     if (declaredCheck !== null) return declaredCheck;
+    const configured = String(options.verifyCommand ?? '').trim();
+    if (configured) {
+      declaredCheck = configured.split('\n')[0].trim().slice(0, 300);
+      declaredCheckSource = 'run';
+      return declaredCheck;
+    }
     try {
       const raw = fs.readFileSync(path.join(overlay.root, '.aipass', 'check.txt'), 'utf8');
       declaredCheck = raw.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#')) ?? '';
+      if (declaredCheck) declaredCheckSource = 'project';
     } catch { declaredCheck = ''; }
     return declaredCheck;
   };
@@ -394,6 +462,7 @@ export async function runTask(taskText, ctx = {}) {
   let checks = 0;            // (stats) how many checks actually ran
   let checkResult = null;    // what the last check answered, or null
   let mutationsAtLastCheck = -1; // the tree state the last check judged
+  let doneUnverified = 0;    // (stats) DONEs the strict gate refused
 
   const finishCheck = async () => {
     if (!check || !options.subagent || !options.allowRun) return null;
@@ -407,7 +476,7 @@ export async function runTask(taskText, ctx = {}) {
       .slice(0, 20);
     const label = files.map((f) => (f.deleted ? `${f.path} (deleted)` : f.path)).join(', ') || 'the staged tree';
     session?.append('note', { text: `check: ${label} staged — a read-only child is looking at the tree Apply would produce` });
-    events?.emit('check_start', { files });
+    events?.emit('check_start', { files, command: declaredCheckCommand() || null });
     try {
       checkResult = await check({ files });
     } catch (err) {
@@ -416,10 +485,42 @@ export async function runTask(taskText, ctx = {}) {
     }
     if (!checkResult.skipped) checks += 1;
     session?.append('note', { text: `check ${checkResult.verdict}: ${String(checkResult.text ?? '').slice(0, 2000)}` });
-    events?.emit('check_end', { verdict: checkResult.verdict, ran: checkResult.ran ?? 0, skipped: Boolean(checkResult.skipped) });
+    events?.emit('check_end', {
+      verdict: checkResult.verdict,
+      ran: checkResult.ran ?? 0,
+      skipped: Boolean(checkResult.skipped),
+      // The exact command the verdict is about, so two runs' `checkVerdict`
+      // values are only ever compared when the `checkCommand` matches.
+      command: checkResult.declared ?? null,
+      commandSource: checkResult.declaredSource ?? null,
+    });
     return checkResult.verdict === 'fail'
       ? `Before DONE, a check of the staged tree ran and did not pass:\n${String(checkResult.text ?? '').slice(0, 4000)}\n\nFix the staged files, or explain why the failure is not yours to fix.`
       : null;
+  };
+
+  // (strict Verify) `requireCheck` turns the advisory checker into a gate: when
+  // the run's declared check is failing, a DONE is a claim the evidence does
+  // not support. The first fail still rides back as a correction; the gate
+  // fires when a later DONE arrives over the tree the check already judged, or
+  // when no step is left to carry the correction. It is terminal on purpose —
+  // the model already saw the failure report and chose to end anyway.
+  const unverifiedDone = () => {
+    if (!options.requireCheck) return null;
+    if (!check || !options.subagent || !options.allowRun) return null;
+    if (!overlay.size || !codeTouched) return null;
+    if (checkResult?.verdict !== 'fail') return null;
+    return declaredCheckCommand() || null;
+  };
+  const refuseUnverifiedDone = () => {
+    const failing = unverifiedDone();
+    if (!failing) return false;
+    doneUnverified += 1;
+    summary = `DONE not accepted — the declared check (${failing}) is still failing.`;
+    session?.append('note', { text: `strict Verify: ${summary}` });
+    events?.emit('note', { text: `strict Verify: ${failing} is still failing — the run stops without accepting DONE` });
+    stopReason = 'done-unverified';
+    return true;
   };
 
   // (Thai pack) The reply-language stop hook. When a finished run's closing
@@ -470,6 +571,10 @@ export async function runTask(taskText, ctx = {}) {
 
   const firstParts = first ? (options.parts ?? null) : null;
   let sends = 0;
+  // (resume) One dead-conversation swap per run: the conversation the session
+  // adopted is gone, and the harness replaced it. Only the first send can use
+  // it — nothing of this run has entered the old one yet.
+  let swappedConversation = false;
   const partsForSend = () => {
     const queued = Array.isArray(tools.pendingParts) ? tools.pendingParts.splice(0) : [];
     const base = sends === 0 && Array.isArray(firstParts) ? firstParts : [];
@@ -492,7 +597,14 @@ export async function runTask(taskText, ctx = {}) {
     if (catalog?.source === 'live' && ids.length
         && !ids.includes(chosenModel.replace(/^aipass\//, ''))) {
       modelGone = true;
-      summary = `the model "${chosenModel}" is not in the model catalog anymore — the site would have swapped it for a substitute mid-run without saying so. Pick a current model in Settings and start the run again.`;
+      // The site swaps a model it no longer offers for a substitute mid-run
+      // and never says so; a provider answers with a plain 404 instead. The
+      // check is the same, but the promise behind it is not, so the wording
+      // names the provider that refused.
+      const providerId = bridge?.providerId ?? 'aipass';
+      summary = providerId === 'aipass'
+        ? `the model "${chosenModel}" is not in the model catalog anymore — the site would have swapped it for a substitute mid-run without saying so. Pick a current model in Settings and start the run again.`
+        : `the model "${chosenModel}" is not in ${providerId}'s model list — that provider would refuse the request. Pick a current model in Settings and start the run again.`;
       stopReason = 'error';
       session?.append('note', { text: `catalog check: ${summary}` });
       events?.emit('error', { message: summary });
@@ -500,6 +612,9 @@ export async function runTask(taskText, ctx = {}) {
   }
 
   for (let step = 1; !modelGone && step <= maxSteps; step++) {
+    // A stop ends the run here, before the next reply: the tools of the last
+    // reply are done, and nothing new goes out.
+    if (stopped()) { stopReason = 'cancelled'; break; }
     // The wall clock is checked before every reply too, not only between
     // tools: waiting on a slow model is as real a spend as running a command.
     if (Date.now() - runStart > maxWallClockMs) { spendBudget('time-limited'); break; }
@@ -537,6 +652,11 @@ export async function runTask(taskText, ctx = {}) {
           listingShown.set(conversation, listingToRecord);
         }
         sends++;
+        // (resume) The conversation just took one of this session's messages:
+        // the harness settles the binding (persisted for a reopen) and commits
+        // a resume seed's boundary. Idempotent, and failures here must never
+        // end a run — the message is already out.
+        try { onConversationSettled?.({ conversation, temporary: conversationTemporary }); } catch { /* best effort */ }
         break;
       }
       catch (err) {
@@ -544,6 +664,29 @@ export async function runTask(taskText, ctx = {}) {
         // AbortError, which is an ending, not a failure — the transcript should
         // not read "error" for something the user did on purpose.
         if (err?.name === 'AbortError') { stopReason = 'cancelled'; sendGivenUp = true; break; }
+        // (resume) The conversation this session adopted is gone upstream — a
+        // temporary that expired, one deleted by hand. Only the run's first
+        // send can recover: nothing of this run has entered the old one, so
+        // the harness can hand back a fresh conversation plus the transcript
+        // digest. Mid-run the history is already there to lose, and an error
+        // stays the honest ending. The check runs before the generic recovery
+        // below: a dead named conversation never heals by waiting.
+        if (attempt === 0 && sends === 0 && !swappedConversation && onConversationDead
+            && /conversation not found|returned 404|returned 409/i.test(String(err?.message ?? ''))) {
+          swappedConversation = true;
+          const swapped = await Promise.resolve()
+            .then(() => onConversationDead())
+            .catch(() => null);
+          if (swapped?.conversation) {
+            conversation = swapped.conversation;
+            conversationTemporary = swapped.temporary === true;
+            if (swapped.seedText) { next = swapped.seedText; listingToRecord = null; }
+            const line = `the session's conversation is gone upstream - a fresh one (${swapped.conversation}) was created and seeded from the transcript`;
+            session?.append('note', { text: line });
+            events?.emit('note', { text: line });
+            continue;
+          }
+        }
         // A send that delivered nothing and heals by waiting — the extension's
         // cycle, a tab mid-reload, a rate window, a 403 the rewrite chain could
         // not clear — is paused and given the same message again before it is
@@ -579,7 +722,7 @@ export async function runTask(taskText, ctx = {}) {
       }
     }
     if (sendGivenUp) break;
-    reply = decode(reply);
+    reply = waf ? decode(reply) : reply;
 
     const elapsed = ((Date.now() - stepStart) / 1000).toFixed(1);
     stepMs.push(Math.round((Date.now() - stepStart)));
@@ -601,7 +744,7 @@ export async function runTask(taskText, ctx = {}) {
       // question rides the finished turn and the next message resumes.
       if (askCall) {
         const langMsg = replyLangMsg(proseText, askCall.arg, work.length === 0);
-        if (langMsg && step < maxSteps) { next = `${langMsg}\n\n${REMINDER}`; continue; }
+        if (langMsg && step < maxSteps) { next = `${langMsg}\n\n${reminder}`; continue; }
         pauseForAsk(askCall.arg);
         break;
       }
@@ -621,17 +764,21 @@ export async function runTask(taskText, ctx = {}) {
         // rides the next message instead of ending the run.
         const checkMsg = await finishCheck();
         if (checkMsg && step < maxSteps) {
-          next = `${checkMsg}\n\n${REMINDER}`;
+          next = `${checkMsg}\n\n${reminder}`;
           continue;
         }
+        // Strict Verify: a DONE over a declared check that is still failing is
+        // refused. The failure report already rode back once; a further DONE
+        // is the model choosing to end over evidence that disagrees.
+        if (refuseUnverifiedDone()) break;
         const todoMsg = step < maxSteps ? openTodoMsg() : null;
         if (todoMsg && step < maxSteps) {
-          next = `${todoMsg}\n\n${REMINDER}`;
+          next = `${todoMsg}\n\n${reminder}`;
           continue;
         }
         const langMsg = replyLangMsg(proseText, cleanArg, work.length === 0);
         if (langMsg && step < maxSteps) {
-          next = `${langMsg}\n\n${REMINDER}`;
+          next = `${langMsg}\n\n${reminder}`;
           continue;
         }
         events?.emit('done_line', { text: cleanArg || 'done', extra });
@@ -648,7 +795,7 @@ export async function runTask(taskText, ctx = {}) {
         const checkMsg = await finishCheck();
         if (checkMsg && step < maxSteps) {
           nudgeStreak = 0;
-          next = `${checkMsg}\n\n${REMINDER}`;
+          next = `${checkMsg}\n\n${reminder}`;
           continue;
         }
         if (checks > 0 && checkResult?.verdict === 'pass') {
@@ -664,7 +811,7 @@ export async function runTask(taskText, ctx = {}) {
       const shapeHint = attempted
         ? `That reply looked like it was trying to act — something in it had the shape of a marker — but it did not parse as one. A marker must sit at the start of its own line, with no indentation, bold or code fence, and use an exact keyword: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it, and so on. One call per line. `
         : '';
-      next = `${shapeHint}That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it — if your answer is already written above, that is all the reply needs. I will paste back exactly what you ask for. ${REMINDER}`;
+      next = `${shapeHint}That reply had no marker I could act on — a marker only counts when it starts its own line: NEED file notes.md reads that file, NEED dir src (or NEED list src) lists that folder, SEARCH someText finds it. One call per line. If you are done, write DONE on its own line with one sentence after it — if your answer is already written above, that is all the reply needs. I will paste back exactly what you ask for. ${reminder}`;
       continue;
     }
     nudgeStreak = 0;
@@ -675,7 +822,11 @@ export async function runTask(taskText, ctx = {}) {
     // serial loop, so the budgets are enforced here as well — a reply with a
     // hundred SUBAGENT lines must trip the cap before it starts a hundred
     // helper runs, not after.
-    const execCtx = { tools, permissions, events, subagent, todoState, session, approvePlan, options, runPluginTool };
+    // The background-job table rides in the context: execute() is a
+    // module-level function, so the map the run owns is not in its scope, and
+    // a helper started in the background needs the very map the run injects
+    // results from — a copy would start a job nothing could ever poll.
+    const execCtx = { tools, permissions, events, subagent, todoState, session, approvePlan, options, runPluginTool, backgroundJobs };
     let helperResults = null;
     // Parallel SUBAGENTs fan out before the serial loop, so their wall time is
     // measured here — keyed by the call — and added to the stats when the
@@ -715,13 +866,17 @@ export async function runTask(taskText, ctx = {}) {
         const declared = declaredCheckCommand();
         if (declared && declaredPassAt !== mutations) {
           commitBlocks += 1;
-          session?.append('note', { text: `red-test gate: refused a git commit — the declared check (${declared}) has not passed since the last change in this run` });
-          events?.emit('note', { text: 'red-test gate: a git commit was refused — run the declared check (.aipass/check.txt) first, then commit' });
-          return `err: a git commit was requested, but this project declares a check (.aipass/check.txt: ${declared}) and it has not passed since the last change in this run. Run it first (RUN\n${declared}\nEND) and commit once it passes — a commit of an unverified tree is exactly what the gate exists to stop.`;
+          const source = declaredCheckSource === 'run' ? '--verify-command' : '.aipass/check.txt';
+          session?.append('note', { text: `red-test gate: refused a git commit — the declared check (${source}: ${declared}) has not passed since the last change in this run` });
+          events?.emit('note', { text: 'red-test gate: a git commit was refused — run the declared check first, then commit' });
+          return `err: a git commit was requested, but this run declares a check (${source}: ${declared}) and it has not passed since the last change. Run it first (RUN\n${declared}\nEND) and commit once it passes — a commit of an unverified tree is exactly what the gate exists to stop.`;
         }
       }
       const sig = `${call.kind}\u0000${String(call.arg ?? '')}\u0000${call.kind === 'run' ? String(call.body ?? '') : ''}`;
-      if (repeatGuard && !['plan', 'todo', 'subagent', 'done'].includes(call.kind)) {
+      // A poll is not an action: the same JOBS call twice is a wait for a
+      // background job, not a loop, and the guard's "nothing changed in
+      // between" is false — the job's own state changes.
+      if (repeatGuard && !['plan', 'todo', 'subagent', 'done', 'jobs'].includes(call.kind)) {
         const seen = repeatSeen.get(sig) ?? { count: 0, mark: -1 };
         seen.count += 1;
         if (seen.count >= 3 && seen.mark === mutations) {
@@ -758,6 +913,11 @@ export async function runTask(taskText, ctx = {}) {
     let brokenBy = null;    // the first change that failed in this reply …
     let chainNoted = false; // … and whether the skip was spoken yet
     for (let i = 0; i < work.length; i++) {
+      // A stop ends the reply's remaining tools: the person said stop, and the
+      // calls after this one were planned against a state they no longer want.
+      // The one in flight cannot be recalled — it ends on its own (a RUN dies
+      // with the signal, tools.mjs) — but nothing new starts.
+      if (stopped()) { stopReason = 'cancelled'; break; }
       // One reply can carry a hundred markers; each one is checked against
       // both budgets before it executes.
       if (toolsRun >= maxToolCalls) { spendBudget('tools-limited'); break; }
@@ -855,7 +1015,7 @@ export async function runTask(taskText, ctx = {}) {
       // loop smells like in the stats, before anyone reads the transcript.
       const seenKey = text.slice(0, 600);
       if (resultSeen.has(seenKey)) repeatedResults += 1; else { resultSeen.add(seenKey); novelResults += 1; }
-      results.push(`Result of ${call.kind} ${label}:\n${outbound(result)}${loopNote ?? ''}`);
+      results.push(`Result of ${call.kind} ${label}:\n${waf ? outbound(result) : result}${loopNote ?? ''}`);
     }
 
     if (repeatTrip || errTrip) {
@@ -893,6 +1053,12 @@ export async function runTask(taskText, ctx = {}) {
       events?.emit('diff_update', { changes });
     }
 
+    // A stop ends the step here: the tools that were still queued did not
+    // run, and the run does not go on to the next send. The diff event above
+    // still went out — whatever is staged is still staged: the person stopped
+    // the run, not the work.
+    if (stopReason === 'cancelled') break;
+
     // A budget spent mid-step ends the run here — before the DONE handling,
     // so a "DONE" riding the same reply cannot mask why the run stopped. The
     // diff event above still went out: whatever was staged is still staged.
@@ -904,7 +1070,7 @@ export async function runTask(taskText, ctx = {}) {
     // and running the read first beats stranding its result.
     if (askCall && !stillLooking) {
       const langMsg = replyLangMsg(proseText, askCall.arg, work.length === 0);
-      if (langMsg && step < maxSteps) { next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${langMsg}`; continue; }
+      if (langMsg && step < maxSteps) { next = `${results.join('\n\n')}\n\n${reminder}\n\n${langMsg}`; continue; }
       pauseForAsk(askCall.arg);
       break;
     }
@@ -916,14 +1082,18 @@ export async function runTask(taskText, ctx = {}) {
       // through the stagnation guard and the compaction estimate like any
       // other step, so the correction is a step the run actually took.
       const checkMsg = await finishCheck();
+      // Strict Verify may end the run here rather than swallow a fresh fail:
+      // when no step is left to carry the failure report, the DONE must not be
+      // accepted just because the continuation had nowhere to go.
+      if (!(checkMsg && step < maxSteps) && refuseUnverifiedDone()) break;
       const todoMsg = !checkMsg && step < maxSteps ? openTodoMsg() : null;
       const langMsg = (checkMsg || todoMsg) ? null : replyLangMsg(proseText, summary, work.length === 0);
       if (checkMsg && step < maxSteps) {
-        next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${checkMsg}`;
+        next = `${results.join('\n\n')}\n\n${reminder}\n\n${checkMsg}`;
       } else if (todoMsg && step < maxSteps) {
-        next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${todoMsg}`;
+        next = `${results.join('\n\n')}\n\n${reminder}\n\n${todoMsg}`;
       } else if (langMsg && step < maxSteps) {
-        next = `${results.join('\n\n')}\n\n${REMINDER}\n\n${langMsg}`;
+        next = `${results.join('\n\n')}\n\n${reminder}\n\n${langMsg}`;
       } else {
         events?.emit('done_line', { text: summary, extra });
         stopReason = 'done';
@@ -931,7 +1101,7 @@ export async function runTask(taskText, ctx = {}) {
       }
     } else {
       if (done) events?.emit('ignore_done', {});
-      next = `${results.join('\n\n')}\n\n${REMINDER}`;
+      next = `${results.join('\n\n')}\n\n${reminder}`;
     }
 
     // (H7/R1) Stagnation guard. Two shapes of a run that cannot move:
@@ -993,7 +1163,10 @@ export async function runTask(taskText, ctx = {}) {
     if (compactor && session && compactor.needsCompaction(session, { pending: next })) {
       try {
         events?.emit('note', { text: 'context is filling up — summarising this conversation and rotating to a fresh one' });
-        const raw = await compactor.summarize(session, { task: taskText, model, conversation, temporary: conversationTemporary });
+        // The summariser is a model call like any other, so it rides the run's
+        // stop signal: a stop during the summary ends the run there instead of
+        // waiting for a round trip nobody asked for.
+        const raw = await compactor.summarize(session, { task: taskText, model, conversation, temporary: conversationTemporary, signal: options.signal ?? null });
         // The reply is two products: the narrative and (when the tier is on)
         // the trailing MEMORY: facts, merged across rotations. A reply
         // without the section digests to the plain summary, so an older
@@ -1022,8 +1195,11 @@ export async function runTask(taskText, ctx = {}) {
           return overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
         }).slice(0, 20);
         const lastCheck = checkResult && checkResult.verdict && checkResult.verdict !== 'pass' ? checkResult : null;
-        next = `${compactor.seed({ summary: note, memory, task: taskText, preambleText: pre, results: results.join('\n\n'), staged: stagedNow, lastCheck, todo: todoState })}\n\n${REMINDER}`;
+        next = `${compactor.seed({ summary: note, memory, task: taskText, preambleText: pre, results: results.join('\n\n'), staged: stagedNow, lastCheck, todo: todoState })}\n\n${reminder}`;
       } catch (err) {
+        // A stop during the summary is not a compaction failure: the run ends
+        // as cancelled, and the error line would only be noise.
+        if (stopped()) { stopReason = 'cancelled'; break; }
         events?.emit('error', { message: `compaction failed, sending the results without it: ${err.message}` });
       }
     }
@@ -1060,6 +1236,11 @@ export async function runTask(taskText, ctx = {}) {
     sendRecoveries,
     checks,
     checkVerdict: checkResult?.verdict ?? null,
+    // The exact command that verdict is about: `pass` from a project check and
+    // `pass` from an inferred test run are not the same evidence, and two runs
+    // are only comparable when this matches.
+    checkCommand: checkResult?.declared ?? (declaredCheckCommand() || null),
+    doneUnverified,
     todoPrompts,
     repeatBlocks,
     commitBlocks,
@@ -1084,9 +1265,14 @@ export async function runTask(taskText, ctx = {}) {
     credits: creditsAfter,
     check: checkResult,
     changes: changes.map((c) => ({ file: c.file, added: c.added, removed: c.removed, deleted: c.deleted, isNew: c.isNew })),
+    // The checklist's final state, as the run itself recorded it: the window
+    // re-tallies the plan card from this copy and names what a completed run
+    // left open, instead of reconstructing it from the last todo event — which
+    // may have arrived steps ago, or not at all after a reload.
+    todo: todoState.map((it) => ({ ...it })),
   });
 
-  return { summary, stopReason, steps: toolsRun, changes, credits: creditsAfter, spent, check: checkResult };
+  return { summary, stopReason, steps: toolsRun, changes, credits: creditsAfter, spent, check: checkResult, todo: todoState.map((it) => ({ ...it })) };
 }
 
 /**
@@ -1117,7 +1303,13 @@ export const SUBAGENT_ROLES = {
 
 /** One marker: run it behind the permission gate, or handle it here. */
 async function execute(call, ctx) {
-  const { tools, permissions, events, subagent, todoState, session, options, runPluginTool } = ctx;
+  const { tools, permissions, events, subagent, todoState, session, options, runPluginTool, backgroundJobs } = ctx;
+
+  // One shape check before anything is dispatched: built-in tools, plugin
+  // markers and MCP tools all answer a malformed call with the same `err: …`
+  // sentence, and no tool implementation has to own the parser's contract.
+  const invalid = validateCall(call, { pluginTools: options?.pluginTools ?? [], runPluginTool });
+  if (invalid) return invalid;
 
   if (call.kind === 'plan' || call.kind === 'todo') {
     const items = parseTodo(call.body ?? '');
@@ -1146,6 +1338,7 @@ async function execute(call, ctx) {
     const task = (taskLine ?? body.split('\n').find((l) => l.trim() && !/^\s*role:/i.test(l) && !/^\s*background:/i.test(l)) ?? '').trim();
     if (!task) return 'err: give the helper a task, on a `task:` line inside SUBAGENT';
     if (background) {
+      if (!backgroundJobs) return 'err: background helpers are not available in this run';
       const id = `bg${backgroundJobs.size + 1}`;
       const job = { id, task, role: role || null, status: 'running', result: null };
       backgroundJobs.set(id, job);
@@ -1173,7 +1366,7 @@ async function execute(call, ctx) {
   }
 
   if (call.kind === 'jobs') {
-    if (!backgroundJobs.size) return '(no background jobs)';
+    if (!backgroundJobs || !backgroundJobs.size) return '(no background jobs)';
     const lines = [];
     for (const [id, job] of backgroundJobs) {
       lines.push(`${id}: ${job.status}${job.role ? ` (${job.role})` : ''} — ${job.task.slice(0, 60)}${job.status !== 'running' ? '\n  ' + String(job.result).slice(0, 400) : ''}`);
