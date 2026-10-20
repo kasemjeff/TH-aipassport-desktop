@@ -22,6 +22,17 @@ before(async () => {
   // previous one's replies. The handler is swapped per test instead.
   ext = await new FakeExtension(bridge.base, { onChat: (job, emit) => onChat(job, emit) }).connect();
 });
+// The shell's readiness probe asks the backend whether it is there. The
+// backend refuses every /rpc call without the loopback token (auth.test.mjs
+// pins the gate), so a probe that went in bare was answered "unauthorized"
+// — which is not the same as "not running": the shell then took the busy
+// port as a free one, and the backend `tauri dev` waits for never came up.
+test('the desktop shell\'s readiness probe presents the loopback token', () => {
+  const src = fs.readFileSync(new URL('../../desktop/main.mjs', import.meta.url), 'utf8');
+  const probe = src.slice(src.indexOf('const backendUp'), src.indexOf('const wait ='));
+  assert.match(probe, /authHeaders\(\)/, 'the probe carries the token the backend asks for');
+});
+
 after(() => { ext.disconnect(); bridge.stop(); });
 
 /** RPC on a free port, rooted at a temp project, answering through `ext`. */

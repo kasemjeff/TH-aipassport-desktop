@@ -28,6 +28,10 @@ const { aipassHome } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge
 const { openLogFile } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'log-file.mjs')));
 // One platform→argv rule, shared with the backend's browser.open.
 const { openCommandFor } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'open-command.mjs')));
+// The loopback token, the same one the window and the CLIs present. The
+// backend refuses every /rpc call without it, so a probe that goes in
+// bare is answered "unauthorized" — which is not the same as "not running".
+const { authHeaders } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'authtoken.mjs')));
 // One resolver for the probe and the harness client alike: AIPASS_BRIDGE
 // (http(s)://host:port, host:port or a bare port) or the loopback default.
 const BRIDGE_URL = resolveBridgeURL();
@@ -44,7 +48,7 @@ const bridgeUp = () => fetch(`${BRIDGE_URL}/status`, { signal: AbortSignal.timeo
   .catch(() => false);
 
 const backendUp = () => fetch(`http://127.0.0.1:${PORT}/rpc`, {
-  method: 'POST', headers: { 'content-type': 'application/json' },
+  method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() },
   body: JSON.stringify({ method: 'status' }), signal: AbortSignal.timeout(1200),
 }).then((r) => r.ok).catch(() => false);
 
