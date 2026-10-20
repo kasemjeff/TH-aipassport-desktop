@@ -965,3 +965,109 @@ test('tone and format travel as codes and apply to any model', async (t) => {
   await post({ model: 'gemini-3.1-flash-lite', messages: [{ role: 'user', content: 'hi' }], output_tone: 'shouty' });
   assert.equal(ext.chats.at(-1).outputTone, undefined, 'an unknown tone is dropped, not forwarded');
 });
+
+/* ------------------------------------------------------- where output goes */
+
+// The streaming reply and the plain one used to route the tool activity
+// differently: AIPASS_TOOL_VISIBILITY=text put it inline in one and in the
+// reasoning field in the other, so the same request answered differently
+// depending on how the client asked.
+test('tool activity lands in the same place with and without streaming', async (t) => {
+  const vis = await startBridge({ AIPASS_TOOL_VISIBILITY: 'text' });
+  t.after(() => vis.stop());
+  const ext = await new FakeExtension(vis.base, {
+    onChat: async (_j, e) => { await e.status('[web_search] {"query":"x"}'); await e.text('the answer'); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const ask = (extra) => fetch(`${vis.base}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], ...extra }),
+  });
+
+  const plain = await (await ask({})).json();
+  assert.match(plain.choices[0].message.content, /\[web_search\]/, 'the tool text is inline');
+  assert.ok(!plain.choices[0].message.reasoning_content, 'and not in the reasoning field');
+
+  const streamed = await readStream(await ask({ stream: true }));
+  assert.match(streamed.content, /\[web_search\]/);
+  assert.ok(!streamed.reasoning);
+});
+
+// The default puts the tool activity in the reasoning field, in both modes.
+test('tool activity stays out of the answer by default', async (t) => {
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_j, e) => { await e.status('[web_search] {"query":"x"}'); await e.text('the answer'); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const body = await (await post({ messages: [{ role: 'user', content: 'hi' }] })).json();
+  assert.equal(body.choices[0].message.content, 'the answer', 'the answer is only the answer');
+  assert.match(body.choices[0].message.reasoning_content, /web_search/);
+});
+
+// A note is a line for the person, not the answer: a mid-reply model switch
+// arrives that way. It must never ride in the content, or a client quotes it
+// back as if the model had said it.
+test('a note never rides in the answer', async (t) => {
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_j, e) => {
+      await e.note('the site switched this conversation\'s model mid-reply');
+      await e.text('the answer');
+      await e.done();
+    },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const body = await (await post({ messages: [{ role: 'user', content: 'hi' }] })).json();
+  assert.equal(body.choices[0].message.content, 'the answer', 'the note must not be quoted back');
+  assert.match(body.choices[0].message.reasoning_content ?? '', /switched this conversation/);
+});
+
+// The bridge computed a placeholder for an attachment-only message, but the
+// extension builds the upstream message from the parts and ignores the text
+// whenever there are parts — so the placeholder never reached the model.
+test('an attachment-only message carries its text upstream as a part', async (t) => {
+  const ext = await new FakeExtension(bridge.base).connect();
+  t.after(() => ext.disconnect());
+
+  await post({
+    messages: [{ role: 'user', content: [{ type: 'file', file: { filename: 'notes.csv', file_data: 'data:text/csv;base64,YSxiCg==' } }] }],
+  });
+  const job = ext.chats.at(-1);
+  assert.equal(job.text, '[notes.csv]');
+  const text = job.parts.find((p) => p.type === 'text');
+  assert.ok(text, 'the upstream message needs a text part, not only the text field');
+  assert.equal(text.text, '[notes.csv]');
+});
+
+// A media frame with no payload used to throw inside the delta handler. The
+// job was then never settled, so the client sat there for the whole idle
+// timeout before hearing anything at all.
+test('a media frame with no payload does not strand the job', async (t) => {
+  const quick = await startBridge({ AIPASS_IDLE_TIMEOUT_MS: '1500' });
+  t.after(() => quick.stop());
+  const ext = await new FakeExtension(quick.base, { onChat: async () => {} }).connect();
+  t.after(() => ext.disconnect());
+
+  const pending = fetch(`${quick.base}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+  });
+  await waitFor(() => ext.chats.length > 0);
+  const jobId = ext.chats.at(-1).jobId;
+
+  const chunk = await fetch(`${quick.base}/ext/chunk`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jobId, parts: [{ kind: 'video' }] }),   // no payload at all
+  });
+  assert.equal(chunk.status, 200, 'the bridge must answer the extension, not fall over');
+  await fetch(`${quick.base}/ext/done`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jobId, finishReason: 'stop' }),
+  });
+
+  const raw = await (await pending).text();
+  assert.match(raw, /"finish_reason":"stop"/, 'the job must settle on the done, not on a timeout');
+  assert.doesNotMatch(raw, /timed out/);
+});

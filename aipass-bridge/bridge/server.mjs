@@ -437,7 +437,13 @@ class Job {
       }
       out.push({ ...p });
     }
-    for (const p of out) this.onDelta(p);
+    for (const p of out) {
+      // A frame the handler cannot use must not take the job down with it.
+      // The flush runs inside a timer, so an exception here would take the
+      // whole bridge process with it; and a job left unsettled waits out its
+      // timeout before the client hears anything at all.
+      try { this.onDelta(p); } catch (err) { log('delta dropped:', err.message); }
+    }
   }
   done(value) { if (this.settled) return; this.flush(); this.cleanup(); this.onDone(value ?? 'stop'); }
   fail(message) { if (this.settled) return; this.flush(); this.cleanup(); this.onError(message); }
@@ -871,10 +877,18 @@ async function extractUserParts(messages) {
 
     // A message that is nothing but an attachment still needs text, or the
     // upstream composer treats it as empty. Name the file when there is one.
+    //
+    // The placeholder has to be a part and not only the text field: the
+    // extension builds the upstream message from the parts and ignores the
+    // text whenever there are parts, so a name that lived only in `text`
+    // never reached the model at all.
     const named = parts.find((p) => p.type === 'file')?.filename;
-    const text = textPieces.join('\n').trim();
+    const spoken = textPieces.join('\n').trim();
+    const placeholder = spoken ? '' : named ? `[${named}]` : parts.length ? '[Image]' : '';
+    if (placeholder) parts.unshift({ type: 'text', text: placeholder });
+    const text = spoken || placeholder;
     return {
-      text: text || (named ? `[${named}]` : parts.length ? '[Image]' : ''),
+      text,
       parts: parts.length ? parts : (text ? [{ type: 'text', text }] : [])
     };
   }
@@ -991,6 +1005,11 @@ function videoOptionsFor(modelId, payload) {
 // tag is a broken image in every renderer there is.
 const MEDIA_KINDS = new Set(['image', 'video', 'audio', 'file']);
 function mediaMarkdown(kind, target, filename) {
+  // A media frame with no payload is a broken frame, not a crash. Returning
+  // nothing keeps the rest of the answer; throwing used to take the whole job
+  // down with it, and the client then waited out the idle timeout for a reply
+  // that was never coming.
+  if (!target) return '';
   if (kind === 'image') return `\n![image](${target})\n`;
   // A video part carries its own filename; music does not. Failing that, the
   // signed storage URL's path holds the real extension before the query
@@ -1000,6 +1019,36 @@ function mediaMarkdown(kind, target, filename) {
   const ext = (target.match(/^data:([^;,]+)/)?.[1]?.split('/')[1]
     ?? target.split('?')[0].match(/\.([a-z0-9]{2,4})$/i)?.[1] ?? '').replace(/[^a-z0-9]/gi, '');
   return `\n[${ext ? `${name}.${ext}` : name}](${target})\n`;
+}
+
+// Where a delta goes, as the fields of one frame. One function, so the
+// streaming reply and the plain one cannot drift apart — they did:
+// AIPASS_TOOL_VISIBILITY=text put the tool activity inline in one and in the
+// reasoning field in the other, so the same request answered differently
+// depending on how the client asked.
+//
+//   'status'  tool activity (web_search progress, sources). Follows
+//             AIPASS_TOOL_VISIBILITY: 'reasoning' puts it in the reasoning
+//             field, 'text' puts it inline in the answer, 'off' drops it.
+//   'note'    a line for the person, not the answer and not tool churn — a
+//             mid-reply model switch arrives this way. It rides its own
+//             delta so the harness can show a transcript note, and keeps
+//             the reasoning echo for clients that never learned the field
+//             (the chat console reads reasoning), so nothing loses the line.
+//             It never rides in the content: a client must not quote it
+//             back as the answer.
+function routeDelta(part) {
+  if (part.kind === 'status') {
+    if (TOOL_VISIBILITY === 'off') return null;
+    if (TOOL_VISIBILITY === 'text') return { content: `\n${part.text}\n` };
+    return { reasoning_content: `${part.text}\n` };
+  }
+  if (part.kind === 'note') {
+    return { note: part.text, ...(TOOL_VISIBILITY !== 'off' ? { reasoning_content: `${part.text}\n` } : {}) };
+  }
+  if (MEDIA_KINDS.has(part.kind)) return { content: mediaMarkdown(part.kind, part.text, part.filename) };
+  if (part.kind === 'reasoning') return { reasoning_content: part.text };
+  return { content: part.text };
 }
 
 async function chatCompletions(req, res) {
@@ -1100,24 +1149,8 @@ async function chatCompletions(req, res) {
       imageStyleId, outputTone, outputFormat,
       conversation, temporary: conversationTemporary,
       onDelta: (part) => {
-        if (part.kind === 'status') {
-          if (TOOL_VISIBILITY === 'off') return;
-          if (TOOL_VISIBILITY === 'text') emit({ content: `\n${part.text}\n` });
-          else emit({ reasoning_content: `${part.text}\n` });
-          return;
-        }
-        if (part.kind === 'note') {
-          // A line for the person, not the answer and not tool churn — a
-          // mid-reply model switch arrives this way. It rides its own delta
-          // so the harness can show a transcript note, and keeps the
-          // reasoning echo for clients that never learned the field (the
-          // chat console reads reasoning), so nothing loses the line.
-          emit({ note: part.text, ...(TOOL_VISIBILITY !== 'off' ? { reasoning_content: `${part.text}\n` } : {}) });
-          return;
-        }
-        if (MEDIA_KINDS.has(part.kind)) return void emit({ content: mediaMarkdown(part.kind, part.text, part.filename) });
-        if (part.kind === 'reasoning') emit({ reasoning_content: part.text });
-        else emit({ content: part.text });
+        const frame = routeDelta(part);
+        if (frame) emit(frame);
       },
       onDone: (finishReason) => {
         stopKeepalive();
@@ -1144,11 +1177,10 @@ async function chatCompletions(req, res) {
       imageStyleId, outputTone, outputFormat,
       conversation, temporary: conversationTemporary,
       onDelta: (p) => {
-        if (p.kind === 'status') { if (TOOL_VISIBILITY !== 'off') reasoning += `${p.text}\n`; return; }
-        if (p.kind === 'note') { if (TOOL_VISIBILITY !== 'off') reasoning += `${p.text}\n`; return; }
-        if (MEDIA_KINDS.has(p.kind)) { out += mediaMarkdown(p.kind, p.text, p.filename); return; }
-        if (p.kind === 'reasoning') reasoning += p.text;
-        else out += p.text;
+        const frame = routeDelta(p);
+        if (!frame) return;
+        if (frame.content !== undefined) out += frame.content;
+        if (frame.reasoning_content !== undefined) reasoning += frame.reasoning_content;
       },
       onDone: (finishReason) => {
         json(res, 200, {
