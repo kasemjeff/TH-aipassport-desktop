@@ -18,6 +18,7 @@ import { execSync, spawnSync } from 'node:child_process';
 import { authHeaders } from './harness/authtoken.mjs';
 import { edgeWaits, rateWaits, waitLabel, RATE_REFUSED } from './harness/bridge.mjs';
 import { outbound, inbound } from './harness/waf.mjs';
+import { parseArgs } from './argv.mjs';
 
 /**
  * @typedef {object} BridgeStatus
@@ -53,15 +54,16 @@ if (argv.includes('--version') || argv.includes('-v')) {
   process.exit(0);
 }
 
-/**
- * @param {string} name
- * @param {string | null} [fallback]
- * @returns {string | null}
- */
-const flag = (name, fallback = null) => {
-  const i = argv.indexOf(`--${name}`);
-  return i === -1 ? fallback : (argv[i + 1] ?? fallback);
-};
+// The flags that take a value. Everything else is a switch, so a question
+// after one is a question and not the flag's value. --file is repeatable, so
+// it is collected by hand further down — but the parser still eats its
+// value, or the path would land in the question.
+const VALUE_FLAGS = new Set([
+  'assistant', 'bridge', 'conversation', 'duration', 'file', 'format', 'image',
+  'image-style', 'max', 'model', 'out', 'ratio', 'resolution', 'style', 'temperature',
+  'thinking', 'tone', 'type',
+]);
+const { positional, flag, has } = parseArgs(argv, VALUE_FLAGS);
 
 if (argv.includes('--help') || argv.includes('-h')) {
   console.log(`usage: npm run chat [-- "question"] [options]
@@ -121,8 +123,8 @@ const IMAGE_STYLE = flag('image-style', null);
 const TONE = flag('tone', null);
 const FORMAT = flag('format', null);
 const ASSISTANT = flag('assistant', null);
-const CAMERA_FIXED = argv.includes('--camera-fixed');
-const NO_AUDIO = argv.includes('--no-audio');
+const CAMERA_FIXED = has('camera-fixed');
+const NO_AUDIO = has('no-audio');
 const imageArg = flag('image', null);
 const FILES = argv.reduce((/** @type {string[]} */ acc, a, i) => (a === '--file' && argv[i + 1] ? [...acc, argv[i + 1]] : acc), /** @type {string[]} */ ([]));
 let thinkingLevel = flag('thinking', null);
@@ -137,9 +139,9 @@ let activeAssistant = ASSISTANT ? { id: ASSISTANT, name: ASSISTANT } : null;
 // account's chat list with a throwaway "New chat." entry. Instead we defer:
 // the next message the user actually sends becomes the seed, so the entry is
 // titled by real text, exactly like the web UI's "new chat".
-let pendingNew = argv.includes('--new');
+let pendingNew = has('new');
 let model = flag('model', '') ?? '';
-const question = argv.filter((a, i) => !a.startsWith('--') && !argv[i - 1]?.startsWith('--')).join(' ').trim();
+const question = positional.join(' ').trim();
 
 /* ------------------------------------------------------------------- styling */
 

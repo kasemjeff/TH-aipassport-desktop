@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import { ASSISTANT_CHARACTER } from './assistant-prompt.mjs';
 import { authHeaders } from './harness/authtoken.mjs';
+import { parseArgs } from './argv.mjs';
 
 const argv = process.argv.slice(2);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -13,10 +14,7 @@ if (argv.includes('--version') || argv.includes('-v')) {
   console.log(`aipass-setup-assistant ${VERSION}`);
   process.exit(0);
 }
-const flag = (name, fallback = null) => {
-  const i = argv.indexOf(`--${name}`);
-  return i === -1 ? fallback : argv[i + 1];
-};
+const { flag, has } = parseArgs(argv, new Set(['bridge', 'name', 'model', 'type', 'delete']));
 if (argv.includes('--help') || argv.includes('-h')) {
   console.log(`usage: npm run setup-assistant [-- options]
 
@@ -43,8 +41,8 @@ const bridgeFetch = (url, opts = {}) => (
 );
 const NAME = flag('name', 'Local File Coder');
 const MODEL = flag('model', 'claude-sonnet-5@default');
-const FORCE = argv.includes('--force');
-const START_CHAT = argv.includes('--start-chat');
+const FORCE = has('force');
+const START_CHAT = has('start-chat');
 const DELETE = flag('delete', null);
 
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;

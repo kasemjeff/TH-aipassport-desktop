@@ -961,3 +961,37 @@ test('a DONE beside a GLOB is held back so the listing reaches the model', async
   assert.match(handler.sent[1], /Result of glob/, 'the listing rode back to the model');
   assert.match(out, /looked around, nothing else to do/, 'the final closing line is the one kept');
 });
+
+// A switch takes no value, so the task after it is the task. The old reading
+// took the next token as the flag's value whatever the flag was, and the run
+// started with no task at all: it printed the usage and exited.
+test('a switch flag does not swallow the task', async (t) => {
+  const dir = tempDir({ 'a.txt': 'x' });
+  const handler = scripted(['DONE nothing to do']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await run(AGENT, ['--apply', 'fix the bug', '--root', dir, '--bridge', bridge.base], {
+    env: { AIPASS_EDGE_WAITS_MS: '0' },
+  });
+  assert.doesNotMatch(out, /usage: npm run agent/, 'the run must start, not print the usage');
+  assert.match(handler.sent.join('\n'), /fix the bug/, 'and the task is the one that was given');
+});
+
+// A flag given without a value used to hand back undefined, which crashed the
+// caller outright: path.resolve(undefined) for --root, undefined.replace for
+// --bridge, and NaN for --max — the quiet one, because a NaN step limit
+// means the loop never runs, so the agent printed its banner and exited
+// having done nothing.
+test('a flag given without a value falls back to its default', async (t) => {
+  const dir = tempDir({ 'a.txt': 'x' });
+  const handler = scripted(['DONE nothing to do']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { code } = await run(AGENT, ['a task', '--root', dir, '--bridge', bridge.base, '--max'], {
+    env: { AIPASS_EDGE_WAITS_MS: '0' },
+  });
+  assert.equal(code, 0, 'a valueless --max must not stop the run');
+  assert.ok(handler.sent.length > 0, 'and the run must actually happen');
+});

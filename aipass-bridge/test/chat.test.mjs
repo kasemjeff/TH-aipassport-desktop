@@ -303,3 +303,17 @@ test('--resolution and the video switches reach the job', async (t) => {
   assert.equal(job.generateAudio, false);
   assert.equal(job.stylePreprompt, 'Documentary style.');
 });
+
+// A switch takes no value, so the question after it is the question. The old
+// reading took the next token as the flag's value whatever the flag was, and
+// the question was dropped: the chat went interactive instead of answering.
+test('a switch flag does not swallow the question', async (t) => {
+  const handler = scripted(['ok']);
+  const ext = await new FakeExtension(bridge.base, { onChat: handler }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out, code } = await chat(['--new', 'what is X']);
+  assert.equal(code, 0);
+  assert.equal(handler.sent.at(-1), 'what is X', 'the question is the one that was given');
+  assert.doesNotMatch(out, /^> /m, 'and it did not fall into the interactive mode');
+});

@@ -14,16 +14,14 @@ import { PluginManager } from './harness/plugins.mjs';
 import { pluginsDirFor } from './harness/install.mjs';
 import { loadConfig } from './harness/mcp.mjs';
 import { tryDesktopRpc } from './harness/desktop-rpc.mjs';
+import { parseArgs } from './argv.mjs';
 const argv = process.argv.slice(2);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 if (argv.includes('--version') || argv.includes('-v')) {
   console.log(`aipass-doctor ${VERSION}`);
   process.exit(0);
 }
-const flag = (name, fallback = null) => {
-  const i = argv.indexOf(`--${name}`);
-  return i === -1 ? fallback : argv[i + 1];
-};
+const { flag } = parseArgs(argv, new Set(['bridge']));
 
 if (argv.includes('--help') || argv.includes('-h')) {
   console.log(`usage: npm run doctor [options]

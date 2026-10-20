@@ -17,13 +17,10 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { SessionStore } from './harness/session.mjs';
+import { parseArgs } from './argv.mjs';
 
 const argv = process.argv.slice(2);
-const flag = (name, fallback = null) => {
-  const i = argv.indexOf(`--${name}`);
-  return i === -1 ? fallback : argv[i + 1];
-};
-const has = (name) => argv.includes(`--${name}`);
+const { flag, has } = parseArgs(argv, new Set(['html', 'store', 'root', 'last']));
 
 /** The stop reasons the alerts treat as "a guard tripped" — one list, two readers. */
 const GUARD_STOPS = new Set(['stalled', 'stagnation', 'error']);
