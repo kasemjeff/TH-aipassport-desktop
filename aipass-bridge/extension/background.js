@@ -256,6 +256,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     else if (p.kind === 'done') { jobTabs.delete(p.jobId); post('/ext/done', { jobId: p.jobId, finishReason: p.finishReason }); }
     else if (p.kind === 'error') { jobTabs.delete(p.jobId); post('/ext/error', { jobId: p.jobId, message: p.message }); }
     else if (p.kind === 'loader') { jobTabs.delete(p.jobId); post('/ext/loader', { jobId: p.jobId, raw: p.raw, message: p.message }); }
+    // The assistant's id is the whole answer to a create-assistant job, and
+    // the bridge waits for it on /ext/assistant. This branch was missing, so
+    // the reply was dropped: the job sat until it timed out, and the
+    // assistant was really created on the account all the same.
+    else if (p.kind === 'assistant') { jobTabs.delete(p.jobId); post('/ext/assistant', { jobId: p.jobId, assistantId: p.assistantId, message: p.message }); }
     return;
   }
   if (msg?.type === 'status') {

@@ -633,6 +633,7 @@ All on `http://127.0.0.1:8787` by default. Every response has
 | `POST /ext/done` | **extension only** — job finished | `{ jobId, finishReason }` |
 | `POST /ext/error` | **extension only** — job failed | `{ jobId, message }` |
 | `POST /ext/loader` | **extension only** — loader/create result | `{ jobId, raw }` or `{ jobId, message }` |
+| `POST /ext/assistant` | **extension only** — assistant created/deleted | `{ jobId, assistantId }` or `{ jobId, message }` |
 | `OPTIONS *` | CORS preflight | allows any header + PNA |
 
 ---
