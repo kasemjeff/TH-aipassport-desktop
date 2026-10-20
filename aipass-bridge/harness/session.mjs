@@ -175,10 +175,15 @@ export class Session {
   /** Fork a branch: copy everything up to one entry into a new session file. */
   fork(store, { fromEntryId = null, title = null } = {}) {
     const chain = fromEntryId ? this.chainTo(fromEntryId) : this.entries.slice();
-    const header = { ...this.header, id: id(), title: title ?? `${this.title} (fork)`, created: Date.now(), updated: Date.now(), forkedFrom: this.id };
+    const kept = chain.filter((e) => e.type !== 'header');
+    // The header is a copy of the parent's, so it carried the parent's
+    // entryCount — and a fork from one entry holds fewer than that. The
+    // count may lag, never overstate (root rule 8), so the fork states its
+    // own.
+    const header = { ...this.header, id: id(), title: title ?? `${this.title} (fork)`, created: Date.now(), updated: Date.now(), entryCount: kept.length, forkedFrom: this.id };
     const file = path.join(path.dirname(this.file), `session-${header.id}.jsonl`);
-    writeAtomic(file, [padHeader(header) ?? JSON.stringify(header), ...chain.filter((e) => e.type !== 'header').map((e) => JSON.stringify(e))].join('\n') + '\n');
-    return new Session({ file, header, entries: chain.filter((e) => e.type !== 'header') });
+    writeAtomic(file, [padHeader(header) ?? JSON.stringify(header), ...kept.map((e) => JSON.stringify(e))].join('\n') + '\n');
+    return new Session({ file, header, entries: kept });
   }
 
   toMarkdown() {
@@ -309,8 +314,15 @@ export class SessionStore {
 
   remove(idOrFile) {
     const file = idOrFile.includes(path.sep) || idOrFile.includes('/') ? idOrFile : findById(this.dir, idOrFile);
-    if (file && fs.existsSync(file)) fs.rmSync(file);
-    return Boolean(file && fs.existsSync(file));
+    // The answer is "did I remove it?", so the existence check has to happen
+    // before the unlink — after it, the file is gone and the answer is always
+    // no, however well the removal went.
+    // The answer is "did I remove it?", so the existence check has to happen
+    // before the unlink — after it, the file is gone and the answer is always
+    // no, however well the removal went.
+    const there = Boolean(file && fs.existsSync(file));
+    if (there) fs.rmSync(file);
+    return there;
   }
 }
 

@@ -205,6 +205,39 @@ test('deleting a session removes the file and the listing drops it', () => {
   assert.equal(store.remove(s.id), false, 'a repeat remove is a no-op');
 });
 
+// The answer is "did I remove it?", so a removal that worked has to say so.
+// The existence check used to run after the unlink, so the answer was always
+// no — and the only test of it asserted the repeat case, which is no either
+// way.
+test('a removal says whether it removed anything', () => {
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const s = store.create({ root: path.join(dir, 'proj'), title: 'doomed' });
+  assert.equal(store.remove(s.id), true, 'the first removal did the work');
+  assert.equal(store.remove(s.id), false, 'and the second found nothing');
+});
+
+// The header may lag, never overstate — and a fork's header was a copy of
+// the parent's, so a fork from one entry claimed the parent's whole count.
+test('a forked session states its own entry count, never the parent\'s', () => {
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const s = store.create({ root: path.join(dir, 'proj'), title: 'parent' });
+  s.append('user', { text: 'one' });
+  s.append('assistant', { text: 'two' });
+  s.append('user', { text: 'three' });
+  s.append('assistant', { text: 'four' });
+
+  const fork = s.fork(store, { fromEntryId: s.entries[1].id });
+  assert.equal(fork.entries.length, 2, 'the fork holds the prefix');
+  assert.equal(fork.header.entryCount, 2, 'and the header says so');
+  assert.ok(fork.header.entryCount < s.header.entryCount, 'not the parent\'s count');
+
+  // and the file on disk agrees, so the listing does not overstate either
+  const reloaded = store.load(fork.id);
+  assert.equal(reloaded.header.entryCount, 2, 'the count round-trips through the file');
+});
+
 test('a new session header records the app that wrote it, through a rewrite', () => {
   const dir = tmp();
   const store = new SessionStore(path.join(dir, 'store'));
