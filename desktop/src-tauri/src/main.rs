@@ -76,18 +76,34 @@ fn node_path(exe_dir: &std::path::Path) -> String {
 
 /// `~/.aipass/settings.json` → { "root": "C:\\…" } — the same file the window
 /// writes when a project is switched, so the packaged app opens where the last
-/// session left off.
+/// session left off. `desktop.json` is the pre-unification leftover: when it
+/// is the only file that names a root, its value is migrated into
+/// settings.json once, so the two files can never disagree again.
 fn last_root() -> Option<PathBuf> {
     let dir = home_dir();
-    for (name, key) in [("settings.json", "root"), ("desktop.json", "root")] {
-        let path = dir.join(".aipass").join(name);
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(root) = json.get(key).and_then(|v| v.as_str()) {
-                    let path = PathBuf::from(root);
-                    if path.exists() {
-                        return Some(path);
-                    }
+    let settings_path = dir.join(".aipass").join("settings.json");
+    if let Ok(text) = std::fs::read_to_string(&settings_path) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(root) = json.get("root").and_then(|v| v.as_str()) {
+                let path = PathBuf::from(root);
+                if path.exists() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    // One-way migration from the legacy file. A root that no longer exists
+    // migrates nowhere — settings.json keeps no dead path.
+    let legacy = dir.join(".aipass").join("desktop.json");
+    if let Ok(text) = std::fs::read_to_string(&legacy) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(root) = json.get("root").and_then(|v| v.as_str()) {
+                let path = PathBuf::from(root);
+                if path.exists() {
+                    let migrated = serde_json::json!({ "root": root });
+                    let _ = std::fs::write(&settings_path, serde_json::to_string_pretty(&migrated).unwrap_or_default());
+                    let _ = std::fs::remove_file(&legacy);
+                    return Some(path);
                 }
             }
         }
@@ -195,8 +211,18 @@ impl Backend {
             return;
         }
         let mut guard = self.child.lock().unwrap();
+        // try_wait consumes the exit status, so read it here: the note names
+        // the code (or the signal) instead of just "exited", which is what
+        // turns "restart attempt 1 × 40" from a mystery into a diagnosis.
+        let mut status: Option<std::process::ExitStatus> = None;
         let exited = match guard.as_mut() {
-            Some(kid) => matches!(kid.try_wait(), Ok(Some(_))),
+            Some(kid) => match kid.try_wait() {
+                Ok(s) => {
+                    status = s;
+                    s.is_some()
+                }
+                _ => false,
+            },
             None => false,
         };
         if !exited {
@@ -217,7 +243,21 @@ impl Backend {
         // loop cannot spin the CPU or flood the log.
         let delay = Duration::from_secs((2u64 << (*fails - 1).min(4)).min(30));
         *next = Instant::now() + delay;
-        note(&format!("backend exited — restart attempt {fails}"));
+        // A crash loop that always lands on the same code is one bug, not N:
+        // after five straight failures the note says so instead of adding
+        // another identical line.
+        if *fails >= 5 {
+            note(&format!(
+                "backend exited ({}) — {} straight failures, same note suppressed until it recovers or the code changes",
+                status.map(|s| format!("{s}")).unwrap_or_else(|| "unknown".into()),
+                *fails,
+            ));
+        } else {
+            note(&format!(
+                "backend exited ({}) — restart attempt {fails}",
+                status.map(|s| format!("{s}")).unwrap_or_else(|| "unknown".into()),
+            ));
+        }
         match self.spawn() {
             Ok(kid) => *guard = Some(kid),
             Err(err) => note(&format!("backend restart failed: {err}")),

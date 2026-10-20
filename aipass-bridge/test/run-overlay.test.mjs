@@ -11,7 +11,7 @@ import { tempDir } from './harness.mjs';
 import { Overlay } from '../harness/overlay.mjs';
 import { SkillLibrary } from '../harness/skills.mjs';
 import { createTools } from '../harness/tools.mjs';
-import { createSandbox, materializeTree } from '../harness/sandbox.mjs';
+import { createSandbox, materializeTree, restorePaths } from '../harness/sandbox.mjs';
 
 const toolsAt = (dir, overlay) => createTools({
   root: dir, overlay, skills: new SkillLibrary([]), allowRun: true, maxResult: 6000,
@@ -78,6 +78,24 @@ test('a staged delete is hidden, and output paths name the project, not the sand
   const cwd = await tools.run('', 'node -e "console.log(process.cwd())"');
   assert.equal(cwd.trim().toLowerCase(), dir.toLowerCase(), 'the child path is put back to the project root');
   assert.ok(!cwd.toLowerCase().includes('.aipass'), 'no sandbox path leaks to the model');
+});
+
+test('a child that prints the canonical spelling still gets the project root back', () => {
+  // macOS hands a child the resolved path (`/private/var/…` for `/var/…`), so
+  // the literal sandbox spelling is not the only one that must swap back. A
+  // symlinked alias reproduces "the child's spelling differs from the sandbox
+  // string" on every platform.
+  const dir = tempDir({ 'keep.txt': 'keep\n' });
+  const alias = path.join(dir, 'alias');
+  fs.symlinkSync(dir, alias, 'junction');
+  const from = path.join(alias, '.aipass', 'run', 'run-x');
+  fs.mkdirSync(from, { recursive: true });
+  const canonical = fs.realpathSync(from);
+  assert.notEqual(canonical, from, 'the fixture produces a second spelling');
+
+  assert.equal(restorePaths(`cwd: ${canonical}`, from, dir), `cwd: ${dir}`, 'the resolved spelling swaps too');
+  const url = `file:///${canonical.split(path.sep).join('/')}`;
+  assert.equal(restorePaths(`at ${url}`, from, dir), `at file:///${dir.split(path.sep).join('/')}`, 'plain and file:// forms');
 });
 
 test('deleting the sandbox never follows a junction into the project', () => {

@@ -31,6 +31,11 @@ const SINGLE = [
   { re: /^\s*NEED\s+([^\s]+(?: \d+-\d+)?)\s*$/i, pick: (m) => ({ kind: 'read', arg: m[1].trim() }) },
   { re: /^\s*SEARCH\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'search', arg: m[1].trim() }) },
   { re: /^\s*GLOB\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'glob', arg: m[1].trim() }) },
+  // The code-navigation markers — mirrored from parse()'s rules, or the bubble
+  // would show raw wire the moment a model used one.
+  { re: /^\s*SYMBOLS\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'symbols', arg: m[1].trim() }) },
+  { re: /^\s*DEF\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'def', arg: m[1].trim() }) },
+  { re: /^\s*REFS\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'refs', arg: m[1].trim() }) },
   { re: /^\s*SKILL\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'skill', arg: m[1].trim() }) },
   { re: /^\s*GIT\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'git', arg: m[1].trim() }) },
   { re: /^\s*FETCH\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'fetch', arg: m[1].trim() }) },
@@ -46,6 +51,10 @@ const RUN_LINE = /^\s*RUN\s*$/i;
 const PLAN_LINE = /^\s*PLAN\s*$/i;
 const TODO_LINE = /^\s*TODO\s*$/i;
 const SUBAGENT_LINE = /^\s*SUBAGENT\s*$/i;
+const JOBS_LINE = /^\s*JOBS\s*$/i;
+// Mirrors parse()'s ASK tail: the keyword may carry a colon or a dash before
+// the question, and the question itself is required — a bare ASK is prose.
+const ASK_LINE = /^\s*ASK\b[:\s—–-]*(.+)$/i;
 // Mirrors parse()'s DONE tail: a heading or emphasis wrapped around the word is
 // still a DONE, because the model reaches for "## DONE" the moment it formats.
 const DONE_LINE = /^\s*(?:\*{1,3}|#{1,6}\s*)?DONE\b[:\s\u2014\u2013-]*(.*)$/i;
@@ -132,6 +141,10 @@ function walk(reply, plugins) {
     if (PLAN_LINE.test(line)) { i += 1; skipUntil(['END']); skipEnd(); calls.push({ kind: 'plan', arg: '' }); continue; }
     if (TODO_LINE.test(line)) { i += 1; skipUntil(['END']); skipEnd(); calls.push({ kind: 'todo', arg: '' }); continue; }
     if (SUBAGENT_LINE.test(line)) { i += 1; skipUntil(['END']); skipEnd(); calls.push({ kind: 'subagent', arg: '' }); continue; }
+    if (JOBS_LINE.test(line)) { i += 1; calls.push({ kind: 'jobs', arg: '' }); continue; }
+
+    m = ASK_LINE.exec(line);
+    if (m) { i += 1; calls.push({ kind: 'ask', arg: m[1].trim() }); continue; }
 
     m = DONE_LINE.exec(line);
     if (m) { i += 1; calls.push({ kind: 'done', arg: m[1].trim() }); continue; }

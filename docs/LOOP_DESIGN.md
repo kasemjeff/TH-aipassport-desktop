@@ -43,16 +43,21 @@ runTask(task):
   │   no calls   → nudge ×2, then the stall path                  │
   │   calls      → execute in order, behind the permission gate   │
   │                 plan gate · diff_update · budgets             │
-  │   DONE       → checker → language check → done_line → stop    │
+  │   DONE       → checker → plan checkpoint → language check →   │
+  │                done_line → stop                               │
   │ guards: repeat · stagnation · verify-nudge · compaction       │
   └──────────────────────────────────────────────────────────────┘
   │
   ▼
-run_stats + finished: summary, stopReason, changes, credits spent
+run_stats + finished: summary, stopReason, changes, credits spent,
+                       the final checklist (todo)
 ```
 
 The loop returns `{ summary, stopReason, steps, changes, credits, spent,
-check }`, records a `run_stats` line into the session, and emits `finished`.
+check, todo }`, records a `run_stats` line into the session, and emits
+`finished` (whose `todo` carries the run's final checklist state — `[]` when
+no plan was written — so the window can re-tally the plan card without
+replaying the run's todo events).
 `npm run stats` aggregates those lines: refusal rates, nudges, stagnation
 corrections, err-loop corrections, chain skips, verification nudges, firewall
 notes, the closing context estimate (`estTokens`), step timings, credits.
@@ -69,6 +74,8 @@ factories live. The context that matters:
 | `check` | always wired by the facade | a read-only verifier child — runs when the run can (`subagent` + `allowRun`) and code is staged; always at DONE (a self-run does not stand it down), at most two verdicts a run; returns `{verdict: pass/fail/none, text, ran}` |
 | `approvePlan` | `options.requirePlanApproval` | emits `plan_request`; the window's modal answers through `plan.answer` |
 | `compactor` / `rotate` | always | checked against the message about to go out |
+| `onConversationDead` | always wired by the facade | (session resume) the conversation a reopened session adopted turned out to be gone upstream — only asked on the run's first send, before the wait-and-retry ladder, and answered with a fresh conversation plus a transcript digest to send instead |
+| `onConversationSettled` | always wired by the facade | (session resume) called after every accepted send — idempotent; the facade settles the session's conversation binding and commits a resume seed's boundary on the first one |
 | `permissions` | always | `ask` / `auto` / `yolo`, persisted rules and "always" grants; nobody listening means deny |
 
 Defaults come from `settings.mjs`: `maxSteps: 0` (no cap — a cap is 1–200 and
@@ -101,8 +108,14 @@ could not clear — is paused and given the same message again
 (`sendRecoverable` names the shapes; `run_stats.sendRecoveries` counts it),
 so `error` is what stays once even those waits run out. The user pressing
 stop surfaces as `AbortError` — an ending, not a failure — and the transcript
-must not read "error" for it: `cancelled`. An error naming a missing chat tab
-emits `needs_tab` so the window can offer the fix in one click.
+must not read "error" for it: `cancelled`. The stop reaches every wait, not
+only the send: the loop checks the signal between the tools of a reply and
+between steps, a command in flight is killed with its tree, the projection a
+RUN waits for is abandoned, the web search and an MCP call ride the same
+signal, a stopped run stages no more edits, and the summariser rides it too —
+so "stopped" means the work stopped. An
+error naming a missing chat tab emits `needs_tab` so the window can offer the
+fix in one click.
 Stops: `cancelled`, `error`.
 
 **3. Parse.** `prose()` + `parse()` scan the whole reply. Markers only count
@@ -117,8 +130,10 @@ are pulled out; everything else is `work`. The first real prose line becomes
   answer. Emits `done_line` + `ask`. Stops: `ask`;
 - an effective DONE (an explicit `DONE`, or prose-only after tools have run):
   the finish pipeline — `finishCheck` when code is staged (always: a self-run
-  does not stand it down; at most two verdicts a run), then the language
-  check, then `done_line`. Stops: `done`;
+  does not stand it down; at most two verdicts a run), then the plan
+  checkpoint (once a run that wrote a PLAN/TODO: a DONE with items still open
+  names them and asks for a ticked TODO — the next DONE ends the run either
+  way), then the language check, then `done_line`. Stops: `done`;
 - otherwise the nudge pipeline: streaks 1–2 emit `nudge` and send a
   marker-shaped reminder; the third consecutive blank reply is the stall path
   — one last checker attempt if it can help, then `give_up`. Stops: `stalled`.
@@ -130,11 +145,16 @@ then `Promise.all`; results re-assemble in marker order.
 
 **6. Execute, in order.** Every call goes through `guarded()`:
 
-- **red-test gate** — a `git commit` RUN while the project's declared check
-  (`.aipass/check.txt`) has not passed at the current tree state is refused
-  with the exact command that un-bars it (`commitBlocks`); a declared check
-  that passes records the state, and any later change re-arms the gate. No
-  declared check, no gate — the file is the project's own opt-in;
+- **shape check** — `validateCall()` runs before anything is dispatched: a
+  built-in, a plugin marker and an MCP tool all answer a malformed call with
+  the same `err: …` sentence, so no implementation has to own the parser's
+  contract and no malformed call reaches a tool that might throw;
+- **red-test gate** — a `git commit` RUN while the run's declared check
+  (`.aipass/check.txt`, or the `verifyCommand` option) has not passed at the
+  current tree state is refused with the exact command that un-bars it and the
+  source it came from (`commitBlocks`); a declared check that passes records
+  the state, and any later change re-arms the gate. No declared check, no
+  gate — naming one is the project's own opt-in;
 - **repeat guard** — the identical call (kind + arg + body) for the third
   time, with no staged change in between, is refused as a loop, not a step
   (`repeat_block`); control markers (`plan`, `todo`, `subagent`) are exempt.
@@ -163,7 +183,11 @@ is not approved yet, `approvePlan()` runs: the facade emits `plan_request` and
 the run waits — however long the human takes. A decline stops the run **before
 anything is applied** (`plan-rejected`); an approve is remembered for the rest
 of the run. `PLAN`/`TODO` bodies update the todo card live (`todo`, merged per
-item); control markers never pass the permission gate.
+item — one row per distinct text, a tick sticking); items tick in the ordinary
+markdown shapes (`- [x] text`, `* [x] text`,
+bare `[x] text`) — the bullet comes off before the checkbox is judged, or a
+ticked line parses as open forever. Control markers never pass the permission
+gate.
 
 **8. After the calls.** A changed overlay emits `diff_update`. A budget spent
 mid-step stops here — before the DONE handling, so a `DONE` riding the same
@@ -196,7 +220,9 @@ out (`error` emitted) — losing a step to a summariser fault would be worse.
 
 **12. Loop end.** `step_limit` when a set cap's last step runs; a spent budget becomes
 the stop reason; credits are diffed (`quota(true)`); `run_stats` and
-`finished` go out; the loop returns.
+`finished` go out — `finished.todo` carrying the run's final checklist state
+(empty when no plan was written), so the window can re-tally the plan card and
+say what a completed run left open; the loop returns.
 
 ## Guards at a glance
 
@@ -206,27 +232,29 @@ the stop reason; credits are diffed (`quota(true)`); `run_stats` and
 | repeat guard | identical call, 3rd time, nothing staged in between | refusal text as the result, `repeat_block` | > `repeatGuardMax` (4) refusals → `stalled` |
 | err loop | the same failure (kind + masked error line) on calls in a row | correction on the third result, `errLoops` | streak > `repeatGuardMax` → `stalled` |
 | chain guard | a failed change, mid-reply | the reply's later changes/RUNs skipped and stated, `chainSkips`; reads still run | — |
-| red-test gate | a `git commit` RUN while the declared check (`.aipass/check.txt`) has not passed at the current state | refusal naming the exact command to run, `commitBlocks`; any later change re-arms | — (run the check first; a commit is never the way around it) |
+| red-test gate | a `git commit` RUN while the declared check (`.aipass/check.txt`, or `verifyCommand` when set) has not passed at the current state | refusal naming the exact command and its source, `commitBlocks`; any later change re-arms | — (run the check first; a commit is never the way around it) |
 | stagnation | same step ×3, or two trading places ×2 | `stagnation` warn + "do something different" | `stagnation` |
 | budgets | tool count (300) and wall clock (30 min) — the only bound when no step cap is set; plus credits, only when set (`maxCredits`, 0 = off, checked against the cached quota) | `budget` event | `tools-limited` / `time-limited` / `credit-limited` |
 | plan gate | `PLAN` and no approval yet | `plan_request`, wait however long | decline → `plan-rejected` |
-| checker | DONE (or a stalled step) with staged code | read-only verifier runs it; a self-run does not stand it down; a re-check only when the tree moved | fail → a correcting step; pass → `done`; two verdicts a run, the last recorded |
+| plan checkpoint | DONE with plan/TODO items still open | one nudge naming them and asking for a ticked TODO (`todoPrompts`); the finish pipeline reads: checker → checkpoint → language | — (the next DONE is honored either way) |
+| checker | DONE (or a stalled step) with staged code | read-only verifier runs it; a self-run does not stand it down; a re-check only when the tree moved; `verifyCommand` names the check | fail → a correcting step; pass → `done`; with `requireCheck`, a later DONE over the failing tree → `done-unverified`; two verdicts a run, the last recorded |
 | verify nudge | staged code, nothing verified since the change | `verify_prompt` (once per run) | — |
 | language check | closing message under `minThaiRatio` (0.4) Thai — a reply with calls is judged on its closing line alone | `lang_prompt`, one rewrite | — |
 | compaction | assembled message over the context budget | summarise + rotate | — |
 
 The mechanical guards (repeat, err loop, stagnation, budgets) stop a run that
 cannot move; the chain guard narrows one step after a failed change; the
-advisory ones (verify, language) ask once and let the model finish. All of
-them correct *evidence*, never intent: a call runs as written first — with one
-deliberate exception, the red-test gate, which is a hard bar and only exists
-where the project declared its check.
+verify nudge and language check ask once and let the model finish. All of them
+correct *evidence*, never intent: a call runs as written first — with two
+deliberate exceptions, the red-test gate and the opt-in `requireCheck` gate,
+which are hard bars and only exist where the run declared its check.
 
 ## Stop reasons
 
 | stopReason | meaning |
 |---|---|
 | `done` | DONE accepted (possibly after the checker or a language rewrite) |
+| `done-unverified` | `requireCheck` was on and a DONE arrived over a declared check that was still failing |
 | `ask` | the model paused on a question (ASK) — the next message answers it |
 | `steps` | a set step cap ran out (no cap is the default) |
 | `stalled` | hollow replies ×3, repeat refusals past the cap, or a same-failure streak past it |
@@ -256,7 +284,12 @@ where the project declared its check.
 5. **The session records accepted sends.** Both sides of a message are
    appended only after the server accepted it; a retry never double-records.
 6. **A stop is an ending.** An aborted send reports `cancelled`; the
-   transcript shows what the person did, not a failure.
+   transcript shows what the person did, not a failure. And it ends the
+   *work*: the tools still queued in the reply do not run, a command in
+   flight is killed with its tree, and a run that had only just started
+   carries the stop (its abort controller exists before the first `await`).
+   The window says what the stop found — a stop that stopped nothing says
+   so.
 7. **Helpers are safe by construction.** A role-less helper's edits are
    proposals that wait for the parent's approval; a named role
    (`SUBAGENT_ROLES`: `verifier`, `reviewer`, `summariser`) is read-only, and
@@ -309,6 +342,7 @@ the helper keeps its original behaviour.
 | `test/harness-fixes.test.mjs` · `test/harness-research.test.mjs` | the stagnation guard's warn-then-stop |
 | `test/compact.test.mjs` | rotation mid-run; the estimate's script-aware divisor |
 | `test/protocol.test.mjs` | markers, fences, the preamble |
+| `test/plan.test.mjs` | tick forms (`- [x]`, `* [x]`, bare `[x]`), the once-per-run DONE checkpoint, `mergeTodo`'s one-row-per-text dedupe, and `finished.todo` |
 | `test/stats.test.mjs` | `run_stats` and its aggregation |
 | `test/secret-screen.test.mjs` | the secret screen past the file tools — RUN bodies, GIT args, SEARCH walks |
 | `test/desktop-window.test.mjs` · `test/ui.test.mjs` | the whole run through the backend — plan gate, permissions, todos — and the window's handlers |

@@ -37,6 +37,13 @@ test('a value that would break a run is clamped, not stored', () => {
     assert.equal(s.set({ maxWallClockMs: 1 }).maxWallClockMs, 10_000, 'the wall clock has a ten-second floor');
     assert.equal(s.set({ maxWallClockMs: 'banana' }).maxWallClockMs, 1_800_000, 'nonsense falls back to the default');
     assert.equal('chatUrl' in s.set({ chatUrl: 'javascript:alert(1)' }), false, 'a chat URL must be http(s)');
+    // The declared check is one command line: a pasted second line must not
+    // reach the checker prompt as another command.
+    assert.equal(s.set({ verifyCommand: 'node check.mjs\necho not-a-check' }).verifyCommand, 'node check.mjs');
+    assert.equal(s.set({ verifyCommand: '   ' }).verifyCommand, null, 'an empty declared check is "none"');
+    assert.equal(s.set({ verifyCommand: 42 }).verifyCommand, null, 'a non-string is not a command');
+    assert.equal(s.set({ requireCheck: 1 }).requireCheck, true);
+    assert.equal(s.set({ requireCheck: 0 }).requireCheck, false);
 
     // A hand-edited file is clamped as it is read, not trusted.
     fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ maxSteps: -1, compaction: { contextTokens: 5 } }));

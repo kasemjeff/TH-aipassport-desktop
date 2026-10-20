@@ -156,3 +156,23 @@ export default {
   assert.equal(details.failed.length, 1, 'an unknown risk fails the plugin at load, not mid-run');
   assert.match(details.failed[0].error, /risk must be 'read', 'write', 'shell'/);
 });
+
+test("the installer's working areas are not plugins — dot-entries are skipped by name", async () => {
+  // .staging holds a copy being validated and .trash holds what a replace
+  // moved aside; both contain a perfectly loadable plugin.mjs. Neither is a
+  // plugin to load, and the skip is by name, not by accident of depth.
+  const dir = tempDir({
+    'settings.json': JSON.stringify({ plugins: [] }),
+    'plugins/alpha.mjs': pluginFile('alpha', 'ALPHA_TOOL'),
+    'plugins/.staging/abc/data/plugin.mjs': pluginFile('staged', 'STAGED_TOOL'),
+    'plugins/.trash/alpha-2026/plugin.mjs': pluginFile('trashed', 'TRASHED_TOOL'),
+    'plugins/.hidden.mjs': pluginFile('hidden', 'HIDDEN_TOOL'),
+  });
+  const manager = new PluginManager({ dir: path.join(dir, 'plugins'), settings: new Settings(dir), log: () => {} });
+
+  const details = await manager.load();
+
+  assert.deepEqual(details.loaded.map((p) => p.name), ['alpha']);
+  assert.deepEqual(details.tools, ['ALPHA_TOOL']);
+  assert.deepEqual(details.failed, []);
+});

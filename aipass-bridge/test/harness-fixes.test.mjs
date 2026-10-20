@@ -177,16 +177,24 @@ test('append batches the header rewrite, and rename still fixes it at once', (t)
   const realWrite = fs.writeFileSync;
   const realWriteSync = fs.writeSync;
   const rewrites = [];
+  // writeFileSync is itself a writeSync underneath on Node 24, so the writeSync
+  // spy ignores frames a spied writeFileSync produced — otherwise the
+  // breadcrumb write that precedes an in-place rewrite reads as a second
+  // rewrite, and one batched rewrite reads as two.
+  let inWriteFile = false;
   const count = (file) => {
     const target = String(file) === session.file || String(file) === `${session.file}.tmp`;
     if (target && /rewriteHeader/.test(new Error().stack)) rewrites.push(String(file));
   };
   fs.writeFileSync = function spied(file, ...rest) {
-    count(file);
-    return realWrite.call(this, file, ...rest);
+    inWriteFile = true;
+    try {
+      count(file);
+      return realWrite.call(this, file, ...rest);
+    } finally { inWriteFile = false; }
   };
   fs.writeSync = function spiedSync(fd, ...rest) {
-    if (typeof fd === 'number') count(session.file);
+    if (typeof fd === 'number' && !inWriteFile) count(session.file);
     return realWriteSync.call(this, fd, ...rest);
   };
   t.after(() => { fs.writeFileSync = realWrite; fs.writeSync = realWriteSync; });
@@ -989,4 +997,52 @@ test("a run's max-result and read-lines options reach the tools (H11)", async ()
   // Ten lines against the run's 3-line page: the page stops at three and the
   // note says how to continue.
   assert.match(resultsMessage, /7 more line\(s\)/, 'the read-lines cap paginated the file');
+});
+
+/* H12 - a background helper starts, is polled, and lands its result --------- */
+
+test('a background helper starts, JOBS polls it, and its result reaches the next turn (H12)', async () => {
+  // The job table lived inside runTask(), but the dispatcher that starts a
+  // helper is a module-level function — so `background: true` answered
+  // "err: backgroundJobs is not defined", and the finished-result injection
+  // (which lives in the run) had nothing to inject.
+  const dir = tempDir({ 'a.txt': 'hello\n' });
+  const overlay = new Overlay(dir);
+  const tools = createTools({ root: dir, overlay });
+  const events = new Emitter();
+  const rows = [];
+  events.on('tool', (p) => rows.push(p));
+  const sent = [];
+  const replies = ['SUBAGENT\nbackground: true\ntask: read a.txt\nEND\n', 'JOBS\n', 'DONE read it\n'];
+  let turn = 0;
+  let helpers = 0;
+  const result = await runTask('read the file in the background', {
+    bridge: {
+      async chat({ message }) {
+        sent.push(message);
+        return { text: replies[Math.min(turn++, replies.length - 1)], reasoning: '' };
+      },
+      async quota() { return { available: 10 }; },
+    },
+    tools, overlay, events,
+    subagent: async (task) => { helpers++; return `helper read ${task}`; },
+    options: { maxSteps: 3, subagent: true }, first: true,
+  });
+
+  assert.equal(result.stopReason, 'done');
+  assert.equal(helpers, 1, 'the helper actually ran');
+  const started = rows.find((p) => p.kind === 'subagent');
+  assert.ok(started, `the helper ran as a call:\n${JSON.stringify(rows)}`);
+  assert.ok(!/err:/.test(started.head), `and it did not fail:\n${started.head}`);
+  assert.match(started.head, /started background job bg1/, 'the job id came back at once');
+
+  const polled = rows.find((p) => p.kind === 'jobs');
+  assert.ok(polled, 'JOBS was a call of its own');
+  assert.match(polled.head, /bg1: done/, 'and it listed the finished job');
+
+  // The finished result rides the next turn on its own — the run injects it
+  // at the step start, so the model never has to ask for it twice.
+  assert.ok(sent.length >= 2, 'the run sent a second turn');
+  assert.match(sent[1], /Background helper bg1 finished/, 'the finished result rode the next turn');
+  assert.match(sent[1], /helper read read a\.txt/, 'and it was the helper\'s own result');
 });

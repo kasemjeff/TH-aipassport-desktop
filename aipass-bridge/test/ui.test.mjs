@@ -180,8 +180,15 @@ async function bootApp(backend, { token = null } = {}) {
     calls.push(method);
     sent.push({ method, params });
     shots.push({ url: String(_url), headers: { ...(init.headers ?? {}) } });
-    const result = backend[method]?.(params) ?? { ok: true };
-    return { json: async () => ({ ok: true, result }) };
+    try {
+      const result = backend[method]?.(params) ?? { ok: true };
+      return { json: async () => ({ ok: true, result }) };
+    } catch (err) {
+      // A method that throws is the RPC layer's catch: the same shape the real
+      // backend answers a refusal with, so the window's error path is the one
+      // under test.
+      return { json: async () => ({ ok: false, error: String(err.message ?? err), ...(err.stage ? { stage: err.stage } : {}) }) };
+    }
   };
 
   await import(`${APP_BASE}?boot=${++boots}`);
@@ -234,6 +241,13 @@ const BACKEND = {
   pending: () => [],
   'plugins.list': () => ({ dir: '~/.aipass/plugins', loaded: [], failed: [], tools: [], panels: [] }),
   models: () => ({ data: [{ id: 'm' }, { id: 'other' }] }),
+  'providers.list': () => ({
+    providers: [
+      { id: 'aipass', label: 'AiPASS (de.aipass.net)', kind: 'aipass', baseUrl: '', hasKey: true, builtin: true, models: [] },
+      { id: 'openai', label: 'OpenAI', kind: 'openai', baseUrl: 'https://api.openai.com/v1', apiKeyEnv: 'OPENAI_API_KEY', hasKey: false, models: ['gpt-4o'] },
+    ],
+    active: 'aipass',
+  }),
   credits: () => ({ available: 42, limit: 100 }),
   'session.fork': () => ({ id: 's4', title: 'forked' }),
 };
@@ -392,6 +406,42 @@ test('/stop works while a turn is still running', async () => {
   assert.equal(task.value, '', 'the composer was freed again');
 });
 
+test('a stop is answered on screen — the window says the run is stopping', async () => {
+  // The stop used to paint nothing at all: the backend heard it, the window
+  // did not, and the button looked broken until the run ended on its own.
+  const { node, tick } = await bootApp(BACKEND);
+  const task = node('task');
+  task.value = 'a task that keeps going';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+  assert.equal(node('send').textContent, 'หยุด', 'the button stops the run');
+
+  globalThis.__stream.emit('cancelled', { running: true });
+  await tick();
+  assert.match(node('log').textContent, /รับคำสั่งหยุดแล้ว/, 'the window says the stop was heard');
+  assert.equal(node('send').textContent, 'กำลังหยุด…', 'and the button says the run is stopping');
+
+  globalThis.__stream.emit('finished', { summary: '', stopReason: 'cancelled', spent: 0 });
+  await tick();
+  assert.equal(node('send').textContent, 'ส่ง', 'and sending is free once the run ended');
+  assert.match(node('log').textContent, /หยุดแล้ว/, 'the ending says the run stopped');
+});
+
+test('a stop that found nothing to stop says so instead of pretending', async () => {
+  const backend = { ...BACKEND, cancel: () => ({ ok: false, running: false, reason: 'no run in /tmp/proj' }) };
+  const { node, calls, tick } = await bootApp(backend);
+  const task = node('task');
+  task.value = 'a task that keeps going';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+
+  node('send').dispatch('click'); // the button stops the run
+  await tick();
+  assert.ok(calls.includes('cancel'), 'the stop was sent');
+  assert.match(node('log').textContent, /หยุดไม่ได้/, 'and the window says what the stop found');
+  assert.equal(node('send').textContent, 'ส่ง', 'the button is free again — there was nothing to stop');
+});
+
 test('the model list holds only models that can talk', async () => {
   // The bridge offers image, video and music models too; selecting one would
   // fail every run, so the dropdown is filtered and named for humans.
@@ -427,6 +477,27 @@ test('a model in use that the filter would drop stays visible', async () => {
   const shown = select.children.map((c) => c.textContent);
   assert.deepEqual(shown, ['Gemini 3.8 Flash', 'Seedream 4.0']);
   assert.equal(select.value, 'seedream-4.0', 'the header shows the model that will run');
+});
+
+test('the provider picker offers every provider and switches the one in use', async () => {
+  // The switch is machine-wide, so it goes through the backend rather than
+  // living in this window — a choice made here has to be the choice the
+  // terminal makes too.
+  const { node, sent, tick } = await bootApp(BACKEND);
+  const select = node('provider');
+  const ids = select.children.map((c) => c.value);
+  assert.deepEqual(ids, ['aipass', 'openai'], 'every provider is offered');
+  assert.equal(select.value, 'aipass', 'the built-in provider is the one in use');
+
+  const withoutKey = select.children.find((c) => c.value === 'openai');
+  assert.match(withoutKey.textContent, /ไม่มี key/, 'a provider that cannot answer says so before a run needs it');
+
+  select.value = 'openai';
+  select.dispatch('change');
+  await tick(); await tick();
+  const call = sent.find((s) => s.method === 'provider.set');
+  assert.ok(call, 'the switch goes through the backend');
+  assert.deepEqual(call.params, { id: 'openai' });
 });
 
 test('a model the live catalog dropped is marked in the picker', async () => {
@@ -491,6 +562,238 @@ test('a compaction shows what the model carried over', async () => {
   const card = node('log').children.find((c) => /compaction-card/.test(c.className));
   assert.ok(card, 'the summary is shown in the conversation');
   assert.match(card.textContent, /still to do: tests/);
+});
+
+/* The plan/todo card -------------------------------------------------------- */
+
+test('the plan card ticks items live and counts progress in its header', async () => {
+  // The card is the live view of the checklist: a ticked item reads as done
+  // and the header counts done/total. It also lives outside #log on purpose —
+  // the finished-run fold must never swallow it.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('todo', { items: [
+    { text: 'done one', done: true, kind: 'todo' },
+    { text: 'open two', done: false, kind: 'todo' },
+  ] });
+  await tick();
+  const panel = findById(node('chat'), 'todo-panel');
+  assert.ok(panel, 'the card appears with the first todo');
+  assert.match(panel.children[0].textContent, /plan & todo · 1\/2/, 'the header counts the ticks');
+  const rows = panel.children[1].children;
+  assert.ok(/\bdone\b/.test(rows[0].className), 'the ticked row is marked done');
+  assert.equal(/\bdone\b/.test(rows[1].className), false, 'the open row is not');
+  assert.equal(panel.classList.contains('complete'), false, 'and the card is not marked complete yet');
+  assert.equal(node('log').children.includes(panel), false, 'the card is outside the transcript fold');
+  assert.ok(node('chat').children.includes(panel), 'it sits in #chat, above the pending strip');
+});
+
+test('a finished run re-tallies the card from the final checklist and marks it complete', async () => {
+  // The live complaint: work finished and the checklist still showed open
+  // items. The finished event now carries the run's final todo state, and the
+  // card re-renders from it — the one account of what actually closed.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('todo', { items: [
+    { text: 'one', done: false, kind: 'todo' },
+    { text: 'two', done: false, kind: 'todo' },
+  ] });
+  globalThis.__stream.emit('done_line', { text: 'เสร็จแล้ว' });
+  globalThis.__stream.emit('finished', {
+    summary: 'เสร็จแล้ว', stopReason: 'done', spent: 1,
+    todo: [{ text: 'one', done: true, kind: 'todo' }, { text: 'two', done: true, kind: 'todo' }],
+  });
+  await tick(); await tick();
+  const panel = findById(node('chat'), 'todo-panel');
+  assert.match(panel.children[0].textContent, /plan & todo · 2\/2/, 'the final state re-tallies the header');
+  assert.ok(panel.classList.contains('complete'), 'and a fully ticked card is marked complete');
+  assert.match(node('log').textContent, /เช็คลิสต์ครบแล้ว/, 'the run says the checklist closed');
+  assert.equal(node('log').children.some((c) => /continue-row/.test(c.className)), false, 'nothing left to carry on with');
+});
+
+test('a done run with open items says how many and offers the one click back in', async () => {
+  // A run that ended "done" with items still open used to just go quiet. The
+  // card names the gap and the carry-on button turns it into the next run
+  // instead of a retyped task.
+  const { node, calls, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('finished', {
+    summary: 'stopped short', stopReason: 'done', spent: 1,
+    todo: [
+      { text: 'one', done: true, kind: 'todo' },
+      { text: 'two', done: false, kind: 'todo' },
+      { text: 'three', done: false, kind: 'todo' },
+    ],
+  });
+  await tick(); await tick();
+  const panel = findById(node('chat'), 'todo-panel');
+  assert.match(panel.children[0].textContent, /plan & todo · 1\/3/, 'the card shows the final tally');
+  assert.match(node('log').textContent, /เช็คลิสต์ยังเหลือ 2 จาก 3 รายการ/, 'the open count is named');
+  const row = node('log').children.find((c) => /continue-row/.test(c.className));
+  assert.ok(row, 'with the way back in');
+  const on = row.children.find((c) => c.tagName === 'BUTTON');
+  on.dispatch('click');
+  await tick();
+  assert.ok(calls.includes('run'), 'clicking it starts the continuation run');
+  assert.equal(node('log').children.some((c) => /continue-row/.test(c.className)), false, 'and the row is gone');
+});
+
+test('a declined plan never offers a carry-on', async () => {
+  // plan-rejected means the human said no to the plan; a "carry on" offer
+  // there would be the window arguing with the decision. The card still shows
+  // what was proposed — that is the record.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('finished', {
+    summary: '', stopReason: 'plan-rejected', spent: 1,
+    todo: [{ text: 'proposed step', done: false, kind: 'plan' }],
+  });
+  await tick(); await tick();
+  assert.equal(node('log').children.some((c) => /continue-row/.test(c.className)), false, 'no way back in is offered');
+  assert.ok(findById(node('chat'), 'todo-panel'), 'the proposed plan stays on the card');
+});
+
+test('a new session starts without the old session plan card', async () => {
+  // The card outlives a run on purpose — it is the session's checklist — but a
+  // new conversation must not open onto the old one's plan.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('todo', { items: [{ text: 'old work', done: false, kind: 'todo' }] });
+  await tick();
+  assert.ok(findById(node('chat'), 'todo-panel'), 'the card is up');
+  node('new-session').dispatch('click');
+  await tick(); await tick();
+  assert.equal(findById(node('chat'), 'todo-panel'), null, 'and gone with the session');
+});
+
+test('opening an old session replays its plan card', async () => {
+  const backend = {
+    ...BACKEND,
+    'session.open': () => [
+      { type: 'task', text: 'old task' },
+      { type: 'todo', items: [{ text: 'replayed one', done: true, kind: 'todo' }, { text: 'replayed two', done: false, kind: 'todo' }] },
+      { type: 'note', text: 'old note' },
+    ],
+  };
+  const { node, tick } = await bootApp(backend);
+  await tick();
+  node('sessions').children[0].dispatch('click');
+  await tick(); await tick();
+  const panel = findById(node('chat'), 'todo-panel');
+  assert.ok(panel, 'the checklist comes back with the session');
+  assert.match(panel.children[0].textContent, /plan & todo · 1\/2/);
+  assert.match(node('log').textContent, /old note/);
+});
+
+test('a tick updates its row in place — no rebuild, no reset', async () => {
+  // While a run works the card re-renders on every step. The rows used to be
+  // thrown away and rebuilt each time, which flickered and reset the list's
+  // scroll position mid-read; the same rows now stay put and only change state.
+  const { node, tick } = await bootApp(BACKEND);
+  const items = [
+    { text: 'one', done: false, kind: 'todo' },
+    { text: 'two', done: false, kind: 'todo' },
+  ];
+  globalThis.__stream.emit('todo', { items });
+  await tick();
+  const panel = findById(node('chat'), 'todo-panel');
+  const first = panel.children[1].children[0];
+  const second = panel.children[1].children[1];
+  globalThis.__stream.emit('todo', { items: [{ ...items[0], done: true }, items[1]] });
+  await tick();
+  assert.equal(panel.children[1].children[0], first, 'the same row element stays');
+  assert.equal(panel.children[1].children[1], second, 'and so does the one beside it');
+  assert.match(first.className, /\bdone\b/, 'the ticked row now reads done');
+  assert.equal(first.children[0].textContent, '☑', 'with a checked box');
+  assert.match(panel.children[0].textContent, /plan & todo · 1\/2/, 'and the header follows');
+});
+
+test('a longer checklist keeps the reading position', async () => {
+  const { node, tick } = await bootApp(BACKEND);
+  const two = [
+    { text: 'one', done: false, kind: 'todo' },
+    { text: 'two', done: false, kind: 'todo' },
+  ];
+  globalThis.__stream.emit('todo', { items: two });
+  await tick();
+  const panel = findById(node('chat'), 'todo-panel');
+  const ul = panel.children[1];
+  ul.scrollTop = 40;
+  globalThis.__stream.emit('todo', { items: [...two, { text: 'three', done: false, kind: 'todo' }] });
+  await tick();
+  assert.equal(ul.scrollTop, 40, 'the scroll position survives the rebuild');
+});
+
+test('a malformed todo frame is dropped, not a crash', async () => {
+  // The card renders wire data. A frame with no items (an older backend, a
+  // truncated relay) used to throw inside the stream handler — mid-run.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('todo', {});
+  globalThis.__stream.emit('todo', { items: 'nope' });
+  await tick();
+  assert.equal(findById(node('chat'), 'todo-panel'), null, 'nothing junk is rendered');
+});
+
+test('opening a second session wins over a load still in flight', async () => {
+  // Two quick clicks used to interleave: the slow session's entries landed on
+  // top of the newer one's, in one log that belonged to neither. The newest
+  // choice owns the screen; a stale load paints nothing.
+  const backend = {
+    ...BACKEND,
+    'session.open': async (params) => {
+      if (params.id === 's1') await new Promise((r) => setTimeout(r, 40));
+      return [{ type: 'note', text: `opened ${params.id}` }];
+    },
+  };
+  const { node, tick } = await bootApp(backend);
+  await tick();
+  node('sessions').children[0].dispatch('click');
+  await tick();
+  node('sessions').children[1].dispatch('click');
+  await new Promise((r) => setTimeout(r, 80));
+  assert.match(node('log').textContent, /opened s2/, 'the newest pick is on screen');
+  assert.equal(/opened s1/.test(node('log').textContent), false, 'the stale load never painted');
+
+  // …and starting a new session beats a load in flight the same way.
+  node('sessions').children[0].dispatch('click');
+  await tick();
+  node('new-session').dispatch('click');
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(/opened s1/.test(node('log').textContent), false, 'the abandoned load stayed quiet');
+});
+
+test("a live run's frames stay out of another session's view", async () => {
+  // A run streams to ITS session while the human browses an old one. Without
+  // the session tag its `assistant_delta` writes a running task into the old
+  // transcript — its checklist card and `finished` notes included. rpc.mjs
+  // tags every harness frame with the run's session; the window drops foreign
+  // ones. The `session` announcement is the exception: adopting the new id is
+  // exactly how the window follows a run that opens a session.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('session', { id: 's2', title: 'the run', file: 'x.jsonl' });
+  await tick();
+  // Browse s1 while the run is still going.
+  node('sessions').children[0].dispatch('click');
+  await tick();
+  globalThis.__stream.emit('assistant_delta', { text: 'RUN-ONLY', session: 's2' });
+  globalThis.__stream.emit('note', { text: 'RUN-NOTE', session: 's2' });
+  globalThis.__stream.emit('todo', { items: [{ text: 'RUN-ITEM', done: false }], session: 's2' });
+  globalThis.__stream.emit('assistant_delta', { text: 'IN-VIEW', session: 's1' });
+  globalThis.__stream.emit('note', { text: 'GLOBAL-NOTE' });
+  await tick();
+  // Prose paints as markdown segments (innerHTML) and notes as plain text —
+  // each family is read the way the window writes it.
+  const prose = () => node('log').children
+    .filter((c) => c.className.includes('assistant'))
+    .map(bubbleHtml)
+    .join('\n');
+  const notes = node('log').textContent;
+  assert.equal(prose().includes('RUN-ONLY'), false, 'the run streaming in s2 painted nothing into s1');
+  assert.equal(notes.includes('RUN-NOTE'), false, 'nor did its notes');
+  assert.equal(findById(node('chat'), 'todo-panel'), null, 'nor its checklist card');
+  assert.ok(prose().includes('IN-VIEW'), 'frames of the open session paint');
+  assert.ok(notes.includes('GLOBAL-NOTE'), 'untagged backend notes still paint');
+  // Back on the run's session, its frames land again.
+  node('sessions').children[1].dispatch('click');
+  await tick();
+  globalThis.__stream.emit('assistant_delta', { text: 'BACK-TAIL', session: 's2' });
+  await tick();
+  assert.ok(prose().includes('BACK-TAIL'), 'the run paints again once its session is open');
 });
 
 test('thinking streams into an open fold that closes when the turn ends', async () => {
@@ -740,24 +1043,40 @@ test('the file panel walks into folders and attaches a file', async () => {
   assert.match(node('log').textContent, /แนบแล้ว: guide\.md/);
 });
 
-test('the memory panel shows carried facts, and forget-all clears them', async () => {
+test('the memory page shows carried facts, and forget-all clears them', async () => {
   // Facts carried across sessions were invisible: the model "remembered"
-  // something the person could neither see nor drop.
+  // something the person could neither see nor drop. They live in the
+  // settings sheet now — that is where you look to find out what an app
+  // knows about you, so the rail keeps only the work.
   let facts = ['ชอบ indent ด้วยสเปซ', 'โปรเจกต์รันบน Node 20'];
   const { node, calls, tick } = await bootApp({
     ...BACKEND,
     'memory.list': () => ({ facts }),
     'memory.clear': () => { facts = []; return { ok: true }; },
   });
+  node('settings-btn').dispatch('click');
   await tick(); await tick(); await tick();
-  assert.equal(node('memory').children.length, 2, 'both facts are listed');
-  assert.match(node('memory-head').textContent, /\(2\)/, 'the header counts them');
 
-  node('memory-clear').dispatch('click');
+  const shell = node('modal-body').children.find((c) => /settings/.test(c.className));
+  const rail = shell.children.find((c) => /settings-nav/.test(c.className));
+  const tab = rail.children.find((b) => /ความจำ/.test(b.textContent));
+  assert.ok(tab, 'the sheet grew a memory category');
+  tab.dispatch('click');
+  await tick();
+
+  const pages = shell.children.find((c) => /settings-pages/.test(c.className));
+  const page = pages.children.find((p) => p.dataset.page === 'memory');
+  assert.ok(page, 'the memory page is in the sheet');
+  const walk = (n, out = []) => { out.push(n); for (const c of n.children ?? []) walk(c, out); return out; };
+  const list = walk(page).find((n) => n.id === 'memory');
+  assert.equal(list.children.length, 2, 'both facts are listed');
+  assert.match(walk(page).find((n) => n.id === 'memory-head').textContent, /\(2\)/, 'the header counts them');
+
+  walk(page).find((n) => n.id === 'memory-clear').dispatch('click');
   await tick(); await tick();
   assert.ok(calls.includes('memory.clear'), 'forget-all reaches the backend');
-  assert.equal(node('memory').children.length, 1, 'the panel re-renders empty');
-  assert.match(node('memory').textContent, /ยังไม่มี/, 'and says so instead of going blank');
+  assert.equal(list.children.length, 1, 'the panel re-renders empty');
+  assert.match(list.textContent, /ยังไม่มี/, 'and says so instead of going blank');
 });
 
 test('an apply refreshes the file panel, so the new file is on screen', async () => {
@@ -939,6 +1258,7 @@ test('the settings sheet shows its categories and saves once', async () => {
   assert.ok(rail, 'the sheet has a category rail');
   const tabs = rail.children.map((b) => b.textContent);
   assert.ok(tabs.length >= 4, `at least four categories, got ${tabs.length}`);
+  assert.ok(tabs.some((t) => /สุขภาพ/.test(t)), 'the health check has its own category');
   const pages = shell.children.find((c) => /settings-pages/.test(c.className));
   assert.ok(pages, 'and one page per category');
   assert.equal(node('modal').classList.contains('settings-sheet'), true, 'the sheet is marked');
@@ -987,6 +1307,151 @@ test('the settings sheet shows its categories and saves once', async () => {
   assert.match(error.textContent, /step/, 'naming the field');
 });
 
+test('the plugins page inspects a source, asks, and only then installs', async () => {
+  const inspected = [];
+  const installed = [];
+  const live = { on: false };
+  const info = { kind: 'path', ref: '/tmp/chime.mjs', entry: 'chime.mjs', size: 120, sha256: 'ab'.repeat(32) };
+  const backend = {
+    ...BACKEND,
+    'plugins.list': () => (live.on
+      ? {
+        dir: '/tmp/plugins',
+        loaded: [{ name: 'chime', version: '1.0.0', description: 'rings', file: '/tmp/plugins/chime/plugin.mjs', sha256: 'c0ffee' }],
+        failed: [], tools: ['CHIME_TOOL'],
+        known: ['chime'],
+        registry: { chime: { source: { ref: '/tmp/chime.mjs' }, sha256: 'c0ffee' } },
+      }
+      : { dir: '/tmp/plugins', loaded: [], failed: [], tools: [], known: [], registry: {} }),
+    'plugins.inspect': (params) => { inspected.push(params); return info; },
+    'plugins.install': (params) => { installed.push(params); live.on = true; return { plugin: { name: 'chime', version: '1.0.0' } }; },
+  };
+  const { node, tick } = await bootApp(backend);
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+
+  const shell = node('modal-body').children.find((c) => /settings/.test(c.className));
+  const rail = shell.children.find((c) => /settings-nav/.test(c.className));
+  const pluginsTab = rail.children.find((b) => /ปลั๊กอิน/.test(b.textContent));
+  assert.ok(pluginsTab, 'the sheet has a plugins category');
+  pluginsTab.dispatch('click');
+  await tick();
+  const pages = shell.children.find((c) => /settings-pages/.test(c.className));
+  const page = pages.children.find((p) => p.dataset.page === 'plugins');
+  assert.ok(page, 'the plugins page is in the sheet');
+
+  const walk = (n, out = []) => { out.push(n); for (const c of n.children ?? []) walk(c, out); return out; };
+  const input = walk(page).find((n) => n.tagName === 'INPUT' && /path|https/.test(n.placeholder ?? ''));
+  assert.ok(input, 'the install box has a source field');
+  input.value = '/tmp/chime.mjs';
+  walk(page).find((n) => n.tagName === 'BUTTON' && n.textContent === 'ตรวจสอบ').dispatch('click');
+  await tick(); await tick();
+
+  assert.deepEqual(inspected, [{ source: '/tmp/chime.mjs' }], 'ตรวจสอบ asked the backend to look');
+  assert.equal(installed.length, 0, 'inspecting runs nothing — no install before the button');
+  assert.match(page.textContent, /sha256 ab/, 'the report shows the hash that is being consented to');
+  assert.match(page.textContent, /ชนิด: path/, 'and says where the source comes from');
+
+  const installBtn = walk(page).find((n) => n.tagName === 'BUTTON' && n.textContent === 'ติดตั้ง');
+  assert.ok(installBtn, 'the report offers install');
+  installBtn.dispatch('click');
+  await tick(); await tick(); await tick();
+
+  assert.deepEqual(installed, [{ source: '/tmp/chime.mjs', expectedSha256: info.sha256 }], 'install carries the hash that was shown');
+  assert.match(page.textContent, /chime 1\.0\.0/, 'the refreshed card names the plugin');
+  assert.match(page.textContent, /ที่มา: \/tmp\/chime\.mjs/, 'and shows where it came from');
+});
+
+test('a refused install says which step closed the door', async () => {
+  // An install can fail in four places — the fetch, the validation, the
+  // name, the swap. A box that only says "err" leaves the person guessing
+  // which one happened.
+  const backend = {
+    ...BACKEND,
+    'plugins.inspect': () => ({ kind: 'git', ref: 'github:acme/plugins#main', entry: 'plugin.mjs', size: 120, sha256: 'ab'.repeat(32) }),
+    'plugins.install': () => {
+      const err = new Error('the source changed since it was inspected — inspect it again');
+      err.stage = 'fetch';
+      throw err;
+    },
+  };
+  const { node, tick } = await bootApp(backend);
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+
+  const shell = node('modal-body').children.find((c) => /settings/.test(c.className));
+  const rail = shell.children.find((c) => /settings-nav/.test(c.className));
+  rail.children.find((b) => /ปลั๊กอิน/.test(b.textContent)).dispatch('click');
+  await tick();
+  const pages = shell.children.find((c) => /settings-pages/.test(c.className));
+  const page = pages.children.find((p) => p.dataset.page === 'plugins');
+
+  const walk = (n, out = []) => { out.push(n); for (const c of n.children ?? []) walk(c, out); return out; };
+  const input = walk(page).find((n) => n.tagName === 'INPUT' && /path|https/.test(n.placeholder ?? ''));
+  input.value = 'github:acme/plugins#main';
+  walk(page).find((n) => n.tagName === 'BUTTON' && n.textContent === 'ตรวจสอบ').dispatch('click');
+  await tick(); await tick();
+
+  assert.match(page.textContent, /ชนิด: git/, 'the report says the source is fetched, not local');
+
+  const installBtn = walk(page).find((n) => n.tagName === 'BUTTON' && n.textContent === 'ติดตั้ง');
+  installBtn.dispatch('click');
+  await tick(); await tick(); await tick();
+
+  assert.match(page.textContent, /err: the source changed/, 'the refusal is on screen');
+  assert.match(page.textContent, /ขั้นตอน: ดึงไฟล์/, 'and it names the step that closed');
+});
+
+test('the MCP page lists servers, tests one, and adds one from its form', async () => {
+  const added = [];
+  const tested = [];
+  const servers = [
+    { name: 'fs', scope: 'home', enabled: true, connected: true, risk: 'write', command: 'npx', args: ['-y', 'pkg'], tools: 2, error: null, file: '/h/mcp.json' },
+    { name: 'slow', scope: 'project', enabled: false, connected: false, risk: 'read', command: 'x', args: [], tools: 0, error: null, file: '/p/mcp.json' },
+  ];
+  const backend = {
+    ...BACKEND,
+    'mcp.list': () => ({ servers, tools: [{ marker: 'MCP__fs__read', description: 'read a file', risk: 'write' }] }),
+    'mcp.test': (params) => { tested.push(params); return { ok: true, ms: 12, tools: [{ name: 'echo', description: '' }] }; },
+    'mcp.add': (params) => { added.push(params); return { server: { name: params.name, scope: params.scope }, servers, tools: [] }; },
+  };
+  const { node, tick } = await bootApp(backend);
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+
+  const shell = node('modal-body').children.find((c) => /settings/.test(c.className));
+  const rail = shell.children.find((c) => /settings-nav/.test(c.className));
+  const mcpTab = rail.children.find((b) => /MCP/.test(b.textContent));
+  assert.ok(mcpTab, 'the sheet grew an MCP category');
+  mcpTab.dispatch('click');
+  await tick();
+  const pages = shell.children.find((c) => /settings-pages/.test(c.className));
+  const page = pages.children.find((p) => p.dataset.page === 'mcp');
+  assert.ok(page, 'the MCP page is in the sheet');
+  assert.match(page.textContent, /fs/, 'the connected server is listed');
+  assert.match(page.textContent, /npx -y pkg/, 'with the command it runs');
+  assert.match(page.textContent, /slow/, 'and the disabled one too');
+  assert.match(page.textContent, /โปรเจกต์นี้/, 'naming its scope');
+
+  const walk = (n, out = []) => { out.push(n); for (const c of n.children ?? []) walk(c, out); return out; };
+  const testBtn = walk(page).find((n) => n.tagName === 'BUTTON' && n.textContent === 'ทดสอบ');
+  testBtn.dispatch('click');
+  await tick(); await tick();
+  assert.deepEqual(tested, [{ name: 'fs', scope: 'home' }], 'ทดสอบ asked the backend to connect');
+  assert.match(page.textContent, /เชื่อมต่อได้/, 'and the verdict lands in the card');
+
+  const field = (ph) => walk(page).find((n) => n.placeholder === ph);
+  field('ชื่อ (a-z 0-9 - _)').value = 'echo';
+  field('คำสั่ง เช่น npx').value = 'node';
+  field('อาร์กิวเมนต์ บรรทัดละตัว').value = 'srv.mjs\n--flag';
+  field('env บรรทัดละ K=V (ไม่บังคับ)').value = 'A=1';
+  walk(page).find((n) => n.tagName === 'BUTTON' && n.textContent === 'บันทึก').dispatch('click');
+  await tick(); await tick();
+  assert.deepEqual(added, [{
+    name: 'echo', command: 'node', args: ['srv.mjs', '--flag'], env: { A: '1' }, risk: 'write', scope: 'home',
+  }], 'the form sends exactly what the CLI takes');
+});
+
 test('the welcome card explains the app and shows what is missing', async () => {
   const { screen } = await bootApp(BACKEND);
   const card = screen('welcome');
@@ -998,11 +1463,33 @@ test('the welcome card explains the app and shows what is missing', async () => 
   assert.match(text, /พิมพ์ข้อความลงข้างล่าง|ข้างล่าง/, 'and tells you to type');
 });
 
+test('the welcome card names an empty credit pool instead of reading as broken', async () => {
+  // Credits ride a second rpc (force:false while idle), so the fake backend
+  // answers quota separately from status — exactly like the real one.
+  const backend = { ...BACKEND, credits: () => ({ available: 0, limit: 10000 }) };
+  const { screen, tick } = await bootApp(backend);
+  await tick(); await tick(); // refreshReadiness awaits the credits call
+  const card = screen('welcome');
+  assert.ok(card, 'an empty screen must not be an empty screen');
+  assert.match(card.textContent, /เครดิต 0/, 'the pool is named, with its figure');
+  assert.match(card.textContent, /free-credit/, 'and the way out is named');
+});
+
+test('a spent quota maps to the Thai copy, not the raw English', async () => {
+  // The run rpc itself throws: sendTask catches and maps through friendly().
+  const backend = { ...BACKEND, run: () => { throw new Error('quota exceeded for this period'); } };
+  const { node, tick } = await bootApp(backend);
+  node('task').value = 'do work';
+  node('task').dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.match(node('log').textContent, /เครดิตหมด/, 'the error reads as the fix');
+});
+
 test('every command in the palette has a handler that resolves', async () => {
   const { node, calls, tick } = await bootApp(BACKEND);
   const task = node('task');
   // Exercise the whole list the way a user would: type each one and send it.
-  const names = ['/help', '/status', '/new', '/resume', '/fork', '/plan', '/skills', '/diff', '/discard', '/project', '/settings', '/stop', '/models', '/conversations', '/fresh'];
+  const names = ['/help', '/status', '/paint', '/new', '/resume', '/fork', '/plan', '/skills', '/diff', '/discard', '/project', '/settings', '/stop', '/models', '/conversations', '/fresh'];
   for (const name of names) {
     task.value = name;
     task.dispatch('keydown', { key: 'Enter' });
@@ -1184,6 +1671,67 @@ test('a long answer paints its settled paragraphs once and repaints only the tai
   assert.match(body.children[1].innerHTML, /para three/, 'and the new paragraph is the tail');
 });
 
+test('the paint cache counts hits and misses, and /paint answers with them', async () => {
+  // The counters behind the settled layer: a frame that appends to it is a
+  // hit, a frame that has to reset it is a miss, and a frame with nothing
+  // settled yet is cold. The miss here is the real one the code comment
+  // names: the plugin table arrives late, the next paint re-parses the same
+  // prose with the marker line now hidden, and the settled stretch has to be
+  // rendered again. /paint prints all of it.
+  let releasePlugins;
+  const pluginsReady = new Promise((resolve) => { releasePlugins = resolve; });
+  const backend = {
+    ...BACKEND,
+    'plugins.list': () => pluginsReady.then(() => ({
+      dir: '', loaded: [], failed: [], tools: [], toolDefs: [{ marker: 'ECHO', takesBody: false }], panels: [],
+    })),
+  };
+  const { node, tick } = await bootApp(backend);
+  globalThis.__stream.emit('assistant_delta', { text: 'intro para\n\nECHO hello there\n\nend para' });
+  await tick();
+  globalThis.__stream.emit('assistant_delta', { text: ' more' });
+  await tick();
+  releasePlugins(); // the table lands between frames
+  await tick(); await tick();
+  globalThis.__stream.emit('assistant_delta', { text: ' tail' });
+  await tick();
+
+  const task = node('task');
+  task.value = '/paint';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+  const out = node('log').textContent;
+  assert.match(out, /hit rate 50\.0%/, 'one kept frame of two warm frames — the late table forced a reset');
+  assert.match(out, /hit 1/);
+  assert.match(out, /miss 1/);
+  assert.match(out, /append 43 ตัวอักษร/, 'the settled text that rode the cache adds up: 30 before the reset, 13 after');
+  assert.match(out, /repaint 30 ตัวอักษร/, 'the miss names the settled stretch it had to render again');
+});
+
+test('a status payload with cache counters prints the cache line', async () => {
+  // The bridge counts how often each of its caches (models, credits,
+  // conversations) answered instead of the tab; /status carries them and the
+  // window prints one line. An old bridge omits the block and the line with it.
+  const backend = {
+    ...BACKEND,
+    status: () => ({
+      ...BACKEND.status(),
+      cache: {
+        models: { hits: 12, fetches: 1 },
+        quota: { hits: 30, fetches: 2 },
+        conversation: { hits: 3, fetches: 1 },
+      },
+    }),
+  };
+  const { node, tick } = await bootApp(backend);
+  const task = node('task');
+  task.value = '/status';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+  const out = node('log').textContent;
+  assert.match(out, /cache: โมเดล 12 hit \/ 1 fetch · เครดิต 30 hit \/ 2 fetch · บทสนทนา 3 hit \/ 1 fetch/);
+});
+
 test('repainting a plugin panel replaces its body instead of stacking copies', async () => {
   // The finished event repaints every panel after every run. The old repaint
   // appended one more body each time — the scratchpad grew a second copy of
@@ -1221,10 +1769,65 @@ test('the theme button flips the window and remembers', async () => {
   assert.equal(globalThis.document.documentElement.dataset.theme, 'dark');
 });
 
-test('the New Conversation line starts a session like the button above it', async () => {
+test('the rail starts a session, and the foot opens the rest of the app', async () => {
+  // The rail used to carry a "New Conversation" line under the history that
+  // did the same thing as the button above it, plus two rows that led nowhere
+  // (one focused the composer, one duplicated the attach button). The rail is
+  // the work now: start a chat, search it, walk the project's files — and the
+  // foot is the way to everything else.
   const { node, calls, tick } = await bootApp(BACKEND);
   const before = calls.length;
-  node('new-conv').dispatch('click');
+  node('new-session').dispatch('click');
   await tick();
-  assert.ok(calls.slice(before).includes('session.new'), 'the line does what it says');
+  assert.ok(calls.slice(before).includes('session.new'), 'แชทใหม่ does what it says');
+
+  node('side-settings').dispatch('click');
+  await tick(); await tick(); await tick();
+  assert.equal(node('modal').classList.contains('hidden'), false, 'ตั้งค่า opens the sheet');
+  assert.equal(node('modal').classList.contains('settings-sheet'), true, 'and it is the settings sheet');
+
+  node('modal-actions').children.find((b) => /ปิด/.test(b.textContent)).dispatch('click');
+  node('side-help').dispatch('click');
+  await tick();
+  assert.equal(node('modal').classList.contains('hidden'), false, 'วิธีใช้ opens the guide');
+  assert.match(node('modal-title').textContent, /วิธีใช้/);
+});
+
+test('the rail only shows sections that have something in them', async () => {
+  // An empty section is a row that leads nowhere: the playbooks row used to
+  // sit there forever on a machine with no playbooks, and the plugins row sat
+  // there with an empty box under it. A section appears when it has content.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'skills.list': () => [],
+    'plugins.list': () => ({ dir: '/tmp/plugins', loaded: [], failed: [], tools: [], panels: [] }),
+  });
+  await tick(); await tick(); await tick();
+  assert.equal(node('skills-group').hidden, true, 'no playbooks, no row');
+  assert.equal(node('plugins-group').hidden, true, 'no plugin panels, no row');
+
+  const withPanels = await bootApp({
+    ...BACKEND,
+    'skills.list': () => [{ name: 'writing', file: 'skills/writing.md' }],
+    'plugins.list': () => ({ dir: '/tmp/plugins', loaded: [{ name: 'notes' }], failed: [], tools: [], panels: [{ id: 'notes', title: 'scratchpad' }] }),
+  });
+  await withPanels.tick(); await withPanels.tick(); await withPanels.tick();
+  assert.equal(withPanels.node('skills-group').hidden, false, 'a playbook shows the row');
+  assert.equal(withPanels.node('plugins-group').hidden, false, 'a plugin panel shows the row');
+});
+
+test('the search field is a field, and it counts the history it filters', async () => {
+  // "ค้นหาแชท" used to be a row that pointed at a box folded away inside
+  // another row — clicking it focused something you could not see, so it read
+  // as a broken button. The search is now on screen, and it says how much
+  // history there is to search.
+  const { node, tick } = await bootApp(BACKEND);
+  assert.equal(node('session-count').textContent, '2', 'the history says how many sessions there are');
+
+  node('session-filter').value = 'one';
+  node('session-filter').dispatch('input');
+  await tick(); await tick();
+  const titles = node('sessions').children.map((li) => li.textContent);
+  assert.equal(titles.length, 1, 'the list is filtered');
+  assert.match(titles[0], /one/);
 });

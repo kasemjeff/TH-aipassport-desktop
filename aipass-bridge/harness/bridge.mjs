@@ -104,7 +104,11 @@ export const SEND_RETRY_MS = Number(process.env.AIPASS_SEND_RETRY_MS) || 1000; /
 // honoured, and one tab-wide clock so parallel senders stack instead of
 // storming); this is the layer above it, for a window longer than the page's
 // budget. 503 rides along — the same edge ships both.
-export const RATE_REFUSED = /aipass returned (429|503)\b/;
+//
+// The second spelling is a provider that is not de.aipass.net: a rate limit
+// is a rate limit whoever answers it, and that answer must be waited out the
+// same way.
+export const RATE_REFUSED = /(?:aipass|provider) returned (429|503)\b/;
 export const RATE_WAITS_MS = [60_000, 180_000];
 
 /** The waits above, from the environment or the default. */
@@ -129,16 +133,25 @@ export function rateWaits(raw = process.env.AIPASS_RATE_WAITS_MS) {
 // as refusals that outlast every wait.
 //
 // The page waits 403s out first, inside the request (extension/page.js
-// EDGE_WAITS_403_MS — 5s then 15s); these waits are the layer above it, for a
+// EDGE_WAITS_403_MS — 15s then 60s); these waits are the layer above it, for a
 // window longer than the page's budget, exactly as RATE_WAITS_MS is for 429.
 // Three rungs since the Oct 17 follow-up: a pace window that outlasts two
 // waits is still more likely to be pace than content, and the rewrite right
 // behind these waits (the split) doubles the messages the edge is refusing —
 // a wrong split is far costlier than one more silence, so the split is only
-// reached after 10s → 30s → 60s of identical resends have all been refused.
+// reached after the identical message has been refused again and again over
+// minutes.
+//
+// The rung sizes changed on Oct 20 2026. They used to be 10s → 30s → 60s, and
+// that was not patience, it was probing: every resend is another request
+// inside the window it is waiting for, so a 10-second probe kept the limiter
+// hot and the identical message was refused for as long as the ladder ran —
+// recorded live, one benign tool result refused for 90 seconds straight while
+// the page asked for it again every 5 and then every 15. A pace refusal is
+// waited out like a rate refusal now: the same waits, the same shape.
 // AIPASS_EDGE_WAITS_MS overrides them (milliseconds, comma-separated); empty
 // or nonsense keeps the default, '0' is retry-once-without-a-pause.
-export const EDGE_WAITS_MS = [10_000, 30_000, 60_000];
+export const EDGE_WAITS_MS = [60_000, 180_000];
 
 /** The waits above, from the environment or the default. */
 export function edgeWaits(raw = process.env.AIPASS_EDGE_WAITS_MS) {
@@ -192,7 +205,102 @@ export function sendRecoverable(err) {
 /** A wait as a note reads it: seconds when it has any, milliseconds below. */
 export const waitLabel = (ms) => (ms >= 1000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms)}ms`);
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms, signal = null) => new Promise((resolve, reject) => {
+  if (!signal) return void setTimeout(resolve, ms);
+  if (signal.aborted) return reject(abortError());
+  const timer = setTimeout(() => {
+    signal.removeEventListener('abort', onAbort);
+    resolve();
+  }, ms);
+  const onAbort = () => {
+    clearTimeout(timer);
+    reject(abortError());
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
+});
+
+/**
+ * The proactive pace under the retry ladder (docs/HARNESS_DESIGN.md, the Oct 17
+ * rate record): the edge's own limit is approximately ten messages in four
+ * minutes — a three-probe burst plus one run, ten messages, drew a 429 — and
+ * every refusal probe is itself a request inside the window it is waiting for.
+ * A run that waits for the first refusal therefore still pays a blocked window,
+ * and parallel helpers can put four or five sends on the wire in one second.
+ *
+ * So sends are paced from the start: one token per wire send, refilled at a
+ * fixed rate. Capacity 4 and one token every 45 seconds is nine messages in
+ * four minutes with a burst of four allowed at the start (and after an idle
+ * gap), which is the measured envelope rather than a guess. A caller that wants
+ * a different pace passes `rateBucket: {capacity, refillMs}`; `rateBucket:
+ * false` disables it. `AIPASS_RATE_BUCKET` overrides the default the same way:
+ * "off" (the test suite), "capacity,refillMs", or empty for the default.
+ */
+export const RATE_BUCKET_DEFAULT = { capacity: 4, refillMs: 45_000 };
+
+/** Parse the default bucket from the environment; null means no bucket. */
+export function rateBucketConfig(raw = process.env.AIPASS_RATE_BUCKET) {
+  if (raw === undefined || raw.trim() === '') return RATE_BUCKET_DEFAULT;
+  const text = raw.trim();
+  if (/^(off|none|false|0)$/i.test(text)) return null;
+  const parts = text.split(',').map((v) => Number(v.trim()));
+  if (parts.length === 2 && parts.every((n) => Number.isFinite(n) && n > 0)) {
+    return {
+      capacity: Math.min(100, Math.max(1, Math.floor(parts[0]))),
+      refillMs: Math.max(100, Math.floor(parts[1])),
+    };
+  }
+  return RATE_BUCKET_DEFAULT;
+}
+
+/**
+ * A token bucket. One token per send, consumed before the request goes out;
+ * when the bucket is empty the caller waits for the next refill instead of
+ * drawing the refusal. `now` and `sleep` are injectable so the unit test can
+ * run a four-minute pace in a few milliseconds.
+ */
+export class TokenBucket {
+  constructor({ capacity = RATE_BUCKET_DEFAULT.capacity, refillMs = RATE_BUCKET_DEFAULT.refillMs, now = () => Date.now(), sleep: sleeper = sleep } = {}) {
+    this.capacity = Math.max(1, Math.floor(capacity));
+    this.refillMs = Math.max(1, Math.floor(refillMs));
+    this.tokens = this.capacity;
+    this.last = now();
+    this.now = now;
+    this.sleeper = sleeper;
+  }
+
+  #refill(now) {
+    const elapsed = now - this.last;
+    if (elapsed < this.refillMs) return;
+    const added = Math.floor(elapsed / this.refillMs);
+    this.tokens = Math.min(this.capacity, this.tokens + added);
+    this.last += added * this.refillMs;
+  }
+
+  /** Take one token, waiting for it when the bucket is empty. */
+  async take({ signal = null, onWait = null, sleep: sleeper = this.sleeper } = {}) {
+    let waited = 0;
+    for (;;) {
+      if (signal?.aborted) throw abortError();
+      const now = this.now();
+      this.#refill(now);
+      if (this.tokens >= 1) {
+        this.tokens -= 1;
+        return waited;
+      }
+      const ms = Math.max(1, this.last + this.refillMs - now);
+      onWait?.(waited + ms);
+      await sleeper(ms, signal);
+      waited += ms;
+    }
+  }
+}
+
+/** The abort shape the loop and retry path already recognise. */
+function abortError() {
+  const err = new Error('The operation was aborted');
+  err.name = 'AbortError';
+  return err;
+}
 
 /**
  * Run `what` again while it fails in a way that heals by itself and nothing
@@ -237,12 +345,33 @@ export class BridgeClient {
   // is where the wait note goes, so a paused run reads as waiting, not stuck;
   // `onStreamNote` receives lines the server sends as notes — events the
   // person must see (a mid-reply model switch) that are not the answer.
-  constructor(base = DEFAULT_BRIDGE_URL, { model = null, rateWaits = RATE_WAITS_MS, onNote = null, onStreamNote = null } = {}) {
+  // `rateBucket` is `undefined` (the environment/default), a
+  // `{capacity, refillMs}` override, or `false` to send unpaced.
+  constructor(base = DEFAULT_BRIDGE_URL, { model = null, rateWaits = RATE_WAITS_MS, onNote = null, onStreamNote = null, rateBucket = undefined } = {}) {
     this.base = String(base).replace(/\/+$/, '');
+    // The edge in front of de.aipass.net is the only firewall in the picture:
+    // the WAF table exists for it and for nothing else. A provider that is a
+    // plain API sets this to false (harness/provider-client.mjs) and the loop
+    // hands it the bytes as they are.
+    this.waf = true;
+    // Which provider this client speaks for. The bridge is the AiPASS one;
+    // a provider client carries its own id (harness/provider-client.mjs).
+    this.providerId = 'aipass';
     this.model = model;
     this.rateWaits = rateWaits;
     this.onNote = onNote;
     this.onStreamNote = onStreamNote;
+    const bucket = rateBucket === undefined ? rateBucketConfig() : rateBucket;
+    this.bucket = bucket ? new TokenBucket(typeof bucket === 'object' ? bucket : {}) : null;
+  }
+
+  /** Wait for the send's token, naming the pause when there is one. */
+  async #pace(signal = null) {
+    if (!this.bucket) return;
+    await this.bucket.take({
+      signal,
+      onWait: (ms) => this.onNote?.(`pacing sends — waiting ${waitLabel(ms)} before this one (rate bucket)`),
+    });
   }
 
   /**
@@ -275,6 +404,10 @@ export class BridgeClient {
     const content = Array.isArray(parts) && parts.length
       ? [{ type: 'text', text: message }, ...parts]
       : message;
+    // The token is consumed per wire attempt, retries included: a resend after
+    // a 429 is exactly the probe that keeps a window hot, so it waits for a
+    // token too.
+    await this.#pace(signal);
     const res = await fetch(`${this.base}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -348,6 +481,7 @@ export class BridgeClient {
       message: message ?? 'Starting a new working session.',
     });
     return retrySend(async () => {
+      await this.#pace();
       const r = await fetch(`${this.base}/conversations/new`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body,
       });
@@ -414,9 +548,18 @@ export class BridgeClient {
  *
  * `log(level, text)` is where progress notes go — stdout for the CLI, an event
  * for the desktop UI.
+ *
+ * `opts` says which of the two chains may run. `encode` is the WAF
+ * substitution — on for the AiPASS edge, off for any other provider, whose
+ * firewall is not the one the table was written for. `firewall` is the
+ * redact/split chain below, which is the same story: a 403 from a plain API is
+ * a permission error, and rewriting the payload to get past it would only
+ * lose the message. The 429 wait is neither: a rate limit is a rate limit
+ * everywhere, so that chain always runs.
  */
-export async function resilientSay(say, text, log = () => {}, parts = null, depth = 0) {
-  if (depth === 0) text = outbound(text); // encode the whole message once
+export async function resilientSay(say, text, log = () => {}, parts = null, depth = 0, opts = {}) {
+  const { encode = true, firewall = true } = opts;
+  if (depth === 0 && encode) text = outbound(text); // encode the whole message once
   try {
     return await say(text, parts);
   } catch (err) {
@@ -444,7 +587,7 @@ export async function resilientSay(say, text, log = () => {}, parts = null, dept
     }
 
     const blocked = /\b40[39]\b/.test(err.message);
-    if (!blocked) throw err;
+    if (!blocked || !firewall) throw err;
 
     // Fast-path: redact known risky patterns immediately rather than waiting
     // or splitting — this one is knowledge, not hope.
@@ -489,7 +632,7 @@ export async function resilientSay(say, text, log = () => {}, parts = null, dept
       const prefix = depth === 0
         ? (final ? 'Final part.\n\n' : `Part ${i + 1}, more follows. Reply with just: ok\n\n`)
         : '';
-      last = await resilientSay(say, prefix + halves[i], log, parts, depth + 1);
+      last = await resilientSay(say, prefix + halves[i], log, parts, depth + 1, opts);
     }
     return last;
   }

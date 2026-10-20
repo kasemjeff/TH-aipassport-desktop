@@ -31,6 +31,8 @@ const REPLIES = [
   'RUN\nnode x.mjs',
   'PLAN\n- [ ] one\n- [x] two\nEND\nTODO\n- [ ] three\nEND',
   'SUBAGENT\ntask: do the thing\nEND',
+  'SYMBOLS src/index.ts\nDEF someName\nREFS someName\nJOBS',
+  'ASK should the export keep the old column names?\nDONE asked',
   '## DONE shipped it',
   '**DONE** bold summary',
   'DONE',

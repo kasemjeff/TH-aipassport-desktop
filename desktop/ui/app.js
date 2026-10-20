@@ -48,7 +48,13 @@ async function rpc(method, params = {}) {
     if (fresh && fresh !== authToken) { authToken = fresh; res = await send(); }
   }
   const body = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
-  if (!body.ok) throw new Error(body.error ?? 'rpc failed');
+  if (!body.ok) {
+    // A failure that knows its step carries it, so the caller can say which
+    // door closed instead of only that something did.
+    const err = new Error(body.error ?? 'rpc failed');
+    if (body.stage) err.stage = body.stage;
+    throw err;
+  }
   return body.result;
 }
 
@@ -89,12 +95,26 @@ const ERROR_COPY = [
   [/ECONNREFUSED|fetch failed|bridge offline/i, 'bridge ไม่ทำงาน — เริ่มด้วยคำสั่ง aipass ก่อน'],
   [/a run is already in flight/i, 'มี run ค้างอยู่ — กดหยุดก่อนแล้วค่อยส่งใหม่'],
   [/outside project root/i, 'path อยู่นอกโปรเจกต์ — ใช้ไฟล์ในโปรเจกต์เท่านั้น'],
+  // The wall every free-tier run eventually hits: quota.available is 0 while
+  // the limit is not — distinguishable from "no tab" (which never returns a
+  // number at all) so the banner can say which fix applies.
+  [/credit|quota|0 of .* left|insufficient/i, 'เครดิตหมด (0) — รอรอบถัดไป หรือสลับไปใช้โมเดล free-credit (gemini-3.1-flash-lite)'],
 ];
 const friendly = (msg) => {
   const s = String(msg ?? '');
   for (const [re, copy] of ERROR_COPY) if (re.test(s)) return copy;
   return s;
 };
+/** The step a refusal closed, in the words the person is reading in. */
+const STAGE_COPY = {
+  plan: 'คำสั่งติดตั้ง',
+  fetch: 'ดึงไฟล์',
+  validate: 'ตรวจโค้ด',
+  name: 'ชื่อปลั๊กอิน',
+  swap: 'สลับไฟล์',
+  finalize: 'โหลดปลั๊กอินใหม่',
+};
+const stageLabel = (stage) => STAGE_COPY[stage] ?? stage;
 /** Follow the conversation only while the reader is already at the bottom.
  *  Scrolling up to read something and being yanked back down by the next line
  *  is the kind of small thing that makes a window feel hostile. */
@@ -116,11 +136,16 @@ const state = {
   attachments: new Map(), // id → {name, bytes, mime}
   sessionId: null,
   settings: null,
+  // Which provider the run talks to: the built-in AiPASS one (the local
+  // bridge and its tab) or an added API provider. The picker is the switch.
+  provider: 'aipass',
+  providers: [],
   plugins: null,
   pluginTools: [],      // {marker, takesBody} — what the transcript must hide
   needsTab: false,      // the last run could not proceed for want of a chat tab
   needsCompaction: false, // the budget is close to full and a rotation is coming
   runCursor: null,      // where in the log the live run's rows begin
+  stopping: false,      // a stop was asked for; the run is winding down
 };
 
 /* -------------------------------------------------------------- transcript */
@@ -171,6 +196,21 @@ function ensureAssistant() {
  * sentences appended out-of-band (the DONE summary), which are already clean
  * text and must not be scanned like a reply.
  */
+/* The paint cache's account of itself. A frame that leaves the settled layer
+ * standing is a hit — only the tail re-parses and the new settled text
+ * appends. A frame that resets the layer (a late plugin report or DONE
+ * summary rewrote earlier prose) is a miss, and `repainted` counts the
+ * characters that had to come back through the renderer. `cold` frames had
+ * nothing settled yet to save. The counters live for the window's lifetime;
+ * `/paint` prints them, so "long answers feel slow" can answer with a number
+ * instead of a shrug (test/ui.test.mjs). */
+const paintCache = { paints: 0, hits: 0, misses: 0, cold: 0, appended: 0, repainted: 0 };
+
+function paintCacheStats() {
+  const warm = paintCache.hits + paintCache.misses;
+  return { ...paintCache, hitRate: warm ? paintCache.hits / warm : null };
+}
+
 function paintAssistant(a) {
   // Painted as a settled stretch plus a moving tail (splitMarkdownStable):
   // the settled layer renders once and only ever gains text, so a frame
@@ -179,8 +219,14 @@ function paintAssistant(a) {
   // and repaints it whole, once.
   const full = transcript(a.text, state.pluginTools) + a.tail;
   const { stable, tail } = splitMarkdownStable(full);
-  if (!stable.startsWith(a.stableText)) { a.stableText = ''; a.stableHtml = ''; }
+  paintCache.paints += 1;
+  const kept = stable.startsWith(a.stableText);
+  if (!a.stableText) paintCache.cold += 1;
+  else if (kept) paintCache.hits += 1;
+  else { paintCache.misses += 1; paintCache.repainted += a.stableText.length; }
+  if (!kept) { a.stableText = ''; a.stableHtml = ''; }
   if (stable.length > a.stableText.length) {
+    paintCache.appended += stable.length - a.stableText.length;
     a.stableHtml += (a.stableHtml ? '\n' : '') + renderMarkdown(stable.slice(a.stableText.length));
     a.stableText = stable;
     if (!a.stableEl) {
@@ -360,6 +406,7 @@ const TOOL_LABEL = {
   replace: 'Edit', write: 'Create', delete: 'Delete', move: 'Move',
   git: 'Git', fetch: 'Fetch', web: 'Web', skill: 'Skill', attach: 'Attach',
   plan: 'Plan', todo: 'Todo', subagent: 'Agent', plugin: 'Plugin',
+  symbols: 'Symbols', def: 'Definition', refs: 'References', jobs: 'Jobs',
 };
 
 function addTool({ kind, arg, ok, head, lines = [] }) {
@@ -379,23 +426,65 @@ function addTool({ kind, arg, ok, head, lines = [] }) {
 
 /* ------------------------------------------------------------------ panel */
 
+// The PLAN/TODO card is one element for the whole session: built on the first
+// todo, re-tallied after that, removed when the session changes. It lives
+// outside #log (directly before #pending), so folding the run's trail never
+// swallows it — and its list scrolls inside a bounded box (styles.css), so a
+// plan of fifty items no longer pushes the conversation off the screen.
+let todoPanel = null;
+let todoHead = null;
+let todoList = null;
+let todoRows = []; // [{ li, text }] — lets an unchanged row stay put across updates
+
+/** Drop the plan/todo card — a new session must not show the old one's plan. */
+function clearTodo() {
+  if (!todoPanel) return;
+  todoPanel.remove();
+  todoPanel = null;
+  todoHead = null;
+  todoList = null;
+  todoRows = [];
+}
+
 function renderTodo(items) {
-  let panel = $('todo-panel');
-  if (!panel) {
-    panel = el('div', 'panel');
-    panel.id = 'todo-panel';
-    panel.append(el('h4', null, 'plan & todo'));
-    const ul = el('ul');
-    panel.append(ul);
-    $('pending').before(panel);
+  // A todo frame is wire data; a malformed one is dropped, never a crash in
+  // the middle of the run's stream.
+  if (!Array.isArray(items)) return;
+  const list = items.map((it) => ({ text: String(it?.text ?? ''), done: Boolean(it?.done) }));
+  if (!todoPanel) {
+    todoPanel = el('div', 'panel');
+    todoPanel.id = 'todo-panel';
+    todoHead = el('h4', null, 'plan & todo');
+    todoList = el('ul');
+    todoPanel.append(todoHead, todoList);
+    // #chat contains #pending, so this is the same slot as "before #pending" —
+    // spelled with insertBefore because the test suite's fake DOM has no before().
+    $('chat').insertBefore(todoPanel, $('pending'));
   }
-  const ul = panel.querySelector('ul');
-  ul.textContent = '';
-  for (const item of items) {
-    const li = el('li', item.done ? 'done' : '');
-    li.append(el('span', 'box', item.done ? '☑' : '☐'), el('span', null, item.text));
-    ul.append(li);
+  const total = list.length;
+  const done = list.filter((it) => it.done).length;
+  todoHead.textContent = `plan & todo · ${done}/${total}`;
+  todoPanel.classList.toggle('complete', total > 0 && done === total);
+  // Ticks move constantly while a run works. When the same rows are still
+  // there, update them where they stand — a full rebuild on every step makes
+  // the card flicker and resets the list's scroll position.
+  const same = todoRows.length === list.length && list.every((it, i) => todoRows[i].text === it.text);
+  if (same) {
+    list.forEach((it, i) => {
+      todoRows[i].li.classList.toggle('done', it.done);
+      todoRows[i].li.children[0].textContent = it.done ? '☑' : '☐';
+    });
+    return;
   }
+  const keepScroll = todoList.scrollTop;
+  todoList.textContent = '';
+  todoRows = list.map((it) => {
+    const li = el('li', it.done ? 'done' : '');
+    li.append(el('span', 'box', it.done ? '☑' : '☐'), el('span', null, it.text));
+    todoList.append(li);
+    return { li, text: it.text };
+  });
+  todoList.scrollTop = keepScroll;
 }
 
 function renderPending(changes) {
@@ -597,8 +686,13 @@ setInterval(() => {
   if (!state.running) return;
   if (Date.now() - lastEventAt > 20_000) {
     state.running = false;
+    state.stopping = false;
     $('send').textContent = 'ส่ง';
     setHint('');
+    // The window has written the run off; the backend is told as well, so the
+    // next task does not bump into a run that is still in flight there ("a run
+    // is already in flight" was what a lost run looked like from the composer).
+    rpc('cancel', { root: state.root ?? undefined }).catch(() => {});
     addNote('run นี้เงียบไป 20 วินาที — ถือว่าหยุดแล้ว (backend อาจหลุด) · ลองส่งใหม่ หรือเช็ค aipass doctor');
     refreshMeter();
   }
@@ -633,6 +727,14 @@ function onRun(name, fn) {
   stream.addEventListener(name, (e) => {
     const data = JSON.parse(e.data);
     if (data.project && state.root && !sameProject(data.project, state.root)) return;
+    // A run's frames name the session that run writes to (rpc.mjs tags them
+    // at the harness boundary). A window showing a different session must not
+    // take them: an `assistant_delta` would write a running task into an old
+    // transcript, a `finished` would fold a trail that is not on screen. The
+    // `session` announcement is the one exception — adopting the new id is
+    // exactly how the window follows a run that opens a session. Untagged
+    // frames are backend-level and always pass.
+    if (name !== 'session' && data.session && state.sessionId && data.session !== state.sessionId) return;
     fn(data, e);
   });
 }
@@ -640,6 +742,25 @@ function onRun(name, fn) {
 function onAny(name, fn) {
   stream.addEventListener(name, (e) => fn(JSON.parse(e.data), e));
 }
+
+/**
+ * How a run's ending reads in the window. The backend's word belongs to the
+ * transcript and the stats; the person in front of the window reads Thai — and
+ * a stop has to say plainly that the work stopped, because that is the whole
+ * point of pressing the button.
+ */
+const STOP_REASON = {
+  cancelled: 'หยุดแล้ว',
+  'plan-rejected': 'แผนไม่ผ่าน — หยุดก่อนแก้อะไร',
+  error: 'รันพัง',
+  stalled: 'ค้าง — หยุด',
+  stagnation: 'ค้าง — หยุด',
+  'credit-limited': 'โควตตาเกิด — หยุด',
+  'tools-limited': 'เครื่องมือครบโควตา — หยุด',
+  'time-limited': 'หมดเวลา — หยุด',
+  steps: 'ครบจำนวนรอบ',
+  'done-unverified': 'เสร็จแต่ยังไม่ผ่านการตรวจ',
+};
 
 onRun('task_start', (data) => {
   addTask(data.task);
@@ -770,19 +891,45 @@ onRun('plugin_call', (data) => {
   const { marker, arg } = data;
   addNote(`plugin ${marker} ${arg}`.trim());
 });
+// (stop) The backend heard the stop. The run winds down — the tool in flight
+// ends on its own — so the window says so at once: pressing stop used to
+// paint nothing at all, and the button looked broken until the run ended.
+onRun('cancelled', (data) => {
+  if (data?.running === false) return; // there was no run to stop
+  state.stopping = true;
+  $('send').textContent = 'กำลังหยุด…';
+  setHint('กำลังหยุด…', true);
+  addNote('รับคำสั่งหยุดแล้ว — กำลังจบงานที่กำลังทำอยู่');
+});
 onRun('finished', async (data) => {
-  const { summary, stopReason, spent, credits, check } = data;
+  const { summary, stopReason, spent, credits, check, todo } = data;
   // The run's verdict rides the pending panel: the badge under the change
   // list says whether Apply is about to write something a check passed.
   state.lastCheck = check ?? null;
   endTurn();
   foldRun(stopReason);
   state.running = false;
+  state.stopping = false;
   $('send').textContent = 'ส่ง';
   setHint('');
   refreshMeter();
   if (credits) addNote(`credits  ${credits.available?.toLocaleString?.() ?? credits.available} of ${credits.limit?.toLocaleString?.() ?? credits.limit} left${spent > 0 ? ` · ${spent.toLocaleString()} this run` : ''}`);
-  if (stopReason !== 'done') addNote(`stopped: ${stopReason}`);
+  if (stopReason !== 'done') addNote(STOP_REASON[stopReason] ?? `stopped: ${stopReason}`);
+  // The checklist's account of the run: the card re-tallies from the final
+  // state, and a completed run that still leaves items open says how many and
+  // offers the one-click way back in — a plan that ended "done" with open
+  // items used to just go quiet. A declined plan (plan-rejected) never gets
+  // the offer: that run did what it was told.
+  if (Array.isArray(todo) && todo.length) renderTodo(todo);
+  if (stopReason === 'done' && Array.isArray(todo) && todo.length) {
+    const open = todo.filter((it) => !it?.done).length;
+    if (open) {
+      addNote(`เช็คลิสต์ยังเหลือ ${open} จาก ${todo.length} รายการ`);
+      offerCarryOn('แผนยังเหลือ — ');
+    } else {
+      addNote(`เช็คลิสต์ครบแล้ว (${todo.length}/${todo.length} รายการ)`);
+    }
+  }
   // Attachments belong to the message they were sent with.
   for (const id of state.attachments.keys()) rpc('attachment.remove', { id }).catch(() => {});
   state.attachments.clear();
@@ -810,8 +957,17 @@ onRun('session', (data) => {
 /** The line above the conversation: what session this is, on what model. */
 function refreshMeta(s = null) {
   const model = $('model').value || state.settings?.defaultModel || '';
+  // The provider only shows when it is not the built-in one: the header is
+  // read often, and "AiPASS" on every line of every session is noise.
+  const provider = $('provider').value || state.provider || '';
   const file = s?.file ? s.file.split(/[\\/]/).slice(-2).join('/') : '';
-  $('meta').textContent = [s?.title ?? 'บทสนทนาใหม่', model, s?.id ? `#${s.id.slice(0, 6)}` : '', file].filter(Boolean).join('  ·  ');
+  $('meta').textContent = [
+    s?.title ?? 'บทสนทนาใหม่',
+    provider && provider !== 'aipass' ? provider : '',
+    model,
+    s?.id ? `#${s.id.slice(0, 6)}` : '',
+    file,
+  ].filter(Boolean).join('  ·  ');
 }
 
 /* -------------------------------------------------------------- composer */
@@ -855,6 +1011,7 @@ async function sendTask(seed = null) {
   $('task').value = '';
   closeSlash();
   state.running = true;
+  state.stopping = false;
   state.lastCheck = null; // a fresh run's verdict is not the old run's
   $('send').textContent = 'หยุด';
   setHint('ทำงานอยู่…', true);
@@ -874,13 +1031,37 @@ async function sendTask(seed = null) {
   } catch (err) {
     addNote(`error: ${friendly(err.message)}`);
     state.running = false;
+    state.stopping = false;
     $('send').textContent = 'ส่ง';
     setHint('');
   }
 }
 
 function cancelRun() {
-  rpc('cancel', { root: state.root ?? undefined }).catch(() => {});
+  // The stop is a request with an answer, not a hope. The backend says what it
+  // stopped: `running: false` means there was nothing to stop, and the window
+  // says so instead of sitting on a button that looks busy and is not.
+  if (state.stopping) return; // a stop is already on its way
+  state.stopping = true;
+  $('send').textContent = 'กำลังหยุด…';
+  setHint('กำลังหยุด…', true);
+  rpc('cancel', { root: state.root ?? undefined })
+    .then((res) => {
+      if (res && res.ok === false) {
+        // Nothing was running: the button goes back to sending, and the line
+        // says what the stop found.
+        state.stopping = false;
+        $('send').textContent = 'ส่ง';
+        setHint('');
+        addNote(`หยุดไม่ได้ — ไม่มีรันที่กำลังทำอยู่${res.reason ? ` (${res.reason})` : ''}`);
+      }
+    })
+    .catch((err) => {
+      state.stopping = false;
+      $('send').textContent = 'ส่ง';
+      setHint('');
+      addNote(`error: ${friendly(err.message)}`);
+    });
 }
 
 $('composer').onsubmit = (ev) => {
@@ -934,7 +1115,13 @@ $('send').onclick = (ev) => {
 
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && !$('modal').classList.contains('hidden')) hideModal();
-  else if (ev.key === 'Escape' && state.running) rpc('cancel', { root: state.root ?? undefined });
+  else if (ev.key === 'Escape' && state.running) cancelRun();
+  // Ctrl+K goes to the search: once the history is longer than a scroll, the
+  // search is the only way back to a conversation you remember.
+  else if ((ev.ctrlKey || ev.metaKey) && String(ev.key).toLowerCase() === 'k') {
+    ev.preventDefault();
+    $('session-filter')?.focus();
+  }
   // Shift+Tab cycles ask → auto → plan from the composer or anywhere the
   // window itself has the focus — the one shortcut that has to work without
   // someone typing first. Form controls (the select, the settings sheet) keep
@@ -959,13 +1146,15 @@ $('slash-btn').onclick = () => {
 $('apply').onclick = applyChecked;
 $('discard').onclick = discardAll;
 $('new-session').onclick = startNewSession;
-// The line under the chat list says "New Conversation", so it has to be one —
-// it was an unwired label, which is a promise the window made and broke.
-$('new-conv').onclick = startNewSession;
 
 // The filter re-renders the list it filters, so there is one source of truth
 // for what is on screen.
 $('session-filter').oninput = () => void refreshSessions();
+
+// The foot of the rail: the two doors to the rest of the app, spelled out.
+// A 15px gear in the header is easy to miss, and this is where people look.
+$('side-settings').onclick = () => openSettings();
+$('side-help').onclick = openHelp;
 
 // Mode is the one setting that decides everything else it might do — may it
 // write, may it run, must it plan first — so the header select and the
@@ -1040,6 +1229,60 @@ $('mode').onchange = () => { setMode($('mode').value); };
 $('model').onchange = () => rpc('config.set', { model: $('model').value })
   .then(() => { state.settings = { ...(state.settings ?? {}), defaultModel: $('model').value }; refreshMeter(); })
   .catch((err) => addNote(`เปลี่ยนโมเดลไม่ได้: ${err.message}`));
+
+/**
+ * The provider switch.
+ *
+ * A provider is who answers the run: the built-in AiPASS one (the local bridge
+ * and its tab) or an added API provider. The switch is machine-wide, like
+ * every other setting, so it is written through the backend rather than kept
+ * in this window — a choice made here is the choice the next run makes, in the
+ * terminal too.
+ *
+ * The model list belongs to the provider, so a switch rebuilds it from
+ * scratch: the old options are gone, not merged with the new ones.
+ */
+$('provider').onchange = async () => {
+  const id = $('provider').value;
+  try {
+    await rpc('provider.set', { id });
+    state.provider = id;
+    // The backend already moved the model to the new provider's own; ask it
+    // which one that is, so the picker and the run agree.
+    const st = await rpc('status').catch(() => null);
+    await fillModels(st?.model ?? null);
+    refreshMeta();
+  } catch (err) {
+    addNote(`เปลี่ยนผู้ให้บริการไม่ได้: ${err.message}`);
+  }
+};
+
+/**
+ * Fill the provider dropdown.
+ *
+ * The list says whether a provider has a key — never what the key is — so a
+ * provider that cannot answer is visibly not ready before a run needs it.
+ */
+async function fillProviders(activeId = null) {
+  const res = await rpc('providers.list').catch(() => null);
+  const list = res?.providers ?? [];
+  if (!list.length) return;
+  state.providers = list;
+  state.provider = activeId ?? res.active ?? state.provider;
+  const select = $('provider');
+  select.textContent = '';
+  for (const p of list) {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    const ready = p.kind === 'aipass' || p.hasKey;
+    opt.textContent = ready ? (p.label || p.id) : `${p.label || p.id} — ไม่มี key`;
+    opt.title = ready
+      ? `${p.id} — ${p.kind}${p.baseUrl ? ` · ${p.baseUrl}` : ''}`
+      : `${p.id} — ยังไม่มี API key (${p.apiKeyEnv ? `$${p.apiKeyEnv}` : 'ใส่ในการตั้งค่า → ผู้ให้บริการ'})`;
+    select.append(opt);
+  }
+  select.value = state.provider;
+}
 
 /* ------------------------------------------------------------------- help */
 
@@ -1126,9 +1369,32 @@ async function refreshSessions() {
   const ul = $('sessions');
   ul.textContent = '';
   const query = ($('session-filter')?.value ?? '').trim().toLowerCase();
+  // How many there are, next to the label — a list whose size is invisible is
+  // a list you cannot tell apart from "nothing there".
+  const count = $('session-count');
+  if (count) count.textContent = list.length ? String(list.length) : '';
   const shown = list
     .filter((s) => !query || `${s.title ?? ''} ${s.id}`.toLowerCase().includes(query))
     .slice(0, 60);
+  // Past 40 sessions the picker is a junk drawer, not a list: the one-click
+  // archive (nothing deleted, files move to <project>/archive/) sits above it
+  // instead of hiding in a settings page. It waits for a search to finish —
+  // a tidying button in the middle of a filtered list is noise.
+  if (list.length > 40 && !query) {
+    const bar = el('li', 'dim archive-bar');
+    const btn = el('button', 'mini', `เก็บ ${list.length - 40}+ บทสนทนาเก่า`);
+    btn.title = 'ย้ายบทสนทนาที่เงียบเกิน 30 วันไป archive/ (ไม่ลบไฟล์)';
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        const out = await rpc('session.archive', { olderThanDays: 30, limit: 50 });
+        addCommandOut(out?.count ? `เก็บ ${out.count} บทสนทนาเก่าเข้า archive/ แล้ว` : 'ไม่มีบทสนทนาเก่าเกิน 30 วันให้เก็บ');
+      } catch (err) { addNote(`เก็บไม่ได้: ${err.message}`); }
+      await refreshSessions();
+    };
+    bar.append(btn);
+    ul.append(bar);
+  }
   if (!shown.length) {
     ul.append(el('li', 'dim', query ? 'ไม่พบบทสนทนาที่ค้น' : 'ยังไม่มีบทสนทนา'));
     return;
@@ -1143,7 +1409,7 @@ async function refreshSessions() {
       : stamped
         ? new Date(+stamped[1], +stamped[2] - 1, +stamped[3], +stamped[4], +stamped[5])
         : null;
-    li.append(el('span', null, stamped ? stamped[4] : (s.title || '(untitled)')));
+    li.append(el('span', 'name', stamped ? stamped[4] : (s.title || '(untitled)')));
     if (when) li.append(el('span', 'sub', sessionDay(when)));
     li.title = `${s.title ?? '(untitled)'}\n${s.id}\n${when ? when.toLocaleString() : ''}`;
     clickable(li, () => void openSession(s.id));
@@ -1155,9 +1421,14 @@ async function refreshSkills() {
   const skills = await rpc('skills.list').catch(() => []);
   const ul = $('skills');
   ul.textContent = '';
+  // A section with nothing in it is a row that leads nowhere, so it is not
+  // shown at all. The rail should only say what it can show.
+  const group = $('skills-group');
+  if (group) group.hidden = !skills.length;
+  if (!skills.length) return;
   for (const s of skills) {
     const li = el('li');
-    li.append(el('span', null, s.name));
+    li.append(el('span', 'name', s.name));
     li.title = s.file ?? '';
     clickable(li, async () => {
       const found = await rpc('skills.load', { name: s.name }).catch((err) => ({ error: err.message }));
@@ -1176,29 +1447,34 @@ async function refreshSkills() {
   }
 }
 
-async function refreshMemory() {
+/**
+ * The facts the app carries between sessions.
+ *
+ * They live in the settings sheet now, not in the rail: this is the question
+ * "what does it remember about me?", and the place people look for that is
+ * the settings — next to the rules and the plugins, not next to the files you
+ * are working on. The list is drawn into whatever container the sheet gives
+ * it, so opening the sheet always shows what is true right now.
+ */
+async function renderMemoryFacts(ul, head) {
   const res = await rpc('memory.list').catch(() => null);
-  const ul = $('memory');
-  if (!ul) return;
-  ul.textContent = '';
   const facts = res?.facts ?? [];
-  const head = $('memory-head');
   if (head) head.textContent = facts.length ? `facts ข้าม session (${facts.length})` : 'facts ข้าม session';
-  if (!facts.length) { ul.append(el('li', 'dim', '(ยังไม่มี — รัน /compact หรือให้ agent ทำงาน)')); return; }
+  if (!ul) return facts;
+  ul.textContent = '';
+  if (!facts.length) {
+    const li = el('li', 'dim');
+    li.append(el('span', 'fact', '(ยังไม่มี — รัน /compact หรือให้ agent ทำงาน)'));
+    ul.append(li);
+    return facts;
+  }
   for (const f of facts) {
     const li = el('li');
-    li.append(el('span', null, f));
+    li.append(el('span', 'fact', f));
     ul.append(li);
   }
+  return facts;
 }
-
-// Memory panel: forget all cross-session facts.
-const _mc = $('memory-clear');
-if (_mc) _mc.addEventListener('click', async () => {
-  await rpc('memory.clear').catch(() => {});
-  addCommandOut('ลืม facts ข้าม session ทั้งหมดแล้ว');
-  refreshMemory();
-});
 
 /* --------------------------------------------------------------- the files */
 
@@ -1227,7 +1503,7 @@ async function refreshFiles(dir = filesState.dir) {
   const shown = [...entries].sort((a, b) => (b.dir ? 1 : 0) - (a.dir ? 1 : 0));
   for (const e of shown.slice(0, 300)) {
     const li = el('li', 'dim');
-    li.textContent = e.dir ? `${e.name}/` : e.name;
+    li.append(el('span', 'name', e.dir ? `${e.name}/` : e.name));
     if (e.dir) {
       clickable(li, () => void refreshFiles(dir === '.' ? e.name : `${dir}/${e.name}`));
     } else {
@@ -1358,7 +1634,7 @@ $('project').onchange = async () => {
   state.sessionId = null;
   renderPending([]);
   addNote(`project: ${$('project').value}`);
-  await Promise.all([refreshSessions(), refreshFiles('.'), refreshSkills(), refreshPanels(), refreshMemory()]);
+  await Promise.all([refreshSessions(), refreshFiles('.'), refreshSkills(), refreshPanels()]);
 };
 
 $('add-project').onclick = async () => {
@@ -1412,9 +1688,13 @@ const SETTINGS_SECTIONS = [
       { key: 'repeatGuard', label: 'กันเรียกซ้ำซาก', type: 'checkbox', note: 'เรียก tool เดิม + อาร์กิวเมนต์เดิมครั้งที่สามโดยไม่มีอะไรเปลี่ยน = ถูกบล็อกพร้อมคำแนะนำ' },
       { key: 'repeatGuardMax', label: 'เพดานการบล็อกซ้ำต่อรอบ', type: 'number', note: 'เกินแล้วหยุดรอบเป็น stalled (ค่าเริ่มต้น 4)' },
       { key: 'attempts', label: 'รอบลองสูงสุดต่อคำสั่ง', type: 'number', note: 'ลองซ้ำเมื่อ checker ไม่ผ่าน (1 = ไม่ลอง; ทุกรอบคิดเครดิตเต็ม)' },
+      { key: 'verifyCommand', label: 'คำสั่งตรวจ (verify command)', type: 'text', note: 'ถ้าใส่ จะใช้แทน .aipass/check.txt และบันทึกมากับผลตรวจ — เว้นว่าง = ใช้ไฟล์ของโปรเจกต์' },
+      { key: 'requireCheck', label: 'บังคับให้ check ผ่านก่อน DONE', type: 'checkbox', note: 'ถ้ามีคำสั่งตรวจและ checker ยัง fail จะไม่รับ DONE — หยุดเป็น done-unverified' },
     ],
   },
   { id: 'context', icon: '📊', title: 'บริบท (context)', sub: 'งบ token และจังหวะการบีบเอ็น', custom: 'context' },
+  { id: 'providers', icon: '🌐', title: 'ผู้ให้บริการ', sub: 'ใครตอบรัน — AiPASS (ผ่าน bridge) หรือ API อื่น', custom: 'providers' },
+  { id: 'memory', icon: '🧠', title: 'ความจำข้ามเซสชัน', sub: 'สิ่งที่แอปจำไว้จากบทสนทนาก่อน ๆ — ดูได้ ลบได้ทันที', custom: 'memory' },
   { id: 'window', icon: '🪟', title: 'หน้าต่าง', sub: 'ธีมและหน้า chat ที่ใช้เชื่อมต่อ', fields: [
     { key: 'theme', label: 'ธีม', type: 'select', options: [['dark', 'มืด'], ['light', 'สว่าง'], ['auto', 'ตามเครื่อง']], note: 'สลับดูได้ทันทีตอนเลือก' },
     { key: 'chatUrl', label: 'หน้า chat ที่ล็อกอินอยู่', type: 'text', note: 'bridge ใช้ tab นี้พูดกับโมเดล' },
@@ -1422,6 +1702,10 @@ const SETTINGS_SECTIONS = [
   ] },
   { id: 'skills', icon: '📘', title: 'คู่มือ (playbook)', sub: 'โฟลเดอร์ที่ใช้ค้นหาคู่มือ', custom: 'skillsDirs' },
   { id: 'rules', icon: '🛡️', title: 'กฎไฟล์', sub: 'path ที่มีกฎละเว้นโหมด — first match wins', custom: 'rules' },
+  // Health is pull-based on purpose (docs/RELIABILITY.md): no daemon pages
+  // anyone, so the check lives where the person already looks — one button,
+  // same answers as `aipass doctor` + `npm run stats -- --alerts`.
+  { id: 'health', icon: '🩺', title: 'สุขภาพ', sub: 'bridge · extension · tab · credits — กดตรวจตอนนี้', custom: 'health' },
 ];
 /**
  * The settings sheet — a category rail on the left, one page of settings on the
@@ -1512,8 +1796,15 @@ async function openSettings() {
   };
 
   const details = await rpc('plugins.list').catch(() => null);
+  // The MCP section is live connection state, not a file — it only means
+  // something when the backend answers mcp.list with rows (an older backend,
+  // or a test stub, answers nothing useful and gets no section).
+  const mcpList = await rpc('mcp.list').catch(() => null);
+  const mcpReady = mcpList && Array.isArray(mcpList.servers) ? mcpList : null;
   const sections = details
-    ? [...SETTINGS_SECTIONS, { id: 'plugins', icon: '🧩', title: 'ปลั๊กอิน', sub: `โค้ดเสริมจาก ${details.dir}`, custom: 'plugins' }]
+    ? [...SETTINGS_SECTIONS,
+      { id: 'plugins', icon: '🧩', title: 'ปลั๊กอิน', sub: `โค้ดเสริมจาก ${details.dir}`, custom: 'plugins' },
+      ...(mcpReady ? [{ id: 'mcp', icon: '🔌', title: 'MCP', sub: 'เซิร์ฟเวอร์เครื่องมือภายนอก — เพิ่ม ปิด ทดสอบ', custom: 'mcp' }] : [])]
     : SETTINGS_SECTIONS;
 
   const nav = el('nav', 'settings-nav');
@@ -1561,42 +1852,504 @@ async function openSettings() {
       continue;
     }
 
+    if (section.custom === 'providers') {
+      // Who answers the run: the built-in AiPASS provider (the local bridge
+      // and its tab) and every added API provider.
+      //
+      // The key is typed here once and filed by the backend — it never comes
+      // back out, so the list can only say whether a provider has one. A
+      // provider whose env var is named needs no key here at all: the
+      // environment answers first, and the file is only the fallback for a
+      // desktop that has no shell to export into.
+      const list = el('div', 'provider-list');
+      const out = el('div', 'install-out dim', '');
+      page.append(list);
+
+      const paint = async () => {
+        const res = await rpc('providers.list').catch(() => null);
+        const rows = res?.providers ?? [];
+        state.providers = rows;
+        list.textContent = '';
+        for (const p of rows) {
+          const card = el('div', 'provider-card');
+          const head = el('div', 'plugin-head');
+          head.append(el('div', 'plugin-name', p.label || p.id));
+          const state_ = p.id === res.active ? 'ใช้อยู่'
+            : (p.kind === 'aipass' ? 'ในตัว' : (p.hasKey ? 'มี key' : 'ยังไม่มี key'));
+          head.append(el('span', `plugin-state${p.id === res.active ? ' on' : ''}`, state_));
+          card.append(head);
+          card.append(el('div', 'plugin-desc', p.kind === 'aipass'
+            ? 'de.aipass.net ผ่าน bridge และแท็บที่ล็อกอินอยู่ — ใช้เครดิตของเว็บ'
+            : `${p.kind} · ${p.baseUrl}${p.apiKeyEnv ? ` · key: $${p.apiKeyEnv}` : ''}${p.models?.length ? ` · ${p.models.length} โมเดล` : ''}`));
+          const actions = el('div', 'plugin-actions');
+          if (p.kind !== 'aipass') {
+            const use = el('button', null, p.id === res.active ? 'ใช้อยู่' : 'ใช้ตัวนี้');
+            use.disabled = p.id === res.active;
+            use.onclick = async () => {
+              use.disabled = true;
+              await rpc('provider.set', { id: p.id })
+                .catch((e) => { out.className = 'install-out err'; out.textContent = `err: ${e.message}`; });
+              await paint();
+              await fillProviders(p.id);
+            };
+            const test = el('button', null, 'ทดสอบ');
+            test.onclick = async () => {
+              test.disabled = true;
+              out.className = 'install-out dim';
+              out.textContent = 'กำลังทดสอบ…';
+              const answer = await rpc('provider.test', { id: p.id }).catch((e) => ({ ok: false, detail: e.message }));
+              out.className = answer.ok ? 'install-out' : 'install-out err';
+              out.textContent = answer.ok ? `พร้อม — ${answer.detail}` : `ไม่ผ่าน — ${answer.detail}`;
+              test.disabled = false;
+            };
+            const del = el('button', 'danger-btn', 'ลบ');
+            del.onclick = async () => {
+              if (!window.confirm(`ลบผู้ให้บริการ "${p.id}"? (key ที่บันทึกไว้จะหายด้วย)`)) return;
+              await rpc('provider.remove', { id: p.id })
+                .catch((e) => { out.className = 'install-out err'; out.textContent = `err: ${e.message}`; });
+              await paint();
+              await fillProviders();
+            };
+            actions.append(use, test, del);
+          }
+          card.append(actions);
+          list.append(card);
+        }
+      };
+      await paint();
+
+      // The form that adds one. Everything here is the spec; the key is the
+      // only secret, and it is written once.
+      const form = el('div', 'set-group');
+      const field = (label, note, node) => {
+        const input = document.createElement('input');
+        input.type = 'text';
+        node.append(input);
+        return row(label, note, node);
+      };
+      const idBox = el('div');
+      const labelBox = el('div');
+      const kindBox = el('div');
+      const kindSel = document.createElement('select');
+      for (const [v, text] of [['openai', 'OpenAI-compatible (OpenAI, OpenRouter, Groq, Ollama…)'], ['anthropic', 'Anthropic (Messages API)']]) {
+        const opt = document.createElement('option');
+        opt.value = v;
+        opt.textContent = text;
+        kindSel.append(opt);
+      }
+      kindBox.append(kindSel);
+      const urlBox = el('div');
+      const envBox = el('div');
+      const modelsBox = el('div');
+      const keyBox = el('div');
+      const keyIn = document.createElement('input');
+      keyIn.type = 'password';
+      keyIn.placeholder = 'ว่างไว้ = ใช้ตัวแปรสภาพแวดล้อม';
+      keyBox.append(keyIn);
+      form.append(
+        field('id', 'ตัวอักษรเล็ก ตัวเลข . _ - เช่น openai, my-gateway', idBox),
+        field('ชื่อที่แสดง', 'เช่น OpenAI (ผ่าน gateway)', labelBox),
+        row('โปรโตคอล', 'ชนิด API ที่ปลายทางพูด', kindBox),
+        field('base url', 'เช่น https://api.openai.com/v1 หรือ http://localhost:11434/v1', urlBox),
+        field('ตัวแปรสภาพแวดล้อมของ key', 'เช่น OPENAI_API_KEY — ถ้าตั้งไว้ ตัวนี้มาก่อนไฟล์', envBox),
+        field('โมเดล', 'คั่นด้วยจุลภาค — เว้นว่างไว้ถ้าไม่รู้ (จะถามจาก provider ตอนใช้)', modelsBox),
+        row('API key', 'เก็บใน ~/.aipass/credentials.json (สิทธิ์เฉพาะเจ้าของ) — ไม่มีก็ใช้ตัวแปรสภาพแวดล้อมแทน', keyBox),
+      );
+      const save = el('button', 'primary', 'เพิ่มผู้ให้บริการ');
+      save.onclick = async () => {
+        save.disabled = true;
+        out.className = 'install-out dim';
+        out.textContent = 'กำลังบันทึก…';
+        const body = {
+          id: idBox.querySelector('input')?.value?.trim(),
+          label: labelBox.querySelector('input')?.value?.trim(),
+          kind: kindSel.value,
+          baseUrl: urlBox.querySelector('input')?.value?.trim(),
+          apiKeyEnv: envBox.querySelector('input')?.value?.trim(),
+          models: (modelsBox.querySelector('input')?.value ?? '').split(/[,\s]+/).map((s) => s.trim()).filter(Boolean),
+          key: keyIn.value?.trim(),
+        };
+        const answer = await rpc('provider.save', body).catch((e) => ({ error: e.message }));
+        if (answer?.error) {
+          out.className = 'install-out err';
+          out.textContent = `err: ${answer.error}`;
+          save.disabled = false;
+          return;
+        }
+        out.className = 'install-out';
+        out.textContent = `เพิ่ม "${body.id}" แล้ว — เลือกใช้ได้จากช่องผู้ให้บริการใต้ช่องพิมพ์`;
+        keyIn.value = '';
+        idBox.querySelector('input').value = '';
+        labelBox.querySelector('input').value = '';
+        urlBox.querySelector('input').value = '';
+        envBox.querySelector('input').value = '';
+        modelsBox.querySelector('input').value = '';
+        save.disabled = false;
+        await paint();
+        await fillProviders();
+      };
+      const actionsRow = el('div', 'plugin-actions');
+      actionsRow.append(save);
+      form.append(actionsRow);
+      page.append(form, out);
+      continue;
+    }
+
+    if (section.custom === 'memory') {
+      // What the app remembers between sessions, and the one button that
+      // makes it forget. It used to sit in the rail as a row folded away
+      // under a heading nobody could place — a thing the app did that you
+      // could only find by guessing. Here it is a page, next to the rules.
+      const head = el('div', 'set-title');
+      head.id = 'memory-head';
+      const list = el('ul', 'list dim memory-list');
+      list.id = 'memory';
+      const clear = el('button', 'mini', 'ลืมทั้งหมด');
+      clear.id = 'memory-clear';
+      clear.title = 'ลบ facts ที่จำไว้ข้าม session ทั้งหมด';
+      clear.onclick = async () => {
+        await rpc('memory.clear').catch(() => {});
+        addCommandOut('ลืม facts ข้าม session ทั้งหมดแล้ว');
+        await renderMemoryFacts(list, head);
+      };
+      page.append(head, list, clear);
+      await renderMemoryFacts(list, head);
+      continue;
+    }
+
     if (section.custom === 'skillsDirs') {
       const group = el('div', 'set-group');
-      group.append(row('โฟลเดอร์คู่มือ', 'ทีละ path ต่อบรรทัด · ลองโฟลเดอร์ในโปรเจกต์ก่อน แล้วค่อย ~/.aipass/skills · /skills = ดูที่มี', control({ key: 'skillsDirs', type: 'textarea' })));
+      group.append(row('โฟลเดอร์คู่มือ', 'ทีละ path ต่อบรรทัด · ลองโฟลเดอร์ในโปรเจกต์ก่อน แล้วค่อย ~/.aipass/skills · /skills = ดูที่มี · รายการรีเฟรชเองเมื่อบันทึก', control({ key: 'skillsDirs', type: 'textarea' })));
       page.append(group);
       continue;
     }
 
     if (section.custom === 'plugins') {
-      if (!details.loaded.length && !details.failed.length) {
-        const hint = el('p', 'settings-empty');
-        hint.append('ยังไม่มีปลั๊กอิน — วางไฟล์ .mjs ลง ');
-        hint.append(el('code', null, details.dir));
-        hint.append(' แล้วกดโหลดใหม่');
-        page.append(hint);
-      }
-      for (const pl of details.loaded) {
-        const card = el('div', 'plugin-card');
-        card.append(el('div', 'plugin-name', `${pl.name} ${pl.version}`));
-        card.append(el('div', 'plugin-desc', pl.description || 'ไม่มีคำอธิบาย'));
-        page.append(card);
-      }
-      for (const f of details.failed) {
-        const card = el('div', 'plugin-card bad');
-        card.append(el('div', 'plugin-name', `โหลดไม่ได้ — ${f.file}`));
-        card.append(el('div', 'plugin-desc', f.error));
-        page.append(card);
-      }
-      if (details.tools.length) {
-        const marks = el('p', 'plugin-markers');
-        marks.append('markers: ');
-        marks.append(el('code', null, details.tools.join(', ')));
-        page.append(marks);
-      }
+      let live = details;
+
+      // The install box: a source in, a report out — inspect runs nothing.
+      // The click on "ติดตั้ง" is the consent moment: it is the first thing
+      // that loads the code, so nothing may happen before the report is read.
+      const box = el('div', 'set-group');
+      const line = el('div', 'install-line');
+      const src = document.createElement('input');
+      src.type = 'text';
+      src.placeholder = 'path ของไฟล์ .mjs หรือโฟลเดอร์ · https://… · github:owner/repo · npm:<package>';
+      const check = el('button', null, 'ตรวจสอบ');
+      line.append(src, check);
+      const out = el('div', 'install-out dim', 'วางที่อยู่แล้วกดตรวจสอบ — ยังไม่มีอะไรถูกรันจนกว่าจะกดติดตั้ง');
+      box.append(line, out);
+      page.append(box);
+
+      const empty = el('p', 'settings-empty');
+      empty.append('ยังไม่มีปลั๊กอินที่ติดตั้งผ่านแอป — วางที่อยู่ด้านบน หรือวางไฟล์ .mjs ลง ');
+      empty.append(el('code', null, details.dir));
+      const cards = el('div');
+      const markers = el('div', 'plugin-markers');
+      page.append(empty, cards, markers);
+
+      const paint = () => {
+        const known = live.known ?? live.loaded.map((pl) => pl.name);
+        empty.style.display = (!known.length && !live.failed.length) ? '' : 'none';
+        cards.textContent = '';
+        for (const name of known) {
+          const pl = live.loaded.find((x) => x.name === name) ?? null;
+          const rec = live.registry?.[name] ?? pl?.installed ?? null;
+          const on = Boolean(pl);
+          const card = el('div', `plugin-card${on ? '' : ' off'}`);
+          const head = el('div', 'plugin-head');
+          head.append(el('div', 'plugin-name', `${name}${pl ? ` ${pl.version}` : ''}`));
+          head.append(el('span', `plugin-state${on ? ' on' : ''}`, on ? 'เปิด' : 'ปิด'));
+          card.append(head);
+          card.append(el('div', 'plugin-desc', pl?.description || (on ? 'ไม่มีคำอธิบาย' : 'ปิดอยู่ — ไม่ถูกโหลด')));
+          if (rec) {
+            const note = el('div', 'plugin-source dim');
+            note.textContent = `ที่มา: ${rec.source?.ref ?? '?'} · sha ${rec.sha256 ?? '?'}`;
+            if (pl?.hashChanged) note.textContent += ' · ไฟล์เปลี่ยนหลังติดตั้ง — กดโหลดใหม่หรือติดตั้งทับถ้าไม่ใช่ฝีมือคุณ';
+            card.append(note);
+          } else {
+            card.append(el('div', 'plugin-source dim', 'วางไฟล์เอง — ไม่ได้ติดตั้งผ่านแอป (ลบต้องยืนยันเป็นพิเศษ)'));
+          }
+          const actions = el('div', 'plugin-actions');
+          const toggle = el('button', null, on ? 'ปิด' : 'เปิด');
+          toggle.onclick = async () => {
+            toggle.disabled = true;
+            const res = await rpc(on ? 'plugins.disable' : 'plugins.enable', { name }).catch((e) => {
+              out.className = 'install-out err';
+              out.textContent = `err: ${e.message}${e.stage ? ` · ขั้นตอน: ${stageLabel(e.stage)}` : ''}`;
+              return null;
+            });
+            if (res) await refresh();
+            else toggle.disabled = false;
+          };
+          const del = el('button', 'danger-btn', 'ลบ');
+          del.onclick = async () => {
+            const first = rec
+              ? `ลบปลั๊กอิน "${name}"? ไฟล์จะถูกเก็บไว้ใน .trash (กู้คืนได้)`
+              : `"${name}" ไม่ได้ติดตั้งผ่านแอป — ไฟล์นี้คือผลงานของคุณ ยืนยันว่าจะย้ายไป .trash?`;
+            if (!window.confirm(first)) return;
+            if (!rec && !window.confirm('ยืนยันอีกครั้ง: ย้ายโฟลเดอร์นี้ไป .trash?')) return;
+            del.disabled = true;
+            const res = await rpc('plugins.remove', { name, force: true }).catch((e) => {
+              out.className = 'install-out err';
+              out.textContent = `err: ${e.message}${e.stage ? ` · ขั้นตอน: ${stageLabel(e.stage)}` : ''}`;
+              return null;
+            });
+            if (res) await refresh();
+            else del.disabled = false;
+          };
+          actions.append(toggle, del);
+          card.append(actions);
+          cards.append(card);
+        }
+        for (const f of live.failed) {
+          const card = el('div', 'plugin-card bad');
+          card.append(el('div', 'plugin-name', `โหลดไม่ได้ — ${f.file}`));
+          card.append(el('div', 'plugin-desc', f.error));
+          cards.append(card);
+        }
+        markers.textContent = '';
+        if (live.tools.length) {
+          markers.append('markers: ');
+          markers.append(el('code', null, live.tools.join(', ')));
+        }
+      };
+
+      const refresh = async () => {
+        live = await rpc('plugins.list').catch(() => live);
+        paint();
+        // The rail's plugin section follows what is installed: a plugin you
+        // just installed has a panel, and the panel should be there now —
+        // not after a reload of the window.
+        await refreshPanels();
+      };
+
+      check.onclick = async () => {
+        const source = src.value.trim();
+        if (!source) { out.className = 'install-out err'; out.textContent = 'ใส่ path หรือ URL ก่อน'; return; }
+        // The box says what it is doing while it does it: a source that has
+        // to be fetched looks the same as one that is already on disk, and the
+        // wait is the difference between the two.
+        check.disabled = true;
+        src.disabled = true;
+        out.className = 'install-out dim';
+        out.textContent = 'กำลังตรวจสอบแหล่งที่มา… (ยังไม่มีอะไรถูกรัน)';
+        const info = await rpc('plugins.inspect', { source }).catch((e) => {
+          out.className = 'install-out err';
+          out.textContent = `err: ${e.message}${e.stage ? ` · ขั้นตอน: ${stageLabel(e.stage)}` : ''}`;
+          return null;
+        });
+        check.disabled = false;
+        src.disabled = false;
+        if (!info) return;
+        out.className = 'install-out';
+        out.textContent = '';
+        out.append(el('div', null, `ที่มา: ${info.ref}`));
+        out.append(el('div', 'dim', `ชนิด: ${info.kind}${info.kind === 'path' ? '' : ' — ดึงมาจากที่นั้นเพื่ออ่าน ยังไม่มีอะไรถูกรัน'}`));
+        out.append(el('div', 'dim', `${info.entry} · ${info.size.toLocaleString()} bytes · sha256 ${info.sha256.slice(0, 16)}…`));
+        out.append(el('div', 'dim', 'ติดตั้ง = โหลดโค้ดนี้ในโปรเซสของแอปจริง ๆ ไม่มี sandbox — เทียบ sha256 กับต้นทางก่อนถ้าไม่แน่ใจ'));
+        const install = el('button', 'primary', 'ติดตั้ง');
+        install.onclick = async () => {
+          install.disabled = true;
+          check.disabled = true;
+          src.disabled = true;
+          out.className = 'install-out dim';
+          out.textContent = 'กำลังติดตั้ง… (ดึงแหล่งที่มา → ตรวจโค้ด → สลับเข้าโฟลเดอร์ปลั๊กอิน)';
+          const res = await rpc('plugins.install', { source: info.ref, expectedSha256: info.sha256 }).catch((e) => {
+            out.className = 'install-out err';
+            out.textContent = `err: ${e.message}${e.stage ? ` · ขั้นตอน: ${stageLabel(e.stage)}` : ''}`;
+            // A folder that is not the installer's is refused by default; this
+            // second click is the explicit force, and it still keeps a copy.
+            if (/not installed by aipass|already exists/.test(e.message)) {
+              const force = el('button', null, 'ติดตั้งทับ (เก็บสำเนาเดิมใน .trash)');
+              force.onclick = async () => {
+                force.disabled = true;
+                out.className = 'install-out dim';
+                out.textContent = 'กำลังติดตั้งทับ…';
+                const forced = await rpc('plugins.install', { source: info.ref, expectedSha256: info.sha256, force: true }).catch((e2) => {
+                  out.className = 'install-out err';
+                  out.textContent = `err: ${e2.message}${e2.stage ? ` · ขั้นตอน: ${stageLabel(e2.stage)}` : ''}`;
+                  return null;
+                });
+                if (forced) {
+                  out.className = 'install-out ok-text';
+                  out.textContent = `ติดตั้งทับ ${forced.plugin?.name ?? ''} ${forced.plugin?.version ?? ''} แล้ว — สำเนาเดิมอยู่ใน .trash`;
+                  check.disabled = false;
+                  src.disabled = false;
+                  await refresh();
+                } else force.disabled = false;
+              };
+              out.append(force);
+            }
+            check.disabled = false;
+            src.disabled = false;
+            return null;
+          });
+          if (res) {
+            out.className = 'install-out ok-text';
+            out.textContent = `ติดตั้ง ${res.plugin?.name ?? ''} ${res.plugin?.version ?? ''} แล้ว`;
+            check.disabled = false;
+            src.disabled = false;
+            await refresh();
+          } else install.disabled = false;
+        };
+        out.append(install);
+      };
+
       const reload = el('button', null, 'โหลดปลั๊กอินใหม่');
-      reload.onclick = async () => { await rpc('plugins.reload'); hideModal(); openSettings(); };
+      reload.onclick = async () => { await rpc('plugins.reload').catch(() => null); await refresh(); };
       page.append(reload);
+      paint();
+      continue;
+    }
+
+    if (section.custom === 'mcp') {
+      let live = mcpReady;
+      const wrap = el('div');
+      page.append(wrap);
+
+      const paintMcp = () => {
+        wrap.textContent = '';
+        for (const s of live.servers ?? []) {
+          const card = el('div', 'plugin-card');
+          const head = el('div', 'plugin-head');
+          head.append(el('div', 'plugin-name', s.name));
+          const state = !s.enabled ? 'ปิด' : s.connected ? `${s.tools} tools` : 'เชื่อมต่อไม่ได้';
+          head.append(el('span', `plugin-state${!s.enabled ? '' : s.connected ? ' on' : ' bad'}`, state));
+          card.append(head);
+          card.append(el('div', 'plugin-source dim',
+            `${s.scope === 'project' ? 'โปรเจกต์นี้' : 'ทุกโปรเจกต์'} · ${s.command}${s.args?.length ? ` ${s.args.join(' ')}` : ''}${s.risk === 'read' ? ' · อ่านอย่างเดียว' : ' · เขียน (ถามตามโหมด)'}`));
+          if (s.error) card.append(el('div', 'plugin-desc', s.error));
+          const actions = el('div', 'plugin-actions');
+          const toggle = el('button', null, s.enabled ? 'ปิด' : 'เปิด');
+          toggle.onclick = async () => {
+            toggle.disabled = true;
+            const res = await rpc(s.enabled ? 'mcp.disable' : 'mcp.enable', { name: s.name, scope: s.scope }).catch(() => null);
+            if (res) { live = res; paintMcp(); } else toggle.disabled = false;
+          };
+          const note = el('div', 'plugin-source dim');
+          const test = el('button', null, 'ทดสอบ');
+          test.onclick = async () => {
+            test.disabled = true;
+            note.className = 'plugin-source dim';
+            note.textContent = 'กำลังเชื่อมต่อ…';
+            const r = await rpc('mcp.test', { name: s.name, scope: s.scope }).catch((e) => ({ ok: false, error: e.message }));
+            note.className = r.ok ? 'plugin-source ok-text' : 'plugin-source err-text';
+            note.textContent = r.ok
+              ? `เชื่อมต่อได้ใน ${r.ms} ms — ${r.tools.length} tools${r.tools.length ? `: ${r.tools.map((t) => t.name).join(', ')}` : ''}`
+              : `err: ${r.error}`;
+            test.disabled = false;
+          };
+          const del = el('button', 'danger-btn', 'ลบ');
+          del.onclick = async () => {
+            if (!window.confirm(`ลบ MCP server "${s.name}" ออกจาก${s.scope === 'project' ? 'โปรเจกต์นี้' : 'การตั้งค่าส่วนกลาง'}?`)) return;
+            del.disabled = true;
+            const res = await rpc('mcp.remove', { name: s.name, scope: s.scope }).catch(() => null);
+            if (res) { live = res; paintMcp(); } else del.disabled = false;
+          };
+          actions.append(toggle, test, del);
+          card.append(actions, note);
+          wrap.append(card);
+        }
+
+        // The add form carries every field `aipass mcp add` takes — a form
+        // that cannot express what the command can is half a feature.
+        const nameI = document.createElement('input');
+        nameI.type = 'text';
+        nameI.placeholder = 'ชื่อ (a-z 0-9 - _)';
+        const cmdI = document.createElement('input');
+        cmdI.type = 'text';
+        cmdI.placeholder = 'คำสั่ง เช่น npx';
+        const argsI = document.createElement('textarea');
+        argsI.rows = 2;
+        argsI.placeholder = 'อาร์กิวเมนต์ บรรทัดละตัว';
+        const envI = document.createElement('textarea');
+        envI.rows = 2;
+        envI.placeholder = 'env บรรทัดละ K=V (ไม่บังคับ)';
+        const cwdI = document.createElement('input');
+        cwdI.type = 'text';
+        cwdI.placeholder = 'โฟลเดอร์ทำงาน สัมพัทธ์กับโปรเจกต์ (ไม่บังคับ)';
+        const scopeS = document.createElement('select');
+        for (const [v, text] of [['home', 'ทุกโปรเจกต์'], ['project', 'เฉพาะโปรเจกต์นี้']]) {
+          const opt = document.createElement('option');
+          opt.value = v;
+          opt.textContent = text;
+          scopeS.append(opt);
+        }
+        const riskS = document.createElement('select');
+        for (const [v, text] of [['write', 'เขียน — ผ่านการถามตามโหมด'], ['read', 'อ่านอย่างเดียว — ไม่ถามเลย']]) {
+          const opt = document.createElement('option');
+          opt.value = v;
+          opt.textContent = text;
+          riskS.append(opt);
+        }
+
+        const form = el('div', 'set-group');
+        form.append(el('div', 'set-title', 'เพิ่มเซิร์ฟเวอร์'));
+        form.append(row('ชื่อ', 'ใช้เป็นส่วนหนึ่งของ marker: MCP__ชื่อ__tool', nameI));
+        form.append(row('คำสั่ง', 'โปรแกรมที่พูด MCP ผ่าน stdio', cmdI));
+        form.append(row('อาร์กิวเมนต์', 'ทีละตัวต่อบรรทัด', argsI));
+        form.append(row('env', 'บรรทัดละ K=V', envI));
+        form.append(row('โฟลเดอร์ทำงาน', 'ไม่บังคับ — เซิร์ฟเวอร์ที่อ่าน path สัมพัทธ์จะอ้างจากที่นี่', cwdI));
+        form.append(row('ขอบเขต', 'ชื่อซ้ำกัน: โปรเจกต์นี้ทับค่าส่วนกลางเสมอ', scopeS));
+        form.append(row('ความเสี่ยง', 'MCP tool คือโปรแกรมของคนอื่น — ค่าเริ่มต้นคือ "เขียน" ให้ผ่านการถาม', riskS));
+
+        const readForm = () => {
+          const env = {};
+          for (const l of envI.value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean)) {
+            const eq = l.indexOf('=');
+            if (eq < 1) throw new Error(`env ต้องเป็น K=V: "${l}"`);
+            env[l.slice(0, eq)] = l.slice(eq + 1);
+          }
+          const params = {
+            name: nameI.value.trim(),
+            command: cmdI.value.trim(),
+            args: argsI.value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean),
+            env,
+            // A select always has a value in the browser; the fallbacks are for
+            // the answer this form gives when nothing was ever chosen.
+            risk: riskS.value || 'write',
+            scope: scopeS.value || 'home',
+          };
+          if (cwdI.value.trim()) params.cwd = cwdI.value.trim();
+          return params;
+        };
+
+        const fout = el('div', 'plugin-source dim');
+        const testBtn = el('button', null, 'ทดสอบ');
+        testBtn.onclick = async () => {
+          let params;
+          try { params = readForm(); } catch (e) { fout.className = 'plugin-source err-text'; fout.textContent = e.message; return; }
+          testBtn.disabled = true;
+          fout.className = 'plugin-source dim';
+          fout.textContent = 'กำลังเชื่อมต่อ…';
+          const r = await rpc('mcp.test', params).catch((e) => ({ ok: false, error: e.message }));
+          fout.className = r.ok ? 'plugin-source ok-text' : 'plugin-source err-text';
+          fout.textContent = r.ok
+            ? `เชื่อมต่อได้ — ${r.tools.length} tools${r.tools.length ? `: ${r.tools.map((t) => t.name).join(', ')}` : ''}`
+            : `err: ${r.error}`;
+          testBtn.disabled = false;
+        };
+        const saveBtn = el('button', 'primary', 'บันทึก');
+        saveBtn.onclick = async () => {
+          let params;
+          try { params = readForm(); } catch (e) { fout.className = 'plugin-source err-text'; fout.textContent = e.message; return; }
+          saveBtn.disabled = true;
+          const res = await rpc('mcp.add', params).catch((e) => {
+            fout.className = 'plugin-source err-text';
+            fout.textContent = `err: ${e.message}`;
+            return null;
+          });
+          saveBtn.disabled = false;
+          if (res) { live = res; paintMcp(); }
+        };
+        const btnRow = el('div', 'plugin-actions');
+        btnRow.append(testBtn, saveBtn);
+        form.append(btnRow, fout);
+        wrap.append(form);
+      };
+
+      paintMcp();
       continue;
     }
 
@@ -1698,6 +2451,43 @@ async function openSettings() {
       continue;
     }
 
+    if (section.custom === 'health') {
+      // One button, same answers as the terminal: bridge up, extension
+      // attached, quota figures — plus the fix for whatever is red. `status`
+      // is token-free by design; `credits` rides the bridge cache so an idle
+      // check does not poke the tab upstream.
+      const out = el('div', 'set-group');
+      const lines = el('div', 'dim', 'ยังไม่ได้ตรวจ — กดปุ่มด้านล่าง');
+      out.append(lines);
+      const run = el('button', 'primary', 'ตรวจตอนนี้');
+      run.onclick = async () => {
+        run.disabled = true;
+        lines.textContent = '';
+        lines.className = 'dim';
+        try {
+          const st = await rpc('status');
+          const credits = await rpc('credits', { force: false }).catch(() => null);
+          const rows = [
+            ['bridge', st?.bridge ? 'พร้อม' : 'ไม่พร้อม', st?.bridge ? '' : 'รัน aipass dev หรือเปิดแอปใหม่'],
+            ['extension', (st?.extensions ?? 0) > 0 ? `เชื่อมอยู่ ×${st.extensions}` : 'ยังไม่มี', (st?.extensions ?? 0) > 0 ? '' : 'โหลดโฟลเดอร์ aipass-bridge/extension ใน chrome://extensions'],
+            ['tab', state.needsTab ? 'ยังไม่มี — run ล่าสุดขอ tab' : 'พร้อม (หรือยังไม่เคยขอ)', state.needsTab ? 'กด “เปิดให้” จาก welcome card' : ''],
+            ['credits', credits ? `${credits.available} / ${credits.limit}` : 'ไม่ทราบ (ไม่มี tab)', credits && Number(credits.available) <= 0 ? 'รอรอบถัดไป หรือใช้โมเดล free-credit' : ''],
+            ['build', st?.app ?? 'ไม่ทราบ', ''],
+          ];
+          for (const [k, v, fix] of rows) {
+            const line = el('div', null, `${k}: ${v}${fix ? ` — ${fix}` : ''}`);
+            lines.append(line);
+          }
+        } catch (err) {
+          lines.className = 'install-out err';
+          lines.textContent = `ตรวจไม่ได้: ${friendly(err.message)}`;
+        }
+        run.disabled = false;
+      };
+      page.append(out, run);
+      continue;
+    }
+
     const group = el('div', 'set-group');
     for (const field of section.fields) group.append(row(field.label, field.note, control(field)));
     page.append(group);
@@ -1761,6 +2551,11 @@ async function openSettings() {
       const attemptsN = Number(draft.attempts);
       if (!Number.isFinite(attemptsN) || attemptsN < 1 || attemptsN > 5) problems.push('รอบลองสูงสุดต่อคำสั่งต้องอยู่ระหว่าง 1 ถึง 5');
     }
+    if (draft.verifyCommand) {
+      const command = String(draft.verifyCommand);
+      if (/[\r\n]/.test(command)) problems.push('คำสั่งตรวจต้องเป็นบรรทัดเดียว (คำสั่งเดียว)');
+      else if (command.trim().length > 300) problems.push('คำสั่งตรวจยาวเกิน 300 ตัวอักษร');
+    }
     const budget = Number(draft.compaction?.contextTokens);
     const reserve = Number(draft.compaction?.reserveTokens);
     if (!Number.isFinite(budget) || budget < 1000) problems.push('งบบริบทควร 1000 token ขึ้นไป');
@@ -1793,6 +2588,9 @@ async function openSettings() {
     applyTheme(next.theme);
     hideModal();
     await refreshHeader();
+    // The playbook library is rebuilt by the backend when skillsDirs changes,
+    // and the rail shows what the folders hold — so the rail asks again.
+    await refreshSkills();
     applyModeFromSettings();
     applyThinkingFromSettings();
     applyTemperatureFromSettings();
@@ -1852,10 +2650,22 @@ async function refreshPanels() {
   // still works: plain markers, single-line.
   state.pluginTools = (details?.toolDefs ?? (details?.tools ?? []).map((marker) => ({ marker })))
     .filter((t) => t?.marker);
-  if (!details?.panels?.length) { holder.classList.add('hidden'); return; }
+  // No plugin, no panel, no row. The section only appears when a plugin has
+  // something to draw — an empty "ปลั๊กอิน" heading read as a broken feature.
+  const group = $('plugins-group');
+  if (!details?.panels?.length) {
+    holder.classList.add('hidden');
+    if (group) { group.hidden = true; group.open = false; }
+    return;
+  }
   holder.classList.remove('hidden');
+  if (group) {
+    // It opens the first time it appears and stays as you left it after that.
+    const wasHidden = group.hidden;
+    group.hidden = false;
+    if (wasHidden) group.open = true;
+  }
   holder.textContent = '';
-  holder.append(el('h3', null, 'ปลั๊กอิน'));
   for (const panel of details.panels) {
     const box = el('div', 'plugin-panel');
     box.id = `panel-${panel.id}`;
@@ -1894,7 +2704,14 @@ async function refreshHeader() {
     s.append(document.createTextNode(label));
     return s;
   };
-  $('status').append(dot(st.bridge, 'bridge'), dot(st.extensions > 0, `extension ×${st.extensions}`));
+  // The bridge and the extension are the AiPASS path. Another provider is
+  // reached by the backend itself, so a red "bridge" would name a problem
+  // that does not exist — the provider's own line says who is answering.
+  if (st.provider && st.provider !== 'aipass') {
+    $('status').append(dot(true, `provider ${st.provider}`));
+  } else {
+    $('status').append(dot(st.bridge, 'bridge'), dot(st.extensions > 0, `extension ×${st.extensions}`));
+  }
   refreshMeter();
   if (st.model) {
     // Live while a run spends credits; idle windows ride the bridge's cache
@@ -1932,6 +2749,9 @@ async function fillModels(currentModel) {
   const dropped = Boolean(currentModel) && models?.source === 'live'
     && !all.some((m) => bare(m.id ?? m) === bare(currentModel));
   if (currentModel && !list.some((m) => (m.id ?? m) === currentModel)) list.push({ id: currentModel });
+  // The list is rebuilt when the provider changes, so the old options go
+  // first: a model of the previous provider must not stay selectable.
+  $('model').textContent = '';
   for (const m of list) {
     const opt = document.createElement('option');
     const id = m.id ?? m;
@@ -1944,7 +2764,7 @@ async function fillModels(currentModel) {
     }
     $('model').append(opt);
   }
-  if (list.length) $('model').value = currentModel;
+  if (list.length) $('model').value = currentModel ?? $('model').options[0].value;
 }
 
 setInterval(refreshHeader, 10_000);
@@ -1980,11 +2800,24 @@ function showWelcome(readiness) {
   card.append(list);
 
   const ready = el('div', 'ready');
-  const rows = [
-    ['bridge', 'ตัวกลาง local', readiness.bridge],
-    ['extension', 'ส่วนขยายใน Chrome', readiness.extensions > 0],
-    ['tab', 'หน้า de.aipass.net ที่ล็อกอินอยู่', readiness.tab],
-  ];
+  const rows = readiness.provider
+    // Another provider is reached by the backend itself: the bridge, the
+    // extension and the chat tab are not part of that path, so listing them
+    // as "not ready" would name a problem that does not exist.
+    ? [['provider', `ผู้ให้บริการ ${readiness.provider}`, readiness.providerOk !== false]]
+    : [
+      ['bridge', 'ตัวกลาง local', readiness.bridge],
+      ['extension', 'ส่วนขยายใน Chrome', readiness.extensions > 0],
+      ['tab', 'หน้า de.aipass.net ที่ล็อกอินอยู่', readiness.tab],
+      // A fourth row only when the quota is known: 0 available reads as
+      // "broken" without it, while null (no tab) means the tab row already
+      // explains what to fix.
+      ...(readiness.credits === null || readiness.credits === undefined ? [] : [[
+        'credits',
+        `เครดิต ${readiness.credits.available} / ${readiness.credits.limit}`,
+        Number(readiness.credits.available) > 0,
+      ]]),
+    ];
   for (const [key, label, ok] of rows) {
     const row = el('div', 'ready-row ' + (ok ? 'ok' : 'no'));
     row.append(el('span', 'dot ' + (ok ? 'ok' : 'no')));
@@ -1995,6 +2828,7 @@ function showWelcome(readiness) {
       fix.onclick = () => rpc('browser.open', { url: appSettingsUrl() }).catch(() => {});
       row.append(fix);
     }
+    if (!ok && key === 'credits') row.append(el('span', 'dim', 'รอรอบถัดไป หรือใช้โมเดล free-credit'));
     if (!ok && key === 'extension') row.append(el('span', 'dim', 'โหลดจากโฟลเดอร์ aipass-bridge/extension'));
     if (!ok && key === 'bridge') row.append(el('span', 'dim', 'รัน aipass dev'));
     ready.append(row);
@@ -2012,12 +2846,24 @@ const appSettingsUrl = () => state.settings?.chatUrl ?? 'https://de.aipass.net/c
 async function refreshReadiness() {
   const st = await rpc('status').catch(() => null);
   if (!st) { showWelcome({ bridge: false, extensions: 0, tab: false }); return; }
+  // A provider that is not AiPASS is reached by the backend itself, so the
+  // bridge and the chat tab are not on its path.
+  if (st.provider && st.provider !== 'aipass') {
+    showWelcome({ provider: st.provider, providerOk: true });
+    return;
+  }
+  // The quota is what tells "no tab" (null — the tab row names the fix) from
+  // "tab attached but the pool is empty" (0 — the new credits row names its
+  // own fix). Idle windows ride the bridge cache (force:false); a run spends,
+  // so it forces.
+  const credits = await rpc('credits', { force: Boolean(state.running) }).catch(() => null);
   showWelcome({
     bridge: st.bridge,
     extensions: st.extensions ?? 0,
     // A run can only tell us "no tab" by failing, so the strip stays neutral
     // until that happens; the banner flips it and offers the fix.
     tab: !state.needsTab,
+    credits: credits ?? null,
   });
 }
 
@@ -2029,14 +2875,16 @@ async function refreshReadiness() {
 const COMMANDS = [
   { cmd: 'help', desc: 'วิธีใช้ทั้งหมด', run: openHelp },
   { cmd: 'model', desc: 'เปลี่ยนโมเดล — /model หรือ /model <id>', args: true, run: (arg) => (arg ? setModel(arg) : pickModel()) },
+  { cmd: 'provider', desc: 'สลับผู้ให้บริการ — /provider หรือ /provider <id>', args: true, run: (arg) => (arg ? setProvider(arg) : pickProvider()) },
   { cmd: 'models', desc: 'ดูรายการโมเดลที่ใช้คุยได้', run: listModels },
   { cmd: 'mode', desc: 'สิทธิ์แก้ไฟล์ — /mode ask|auto|yolo', args: true, run: (arg) => (arg ? setMode(arg) : pickMode()) },
   { cmd: 'status', desc: 'สถานะ bridge / extension / tab / credits', run: showStatus },
+  { cmd: 'paint', desc: 'สถิติ paint cache ของการสตรีม — hit/miss ต่อเฟรม', run: showPaintStats },
   { cmd: 'conversations', desc: 'เลือกบทสนทนาของ bridge (ความจำของโมเดล)', run: pickConversation },
   { cmd: 'fresh', desc: 'เริ่มบทสนทนาบน bridge ใหม่ (ความจำ wiped)', run: freshConversation },
   { cmd: 'compact', desc: 'บีบบริบททันที (สรุปงานเก่าแล้วเริ่ม conversation ใหม่)', run: compactNow },
   { cmd: 'memory', desc: 'ดู facts ที่จำข้าม session — /memory clear ลืมทั้งหมด', args: true, run: (arg) => showMemory(arg) },
-  { cmd: 'mcp', desc: 'ดู/เรียก tools จาก MCP servers', run: showMcp },
+  { cmd: 'mcp', desc: 'ดู servers/tools จาก MCP (จัดการที่ /settings → MCP)', run: showMcp },
   { cmd: 'symbols', desc: 'ดู declarations ของไฟล์ — /symbols <file>', args: true, run: (arg) => showSymbols(arg) },
   { cmd: 'new', desc: 'เริ่มบทสนทนาใหม่ในหน้าต่าง', run: startNewSession },
   { cmd: 'resume', desc: 'เปิดบทสนทนาเดิม', run: resumeSession },
@@ -2053,7 +2901,7 @@ const COMMANDS = [
   { cmd: 'discard', desc: 'ทิ้งไฟล์ที่รออยู่ทั้งหมด', run: discardAll },
   { cmd: 'project', desc: 'เลือกโฟลเดอร์โปรเจกต์', run: pickProject },
   { cmd: 'settings', desc: 'ตั้งค่าทั้งหมด', run: openSettings },
-  { cmd: 'stop', desc: 'ยกเลิกรันที่กำลังทำ', run: () => rpc('cancel', { root: state.root ?? undefined }).then(() => addCommandOut('ยกเลิกแล้ว')) },
+  { cmd: 'stop', desc: 'ยกเลิกรันที่กำลังทำ', run: () => rpc('cancel', { root: state.root ?? undefined }).then((res) => addCommandOut(res && res.ok === false ? `หยุดไม่ได้ — ไม่มีรันที่กำลังทำอยู่${res.reason ? ` (${res.reason})` : ''}` : 'ยกเลิกแล้ว')) },
 ];
 
 const slash = { open: false, items: [], index: 0 };
@@ -2141,6 +2989,48 @@ async function setModel(id) {
   state.settings = await rpc('settings.get').catch(() => null);
   await refreshHeader();
   addCommandOut(`โมเดล: ${id}`);
+}
+
+/**
+ * Switch the provider.
+ *
+ * The switch is machine-wide, so it goes through the backend and lands in the
+ * settings file — the terminal sees it too. The model list is rebuilt
+ * afterwards: the models of one provider mean nothing to another.
+ */
+async function setProvider(id) {
+  await rpc('provider.set', { id });
+  state.provider = id;
+  await fillProviders(id);
+  const st = await rpc('status').catch(() => null);
+  await fillModels(st?.model ?? null);
+  refreshMeta();
+  addCommandOut(`ผู้ให้บริการ: ${id}`);
+}
+
+function pickProvider() {
+  rpc('providers.list').then((res) => {
+    const list = res?.providers ?? [];
+    $('modal-title').textContent = 'เลือกผู้ให้บริการ';
+    const body = $('modal-body');
+    body.textContent = '';
+    if (!list.length) body.append(el('p', 'dim', 'ยังไม่มีผู้ให้บริการที่ตั้งไว้ — เพิ่มได้ที่ /settings → ผู้ให้บริการ'));
+    for (const p of list) {
+      const row = el('button', p.id === ($('provider').value) ? 'primary' : null,
+        `${p.label || p.id}${p.id === res.active ? ' — ใช้อยู่' : ''}${p.kind !== 'aipass' && !p.hasKey ? ' — ยังไม่มี key' : ''}`);
+      row.style.display = 'block';
+      row.style.width = '100%';
+      row.style.textAlign = 'left';
+      row.style.marginBottom = '6px';
+      row.onclick = () => { hideModal(); void setProvider(p.id); };
+      body.append(row);
+    }
+    $('modal-actions').textContent = '';
+    const close = el('button', 'primary', 'ปิด');
+    close.onclick = hideModal;
+    $('modal-actions').append(close);
+    $('modal').classList.remove('hidden');
+  }).catch((err) => addNote(err.message));
 }
 
 function pickModel() {
@@ -2246,6 +3136,16 @@ function refreshMeter() {
   }).catch(() => {});
 }
 
+/** The paint cache's numbers in one breath: how often a frame appended to the
+ *  settled layer instead of re-rendering it, and what the misses cost. */
+function showPaintStats() {
+  const s = paintCacheStats();
+  const pct = s.hitRate == null ? '— (ยังไม่มี settled layer)' : `${(s.hitRate * 100).toFixed(1)}%`;
+  addCommandOut(`paint cache — hit rate ${pct} · hit ${s.hits.toLocaleString()} · miss ${s.misses.toLocaleString()} · cold ${s.cold.toLocaleString()} (รวม ${s.paints.toLocaleString()} เฟรม)`);
+  addCommandOut(`settled ต่อเพิ่มแบบ append ${s.appended.toLocaleString()} ตัวอักษร · miss ต้อง repaint ${s.repainted.toLocaleString()} ตัวอักษร`);
+  addCommandOut('hit = settled layer อยู่ครบ ต่อท้ายอย่างเดียว · miss = เขียนย้อนหลัง ต้อง repaint ทั้งก้อน · cold = ยังไม่มีอะไรให้แคช');
+}
+
 async function showStatus() {
   const st = await rpc('status').catch(() => null);
   if (!st) { addNote('bridge ไม่ตอบ'); return; }
@@ -2255,6 +3155,13 @@ async function showStatus() {
     `โมเดล: ${st.model ?? '-'} · mode: ${st.mode} · plan: ${st.plan ? 'เปิด' : 'ปิด'} · รันอยู่: ${st.running ? 'ใช่' : 'ไม่'}`,
     `ไฟล์รอเขียน: ${st.pending?.length ?? 0}`,
   ];
+  if (st.app) lines.push(`build: ${st.app}`);
+  // The bridge's caches (models/quota/conversation) report what rode the cache
+  // instead of the tab; a bridge too old to count them omits the block.
+  if (st.cache) {
+    const pair = (v) => v ? `${(v.hits ?? 0).toLocaleString()} hit / ${(v.fetches ?? 0).toLocaleString()} fetch` : '—';
+    lines.push(`cache: โมเดล ${pair(st.cache.models)} · เครดิต ${pair(st.cache.quota)} · บทสนทนา ${pair(st.cache.conversation)}`);
+  }
   if (credits) lines.push(`credits: ${credits.available?.toLocaleString?.() ?? credits.available} / ${credits.limit?.toLocaleString?.() ?? credits.limit}`);
   if (state.needsTab) lines.push('⚠ ยังไม่มี tab de.aipass.net ที่ล็อกอิน — กดปุ่มเปิดได้จาก welcome card');
   for (const line of lines) addCommandOut(line);
@@ -2277,9 +3184,14 @@ async function showMemory(arg) {
 async function showMcp() {
   const res = await rpc('mcp.list').catch(() => null);
   if (!res) { addCommandOut('bridge ไม่ตอบ'); return; }
-  if (!res.tools?.length) { addCommandOut('(ไม่มี MCP server ที่ตั้งค่า — เพิ่ม ~/.aipass/mcp.json)'); return; }
-  addCommandOut(`MCP: ${res.servers.length} server, ${res.tools.length} tool:`);
-  for (const t of res.tools) addCommandOut(`  ${t.marker}  ${t.description}`);
+  const servers = res.servers ?? [];
+  if (!servers.length) { addCommandOut('(ยังไม่มี MCP server — เพิ่มที่ /settings → MCP หรือ `aipass mcp add`)'); return; }
+  addCommandOut(`MCP: ${servers.length} server · ${(res.tools ?? []).length} tool:`);
+  for (const s of servers) {
+    const state = !s.enabled ? 'ปิด' : s.connected ? `เชื่อมต่อแล้ว ${s.tools} tools` : `เชื่อมต่อไม่ได้: ${s.error ?? '?'}`;
+    addCommandOut(`  ${s.name} [${s.scope}] — ${state}${s.risk === 'read' ? '' : ' · เขียน'}`);
+  }
+  for (const t of res.tools ?? []) addCommandOut(`      ${t.marker}  ${t.description}`);
 }
 
 async function showSymbols(arg) {
@@ -2361,8 +3273,16 @@ async function clipPaste() {
   }
 }
 
+// Which session view should be on screen: opening a session is async, and a
+// slow load must never paint over a newer choice. Every entry point that
+// replaces the view bumps this counter; a load that comes back to find a
+// higher number paints nothing.
+let viewSeq = 0;
+
 async function startNewSession() {
+  viewSeq += 1;
   log.textContent = '';
+  clearTodo();
   await rpc('session.new');
   await refreshSessions();
   await refreshReadiness();
@@ -2393,7 +3313,7 @@ function resumeSession() {
       del.onclick = async () => {
         if (!window.confirm(`ลบบทสนทนา "${s.title ?? s.id}"?`)) return;
         await rpc('session.delete', { id: s.id }).catch((err) => addNote(err.message));
-        if (state.sessionId === s.id) { state.sessionId = null; log.textContent = ''; }
+        if (state.sessionId === s.id) { state.sessionId = null; log.textContent = ''; clearTodo(); }
         await refreshSessions();
         resumeSession();
       };
@@ -2409,12 +3329,21 @@ function resumeSession() {
 }
 
 async function openSession(id) {
+  const seq = ++viewSeq;
   const entries = await rpc('session.open', { id });
+  // While this load was in flight the human may have picked another session
+  // (or started a new one): the newest choice owns the screen. Without this,
+  // two quick clicks interleaved their entries into one transcript.
+  if (seq !== viewSeq) return;
   state.sessionId = id;
   log.textContent = '';
-  for (const entry of entries) {
+  clearTodo();
+  for (const entry of Array.isArray(entries) ? entries : []) {
     if (entry.type === 'task') addTask(entry.text);
     else if (entry.type === 'assistant') replayAssistant(entry.text ?? '');
+    // The session's checklist is replayed like any other entry, so an old
+    // conversation reopens with the plan card it was left with.
+    else if (entry.type === 'todo' && Array.isArray(entry.items)) renderTodo(entry.items);
     else if (entry.type === 'tool') { addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '' }); state.assistant = null; }
     else if (entry.type === 'note') addNote(entry.text);
   }
@@ -2573,6 +3502,9 @@ function applyTheme(theme) {
 }
 
 (async function boot() {
+  // The provider switch comes first: the model list belongs to a provider,
+  // so the picker has to know which one is in use before the models are read.
+  await fillProviders();
   await refreshHeader();
   state.settings = await rpc('settings.get').catch(() => null);
   // A reloaded window has to look like the saved theme, not like the default.
@@ -2582,7 +3514,6 @@ function applyTheme(theme) {
   await refreshSessions();
   await refreshFiles();
   await refreshSkills();
-  await refreshMemory();
   await refreshPanels();
   await refreshPending();
   applyModeFromSettings();
@@ -2590,3 +3521,11 @@ function applyTheme(theme) {
   applyTemperatureFromSettings();
   $('task').focus();
 })();
+
+// A playbook dropped into a library folder while the window was in the
+// background is there the next time the window is looked at: the backend reads
+// the folders on every call, so the rail only has to ask again. One small
+// request, and only when the window comes back — not a poll.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') void refreshSkills().catch(() => {});
+});

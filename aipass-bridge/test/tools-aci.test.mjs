@@ -112,3 +112,31 @@ test('a spill read hands back the verbatim range — never a spill of a spill', 
   assert.match(page, new RegExp(`row ${start} `));
   assert.match(page, new RegExp(`row ${start + 50} `));
 });
+
+test('the spill locator starts where the head really ended, not where the byte cap guessed', () => {
+  // The start line was guessed from the byte cap (80 characters a line), and
+  // the cap says nothing about how long the lines are: on long-lined files
+  // the guess pointed past lines the model had never seen, so the range it
+  // handed back skipped them for good.
+  const rows = Array.from({ length: 40 }, (_, i) => `row ${i + 1} ${'y'.repeat(160)}`);
+  const dir = mkTracked({ 'long.txt': rows.join('\n') + '\n' });
+  const tools = toolsIn(dir);
+
+  const out = tools.read('long.txt');
+  const loc = out.match(/NEED file (\.aipass\/spill\/[a-f0-9]+\.txt) (\d+)-(\d+)/);
+  assert.ok(loc, `the read spilled and handed a locator:\n${out.slice(0, 300)}`);
+
+  // The head is what rode the message. The first line it did not carry is
+  // where the rest has to be read from.
+  const head = out.slice(0, out.indexOf('\n. '));
+  const firstMissing = head.split('\n').length;
+  assert.equal(Number(loc[2]), firstMissing, 'the range starts at the first line the head did not carry');
+
+  const spilled = fs.readFileSync(path.join(dir, loc[1]), 'utf8').split('\n');
+  assert.equal(Number(loc[3]), spilled.length, 'and it ends at the last line of the spill');
+
+  // Nothing is skipped: the row the head broke on is the row the range opens
+  // with.
+  const page = tools.read(`${loc[1]} ${loc[2]}-${Number(loc[2]) + 1}`);
+  assert.match(page, new RegExp(`row ${firstMissing} `), 'the row after the head is the row the range starts with');
+});

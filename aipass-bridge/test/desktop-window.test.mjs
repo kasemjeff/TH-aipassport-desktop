@@ -503,3 +503,117 @@ test('reading helpers: file listing, file text, and the playbook library', async
   // A path outside the root is refused, not served.
   await assert.rejects(() => env.call('fs.read', { file: '../outside.txt' }));
 });
+
+test('the window installs a plugin from a path: inspect, install, provenance, disable, remove', async (t) => {
+  const pluginDir = tempDir();
+  const srcDir = tempDir();
+  const src = path.join(srcDir, 'chime.mjs');
+  fs.writeFileSync(src, `
+export default {
+  name: 'chime',
+  version: '1.0.0',
+  description: 'rung by the window test',
+  setup(ctx) { ctx.tools.register('CHIME_TOOL', () => 'ding'); },
+};
+`);
+
+  const env = await startRpc({ files: {}, replies: [], rpcOptions: { pluginsDir: pluginDir } });
+  t.after(() => env.stop());
+
+  // Inspect is the consent step: size and hash of what would run, and nothing
+  // runs to answer it.
+  const info = await env.call('plugins.inspect', { source: src });
+  assert.equal(info.kind, 'path');
+  assert.equal(info.sha256.length, 64);
+
+  const out = await env.call('plugins.install', { source: src, expectedSha256: info.sha256 });
+  assert.equal(out.plugin.name, 'chime');
+  assert.equal(out.plugin.installed.source.type, 'path');
+  assert.equal(out.plugin.hashChanged, false);
+  assert.ok(fs.existsSync(path.join(pluginDir, 'chime', 'plugin.mjs')), 'the installer owns the layout');
+
+  // A hand-edit of the installed file is visible after a reload — provenance's
+  // whole job is answering "did that plugin change since it last behaved?".
+  fs.appendFileSync(path.join(pluginDir, 'chime', 'plugin.mjs'), '\n// edited by hand\n');
+  const listed = await env.call('plugins.reload');
+  assert.equal(listed.loaded[0].hashChanged, true);
+
+  // Disabling the only plugin cannot read as "everything": the list lands on
+  // the none sentinel, and nothing of the plugin is live.
+  const disabled = await env.call('plugins.disable', { name: 'chime' });
+  assert.deepEqual(disabled.plugins, ['(none)']);
+  assert.deepEqual(disabled.details.loaded, []);
+
+  const enabled = await env.call('plugins.enable', { name: 'chime' });
+  assert.deepEqual(enabled.plugins, [], 'enabling back collapses to the master switch');
+  assert.equal(enabled.details.loaded.length, 1);
+
+  const removed = await env.call('plugins.remove', { name: 'chime' });
+  assert.ok(removed.trashed.includes('.trash'), 'a removed plugin is kept, not deleted');
+  assert.deepEqual(removed.details.loaded, []);
+});
+
+test('the window adds, tests, disables and removes an MCP server', async (t) => {
+  const dir = tempDir();
+  const fixture = path.join(dir, 'fixture.mjs');
+  fs.writeFileSync(fixture, `
+process.stdin.setEncoding('utf8');
+let buf = '';
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let idx;
+  while ((idx = buf.indexOf('\\n')) !== -1) {
+    const line = buf.slice(0, idx).trim();
+    buf = buf.slice(idx + 1);
+    if (!line) continue;
+    const msg = JSON.parse(line);
+    const send = (result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }) + '\\n');
+    if (msg.method === 'initialize') send({ protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'fixture', version: '1.0.0' } });
+    else if (msg.method === 'tools/list') send({ tools: [{ name: 'echo', description: 'echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } }] });
+    else if (msg.method === 'tools/call') send({ content: [{ type: 'text', text: 'echo: ' + (msg.params.arguments?.text ?? '') }] });
+    else if (msg.id !== undefined) send({});
+  }
+});
+`);
+
+  const env = await startRpc({ files: {}, replies: [] });
+  t.after(() => env.stop());
+  const name = `fix${Date.now().toString(36)}`;
+
+  // The form's test button runs a definition before it is saved.
+  const trial = await env.call('mcp.test', { command: process.execPath, args: [fixture] });
+  assert.equal(trial.ok, true);
+  assert.deepEqual(trial.tools.map((x) => x.name), ['echo']);
+
+  // A command that cannot start is a structured failure, not an RPC error.
+  const bad = await env.call('mcp.test', { command: 'definitely-not-a-real-command-aipass', args: [] });
+  assert.equal(bad.ok, false);
+  assert.ok(bad.error);
+
+  const added = await env.call('mcp.add', { name, command: process.execPath, args: [fixture], scope: 'home' });
+  assert.equal(added.server.scope, 'home');
+  const row = added.servers.find((s) => s.name === name);
+  assert.equal(row.connected, true);
+  assert.equal(row.risk, 'write', 'an MCP tool is gated by default');
+
+  const marker = `MCP__${name}__echo`;
+  const listed = await env.call('mcp.list');
+  assert.ok(listed.tools.some((x) => x.marker === marker), 'the model can see the tool');
+  assert.equal(listed.tools.find((x) => x.marker === marker).risk, 'write');
+
+  // Testing a saved name resolves through the config — what runs is what is
+  // on disk, project override included.
+  const saved = await env.call('mcp.test', { name });
+  assert.equal(saved.ok, true);
+
+  const off = await env.call('mcp.disable', { name });
+  assert.equal(off.servers.find((s) => s.name === name).enabled, false);
+  assert.equal(off.tools.some((x) => x.marker === marker), false, 'off means off');
+
+  const on = await env.call('mcp.enable', { name });
+  assert.equal(on.servers.find((s) => s.name === name).connected, true);
+
+  const out = await env.call('mcp.remove', { name });
+  assert.equal(out.removed, true);
+  assert.equal(out.servers.some((s) => s.name === name), false);
+});

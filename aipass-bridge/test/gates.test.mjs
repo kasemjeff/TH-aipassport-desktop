@@ -406,14 +406,48 @@ test('a commit is refused until the declared check passes at the current tree', 
   });
 
   // 1 — before any check, the gate refuses and names the exact command that un-bars it.
-  assert.match(prompts[1], /check \(\.aipass\/check\.txt: node check\.mjs\)/i, 'the refusal names the declared command');
+  assert.match(prompts[1], /declares a check \(\.aipass\/check\.txt: node check\.mjs\)/i, 'the refusal names the declared command and its source');
   // 3 — the check passed at an unchanged tree, so the commit reached git itself.
   assert.match(prompts[3], /not a git repository|gitfile does not point/i, 'the allowed commit actually ran and git answered');
-  assert.doesNotMatch(prompts[3], /red-test gate|check \(\.aipass/i, 'the gate did not refuse this one');
+  assert.doesNotMatch(prompts[3], /red-test gate|declares a check \(\.aipass/i, 'the gate did not refuse this one');
   // 5 — one ordinary run later the tree moved, and the gate is armed again.
-  assert.match(prompts[5], /check \(\.aipass\/check\.txt: node check\.mjs\)/i, 'the gate re-arms after any change');
+  assert.match(prompts[5], /declares a check \(\.aipass\/check\.txt: node check\.mjs\)/i, 'the gate re-arms after any change');
   const stat = session.entries.find((e) => e.type === 'run_stats');
   assert.equal(stat.commitBlocks, 2, 'both refusals are counted in run_stats');
+});
+
+test('a run-declared verifyCommand arms the commit gate without a project file', async () => {
+  // The same gate, with the command coming from the run option instead of
+  // `.aipass/check.txt`: a caller that names its check gets the same protection
+  // for the session, and the refusal names the command it must run first.
+  const dir = tempDir({ 'check.mjs': "console.log('PASS');\n" });
+  const overlay = new Overlay(dir);
+  const replies = [
+    'RUN\ngit commit -m one\nEND\n',          // 1 — refused: the declared check has not passed
+    'RUN\nnode check.mjs\nEND\n',             // 2 — the run-declared check passes
+    'RUN\ngit commit -m one\nEND\n',          // 3 — un-barred; git itself refuses (no repo)
+    'DONE tried to commit\n',
+  ];
+  let turn = 0;
+  const prompts = [];
+  const bridge = {
+    async quota() { return null; },
+    async chat({ message }) {
+      prompts.push(message);
+      return { text: replies[Math.min(turn++, replies.length - 1)], reasoning: '' };
+    },
+  };
+  const tools = createTools({ root: dir, overlay, skills: new SkillLibrary([]), allowRun: true });
+  const permissions = new PermissionEngine({ mode: 'yolo', allowRun: true, askFn: async () => 'allow', events: new Emitter() });
+
+  await runTask('try to commit', {
+    bridge, tools, overlay, permissions,
+    options: { mode: 'yolo', allowRun: true, maxSteps: 8, verifyCommand: 'node check.mjs' },
+    first: true,
+  });
+
+  assert.match(prompts[1], /declares a check \(--verify-command: node check\.mjs\)/i, 'the refusal names the run-declared command and its source');
+  assert.match(prompts[3], /not a git repository|gitfile does not point/i, 'the check passed, so the commit ran');
 });
 
 test('without a declared check the commit gate stays out of the way', async () => {

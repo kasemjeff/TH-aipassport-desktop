@@ -18,11 +18,21 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Harness } from './harness.mjs';
-import { SessionStore } from './session.mjs';
-import { SkillLibrary } from './skills.mjs';
+import { SessionStore, APP_VERSION } from './session.mjs';
+import { SkillLibrary, skillDirsFor } from './skills.mjs';
 import { Settings, aipassHome } from './settings.mjs';
 import { PluginManager } from './plugins.mjs';
+import {
+  inspectSource, installSource, finalizeInstall, removePlugin, readRegistry,
+  decorateDetails, materializeEnabledList, stripFromEnabled, knownNames, NONE_NAME,
+} from './install.mjs';
+import { loadConfig, addServer, removeServer, setServerEnabled, testServer } from './mcp.mjs';
 import { Emitter } from './events.mjs';
+// The provider registry: which provider the runs talk to, where it lives and
+// where its key comes from. The specs and the keys are two files, and neither
+// of them is settings.json.
+import { ProviderStore, AIPASS_PROVIDER, publicSpec } from './providers.mjs';
+import { clientFor } from './provider-client.mjs';
 // One resolver for "where the bridge is", shared with the harness's own client
 // and with desktop/main.mjs's probe: an explicit bridgeURL wins, otherwise
 // AIPASS_BRIDGE decides, otherwise the loopback default.
@@ -158,6 +168,9 @@ export function createRpc({
   settings = null,
   pluginsDir = null,
   rulesFile = null,
+  // The provider registry. A test (or a second backend) may hand one in; the
+  // default reads the same directory the settings live in.
+  providerStore = null,
   // The bridge is the browser half of the app. The window's shell is supposed to
   // start it, and the CLI's own entry point does; this is the backstop for a
   // surface that starts only the RPC server (which is what the packaged window
@@ -200,6 +213,9 @@ export function createRpc({
   };
 
   const appSettings = settings ?? new Settings();
+  // The provider registry lives beside the settings: same home, same
+  // AIPASS_HOME override, so a test that moves the home moves both.
+  const providers = providerStore ?? new ProviderStore(appSettings.dir ?? aipassHome());
   // `store` is a directory (tests pass a temp one); a SessionStore instance is
   // accepted too, for callers that already made one.
   const storeDir = typeof store === 'string' ? store : (store?.dir ?? path.join(aipassHome(), 'sessions'));
@@ -253,7 +269,77 @@ export function createRpc({
   /* -------------------------------------------------------- harness per project */
 
   const harnesses = new Map(); // abs project path → Harness
+  // abs project path → the session id of the run in flight there (only while
+  // one is). A run writes to the session it started in; the harness's own
+  // `.session` can move under it (the human opens another session mid-run).
+  // Frames are tagged from here so a window showing another session can tell
+  // whose stream this is and leaves it alone.
+  const runSessions = new Map();
   let current = null;
+
+  /**
+   * The provider this install runs on.
+   *
+   * The setting names one; the registry is the judge of which ids exist, so a
+   * provider that was deleted from the file falls back to AiPASS instead of
+   * leaving every run without a client.
+   */
+  const activeProviderId = () => {
+    const want = String(appSettings.get('defaultProvider') ?? AIPASS_PROVIDER).trim().toLowerCase();
+    return providers.get(want) ? want : AIPASS_PROVIDER;
+  };
+
+  /**
+   * The model a provider starts on.
+   *
+   * AiPASS keeps the machine-wide default; every other provider keeps its own,
+   * because a model id means nothing across providers — `gpt-4o` is not a
+   * thing an Anthropic key can be asked for.
+   */
+  const modelFor = (providerId) => {
+    const spec = providers.get(providerId);
+    if (!spec) return null;
+    if (spec.kind === 'aipass') return appSettings.get('defaultModel') ?? null;
+    return spec.defaultModel ?? spec.models?.[0] ?? null;
+  };
+
+  /**
+   * The client a provider is reached through.
+   *
+   * AiPASS is the local bridge and its tab; every other provider is an HTTP
+   * API this process calls itself. Both answer the same contract, so nothing
+   * below this line ever asks which one it got.
+   */
+  const clientForProvider = (providerId, { model = null, events = null } = {}) => {
+    const spec = providers.get(providerId);
+    if (!spec) return null;
+    return clientFor(spec, {
+      bridgeURL,
+      model: model ?? modelFor(providerId),
+      key: spec.kind === 'aipass' ? null : providers.keyFor(spec.id),
+      onNote: (text) => events?.emit('firewall_note', { text }),
+      onStreamNote: (text) => events?.emit('note', { text }),
+    });
+  };
+
+  /**
+   * Point one harness at the provider it should be talking to.
+   *
+   * A switch replaces the client and nothing else: the harness, the loop and
+   * the tools all talk to `h.bridge`, so a client that answers the same
+   * contract is the whole of the change. The client is NOT rebuilt when the
+   * provider did not change — a provider client owns the conversation
+   * history, and a settings save must not drop it.
+   */
+  const applyProviderTo = (h, providerId = activeProviderId()) => {
+    if (!providers.get(providerId)) return;
+    // The same provider: the client stays, and so does everything it owns —
+    // a provider client keeps the conversation history, and a settings save
+    // must not drop it.
+    if (h.providerId === providerId && h.bridge) return;
+    const client = clientForProvider(providerId, { model: model ?? modelFor(providerId), events: h.events });
+    if (client) h.setProvider(client);
+  };
 
   const harnessFor = (projectPath) => {
     const abs = path.resolve(projectPath);
@@ -264,6 +350,7 @@ export function createRpc({
       root: abs,
       bridgeURL,
       model: bridgeModel,
+      client: clientForProvider(activeProviderId(), { model: bridgeModel }),
       store: new SessionStore(storeDir),
       // The budget the sheet owns, plus the share of it the rotation knob
       // names. An explicit `compaction` (a test, a CLI flag) wins whole: it is
@@ -290,6 +377,11 @@ export function createRpc({
         attach: appSettings.get('attach'),
         webScratch: appSettings.get('webScratch'),
         parallelHelpers: appSettings.get('parallelHelpers'),
+        // The window's bootstrap start: the same git status + package.json
+        // snapshot the CLI asks for with `--snapshot`. On by default here
+        // because the window's user pays the same discovery round trips and
+        // never sees the flag; a caller can still pass `snapshot: false`.
+        snapshot: true,
         // (Thai pack) Reply-language policy and the loop guards the settings
         // sheet owns: language check, repeat guard, and the window's attempt
         // count for a failed checker.
@@ -299,6 +391,9 @@ export function createRpc({
         repeatGuard: appSettings.get('repeatGuard'),
         repeatGuardMax: appSettings.get('repeatGuardMax'),
         attempts: appSettings.get('attempts'),
+        // (docs/SPEC_CHECKER.md) The declared check and the strict Verify gate.
+        verifyCommand: appSettings.get('verifyCommand'),
+        requireCheck: appSettings.get('requireCheck'),
         // Where the chat tab lives, so a run that needs one can name the right
         // URL on its needs_tab event.
         chatUrl: appSettings.get('chatUrl'),
@@ -308,27 +403,90 @@ export function createRpc({
       rules: appSettings.get('rules') ?? [],
       skills: skillLibraryFor(abs),
     });
-    h.events.on('*', (type, payload) => bus.emit(type, { project: abs, ...payload }));
+    // Every frame carries its project and, when there is one, its session:
+    // `runSessions` while a run is in flight (the run's own session, whatever
+    // the window is looking at), the harness's current session otherwise.
+    h.events.on('*', (type, payload) => bus.emit(type, {
+      project: abs,
+      session: runSessions.get(abs) ?? h.session?.id ?? null,
+      ...payload,
+    }));
     harnesses.set(abs, h);
     return h;
   };
 
   const skillLibraryFor = (abs) => {
-    // Order: explicit folders from settings, then the project's own library,
-    // then the user's, then the ones shipped with the CLI. First match wins.
+    // One order for every surface: the folders a person configured, then the
+    // project's own library, then the user's, then the ones shipped with the
+    // CLI. First match wins. The window and the CLI used to disagree about
+    // the first slot, so a name in two libraries loaded a different file
+    // depending on who asked.
     const repoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills');
-    const projectDir = path.join(abs, '.aipass', 'skills');
-    const userDir = path.join(aipassHome(), 'skills');
-    const dirs = [
-      ...(appSettings.get('skillsDirs') ?? []),
-      projectDir,
-      userDir,
+    const { dirs, roles } = skillDirsFor({
+      root: abs,
       repoDir,
-    ].filter(Boolean);
+      configured: appSettings.get('skillsDirs') ?? [],
+    });
     // The generated index labels each library by its stated role; the two
     // known folders are named, not inferred from position, so a missing
     // project folder cannot mark the user's library as the project's.
-    return new SkillLibrary(dirs, { roles: { [projectDir]: 'project', [userDir]: 'user' } });
+    return new SkillLibrary(dirs, { roles });
+  };
+
+  /**
+   * Every settings-owned value, applied to one live harness whole.
+   *
+   * This is the sheet's promise taken literally: what the file says is what
+   * the harness runs under, whatever it was built with. `settings.set` walks a
+   * save parameter by parameter for every harness the backend holds; a project
+   * switch (and `settings.reset`) runs this, so an install whose settings were
+   * changed by a side door — a CLI writing the file while this backend ran, a
+   * backup restored underneath it — cannot leave a harness running yesterday's
+   * temperature, budgets or path rules while every window shows the new ones.
+   */
+  const applySettingsTo = (h) => {
+    h.setPolicy({ mode: appSettings.get('mode'), allowRun: appSettings.get('allowRun') });
+    Object.assign(h.options, {
+      maxSteps: appSettings.get('maxSteps'),
+      maxResult: appSettings.get('maxResult'),
+      maxToolCalls: appSettings.get('maxToolCalls'),
+      maxWallClockMs: appSettings.get('maxWallClockMs'),
+      maxCredits: appSettings.get('maxCredits'),
+      plan: appSettings.get('plan'),
+      requirePlanApproval: appSettings.get('requirePlanApproval'),
+      subagent: appSettings.get('subagent'),
+      thinking: appSettings.get('thinking'),
+      temperature: appSettings.get('temperature'),
+      searchI: appSettings.get('searchI'),
+      attach: appSettings.get('attach'),
+      webScratch: appSettings.get('webScratch'),
+      parallelHelpers: appSettings.get('parallelHelpers'),
+      // (Thai pack) the language policy and the loop guards
+      replyLanguage: appSettings.get('replyLanguage'),
+      langCheck: appSettings.get('langCheck'),
+      minThaiRatio: appSettings.get('minThaiRatio'),
+      repeatGuard: appSettings.get('repeatGuard'),
+      repeatGuardMax: appSettings.get('repeatGuardMax'),
+      attempts: appSettings.get('attempts'),
+      // The declared check and the strict Verify gate, re-applied so a save in
+      // the sheet is live on every harness the backend holds.
+      verifyCommand: appSettings.get('verifyCommand'),
+      requireCheck: appSettings.get('requireCheck'),
+      chatUrl: appSettings.get('chatUrl'),
+    });
+    // An explicit compaction (a CLI flag, a test) wins whole — the same rule
+    // harnessFor applies: it is a budget, and folding a saved share into one
+    // the caller did not ask for would be this layer inventing policy.
+    if (!compaction) h.compactor = Object.assign(h.compactor, appSettings.get('compaction'), { compactAtPercent: appSettings.get('compactAtPercent') });
+    // The explicit pin a CLI or a test passed wins whole (like compaction);
+    // otherwise the file is the truth, null included — that is how a reset
+    // clears the model a run had picked. The provider is applied first: a
+    // harness that is about to be moved to another provider must not keep the
+    // old one's model, and each provider remembers its own.
+    applyProviderTo(h);
+    h.bridge.model = model ?? modelFor(h.providerId) ?? null;
+    h.skills = skillLibraryFor(h.root);
+    h.setRules(appSettings.get('rules') ?? []);
   };
 
   const pickRoot = () => {
@@ -340,7 +498,21 @@ export function createRpc({
   const switchProject = (projectPath, { remember = true } = {}) => {
     const abs = path.resolve(projectPath);
     if (!fs.existsSync(abs)) throw new Error(`no such folder: ${abs}`);
+    // Whatever the backend is leaving behind is left warm but not spawned: an
+    // idle harness's MCP servers are child processes, and a long-lived backend
+    // that has visited many projects would otherwise collect one set per
+    // project it ever ran in. The one being entered keeps its clients (the
+    // window is about to use it), and a harness with a run in flight keeps
+    // them too — that run may still call an MCP tool. They respawn on demand.
+    for (const [otherAbs, other] of harnesses) {
+      if (otherAbs !== abs && !other.running) other.mcp.close();
+    }
     current = harnessFor(abs);
+    // The file is the truth for the harness being entered, even one this
+    // backend built long before the last save: without this, a project visited
+    // in the morning ran on the morning's temperature, budgets and rules while
+    // the sheet (and every window) said the new ones were in force.
+    applySettingsTo(current);
     if (remember) {
       appSettings.addProject(abs);
       emit('project', { root: abs });
@@ -428,6 +600,45 @@ export function createRpc({
     staged.delete(id);
   };
 
+  /* ---------------------------------------------------- plugins & mcp helpers */
+
+  // The manager's view plus what the installer's registry remembers. Every
+  // plugin call that answers with details answers with this one shape — list,
+  // reload, install, remove and enable all end here, so the window never has
+  // to reconcile two versions of "installed". `known` and `registry` are what
+  // let the sheet show a disabled-but-installed plugin as a row with a switch
+  // instead of a name that silently vanished.
+  const decoratedPlugins = () => {
+    const registry = readRegistry(plugins.defaultDir);
+    const details = decorateDetails(plugins.details(), registry);
+    return { ...details, registry: registry.plugins, known: knownNames(details, registry) };
+  };
+
+  const mcpListing = () => ({ servers: current.mcp.status(), tools: current.mcp.toolTable() });
+
+  // The enabled-list rules live in install.mjs as one pure function; this is
+  // just the write + reload around it.
+  const pluginSetEnabled = async (name, enabled) => {
+    if (!name) throw new Error('name is required');
+    const names = knownNames(plugins.details(), readRegistry(plugins.defaultDir));
+    const list = appSettings.get('plugins');
+    if (!names.includes(name) && !(Array.isArray(list) && list.includes(name))) {
+      throw new Error(`no plugin named ${name} — see plugins.list for what is installed`);
+    }
+    const next = materializeEnabledList(list, names, name, enabled);
+    appSettings.set({ plugins: next });
+    await plugins.load();
+    const details = decoratedPlugins();
+    emit('plugins', details);
+    return { plugins: next, details };
+  };
+
+  const mcpSetEnabled = async (params, enabled) => {
+    setServerEnabled(params.name, enabled, { home: aipassHome(), root: current.root, scope: params.scope ?? null });
+    await current.mcp.reload();
+    return mcpListing();
+  };
+
   /* -------------------------------------------------------------------- methods */
 
   const methods = {
@@ -447,11 +658,22 @@ export function createRpc({
         })),
         bridge: Boolean(st?.ok),
         extensions: st?.extensions ?? 0,
+        // Bridge-side cache counters (models/quota/conversation): what rode a
+        // cache instead of the tab. Null from a bridge too old to count them —
+        // the window's /status omits the line then.
+        cache: st?.cache ?? null,
+        // The build behind this backend: the window shows it (and warns when
+        // the packaged shell is older than the repo it was built from), so a
+        // stale install reads as a version instead of a mystery.
+        app: APP_VERSION ?? null,
         // The harness's model first: it is the one a run sends. The bridge's
         // own default is only a fallback, because the bridge remembers whatever
         // the browser tab last used — showing that instead would put a retired
         // model in the header while a different one answers.
         model: current.bridge.model ?? st?.defaultModel ?? null,
+        // Which provider the run talks to. The window shows it, so a run that
+        // suddenly costs real money instead of credits says why.
+        provider: current.providerId ?? AIPASS_PROVIDER,
         conversation: st?.conversation ?? null,
         session: current.session ? current.session.meta() : null,
         running: current.running,
@@ -464,7 +686,7 @@ export function createRpc({
         // Context is invisible until it is not: this meter is the difference
         // between "it is handling that" and "why did it forget what I said".
         context: current.contextUsage(),
-        plugins: plugins.details(),
+        plugins: decoratedPlugins(),
         settings: appSettings.values,
       };
     },
@@ -499,9 +721,123 @@ export function createRpc({
     async conversations() { return current.bridge.conversations(); },
 
     async 'config.set'(params = {}) {
-      if (params.model != null) { current.bridge.model = params.model; appSettings.set({ defaultModel: params.model }); }
+      if (params.model != null) {
+        // The same setting `settings.set({defaultModel})` writes, so it lands
+        // wherever that lands: a model chosen in the open window is the
+        // machine's default — "the choice survives a restart and the backend
+        // runs with it, not just this window" — not this project's private
+        // preference. A harness left holding the old model used to greet the
+        // next run in its project with it, while the sheet said otherwise.
+        //
+        // A provider other than AiPASS keeps its own model: the id means
+        // nothing across providers, so it is filed with the provider that
+        // answers to it and the machine-wide default stays the AiPASS one.
+        const active = providers.get(activeProviderId());
+        if (!active || active.kind === 'aipass') {
+          appSettings.set({ defaultModel: params.model });
+        } else {
+          providers.save({ ...active, defaultModel: params.model });
+        }
+        for (const h of harnesses.values()) h.bridge.model = params.model;
+      }
       await current.bridge.config(Object.fromEntries(Object.entries(params).filter(([k]) => ['model', 'assistant', 'aspectRatio', 'conversation'].includes(k))));
       return { ok: true };
+    },
+
+    /* ----------------------------------------------------------- providers */
+
+    /**
+     * The providers this install knows: the built-in AiPASS one and every
+     * added one.
+     *
+     * The keys are never in this answer — only whether there is one — so the
+     * window can show a green dot without a secret leaving the backend.
+     */
+    async 'providers.list'() {
+      return {
+        providers: providers.all().map((p) => ({
+          ...publicSpec(p),
+          hasKey: p.kind === 'aipass' ? true : providers.hasKey(p.id),
+        })),
+        active: activeProviderId(),
+      };
+    },
+
+    /**
+     * Switch the provider every harness runs on.
+     *
+     * The switch is machine-wide, like every other setting: the window, the
+     * CLI and the backend read the same file, so a choice made here is the
+     * choice the next run makes.
+     */
+    async 'provider.set'(params = {}) {
+      const id = String(params.id ?? '').trim().toLowerCase();
+      const spec = providers.get(id);
+      if (!spec) throw new Error(`no provider "${id}"`);
+      appSettings.set({ defaultProvider: spec.id });
+      for (const h of harnesses.values()) applyProviderTo(h, spec.id);
+      const list = await methods['providers.list']();
+      return { ok: true, active: spec.id, providers: list.providers };
+    },
+
+    /**
+     * Add a provider, or change one that is already there.
+     *
+     * The spec and the key travel together because they are one thing to
+     * configure: a provider without a key cannot answer, and a key without a
+     * spec has nowhere to go.
+     */
+    async 'provider.save'(params = {}) {
+      const spec = providers.save(params);
+      if (params.key) providers.setKey(spec.id, params.key);
+      // A provider whose spec just changed is rebuilt on every harness that
+      // runs on it, so the change is live and not only on the next start.
+      for (const h of harnesses.values()) {
+        if (h.providerId === spec.id) applyProviderTo(h, spec.id);
+      }
+      return { ok: true, provider: publicSpec(spec), hasKey: providers.hasKey(spec.id) };
+    },
+
+    async 'provider.remove'(params = {}) {
+      const id = String(params.id ?? '').trim().toLowerCase();
+      if (id === AIPASS_PROVIDER) throw new Error('the aipass provider cannot be removed');
+      providers.remove(id);
+      if (activeProviderId() === id) {
+        appSettings.set({ defaultProvider: AIPASS_PROVIDER });
+        for (const h of harnesses.values()) applyProviderTo(h, AIPASS_PROVIDER);
+      }
+      return { ok: true, active: activeProviderId() };
+    },
+
+    /**
+     * Ask a provider whether it answers — the one-click check in the sheet.
+     *
+     * The check is a request the provider recognises, not a guess: its own
+     * model list, which is the cheapest thing it can be asked for.
+     */
+    async 'provider.test'(params = {}) {
+      const id = String(params.id ?? '').trim().toLowerCase();
+      const spec = providers.get(id);
+      if (!spec) throw new Error(`no provider "${id}"`);
+      if (spec.kind === 'aipass') {
+        const st = await current.bridge.status().catch(() => null);
+        return {
+          ok: Boolean(st?.ok),
+          detail: st?.ok ? 'the bridge is answering' : 'the bridge is not answering',
+        };
+      }
+      const key = providers.keyFor(id);
+      if (!key) {
+        return { ok: false, detail: `no API key — set ${spec.apiKeyEnv ? `$${spec.apiKeyEnv}` : 'one here'}` };
+      }
+      const client = clientFor(spec, { key, model: spec.defaultModel ?? null });
+      const models = await client.models();
+      return {
+        ok: models.source === 'live',
+        detail: models.source === 'live'
+          ? `${models.data.length} model(s)`
+          : (models.error ?? 'the provider did not answer with a model list'),
+      };
     },
 
     /* ------------------------------------------------------- conversations */
@@ -544,42 +880,60 @@ export function createRpc({
       // A change of root moves the live run onto another project first: every
       // policy below it belongs to the harness that keeps running.
       if (params.root != null) switchProject(params.root);
-      // A change of mode or root is not a note in a file: it moves the live run.
-      if (params.mode || params.allowRun != null) current.setPolicy({ mode: params.mode ?? null, allowRun: params.allowRun ?? null });
-      // The settings sheet claims a value is live the moment Save is pressed,
-      // so every setting that reaches a module of its own is re-applied here
-      // rather than at the next start. A half-applied form is worse than no
-      // form: it writes one truth and keeps the process running another.
-      if (params.maxSteps != null) current.options.maxSteps = appSettings.get('maxSteps');
-      // The budgets are read once per run from `current.options`; without this
-      // a budget change was a note for the next backend start while the sheet
-      // said it was live.
-      if (params.maxToolCalls != null) current.options.maxToolCalls = appSettings.get('maxToolCalls');
-      if (params.maxWallClockMs != null) current.options.maxWallClockMs = appSettings.get('maxWallClockMs');
-      if (params.maxCredits != null) current.options.maxCredits = appSettings.get('maxCredits');
-      if (params.plan != null) current.options.plan = appSettings.get('plan');
-      if (params.requirePlanApproval != null) current.options.requirePlanApproval = appSettings.get('requirePlanApproval');
-      if (params.subagent != null) current.options.subagent = appSettings.get('subagent');
-      if (params.thinking != null) current.options.thinking = appSettings.get('thinking');
-      if (params.temperature !== undefined) current.options.temperature = appSettings.get('temperature');
-      if (params.defaultModel != null) current.bridge.model = params.defaultModel;
-      if (params.compaction) current.compactor = Object.assign(current.compactor, params.compaction);
-      // The rotation share is its own setting, not part of the budget object:
-      // it is the knob a person turns, the budget is the ceiling.
-      if (params.compactAtPercent != null) current.compactor.compactAtPercent = params.compactAtPercent;
-      // (Thai pack) The language keys and the loop guards read their options
-      // per run, so the sheet's save has to move the live copies too.
-      for (const key of ['replyLanguage', 'langCheck', 'minThaiRatio', 'repeatGuard', 'repeatGuardMax', 'attempts']) {
-        if (params[key] != null) current.options[key] = appSettings.get(key);
+      // A change of mode or root is not a note in a file: it moves every live
+      // run. Settings are one file for the whole machine, so the save lands on
+      // every harness the backend holds, not only the current one — a project
+      // visited later in the day must not keep the values of the moment it was
+      // first opened. The guards stay per-parameter: a save that does not name
+      // the mode must not stomp a mode a run set for itself.
+      for (const h of harnesses.values()) {
+        if (params.mode || params.allowRun != null) h.setPolicy({ mode: params.mode ?? null, allowRun: params.allowRun ?? null });
+        // The settings sheet claims a value is live the moment Save is pressed,
+        // so every setting that reaches a module of its own is re-applied here
+        // rather than at the next start. A half-applied form is worse than no
+        // form: it writes one truth and keeps the process running another.
+        if (params.maxSteps != null) h.options.maxSteps = appSettings.get('maxSteps');
+        // The budgets are read once per run from the harness options; without
+        // this a budget change was a note for the next backend start while the
+        // sheet said it was live.
+        if (params.maxToolCalls != null) h.options.maxToolCalls = appSettings.get('maxToolCalls');
+        if (params.maxWallClockMs != null) h.options.maxWallClockMs = appSettings.get('maxWallClockMs');
+        if (params.maxCredits != null) h.options.maxCredits = appSettings.get('maxCredits');
+        if (params.plan != null) h.options.plan = appSettings.get('plan');
+        if (params.requirePlanApproval != null) h.options.requirePlanApproval = appSettings.get('requirePlanApproval');
+        if (params.subagent != null) h.options.subagent = appSettings.get('subagent');
+        if (params.thinking != null) h.options.thinking = appSettings.get('thinking');
+        if (params.temperature !== undefined) h.options.temperature = appSettings.get('temperature');
+        if (params.defaultModel != null) h.bridge.model = params.defaultModel;
+        // A provider named in the same save is applied here, not only by the
+        // dedicated switch: the sheet's provider field and its "use this one"
+        // button are the same decision, and a save that wrote one and not the
+        // other would leave the run on the old provider.
+        if (params.defaultProvider != null) {
+          const want = String(params.defaultProvider).trim().toLowerCase();
+          if (providers.get(want)) applyProviderTo(h, want);
+        }
+        if (params.compaction) h.compactor = Object.assign(h.compactor, params.compaction);
+        // The rotation share is its own setting, not part of the budget object:
+        // it is the knob a person turns, the budget is the ceiling.
+        if (params.compactAtPercent != null) h.compactor.compactAtPercent = params.compactAtPercent;
+        // (Thai pack) The language keys and the loop guards read their options
+        // per run, so the sheet's save has to move the live copies too.
+        for (const key of ['replyLanguage', 'langCheck', 'minThaiRatio', 'repeatGuard', 'repeatGuardMax', 'attempts', 'verifyCommand', 'requireCheck']) {
+          if (params[key] != null) h.options[key] = appSettings.get(key);
+        }
+        // The playbook folders are per project, so each harness rebuilds its
+        // own list. The plugin list is one module for the whole backend and is
+        // reloaded once below.
+        if (params.skillsDirs != null) h.skills = skillLibraryFor(h.root);
+        // Path rules are read on every evaluate(), so they are the cheapest kind
+        // of live: the engine swaps the array and the next marker sees them.
+        if (params.rules != null) h.setRules(appSettings.get('rules') ?? []);
       }
-      // The playbook folders and the plugin list are the two settings a module
-      // of their own owns; both are rebuilt by name here so the sheet has one
-      // contract instead of a footnote saying "restart for these two".
-      if (params.skillsDirs != null) current.skills = skillLibraryFor(current.root);
+      // The plugin list is the other setting a module of its own owns; it is
+      // rebuilt by name here so the sheet has one contract instead of a
+      // footnote saying "restart for this one".
       if (params.plugins != null) void plugins.load();
-      // Path rules are read on every evaluate(), so they are the cheapest kind
-      // of live: the engine swaps the array and the next marker sees them.
-      if (params.rules != null) current.setRules(appSettings.get('rules') ?? []);
       emit('settings', next);
       return next;
     },
@@ -601,15 +955,20 @@ export function createRpc({
      */
     async 'rules.set'(params = {}) {
       const next = appSettings.set({ rules: params.rules ?? [] });
-      current.setRules(next.rules ?? []);
+      // Every live harness, not just the current one: a path rule is a
+      // boundary, and an engine in another project must not keep running
+      // without hearing about it.
+      for (const h of harnesses.values()) h.setRules(next.rules ?? []);
       return { rules: next.rules ?? [] };
     },
 
     /** Back to the defaults, projects and all. The escape hatch from a form. */
     async 'settings.reset'() {
       const next = appSettings.reset();
-      current.setPolicy({ mode: next.mode, allowRun: next.allowRun });
-      current.bridge.model = next.defaultModel;
+      // A reset is a save of every default: it lands on every harness the
+      // same way any other save does, or the form would be true on disk and
+      // half-true in the process it just claimed to reset.
+      for (const h of harnesses.values()) applySettingsTo(h);
       emit('settings', next);
       return next;
     },
@@ -628,7 +987,34 @@ export function createRpc({
 
     async 'mcp.list'() {
       await current.mcp.ensureLoaded();
-      return { servers: [...current.mcp.clients.keys()], tools: current.mcp.toolTable() };
+      return mcpListing();
+    },
+    async 'mcp.reload'() {
+      await current.mcp.reload();
+      return mcpListing();
+    },
+    async 'mcp.add'(params = {}) {
+      const server = addServer(params, { home: aipassHome(), root: current.root });
+      await current.mcp.reload();
+      return { server, ...mcpListing() };
+    },
+    async 'mcp.remove'(params = {}) {
+      const out = removeServer(params.name, { home: aipassHome(), root: current.root, scope: params.scope ?? null });
+      await current.mcp.reload();
+      return { ...out, ...mcpListing() };
+    },
+    async 'mcp.enable'(params = {}) { return mcpSetEnabled(params, true); },
+    async 'mcp.disable'(params = {}) { return mcpSetEnabled(params, false); },
+    /**
+     * Try a definition that may not be saved yet (a form's "test" button), or
+     * a name that is (the card's). A saved name resolves through the config,
+     * so the test runs exactly what is on disk — project override included.
+     */
+    async 'mcp.test'(params = {}) {
+      if (!params.name) return testServer(params, { root: current.root });
+      const known = loadConfig(current.root).find((s) => s.name === params.name && (!params.scope || s.scope === params.scope));
+      if (!known) throw new Error(`no server named ${params.name}`);
+      return testServer(known, { root: current.root });
     },
 
     /* ------------------------------------------------------------ projects */
@@ -672,6 +1058,20 @@ export function createRpc({
     async 'session.entries'() { return current.session?.entries ?? []; },
     async 'session.rename'(params = {}) { current.store.rename(params.id, params.title); return { ok: true }; },
     async 'session.delete'(params = {}) { current.store.remove(params.id); return { ok: true }; },
+    /**
+     * Move idle sessions out of the picker's way. Nothing is deleted — files
+     * move to `<project>/archive/` — and the live session is always kept even
+     * when idle. `olderThanDays` 30 by default; `limit` caps the move count.
+     */
+    async 'session.archive'(params = {}) {
+      const days = Number(params.olderThanDays ?? 30);
+      const out = current.store.archiveIdle(current.root, {
+        olderThanMs: Number.isFinite(days) && days >= 0 ? days * 24 * 3600 * 1000 : 30 * 24 * 3600 * 1000,
+        limit: Math.min(200, Math.max(1, Math.floor(Number(params.limit ?? 50)) || 50)),
+        keepId: current.session?.id ?? null,
+      });
+      return { archived: out.archived, count: out.archived.length };
+    },
     async 'session.fork'(params = {}) {
       if (!current.session) throw new Error('no session to fork');
       const forked = current.session.fork(current.store, { fromEntryId: params.from ?? null });
@@ -689,44 +1089,63 @@ export function createRpc({
       // is not showing that project. remember:false keeps the project list's
       // order alone: this is a target for the call, not a switch by the human.
       if (params.root && path.resolve(params.root) !== current.root) switchProject(params.root, { remember: false });
-      current.setPolicy({ mode: params.mode ?? null, allowRun: params.allowRun ?? null });
-      Object.assign(current.options, {
-        plan: params.plan ?? current.options.plan,
-        subagent: params.subagent ?? current.options.subagent,
+      // Everything below belongs to the harness this call landed on, captured
+      // once: between this method's awaits (attachment reads, the attempts
+      // loop, the run itself) another window can switch the backend's
+      // `current`, and this run's policy, options and pending list must not
+      // follow it.
+      const h = current;
+      h.setPolicy({ mode: params.mode ?? null, allowRun: params.allowRun ?? null });
+      Object.assign(h.options, {
+        plan: params.plan ?? h.options.plan,
+        subagent: params.subagent ?? h.options.subagent,
         // Unlike maxSteps and friends this one is only ever a saved setting:
         // the window flips plan mode through settings.set and never through
         // the run call, so the live value is the default — an explicit run
         // param still wins.
-        requirePlanApproval: Boolean(params.requirePlanApproval ?? current.options.requirePlanApproval),
-        maxSteps: params.maxSteps ?? current.options.maxSteps,
-        maxToolCalls: params.maxToolCalls ?? current.options.maxToolCalls,
-        maxWallClockMs: params.maxWallClockMs ?? current.options.maxWallClockMs,
-        maxCredits: params.maxCredits ?? current.options.maxCredits,
-        searchI: params.searchI ?? current.options.searchI,
-        attach: params.attach ?? current.options.attach,
-        webScratch: params.webScratch ?? current.options.webScratch,
-        parallelHelpers: params.parallelHelpers ?? current.options.parallelHelpers,
-        attempts: params.attempts ?? current.options.attempts,
+        requirePlanApproval: Boolean(params.requirePlanApproval ?? h.options.requirePlanApproval),
+        maxSteps: params.maxSteps ?? h.options.maxSteps,
+        maxToolCalls: params.maxToolCalls ?? h.options.maxToolCalls,
+        maxWallClockMs: params.maxWallClockMs ?? h.options.maxWallClockMs,
+        maxCredits: params.maxCredits ?? h.options.maxCredits,
+        searchI: params.searchI ?? h.options.searchI,
+        attach: params.attach ?? h.options.attach,
+        webScratch: params.webScratch ?? h.options.webScratch,
+        parallelHelpers: params.parallelHelpers ?? h.options.parallelHelpers,
+        attempts: params.attempts ?? h.options.attempts,
+        verifyCommand: params.verifyCommand !== undefined ? params.verifyCommand : h.options.verifyCommand,
+        requireCheck: Boolean(params.requireCheck ?? h.options.requireCheck),
         parts: await partsFor(params.attachments ?? []),
         pluginTools: plugins.toolTable(),
       });
-      if (params.model) current.bridge.model = params.model;
-      if (!current.session) await current.startSession({ title: params.title ?? null });
+      if (params.model) h.bridge.model = params.model;
+      if (!h.session) await h.startSession({ title: params.title ?? null });
       // (Thai pack) Attempts: when the checker reports the staged tree still
       // fails, the window may re-run the task instead of handing a known-bad
       // tree back. Every attempt starts from a cleared overlay (the loop
       // clears it on entry) in the same conversation, so the model sees its
       // own failure and tries a different route; the first attempt whose
       // check passes is the one kept. Each attempt costs a full run.
-      const attempts = Math.min(5, Math.max(1, Math.floor(Number(current.options.attempts ?? 1))));
+      const attempts = Math.min(5, Math.max(1, Math.floor(Number(h.options.attempts ?? 1))));
+      // The session this run writes to, read once at the boundary: the human
+      // may open another session while it streams — `h.session` moves, the
+      // run's entries do not. Frames carry this id (see harnessFor's tag), so
+      // a window showing another session can tell whose stream this is and
+      // leaves it alone.
+      const runSessionId = h.session?.id ?? null;
+      runSessions.set(h.root, runSessionId);
       let result = null;
       let used = 0;
-      for (let i = 1; i <= attempts; i++) {
-        used = i;
-        result = await current.run(params.task, { runPluginTool: (marker, args) => plugins.runTool(marker, args) });
-        const verdict = result.check?.verdict ?? null;
-        if (used === attempts || verdict !== 'fail') break;
-        emit('note', { text: `check failed after attempt ${used} of ${attempts} — running the task again`, project: current.root });
+      try {
+        for (let i = 1; i <= attempts; i++) {
+          used = i;
+          result = await h.run(params.task, { runPluginTool: (marker, args) => plugins.runTool(marker, args) });
+          const verdict = result.check?.verdict ?? null;
+          if (used === attempts || verdict !== 'fail') break;
+          emit('note', { text: `check failed after attempt ${used} of ${attempts} — running the task again`, project: h.root, session: runSessionId });
+        }
+      } finally {
+        runSessions.delete(h.root);
       }
       return {
         summary: result.summary,
@@ -735,7 +1154,7 @@ export function createRpc({
         spent: result.spent,
         attempts: used,
         check: result.check?.verdict ?? null,
-        pending: current.pendingChanges(),
+        pending: h.pendingChanges(),
       };
     },
 
@@ -745,8 +1164,13 @@ export function createRpc({
       // a different project current since this window's run started. A root
       // with no harness (nothing ever ran there) has nothing to cancel.
       const h = params.root ? harnesses.get(path.resolve(params.root)) : current;
-      h?.cancel();
-      return { ok: true };
+      if (!h) return { ok: false, running: false, reason: `no run in ${params.root ?? 'this project'}` };
+      // What the harness says about the run it stopped: `running` was false
+      // when the stop arrived, so there was nothing to stop and the window
+      // says so instead of pretending the work ended.
+      const running = h.running;
+      h.cancel();
+      return { ok: true, running };
     },
 
     /* -------------------------------------------------------- permissions */
@@ -809,12 +1233,54 @@ export function createRpc({
     },
 
     /* ------------------------------------------------------------- plugins */
-    async 'plugins.list'() { return plugins.details(); },
+    async 'plugins.list'() { return decoratedPlugins(); },
     async 'plugins.reload'() {
       await plugins.load();
-      emit('plugins', plugins.details());
-      return plugins.details();
+      const details = decoratedPlugins();
+      emit('plugins', details);
+      return details;
     },
+    /** Report on a source (path, folder, URL) — size and hash, nothing runs. */
+    async 'plugins.inspect'(params = {}) {
+      return inspectSource(params.source, { base: current?.root ?? process.cwd() });
+    },
+    async 'plugins.install'(params = {}) {
+      const result = await installSource(params.source, {
+        name: params.name ?? null,
+        expectedSha256: params.expectedSha256 ?? null,
+        force: Boolean(params.force),
+        base: current?.root ?? process.cwd(),
+        pluginsDir: plugins.defaultDir,
+        installedBy: params.installedBy === 'cli' ? 'cli' : 'desktop-ui',
+      });
+      // A non-empty enabled-list is an exact list of what runs. Leaving the new
+      // plugin out of it would install it into silence, which reads as a failed
+      // install; adding it here is the same decision as enabling it.
+      const list = appSettings.get('plugins');
+      if (Array.isArray(list) && list.length && !list.includes(result.name)) {
+        appSettings.set({ plugins: [...list.filter((n) => n !== NONE_NAME), result.name] });
+      }
+      const details = await finalizeInstall(result, plugins);
+      const decorated = decorateDetails(details, readRegistry(plugins.defaultDir));
+      emit('plugins', decorated);
+      return { plugin: decorated.loaded.find((p) => p.name === result.name) ?? null, details: decorated };
+    },
+    async 'plugins.remove'(params = {}) {
+      const out = removePlugin(params.name, { pluginsDir: plugins.defaultDir, force: Boolean(params.force) });
+      // Removing a name from an explicit enabled-list keeps the list exact: a
+      // name that no longer exists would otherwise be the only thing standing
+      // between "these plugins" and "everything, now and later".
+      const list = appSettings.get('plugins');
+      if (Array.isArray(list) && list.includes(params.name)) {
+        appSettings.set({ plugins: stripFromEnabled(list, params.name) });
+      }
+      await plugins.load();
+      const details = decoratedPlugins();
+      emit('plugins', details);
+      return { ...out, details };
+    },
+    async 'plugins.enable'(params = {}) { return pluginSetEnabled(params.name, true); },
+    async 'plugins.disable'(params = {}) { return pluginSetEnabled(params.name, false); },
     async 'panel.render'(params = {}) { return plugins.renderPanel(params.id); },
 
     /* ----------------------------------------------------------------- fs */
@@ -936,7 +1402,10 @@ export function createRpc({
         try {
           return json(res, 200, { ok: true, result: await fn(msg.params ?? {}) });
         } catch (err) {
-          return json(res, 200, { ok: false, error: String(err.message ?? err) });
+          // A failure that knows its step carries it: the window can say which
+          // door closed (fetch, validate, swap) instead of only that something
+          // did. The step is an extra field, never part of the message.
+          return json(res, 200, { ok: false, error: String(err.message ?? err), ...(err.stage ? { stage: err.stage } : {}) });
         }
       });
       return;

@@ -1,4 +1,3 @@
-// @ts-check
 // The pre-tool argument guard, Thai pack.
 //
 // Two failure shapes that live in a call's argument rather than its intent:
@@ -20,7 +19,7 @@
 import { stripInvisibles, toArabicDigits, beYearsIn } from './lang.mjs';
 
 /** Call kinds whose `arg` names a path (or a path plus a line range). */
-export const PATHY = new Set(['read', 'list', 'write', 'replace', 'delete', 'move', 'attach']);
+export const PATHY = new Set(['read', 'list', 'write', 'replace', 'delete', 'move', 'attach', 'symbols']);
 
 /**
  * Normalized retries for a path argument, in order: invisible characters
@@ -31,9 +30,7 @@ export const PATHY = new Set(['read', 'list', 'write', 'replace', 'delete', 'mov
  */
 export function pathVariants(arg) {
   const raw = String(arg);
-  /** @type {string[]} */
   const out = [];
-  /** @param {string} v */
   const push = (v) => { if (v && v !== raw && !out.includes(v)) out.push(v); };
   const noInvis = stripInvisibles(raw);
   push(noInvis);

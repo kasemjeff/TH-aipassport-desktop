@@ -1,4 +1,3 @@
-// @ts-check
 // Which hostnames must a local agent refuse to fetch. One module so the
 // bridge's attachment path and the harness's FETCH tool cannot drift — the
 // guard is only as good as its weakest caller.
@@ -10,14 +9,12 @@
 // resolution — so this blocks the literal-IP SSRF attempts, which is what a
 // URL in a chat message looks like.
 import { lookup as dnsLookup } from 'node:dns/promises';
-/** @param {number} a @param {number} b */
 const privateV4 = (a, b) =>
   a === 0 || a === 127 || a === 10                     // this-host, loopback, private
   || (a === 169 && b === 254)                          // link-local incl. cloud metadata
   || (a === 192 && b === 168)
   || (a === 172 && b >= 16 && b <= 31);                // 172.16.0.0/12
 
-/** @param {string} host */
 export function isPrivateHost(host) {
   let h = String(host).toLowerCase();
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
@@ -50,10 +47,8 @@ export function isPrivateHost(host) {
 // latency. The TTL is short on purpose — a long-lived backend must eventually
 // see a rebinding flip — and failures are never cached (they fail open).
 const DNS_TTL_MS = 60_000;
-/** @type {Map<string, { at: number, value: boolean }>} */
 const dnsCache = new Map(); // host → { at, value }
 
-/** @param {string} host @returns {Promise<boolean>} */
 export async function hostResolvesPrivate(host) {
   const key = String(host).toLowerCase();
   const hit = dnsCache.get(key);

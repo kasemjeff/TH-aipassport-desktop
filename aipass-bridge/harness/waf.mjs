@@ -1,4 +1,3 @@
-// @ts-check
 // Upstream WAF neutralisation — one module for every surface.
 //
 // Ordinary project files are full of the exact shapes a request filter looks
@@ -22,7 +21,6 @@
 // This file is the single source of the table. agent.mjs, chat.mjs and the
 // harness core all import it — the bytes must never drift between them.
 
-/** @type {Array<[RegExp, string]>} */
 export const SUBSTITUTIONS = [
   [/127\.0\.0\.1/g, 'LOOPBACK-IP'],
   [/169\.254\.169\.254/g, 'METADATA-IP'],
@@ -86,12 +84,10 @@ export const SUBSTITUTIONS = [
   [/<(?=[a-zA-Z/!?])/g, 'TAG-LT'],
 ];
 
-/** @param {string} text @returns {string} */
 export const outbound = (text) => SUBSTITUTIONS.reduce((acc, [re, to]) => acc.replace(re, to), text);
 
 // Reversing loses the original casing of "localhost"; lower case is what
 // appears in practice and a mismatch only costs a retry, never a bad write.
-/** @type {Array<[RegExp, string]>} */
 export const RESTORE = [
   [/LOOPBACK-IP/g, '127.0.0.1'],
   [/METADATA-IP/g, '169.254.169.254'],
@@ -139,22 +135,7 @@ export const RESTORE = [
   [/TAG-LT/g, '<'],
 ];
 
-/**
- * Restores placeholders a previously-wrapped value carries. Null and
- * undefined pass through untouched.
- * @overload
- * @param {string} text
- * @returns {string}
- */
-/**
- * @overload
- * @param {null|undefined} text
- * @returns {null|undefined}
- */
-/** @param {any} text @returns {any} */
-export function inbound(text) {
-  return text == null ? text : RESTORE.reduce((acc, [re, to]) => acc.replace(re, to), text);
-}
+export const inbound = (text) => (text == null ? text : RESTORE.reduce((acc, [re, to]) => acc.replace(re, to), text));
 
 // The last-resort drop list, carried into the firewall fallback path: lines
 // matching these are dropped whole when a fragment is rejected even on its own.

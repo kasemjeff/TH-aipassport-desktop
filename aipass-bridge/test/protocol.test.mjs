@@ -130,6 +130,30 @@ test('the preamble documents the ASK pause', () => {
   assert.match(text, /Never put ASK in the same reply as a NEED/);
 });
 
+test('the code-navigation markers and JOBS are calls, not prose', () => {
+  // They were in the preamble and in MARKER_LINE the whole time, so a reply
+  // that used one lost that line from the prose — and then nothing ran it.
+  // The line vanished: no call, and a nudge about a marker the model had
+  // spelled exactly right.
+  const reply = 'SYMBOLS src/index.ts\nDEF someName\nREFS someName\nJOBS\nDONE looked';
+  const calls = parse(reply);
+  assert.deepEqual(calls.map((c) => [c.kind, c.arg]), [
+    ['symbols', 'src/index.ts'],
+    ['def', 'someName'],
+    ['refs', 'someName'],
+    ['jobs', ''],
+    ['done', 'looked'],
+  ]);
+  assert.doesNotMatch(prose(reply), /SYMBOLS|DEF|REFS|JOBS/, 'and none of them is prose either');
+});
+
+test('a code-navigation marker without its argument is prose, not a broken call', () => {
+  // The same rule every other argument-taking marker follows: a marker with
+  // nothing after it is a shape mistake, and the shape nudge teaches it.
+  assert.deepEqual(parse('SYMBOLS\nDEF\nREFS').map((c) => c.kind), []);
+  assert.equal(attemptedMarker('SYMBOLS'), true, 'but it is read as an attempt');
+});
+
 test('the preamble keeps the answer itself in the message, above the DONE', () => {
   // Recorded live: a WEB-search run closed with a "summary done" line while the
   // findings never left the pasted result — a one-line bubble for a request

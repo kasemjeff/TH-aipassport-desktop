@@ -59,7 +59,7 @@ event — is in [`LOOP_DESIGN.md`](LOOP_DESIGN.md).
 | `compact.mjs` | estimate bytes/4 → summarise → rotate → re-seed | summarisation happens in the conversation that still holds the history |
 | `harness.mjs` | the facade a CLI, the window and tests all drive | the one-conversation resource is managed nowhere else; helpers propose into the parent overlay |
 | `session.mjs` | JSONL append with a forkable tree | a session opened next week reads as one continuous piece of work |
-| `skills.mjs` | plain markdown, project → user → repo | the library grows without code changes |
+| `skills.mjs` | plain markdown, configured → project → user → repo | the library grows without code changes, and one order serves the window and the CLI alike |
 | `plugins.mjs` | `setup(ctx)` in-process: markers, rpc, panels, settings; `apiVersion` checked against `PLUGIN_API` (1) | plugins are code you chose to install — not sandboxed, and it says so |
 
 What is already right and should not be "improved" away: unique-match REPLACE
@@ -454,6 +454,59 @@ said no. A 403 now arms the tab-wide clocks exactly as a 429 does: the sends
 behind it wait out one shared pause and are then paced 3s apart while the
 window cools (`page.test.mjs` pins the tab-wide wait for a 403).
 
+**Follow-up, Oct 20 — pacing moved ahead of the first refusal.** Every layer
+above reacts: it waits after the edge says no. That still spends the refusal,
+and parallel helpers can put several sends on the wire before any of them sees
+the shared clock. `BridgeClient` now carries a token bucket: one token per wire
+send (retries and conversation creates included), four tokens at the start and
+one more every 45 seconds — nine messages in four minutes, the measured
+envelope — so an ordinary burst waits a little instead of drawing a 429 and
+then waiting a lot. The bucket is per client, shared by every helper and the
+checker because they share the client. `AIPASS_RATE_BUCKET` overrides it
+(`off` for tests, `capacity,refillMs` for an experiment); the suite sets `off`
+in its harness and `scripts/test.mjs`, and `rate-bucket.test.mjs` pins the
+metering, the refill and the abort path with an injected clock.
+
+**Follow-up, Oct 20 — the 403's waits were probes, not patience.** The bucket
+above paces sends *before* the first refusal, and the tab's clock paces them
+*after* one — but the ladder in between was answering the refusal with a
+five-second pause, then fifteen, then ten, then thirty, then sixty. Five
+probes inside the very window they were waiting for. A live desktop run drew
+one refusal on a benign tool result (a `glob` listing of file paths — nothing a
+filter would have an opinion about) and sat in `[403] refused at the edge —
+waiting 5s` for ninety seconds: the page asked again after 5s and 15s, the
+client asked again after 10s and 30s, and each of those requests landed inside
+the window the run was waiting for and kept it hot. The refusal was never
+about the message, and it never cleared, because the cure was the disease.
+
+Three things changed, and they are the same physics the 429 path already
+follows:
+
+1. **The ladder waits like a rate ladder.** The page's 403 ladder is 15s then
+   60s (`EDGE_WAITS_403_MS`, where it was 5s then 15s) and the client's is 60s
+   then 180s (`EDGE_WAITS_MS`, where it was 10s/30s/60s) — the same shape a 429
+   gets, because it is the same limiter. A refusal that survives all of that
+   is content, and only then is it split.
+2. **The tab falls back to the envelope, not to a third of a second.** After
+   any refusal the tab paces its sends 20s apart (`RATE_PACE_GAP_MS`, where it
+   was 3s — eight times faster than the ten-per-four-minutes the edge
+   enforces). The 3s gap is what turned one refusal into an episode: the tab
+   stayed inside the window that had just said no, so every send drew the next
+   refusal and each one re-armed the same 3s pace. Under the new gap the tab
+   cools instead. Independently of any refusal, two sends in one tab now keep a
+   2s floor (`SEND_GAP_MS`), so a helper, the chat pane and a second project
+   cannot put four requests on the wire inside one second.
+3. **The create is a send, and a resend says so.** The conversation create
+   (`/chat.data`) used to fire outside the tab's clock entirely, so a run could
+   create its conversation and post its first message back-to-back — the shape
+   the edge refuses most; it waits on the same clock now, and the send after it
+   waits the same gap behind it. A resend carries `x-ai-retry`, the header the
+   site's own client sends when a person retries a message, so the server can
+   tell the repeat from a second turn.
+
+`page.test.mjs` pins all of it: the envelope gap after a refusal, the floor
+between two sends, the create on the same clock, and the retry header.
+
 ## The re-run that passed, and the gap it stepped on (Oct 2026)
 
 The smoke task ran once more after the block lifted — same task, same project,
@@ -486,7 +539,7 @@ only one that keeps every invariant — the protocol cannot say "a run sees
 disk" without making the Verify stage structurally impossible, and writing
 straight to disk in `auto`/`yolo` would trade away diff-before-apply, the
 crash-safety of a dead run, and helpers' proposals. `sandbox.mjs` now projects
-the tree into `.aipass/run/run-*` with the staged edits written in: source
+the tree into a throwaway copy with the staged edits written in: source
 files copied (a copy means an in-place write cannot touch the real file),
 heavy directories — `node_modules`, `.git`, build outputs — junctioned so a
 check does not pay to copy them, staged deletes left out. The command runs
@@ -496,6 +549,21 @@ stagnation guard still recognizes a repeat), and the copy is deleted in a
 `finally`. A run with nothing staged skips the projection entirely and
 behaves exactly as before. What the model sees is now the truth it always
 assumed: stage a fix, run `node check.mjs`, get `PASS`.
+
+**Where the projection lives (2026-10-20).** It used to be
+`.aipass/run/run-*`, inside the project — a full copy of the user's source,
+and of whatever secrets the project holds, in the folder a `git add -A` walks.
+It lives under `~/.aipass/run/<project>/run-*` now, so it cannot be committed
+by accident and cannot be walked by a tool. Three things changed with it: a
+janitor (`sweepSandboxes`) collects the copies a killed backend left behind —
+nothing did before; a link that points OUTSIDE the project is left out of the
+projection (the tools refuse such a path, so copying the target in would put
+a file where the run could read it); and a file over the size cap
+(`AIPASS_SANDBOX_MAX_FILE_MB`, 64 MB) is left out and named in the command's
+result. The heavy directories are still SHARED with the real tree — a copy of
+`node_modules` would cost a minute per RUN — so a write into one of them
+lands in the user's project; the command's result now says which folders are
+shared, so the model is never surprised by a change it did not make.
 
 Proven live the same day, on a broken `total.mjs` with `check.mjs` printing
 FAIL: the model staged the one-word fix and ran the check in the same step —
@@ -578,20 +646,23 @@ The map, then what each gap is worth:
 
 | hook | spine stage | mechanism today | status |
 |---|---|---|---|
-| SessionStart — inject a snapshot | Bootstrap | preamble + top-level listing on turn 1; a later turn re-pastes the listing only when it moved — an unchanged one is a single line, and a rotation forgets the memory, so the first follow-up after it pastes the table in full; `--snapshot` (CLI) adds `git status --short` and the package scripts to turn 1 (`loop.mjs` the `again` message, `harness.mjs#listingShown`) | partial — the listing is the only default snapshot; everything else still costs a NEED |
-| PreToolUse — validate the shape, deny with a reason | Action validator | per-tool checks returning `err: …` and the fix (F5); fenced protocol text never executes (F1); `node --check` on staged JS (R2); permission denials carry the rule name; a plugin marker that declared a `risk` rides the permission engine | done per tool — no single pre-dispatch layer; undeclared plugin markers keep the stated trust |
+| SessionStart — inject a snapshot | Bootstrap | preamble + top-level listing on turn 1; a later turn re-pastes the listing only when it moved — an unchanged one is a single line, and a rotation forgets the memory, so the first follow-up after it pastes the table in full; the bootstrap snapshot (`git status --short` + package scripts) rides the turn-1 listing slot (`loop.mjs#bootstrapSnapshot`, `harness.mjs#listingShown`) | done — the desktop harness ships it on by default; the CLI keeps the opt-in `--snapshot` so its tuned bytes stay identical |
+| PreToolUse — validate the shape, deny with a reason | Action validator | one `validateCall()` before dispatch (`harness/validate.mjs`) checks every built-in, plugin and MCP call for the same shape contract, so an empty `RUN`, a blank `NEED`/`SEARCH` or an uninstalled marker answers with one `err: …` sentence before any implementation sees it; fenced protocol text never executes (F1); `node --check` on staged JS (R2); permission denials carry the rule name; a plugin marker that declared a `risk` rides the permission engine | done — shapes are central; undeclared plugin markers keep the stated trust |
 | PostToolUse — compact an oversized result | Observation compressor | clip at `maxResult` + spill file with a `NEED` locator (`tools.mjs`) — reads keep the head, `RUN` keeps head+tail (ACI round); the summary transcript elides stale bulk (opt-in) and the rotation's seed pins the memory facts; conversation summarise→rotate at the budget (`compact.mjs`) | done, three tiers — clip + spill, elision (opt-in), rotate; the elided middle of a command sits on disk, not lost |
-| Stop — tests fail, keep working | Verify | R4's one soft nudge (`verifyPrompts`); the checker at DONE — a read-only child runs the project's own check, the verdict computed from what it ran, one continuation on fail (`loop.mjs`, `harness.mjs#makeChecker`) | done v1 — the verdict is advisory: a second DONE is accepted with `checks`/`checkVerdict` recorded |
+| Stop — tests fail, keep working | Verify | R4's one soft nudge (`verifyPrompts`); the checker at DONE — a read-only child runs the project's own check, the verdict computed from what it ran, one continuation on fail (`loop.mjs`, `harness.mjs#makeChecker`); `verifyCommand` names that check for a run without `.aipass/check.txt`; `requireCheck` refuses a later DONE over a failing verdict as `done-unverified` | done — advisory by default, strict gate opt-in; `checks`/`checkVerdict`/`checkCommand` and `doneUnverified` recorded |
 | PreToolUse — count calls, log every event | Budget + trace | one `run_stats` line per run + one session JSONL entry per tool call, 20 000-char result and all; `run_stats.tools` carries `{n, fail, ms}` per kind and `stats` prints the mean latency | done — a hard per-run cap is still not recorded (the budget stops a run with its reason instead) |
-| PreToolUse — destructive commands, config files, red-test commits | Safety gates | modes + the H9 rule engine: path rules outrank the mode, reads included; no listener means deny; `classifyRun` asks about hazardous `RUN` bodies in every mode, ahead of grants; `SAFETY_RULES` ask about config/lockfile mutations (`permissions.mjs`, `settings.mjs`); the declared check (`.aipass/check.txt`) arms the red-test commit gate: a `git commit` RUN is refused until it passed at the current tree state, and `run_stats.commitBlocks` counts the refusals | done — the gate is keyed off the declared check, no separate `verifyCommand` surface |
+| PreToolUse — destructive commands, config files, red-test commits | Safety gates | modes + the H9 rule engine: path rules outrank the mode, reads included; no listener means deny; `classifyRun` asks about hazardous `RUN` bodies in every mode, ahead of grants; `SAFETY_RULES` ask about config/lockfile mutations (`permissions.mjs`, `settings.mjs`); the declared check (`.aipass/check.txt`, or `verifyCommand` when set) arms the red-test commit gate: a `git commit` RUN is refused until it passed at the current tree state, and `run_stats.commitBlocks` counts the refusals | done — the gate names the command and its source (`--verify-command` or `.aipass/check.txt`) |
 
 Worth closing, in roughly the order the table reads:
 
 1. **A verdict behind DONE — shipped 2026-10-15** as the checker
    ([`SPEC_CHECKER.md`](SPEC_CHECKER.md), tests `checker.test.mjs`). The
-   remaining edge of it: a declared check command (`verifyCommand`) would make
-   verdicts comparable across runs, and it is also what armed the red-test
-   commit gate (shipped 2026-10-17, keyed off `.aipass/check.txt`).
+   remaining edge closed 2026-10-20: `verifyCommand` names the check when a run
+   has no `.aipass/check.txt`, so the verdict carries a comparable command
+   (`run_stats.checkCommand`), and `requireCheck` makes the last failing verdict
+   terminal as `done-unverified` instead of accepting the DONE. The red-test
+   commit gate reads the same option (or the file). Pinned in
+   `checker.test.mjs` and `gates.test.mjs`.
 2. **The safety set — shipped 2026-10-15** (`gates.test.mjs`). The floor is
    `SAFETY_RULES` in `settings.mjs`: mutating `package.json`, `tsconfig*.json`,
    `.*rc*` or a lockfile asks even in yolo, while reads stay ordinary; it is
@@ -619,10 +690,15 @@ Worth closing, in roughly the order the table reads:
    repository is reachable above the run, `sandbox.mjs` writes a `.git` file
    with an unresolvable `gitdir:` — the one shape that halts the climb, since
    an empty `.git` directory does not. A repo-less project keeps today's
-   sandbox, `git init` included.
+   sandbox, `git init` included. (2026-10-20: the projection moved out of the
+   project, so the sentinel is written when a repository is reachable from
+   EITHER the project or the projection's new home.)
 4. **Bootstrap snapshot — shipped 2026-10-17** behind `--snapshot`: git
-   status and the package scripts quoted into turn 1, off by default so the
-   CLI's tuned bytes stay identical (`loop.mjs`, `agent.test.mjs`).
+   status and the package scripts quoted into turn 1. Since 2026-10-20 the
+   desktop harness turns it on for every run (the window's user never sees the
+   flag and pays the same discovery round trips), while the CLI keeps the
+   opt-in so its tuned bytes stay identical (`loop.mjs`, `rpc.mjs`,
+   `test/desktop.test.mjs`, `agent.test.mjs`).
 5. **Per-tool latency — shipped 2026-10-17**: one `ms` field in `toolStats`,
    aggregated in `stats.mjs` and printed per kind (`stats.test.mjs`). A hard
    per-run cap is still not recorded: the soft budget stops a run with a
@@ -776,7 +852,15 @@ lost to a three-second blip. Fixes:
    one-click offer instead of a bare error.
 3. **A stop is not an error.** The window's stop button aborts the send, and
    the loop used to label that run `error` — a system failure for something
-   the user did on purpose. It now ends as `cancelled`.
+   the user did on purpose. It now ends as `cancelled`. And it ends the
+   *work*, not only the conversation: the signal is checked between the tools
+   of a reply and between steps, a command in flight is killed with its
+   tree, the projection a `RUN` waits for is abandoned, the web search and an
+   MCP call ride the same signal, a stopped run stages no more edits, and the
+   run's abort controller is created before the first `await` so a stop can
+   never be lost in the gap while a run is starting
+   (`harness/loop.mjs`, `harness/harness.mjs`, `harness/tools.mjs`,
+   `harness/sandbox.mjs`, `harness/mcp.mjs`, `test/stop.test.mjs`).
 
 Pinned by `test/run-resilience.test.mjs` (the gap is retried; a mid-stream
 refusal is not; a create survives the same gap).

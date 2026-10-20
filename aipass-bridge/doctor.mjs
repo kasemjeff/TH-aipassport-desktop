@@ -7,7 +7,13 @@
 // about it — so a broken setup costs a line of output rather than a session of
 // guessing.
 import fs from 'node:fs';
+import path from 'node:path';
 import { authHeaders } from './harness/authtoken.mjs';
+import { aipassHome, Settings } from './harness/settings.mjs';
+import { PluginManager } from './harness/plugins.mjs';
+import { pluginsDirFor } from './harness/install.mjs';
+import { loadConfig } from './harness/mcp.mjs';
+import { tryDesktopRpc } from './harness/desktop-rpc.mjs';
 import { parseArgs } from './argv.mjs';
 const argv = process.argv.slice(2);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -156,6 +162,48 @@ if (NO_CHAT || !status?.extensions) {
     report('round trip', 'ok', `${model} replied in ${((Date.now() - started) / 1000).toFixed(1)}s`);
   } catch (err) {
     report('round trip', 'fail', err.message, 'check the bridge log and the tab console');
+  }
+}
+
+/* 7 — the local extension channels. These read this machine's files, not the
+   bridge: a plugin that fails to load, or an MCP server that will not connect,
+   is invisible everywhere else unless a window happens to be open. */
+try {
+  const gate = new PluginManager({ dir: pluginsDirFor(aipassHome()), settings: new Settings(), log: () => {} });
+  await gate.load();
+  const details = gate.details();
+  if (details.failed.length) {
+    report('plugins', 'fail', `${details.failed.length} failed to load`,
+      `aipass plugin list — fix or disable: ${details.failed.map((f) => path.basename(f.file)).join(', ')}`);
+  } else if (details.loaded.length) {
+    report('plugins', 'ok', `${details.loaded.length} loaded`);
+  } else {
+    report('plugins', 'skip', 'none installed');
+  }
+} catch (err) {
+  report('plugins', 'fail', err.message, 'aipass plugin list');
+}
+
+// MCP: a running backend already holds live rows; without one, do not spawn
+// servers from a diagnostic — read the config and say it was not tested.
+const mcpLive = await tryDesktopRpc('mcp.list');
+if (mcpLive?.ok && Array.isArray(mcpLive.result?.servers)) {
+  const servers = mcpLive.result.servers;
+  const bad = servers.filter((s) => s.enabled && !s.connected);
+  if (bad.length) {
+    report('mcp', 'fail', `${bad.length} enabled server(s) will not connect`, `aipass mcp test ${bad[0].name}`);
+  } else if (servers.length) {
+    report('mcp', 'ok', `${servers.length} server(s), ${(mcpLive.result.tools ?? []).length} tool(s)`);
+  } else {
+    report('mcp', 'skip', 'no servers configured');
+  }
+} else {
+  const enabled = loadConfig(process.cwd()).filter((s) => s.enabled);
+  if (enabled.length) {
+    report('mcp', 'warn', `${enabled.length} enabled server(s) — not tested`,
+      'start the desktop app, or: aipass mcp test <name>');
+  } else {
+    report('mcp', 'skip', 'no servers configured');
   }
 }
 

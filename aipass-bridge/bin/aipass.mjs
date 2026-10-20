@@ -9,6 +9,7 @@
 //   aipass dev             run the bridge in the foreground (Ctrl+C to stop)
 //   aipass agent "task"    run the file agent against the current directory
 //   aipass models          list models
+//   aipass providers       list the API providers (add/remove/use)
 //   aipass conversations   list conversations
 //   aipass status          check node / bridge / extension
 //   aipass stop            stop a bridge that `aipass` started
@@ -87,7 +88,7 @@ function stopBridge() {
 
 async function status() {
   const major = Number(process.versions.node.split('.')[0]);
-  console.log(`node          ${process.versions.node}${major >= 22 ? '' : red('  ✗ need >= 22')}`);
+  console.log(`node          ${process.versions.node}${major >= 20 ? '' : red('  ✗ need >= 20')}`);
 
   const up = await bridgeUp();
   console.log(`bridge        ${up ? `${BRIDGE}  ok` : `${BRIDGE}  ${red('not running')} — run \`aipass dev\` (or npm run dev)`}`);
@@ -109,6 +110,7 @@ const HELP = `aipass — de.aipass.net from your terminal
   aipass "question"      one-shot question
   aipass agent "task"    run the file agent against the current directory
   aipass models          list models
+  aipass providers       list / add / remove / use the API providers
   aipass styles          list video & image style presets
   aipass conversations   list conversations
   aipass credits         check credit quota
@@ -116,8 +118,10 @@ const HELP = `aipass — de.aipass.net from your terminal
   aipass setup-assistant configure custom assistant
   aipass setup           first-run setup: Node, PATH, token, bridge, browser pages
   aipass memory          list/clear facts carried across sessions for this project
+  aipass relocate        re-key a project's stored data after its folder moved
   aipass scale "task"    test-time scaling: run a task N times, keep the best
-  aipass mcp             list/call tools from configured MCP servers
+  aipass plugin          install/inspect/enable/disable/remove plugins
+  aipass mcp             add/remove/list MCP servers and call their tools
   aipass status          check node / bridge / extension status
   aipass stop            stop any lingering background bridge
 
@@ -153,6 +157,12 @@ switch (cmd) {
     process.exit(await run('list.mjs', [cmd, ...rest], { env: { ...process.env, AIPASS_BRIDGE: BRIDGE } }));
     break;
 
+  case 'providers':
+    // The provider registry is a file, not a bridge: it is read and written
+    // here, so it needs no bridge and no extension.
+    process.exit(await run('providers.mjs', rest));
+    break;
+
   case 'doctor':
     process.exit(await run('doctor.mjs', ['--bridge', BRIDGE, ...rest]));
     break;
@@ -170,12 +180,20 @@ switch (cmd) {
     process.exit(await run('memory.mjs', rest));
     break;
 
+  case 'relocate':
+    process.exit(await run('relocate.mjs', rest));
+    break;
+
   case 'scale':
     process.exit(await run('scale.mjs', rest));
     break;
 
   case 'mcp':
     process.exit(await run('mcp.mjs', rest));
+    break;
+
+  case 'plugin':
+    process.exit(await run('plugin.mjs', rest));
     break;
 
   case 'status':

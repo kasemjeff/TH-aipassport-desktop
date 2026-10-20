@@ -142,6 +142,30 @@ test('collectRuns and summarize aggregate sessions the reader can print', () => 
   assert.equal(totals.byRoot[dir].spent, 5);
 });
 
+test('a strict Verify refusal keeps its command and its count', () => {
+  // The verdict of a strict run is only comparable when the command it is
+  // about is carried with it, and a refused DONE must be visible in the
+  // totals rather than hidden inside a stop-reason bucket.
+  const dir = tempDir();
+  const store = new SessionStore(path.join(dir, 'sessions'));
+  const s = store.create({ root: dir, title: 'unverified' });
+  s.append('run_stats', {
+    stopReason: 'done-unverified', steps: 4, model: 'm-a',
+    tools: { read: { n: 1, fail: 0, ms: 10 } },
+    checks: 1, checkVerdict: 'fail', checkCommand: 'node check.mjs', doneUnverified: 1,
+    stepMs: [100], spent: 1,
+  });
+
+  const rows = collectRuns(s);
+  assert.equal(rows[0].checkCommand, 'node check.mjs', 'the verdict carries the command it is about');
+  assert.equal(rows[0].doneUnverified, 1);
+
+  const totals = summarize(rows);
+  assert.equal(totals.doneUnverified, 1);
+  assert.equal(totals.checkFails, 1);
+  assert.equal(totals.byStop['done-unverified'], 1);
+});
+
 test('a run whose session recorded no model either lands in the unrecorded group, not nowhere', () => {
   // The last resort: when neither the run nor its session recorded a model,
   // the row still reports — under an explicit "(unrecorded)" key, so the mix

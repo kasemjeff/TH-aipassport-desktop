@@ -1,4 +1,3 @@
-// @ts-check
 // Log files that cannot grow without bound.
 //
 // bridge.log and desktop-backend.log are opened append-only and written for
@@ -17,10 +16,6 @@ export const LOG_MAX_BYTES = Number(process.env.AIPASS_LOG_MAX_BYTES ?? 5 * 1024
  * Returns an fd (as fs.openSync would). Rotation failures are swallowed: a
  * still-open handle on Windows, a read-only directory — none of them should
  * stop the process from logging; appending to the big file is the lesser evil.
- *
- * @param {string} file
- * @param {{ maxBytes?: number }} [opts]
- * @returns {number} an fs file descriptor, ready for appending
  */
 export function openLogFile(file, { maxBytes = LOG_MAX_BYTES } = {}) {
   fs.mkdirSync(path.dirname(file), { recursive: true });

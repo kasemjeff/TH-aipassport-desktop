@@ -85,7 +85,16 @@ test('the CLI validates, prints, and names problems (exit codes 0/1/2)', () => {
 
   const listing = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8', windowsHide: true });
   assert.equal(listing.status, 0, listing.stderr);
-  assert.match(listing.stdout, /next: safety-twin-controls/);
+  // The head is the first record that is still open — a finished record is
+  // never next, and the head moves when one ends (safety-twin-controls ended
+  // `done` on 2026-10-20), so the test reads the queue instead of pinning a
+  // name that a finished experiment would change.
+  const head = /next: (\S+)/.exec(listing.stdout)?.[1] ?? '';
+  const records = JSON.parse(fs.readFileSync(QUEUE_FILE, 'utf8'));
+  const headRecord = records.find((r) => r.id === head);
+  assert.ok(head, 'the CLI names a head');
+  assert.ok(headRecord, 'the named head is a record of the committed queue');
+  assert.ok(headRecord.status === 'proposed' || headRecord.status === 'running', 'the head is still open');
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-experiments-'));
   try {

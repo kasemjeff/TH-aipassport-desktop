@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { SessionStore, HEADER_EVERY } from '../harness/session.mjs';
 import { Settings } from '../harness/settings.mjs';
+import { Overlay } from '../harness/overlay.mjs';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-integrity-'));
 
@@ -60,6 +61,37 @@ test('a duplicated entry loads once — the chain keeps its shape', () => {
   assert.equal(s.entries[2].parentId, 'a1', 'links still resolve after the drop');
 });
 
+test('remove() reports the file gone, and archiveIdle moves only idle sessions', () => {
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const root = path.join(dir, 'proj');
+  const now = Date.now();
+
+  // remove: the old return read existsSync() AFTER deletion — always false
+  // on success is the wrong polarity for "did it go away".
+  const s = store.create({ root, title: 'gone' });
+  assert.equal(store.remove(s.id), true, 'a removed session reports gone');
+
+  // archive: one idle, one fresh, one live-but-idle. Only the first moves.
+  const idle = store.create({ root, title: 'idle' });
+  const fresh = store.create({ root, title: 'fresh' });
+  const live = store.create({ root, title: 'live' });
+  const touch = (session, updated) => {
+    const loaded = store.load(session.id);
+    loaded.header.updated = updated;
+    fs.writeFileSync(loaded.file, fs.readFileSync(loaded.file, 'utf8').replace(/"updated":\d+/, `"updated":${updated}`));
+  };
+  touch(idle, now - 40 * 24 * 3600 * 1000);
+  touch(live, now - 40 * 24 * 3600 * 1000);
+  touch(fresh, now);
+
+  const out = store.archiveIdle(root, { olderThanMs: 30 * 24 * 3600 * 1000, limit: 50, keepId: live.id });
+  assert.deepEqual(out.archived, [idle.id], 'only the idle non-live session moves');
+  assert.equal(store.list(root).some((e) => e.id === idle.id), false, 'archived leaves the picker');
+  assert.equal(store.list(root).some((e) => e.id === fresh.id), true, 'fresh stays');
+  assert.equal(store.list(root).some((e) => e.id === live.id), true, 'live stays even when idle');
+});
+
 test('wrong-typed data never reaches the picker or the chain', () => {
   const dir = tmp();
   const proj = path.join(dir, 'proj'); // list() scans project directories
@@ -83,6 +115,66 @@ test('wrong-typed data never reaches the picker or the chain', () => {
   const loaded = store.load(path.join(proj, 'session-baden.jsonl'));
   assert.deepEqual(loaded.entries.map((e) => e.id), ['u1']);
   assert.equal(store.load(path.join(proj, 'session-bad-header.jsonl')), null, 'no header object, no session');
+});
+
+test('an entry-shaped first line is skipped like a torn one', () => {
+  const dir = tmp();
+  const proj = path.join(dir, 'proj');
+  fs.mkdirSync(proj, { recursive: true });
+  // A file whose header line was lost — something appended to it after an
+  // external delete — starts with an entry. Every entry carries a string id,
+  // so the picker's old "object with an id" test listed it as a session that
+  // then refused to open. A line is a header only when it says so.
+  writeSession(path.join(proj, 'session-orphan1.jsonl'), [entry('note', 'n1', null, { text: 'x' })]);
+  const store = new SessionStore(dir);
+  assert.equal(store.list().some((m) => m.id === 'n1'), false, 'an entry is not a picker header');
+  assert.equal(store.load(path.join(proj, 'session-orphan1.jsonl')), null, 'and it does not load as a session');
+});
+
+test('a torn header costs the session nothing — the breadcrumb carries it', () => {
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const proj = path.join(dir, 'proj');
+  const s = store.create({ root: proj, title: 'crashed' });
+  s.append('user', { text: 'hello' });
+  s.append('assistant', { text: 'hi' });
+
+  // A power loss mid in-place header rewrite: the first line is torn and the
+  // breadcrumb the rewrite writes before it is still there. Before the
+  // breadcrumb this was a session lost — skipped by the picker, null from
+  // load(), entries sitting on disk with nobody able to open them.
+  const raw = fs.readFileSync(s.file, 'utf8');
+  fs.writeFileSync(s.file, '{"type":"hea\n' + raw.slice(raw.indexOf('\n') + 1));
+  fs.writeFileSync(`${s.file}.hdr`, JSON.stringify(s.header) + '\n');
+
+  const listed = store.list(proj).find((m) => m.id === s.id);
+  assert.ok(listed, 'the picker still shows it');
+  assert.equal(listed.title, 'crashed', 'with the header the breadcrumb kept');
+
+  const loaded = store.load(s.id);
+  assert.ok(loaded, 'the session opens');
+  assert.equal(loaded.title, 'crashed');
+  assert.deepEqual(loaded.entries.map((e) => e.type), ['user', 'assistant'], 'and every entry is there');
+  assert.equal(fs.existsSync(`${s.file}.hdr`), false, 'the repair deletes the breadcrumb');
+  assert.equal(JSON.parse(fs.readFileSync(s.file, 'utf8').split('\n')[0]).title, 'crashed', 'the first line is a header again');
+
+  const reread = store.load(s.id); // no breadcrumb involved this time
+  assert.equal(reread.title, 'crashed');
+  assert.deepEqual(reread.entries.map((e) => e.type), ['user', 'assistant']);
+});
+
+test('a breadcrumb left by a crash that damaged nothing is cleaned up on load', () => {
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const s = store.create({ root: path.join(dir, 'proj'), title: 'fine' });
+  s.append('note', { text: 'x' });
+  // Crash between the breadcrumb write and the in-place write: the first line
+  // is the old (valid) header and the breadcrumb holds the newer one. The
+  // interrupted rewrite rolls back to what the file actually says.
+  fs.writeFileSync(`${s.file}.hdr`, JSON.stringify({ ...s.header, title: 'stale' }) + '\n');
+  const loaded = store.load(s.id);
+  assert.equal(loaded.title, 'fine', 'the valid first line answers first');
+  assert.equal(fs.existsSync(`${s.file}.hdr`), false, 'the leftover breadcrumb goes');
 });
 
 test('an unknown entry type from a newer build is preserved, not dropped', () => {
@@ -220,6 +312,98 @@ test('a new session header records the app that wrote it, through a rewrite', ()
   const reloaded = store.load(s.id);
   assert.equal(reloaded.header.app, pkg.version, 'app survives the rewrite');
   assert.equal(reloaded.header.fromNewer, 'kept', 'and so does a field from a newer build');
+});
+
+test('a session records the conversation it works in; a fork starts unbound', () => {
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const s = store.create({ root: path.join(dir, 'proj'), title: 'bound' });
+  assert.equal(s.bindConversation('conv-1', true), 'conv-1');
+  const reloaded = store.load(s.id);
+  assert.equal(reloaded.header.conversation, 'conv-1', 'the binding round-trips through the file');
+  assert.equal(reloaded.header.conversationTemporary, true, 'and so does the temporary flag');
+
+  // A fork is a new branch, not a second writer: it must not inherit the
+  // conversation the original is still working in.
+  const fork = reloaded.fork(store);
+  assert.equal(fork.header.conversation, undefined, 'the fork starts unbound');
+  assert.equal(store.load(fork.id).header.conversation, undefined, 'on disk too');
+
+  // Rebinding overwrites; clearing removes both fields.
+  reloaded.bindConversation('conv-2');
+  assert.equal(store.load(s.id).header.conversation, 'conv-2');
+  assert.equal(store.load(s.id).header.conversationTemporary, false, 'a missing temporary flag reads as false');
+  reloaded.bindConversation(null);
+  assert.equal(store.load(s.id).header.conversation, undefined, 'cleared');
+  assert.equal(store.load(s.id).header.conversationTemporary, undefined, 'both fields go');
+});
+
+test('a memory save that cannot complete leaves the previous facts intact', async () => {
+  const home = tmp();
+  const prev = process.env.AIPASS_HOME;
+  process.env.AIPASS_HOME = home;
+  try {
+    // Imported here, with the home in place, because the store directory is
+    // computed from it at module load.
+    const { saveMemory, loadMemory, memoryPath } = await import('../harness/memory-store.mjs');
+    const root = path.join(home, 'proj');
+    saveMemory(root, ['fact one']);
+    assert.deepEqual(loadMemory(root), ['fact one']);
+
+    const before = fs.readFileSync(memoryPath(root), 'utf8');
+    fs.mkdirSync(`${memoryPath(root)}.tmp`); // the swap cannot land
+    saveMemory(root, ['fact two']);          // best effort: never throws
+    assert.equal(fs.readFileSync(memoryPath(root), 'utf8'), before, 'the old facts survive a failed save');
+
+    fs.rmSync(`${memoryPath(root)}.tmp`, { recursive: true, force: true });
+    saveMemory(root, ['fact two']);
+    assert.deepEqual(loadMemory(root).sort(), ['fact one', 'fact two'], 'and the next save lands');
+  } finally {
+    if (prev === undefined) delete process.env.AIPASS_HOME;
+    else process.env.AIPASS_HOME = prev;
+  }
+});
+
+test('the cross-session store follows the home it is given, not the real one', async () => {
+  // The store's directory is resolved when it is used, not when the module
+  // loads: a caller that points AIPASS_HOME at a scratch home after the
+  // import (the suite does) must still land there. A path frozen at load time
+  // wrote the suite's facts into the developer's real ~/.aipass/memory — one
+  // file per temp root, every run.
+  const home = tmp();
+  const prev = process.env.AIPASS_HOME;
+  process.env.AIPASS_HOME = home;
+  try {
+    const { saveMemory, loadMemory, memoryPath } = await import('../harness/memory-store.mjs');
+    const root = path.join(home, 'proj');
+    saveMemory(root, ['fact one']);
+    assert.deepEqual(loadMemory(root), ['fact one'], 'the fact lands and reads back');
+    assert.ok(memoryPath(root).startsWith(path.join(home, 'memory')), 'in the home it was given');
+    assert.ok(
+      !memoryPath(root).startsWith(path.join(os.homedir(), '.aipass', 'memory')),
+      'and never in the real one'
+    );
+  } finally {
+    if (prev === undefined) delete process.env.AIPASS_HOME;
+    else process.env.AIPASS_HOME = prev;
+  }
+});
+
+test('an applied edit replaces a file in one swap and keeps its mode', () => {
+  const dir = tmp();
+  const file = path.join(dir, 'script.sh');
+  fs.writeFileSync(file, 'echo old\n');
+  try { fs.chmodSync(file, 0o755); } catch { /* Windows keeps ACLs */ }
+
+  const overlay = new Overlay(dir);
+  overlay.set(overlay.safe('script.sh'), 'echo new\n');
+  const out = overlay.applyToDisk();
+  assert.deepEqual(out.files, ['script.sh']);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'echo new\n', 'the staged text is the file');
+  assert.equal(fs.existsSync(`${file}.tmp`), false, 'the swap leaves no temp behind');
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(file).mode & 0o777, 0o755, 'the exec bit survives the replacement');
+  }
 });
 
 // The store is the sensitive data class (SECURITY.md, Data classes): a session

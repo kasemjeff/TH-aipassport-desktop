@@ -17,6 +17,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { writeFileAtomic, tighten } from './atomic-write.mjs';
 
 // The build that wrote a file, recorded in every new header. Reading an old
 // file under a newer build is normal here; the one thing that answers "which
@@ -66,21 +67,9 @@ const padHeader = (header) => {
 // between the truncate and the last byte. Temp file plus rename makes the
 // swap atomic: a crash leaves the previous version on disk, never a half one.
 // rename() replaces an existing destination on both platforms (libuv uses
-// MoveFileEx with MOVEFILE_REPLACE_EXISTING on Windows).
-function writeAtomic(file, text) {
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, text, { mode: 0o600 });
-  tighten(tmp, 0o600);
-  fs.renameSync(tmp, file);
-}
-
-// Owner-only where the OS has POSIX modes; Windows keeps ACLs, so the chmod is
-// best effort there. The store is the sensitive data class (SECURITY.md) — a
-// session holds the user's own words and the model's work, and the token file
-// already pins its own modes the same way.
-function tighten(target, mode) {
-  try { fs.chmodSync(target, mode); } catch { /* best effort on Windows */ }
-}
+// MoveFileEx with MOVEFILE_REPLACE_EXISTING on Windows). The swap itself
+// lives in atomic-write.mjs — the rules store and the memory store need the
+// same one, and one implementation is one behavior to pin.
 
 // The header is the first line; rewriting it keeps list() cheap enough that
 // the session picker never has to parse whole files. Since every header this
@@ -88,16 +77,34 @@ function tighten(target, mode) {
 // fixed-size write in place — no read of the body, no whole-file rewrite.
 // The atomic swap stays as the fallback: an unpadded file (an older version,
 // a hand-written one) or a header that outgrew its block.
+//
+// The in-place write has a crash window the swap does not: a power loss mid
+// write can leave a first line that no longer parses, and a session whose
+// first line is unreadable used to be a session lost — skipped by the picker,
+// null from load(), entries sitting on disk with nobody able to open them.
+// The breadcrumb closes it: the same header goes to `${file}.hdr`
+// (atomically) before the destructive write, readers fall back to it when the
+// first line is torn (see readSessionHeader), and a completed rewrite deletes
+// it. A crash now leaves the old header, or the new one plus its breadcrumb —
+// never a session nobody can open.
+const hdrPath = (file) => `${file}.hdr`;
+
+function cleanBreadcrumb(file) {
+  try { fs.rmSync(hdrPath(file), { force: true }); } catch { /* already gone, or not ours to remove */ }
+}
+
 function rewriteHeader(session) {
   const line = padHeader(session.header);
   if (line) {
     try {
       const first = readFirstLine(session.file);
       if (Buffer.byteLength(first) === HEADER_WIDTH) {
-        if (first === line) return;
+        if (first === line) { cleanBreadcrumb(session.file); return; }
+        writeFileAtomic(hdrPath(session.file), JSON.stringify(session.header) + '\n', { mode: 0o600 });
         const fd = fs.openSync(session.file, 'r+');
         try { fs.writeSync(fd, Buffer.from(line), 0, HEADER_WIDTH, 0); }
         finally { fs.closeSync(fd); }
+        cleanBreadcrumb(session.file);
         return;
       }
     } catch { /* fall through to the atomic rewrite */ }
@@ -105,7 +112,8 @@ function rewriteHeader(session) {
   const lines = fs.readFileSync(session.file, 'utf8').split('\n');
   lines[0] = line ?? JSON.stringify(session.header);
   while (lines.at(-1) === '') lines.pop();
-  writeAtomic(session.file, lines.join('\n') + '\n');
+  writeFileAtomic(session.file, lines.join('\n') + '\n', { mode: 0o600 });
+  cleanBreadcrumb(session.file);
 }
 
 export class Session {
@@ -172,12 +180,36 @@ export class Session {
     };
   }
 
+  /**
+   * Bind this session to the model-side conversation it is working in, or
+   * clear the binding. Persisted in the header, so reopening the session
+   * adopts its OWN conversation: without it the harness kept whatever
+   * conversation it was last on — one session's messages landed in another
+   * session's history (bleed), and a session reopened in a fresh process
+   * started with amnesia. One header rewrite per call.
+   */
+  bindConversation(conversation, temporary = null) {
+    if (conversation) {
+      this.header.conversation = conversation;
+      this.header.conversationTemporary = temporary === true;
+    } else {
+      delete this.header.conversation;
+      delete this.header.conversationTemporary;
+    }
+    rewriteHeader(this);
+    return this.header.conversation ?? null;
+  }
+
   /** Fork a branch: copy everything up to one entry into a new session file. */
   fork(store, { fromEntryId = null, title = null } = {}) {
     const chain = fromEntryId ? this.chainTo(fromEntryId) : this.entries.slice();
     const header = { ...this.header, id: id(), title: title ?? `${this.title} (fork)`, created: Date.now(), updated: Date.now(), forkedFrom: this.id };
+    // A fork is a new branch, not a second writer: it must not inherit the
+    // conversation the original is still working in.
+    delete header.conversation;
+    delete header.conversationTemporary;
     const file = path.join(path.dirname(this.file), `session-${header.id}.jsonl`);
-    writeAtomic(file, [padHeader(header) ?? JSON.stringify(header), ...chain.filter((e) => e.type !== 'header').map((e) => JSON.stringify(e))].join('\n') + '\n');
+    writeFileAtomic(file, [padHeader(header) ?? JSON.stringify(header), ...chain.filter((e) => e.type !== 'header').map((e) => JSON.stringify(e))].join('\n') + '\n', { mode: 0o600 });
     return new Session({ file, header, entries: chain.filter((e) => e.type !== 'header') });
   }
 
@@ -211,6 +243,31 @@ function readFirstLine(file, cap = 64 * 1024) {
   } finally {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed */ } }
   }
+}
+
+// What counts as a header object — the rule load() has always applied to
+// header lines: a line is a header only when it says so. `id` alone is not
+// enough: every entry carries one, and a file whose first line is a bare
+// entry (appended to after an external delete) used to list as a session in
+// the picker while refusing to load.
+const isHeaderObject = (h) => Boolean(h) && typeof h === 'object' && !Array.isArray(h)
+  && h.type === 'header' && typeof h.id === 'string';
+
+/**
+ * The header of a session file. The first line answers when it parses;
+ * otherwise the breadcrumb an interrupted in-place rewrite left behind does
+ * (see rewriteHeader), and `recovered` says so — load() writes it back.
+ */
+function readSessionHeader(file) {
+  try {
+    const header = JSON.parse(readFirstLine(file));
+    if (isHeaderObject(header)) return { header, recovered: false };
+  } catch { /* a torn or unreadable first line — the breadcrumb may know */ }
+  try {
+    const header = JSON.parse(fs.readFileSync(hdrPath(file), 'utf8'));
+    if (isHeaderObject(header)) return { header, recovered: true };
+  } catch { /* no breadcrumb either */ }
+  return { header: null, recovered: false };
 }
 
 export class SessionStore {
@@ -250,7 +307,7 @@ export class SessionStore {
       schema: 1,
     };
     const file = path.join(dir, `session-${header.id}.jsonl`);
-    writeAtomic(file, (padHeader(header) ?? JSON.stringify(header)) + '\n');
+    writeFileAtomic(file, (padHeader(header) ?? JSON.stringify(header)) + '\n', { mode: 0o600 });
     return new Session({ file, header });
   }
 
@@ -264,11 +321,11 @@ export class SessionStore {
         if (!f.endsWith('.jsonl')) continue;
         const file = path.join(dir, f);
         try {
-          const first = readFirstLine(file);
-          const header = JSON.parse(first);
-          // Wrong-type data must not reach the picker: a first line that parses
-          // to anything but a header object is skipped like a torn one.
-          if (!header || typeof header !== 'object' || typeof header.id !== 'string') continue;
+          // Wrong-type data must not reach the picker: a first line that is
+          // not a header object is skipped like a torn one — and a torn one
+          // itself is recovered from the breadcrumb, not dropped.
+          const { header } = readSessionHeader(file);
+          if (!header) continue;
           out.push({ ...header, file, entries: header.entryCount ?? 0 });
         } catch { /* a half-written file is skipped, not fatal */ }
       }
@@ -281,24 +338,33 @@ export class SessionStore {
       ? idOrFile
       : findById(this.dir, idOrFile);
     if (!file || !fs.existsSync(file)) return null;
+    const { header, recovered } = readSessionHeader(file);
+    if (!header) return null;
     const entries = [];
     const seen = new Set(); // entry ids already loaded — a duplicated append
-    let header = null;      // (a crash between write and fsync) loads once
     for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
       if (!line.trim()) continue;
       try {
         const e = JSON.parse(line);
         if (!e || typeof e !== 'object' || Array.isArray(e)) continue;
-        if (e.type === 'header') { header = e; continue; }
+        if (e.type === 'header') continue; // the header came from line 1 or the breadcrumb
         if (typeof e.id !== 'string' || seen.has(e.id)) continue;
         seen.add(e.id);
         entries.push(e);
       } catch { /* skip a torn line rather than lose the session */ }
     }
-    if (!header || typeof header.id !== 'string') return null;
     // A file written before the modes were pinned turns owner-only when opened.
     tighten(file, 0o600);
-    return new Session({ file, header, entries });
+    const session = new Session({ file, header, entries });
+    if (recovered) {
+      // The breadcrumb's header is written back so the next open reads it the
+      // ordinary way, and the entries are the file's own. Best effort: a
+      // read-only copy still loads from the breadcrumb every time.
+      try { rewriteHeader(session); } catch { /* the session loads anyway */ }
+    } else {
+      cleanBreadcrumb(file); // stale residue of a crash that cost nothing
+    }
+    return session;
   }
 
   rename(id, title) {
@@ -309,8 +375,108 @@ export class SessionStore {
 
   remove(idOrFile) {
     const file = idOrFile.includes(path.sep) || idOrFile.includes('/') ? idOrFile : findById(this.dir, idOrFile);
-    if (file && fs.existsSync(file)) fs.rmSync(file);
-    return Boolean(file && fs.existsSync(file));
+    if (file && fs.existsSync(file)) {
+      fs.rmSync(file);
+      cleanBreadcrumb(file); // a breadcrumb without its session is litter
+    }
+    return Boolean(file && !fs.existsSync(file));
+  }
+
+  /**
+   * Re-key a project's sessions after its folder moved.
+   *
+   * `sessions/<slug>` and the header's `root` are both derived from the
+   * absolute path, so a copied home on a machine whose paths differ shows an
+   * empty picker and conversations that no longer know which project they
+   * belonged to. This moves every file of `fromRoot` into `toRoot`'s
+   * directory — the archive too, breadcrumbs alongside their sessions — and
+   * rewrites each header's root. Ids and entries are untouched, so a session
+   * still opens by id from wherever it now sits. Two paths can share one slug
+   * (`a b` and `a-b` slugify the same); then the files are already in the
+   * right directory and only the headers change.
+   */
+  reassign(fromRoot, toRoot) {
+    const from = path.resolve(fromRoot);
+    const to = path.resolve(toRoot);
+    const fromDir = path.join(this.dir, slug(from));
+    const toDir = this.dirFor(to);
+    const same = path.resolve(fromDir) === path.resolve(toDir);
+    // A header read from a breadcrumb (a torn in-place rewrite) is written
+    // back to the file here, so a session that was broken before the move is
+    // repaired by it. A file with no header at all moves as it is.
+    const rekey = (file) => {
+      const { header } = readSessionHeader(file);
+      if (!header) return;
+      header.root = to;
+      try { rewriteHeader({ file, header }); } catch { /* the session still opens */ }
+    };
+    let moved = 0;
+    for (const [srcDir, dstDir] of [[fromDir, toDir], [path.join(fromDir, 'archive'), path.join(toDir, 'archive')]]) {
+      let names = [];
+      try { names = fs.readdirSync(srcDir); } catch { continue; }
+      for (const name of names) {
+        if (!name.endsWith('.jsonl')) continue; // breadcrumbs move with their file, below
+        const src = path.join(srcDir, name);
+        let dst = path.join(dstDir, name);
+        if (!same) {
+          fs.mkdirSync(dstDir, { recursive: true, mode: 0o700 });
+          // Only a hand-copied duplicate can collide (ids are per-session);
+          // both survive, the second under a suffixed name.
+          for (let n = 2; fs.existsSync(dst); n++) dst = path.join(dstDir, `${name}.${n}`);
+          fs.renameSync(src, dst);
+          const crumb = hdrPath(src);
+          if (fs.existsSync(crumb)) {
+            try { fs.renameSync(crumb, `${dst}.hdr`); } catch { /* best effort */ }
+          }
+        }
+        rekey(dst);
+        moved++;
+      }
+    }
+    // The emptied directories go, the archive before its parent. A directory
+    // still holding something (an orphan breadcrumb, a file that was never a
+    // session) is left where it is rather than swept.
+    for (const dir of same ? [] : [path.join(fromDir, 'archive'), fromDir]) {
+      try { if (!fs.readdirSync(dir).length) fs.rmdirSync(dir); } catch { /* not empty, or not ours */ }
+    }
+    return { moved, dir: toDir };
+  }
+
+  /**
+   * Archive sessions idle longer than `olderThanMs`, newest-first.
+   *
+   * A project that has lived for months carries dozens of dead sessions in
+   * the picker — on this machine that was 61 files in one project. The
+   * archive is a sibling directory (`<root>/archive/`) holding the same
+   * JSONL files, so nothing is deleted, only moved out of the picker's way;
+   * `list()` never reads the archive dir. `limit` caps how many move per
+   * call so one call cannot surprise with a mass move. The live session
+   * (`keepId`) is never archived even when idle.
+   */
+  archiveIdle(root, { olderThanMs = 30 * 24 * 3600 * 1000, limit = 50, keepId = null } = {}) {
+    const dir = this.dirFor(root);
+    const now = Date.now();
+    const idle = this.list(root)
+      .filter((s) => s.id !== keepId && (now - (s.updated ?? 0)) > olderThanMs)
+      .sort((a, b) => (a.updated ?? 0) - (b.updated ?? 0));
+    const picked = idle.slice(0, Math.max(0, limit));
+    if (!picked.length) return { archived: [], archiveDir: path.join(dir, 'archive') };
+    const archiveDir = path.join(dir, 'archive');
+    fs.mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
+    tighten(archiveDir, 0o700);
+    const archived = [];
+    for (const s of picked) {
+      try {
+        const file = s.file ?? findById(this.dir, s.id);
+        if (!file || !fs.existsSync(file)) continue;
+        fs.renameSync(file, path.join(archiveDir, path.basename(file)));
+        // The breadcrumb is part of the session on disk when a crash left
+        // one; it moves with it (best effort — never the session's problem).
+        try { if (fs.existsSync(hdrPath(file))) fs.renameSync(hdrPath(file), path.join(archiveDir, path.basename(hdrPath(file)))); } catch { /* litter at worst */ }
+        archived.push(s.id);
+      } catch { /* one stuck file must not block the rest */ }
+    }
+    return { archived, archiveDir };
   }
 }
 
