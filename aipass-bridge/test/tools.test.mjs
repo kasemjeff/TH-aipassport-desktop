@@ -130,6 +130,18 @@ test('a range past the end of the file says so, instead of reading nothing', asy
   assert.doesNotMatch(out, /lines 500-/, 'and no nonsensical range');
 });
 
+// Lines are counted from 1. A range starting at 0 passed both guards and
+// then sliced with a negative index, which means "from the last element" —
+// so the read came back empty, or showed the last line labelled 0.
+test('a range that starts at zero is refused, not read backwards', async () => {
+  const dir = mkTracked({ 'small.txt': 'one\ntwo\n' });
+  const tools = toolsIn(dir);
+  const out = tools.read('small.txt 0-2');
+  assert.match(out, /^err: small\.txt has 2 line\(s\)/);
+  assert.match(out, /counted from 1/);
+  assert.doesNotMatch(out, /\|/, 'and no lines at all');
+});
+
 // A trailing newline ends the last line; it does not begin an empty one.
 // Splitting on "\n" alone invents a phantom last line for every file that
 // ends with one, and the model copies what it is shown.

@@ -364,6 +364,9 @@ export function createTools(ctx) {
         // note claiming "lines 500-100 of 100" — which reads like the file is
         // empty, and the model then creates it again.
         const [from, to] = range;
+        if (from < 1) {
+          return `err: ${rel} has ${total} line(s). Lines are counted from 1 — ask for a range within it.`;
+        }
         if (from > to) {
           return `err: ${rel} has ${total} line(s). The range ${from}-${to} runs backwards — ask for ${to}-${from} instead.`;
         }
