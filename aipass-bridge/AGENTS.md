@@ -4,6 +4,18 @@
 > Verify: `npm test` from the repo root; one file at a time:
 > `node --test aipass-bridge/test/<name>.test.mjs`.
 
+## Ours and upstream
+
+This directory holds both layers, and the difference decides how you work:
+
+- **`harness/`** — this repository's own work, and the product: the agent
+  core the window and `aipass agent` both drive.
+- **`bridge/`, `extension/`, `bin/`, the terminal clients** — upstream
+  ([niawjunior/aipass-bridge](https://github.com/niawjunior/aipass-bridge)),
+  continued and extended here, still under niawjunior's copyright. Extend
+  them when the harness needs more of them; do not fork them, and keep what
+  the harness expects of them.
+
 ## Module map
 
 | path | role |
