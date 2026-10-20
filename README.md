@@ -72,8 +72,8 @@ taken from anywhere.
 
 ## What this repo does well
 
-These are the parts worth having, and each one is a decision with a test
-behind it.
+These are the parts worth having. Each one is a decision the repository holds
+itself to — most of them have a test that would notice if they broke.
 
 **The agent is reviewable, not a black box.** Every tool call is a row you can
 open; every pending edit is a file with a checkbox and a real diff; the plan
