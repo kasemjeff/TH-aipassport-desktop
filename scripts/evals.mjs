@@ -74,7 +74,7 @@ const parseJson = (text) => JSON.parse(String(text).replace(/^\uFEFF/, ''));
 const lf = (text) => String(text).replace(/\r\n/g, '\n');
 
 function readBudget(raw, id) {
-  const budget = { model: null, thinking: 'low', maxSteps: 10, wallMs: null };
+  const budget = { model: null, thinking: 'low', maxSteps: 10, wallMs: null, maxCredits: 0 };
   if (raw == null) return budget;
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     throw new EvalTaskError(`task ${id}: budget must be an object`);
@@ -100,6 +100,14 @@ function readBudget(raw, id) {
     const n = Number(raw.wallMs);
     if (!Number.isFinite(n) || n <= 0) throw new EvalTaskError(`task ${id}: budget.wallMs must be a positive number`);
     budget.wallMs = n;
+  }
+  // A task may cap its own credits. The key was never read, so the cap came
+  // out as 0 — off — and the row recorded "maxCredits: 0" for a run that was
+  // supposed to be capped.
+  if (raw.maxCredits != null) {
+    const n = Number(raw.maxCredits);
+    if (!Number.isFinite(n) || n < 0) throw new EvalTaskError(`task ${id}: budget.maxCredits must be zero or a positive number`);
+    budget.maxCredits = n;
   }
   return budget;
 }

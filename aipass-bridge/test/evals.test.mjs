@@ -108,7 +108,13 @@ test('loadTask parses task.md + task.json and names its failures', () => {
   assert.equal(task.taskText, 'Fix the thing.\n');
   assert.equal(task.check, 'node check.mjs');
   assert.equal(task.allowRun, true);
-  assert.deepEqual(task.budget, { model: 'm', thinking: 'high', maxSteps: 3, wallMs: null });
+  assert.deepEqual(task.budget, { model: 'm', thinking: 'high', maxSteps: 3, wallMs: null, maxCredits: 0 });
+
+  // A task may cap its own credits. The key was read off the raw spec but
+  // dropped by the normaliser, so the cap came out as 0 — off — and the row
+  // recorded "maxCredits: 0" for a run that was supposed to be capped.
+  const capped = makeTask({ 'a.txt': 'hello\n' }, { budget: { maxCredits: 25 } });
+  assert.equal(capped.budget.maxCredits, 25, 'the task\'s own credit cap survives');
 
   // The shipped layout is loadable the way --task resolves it.
   assert.ok(resolveTask('math-fix', { evalsDir: EVALS }).check);
