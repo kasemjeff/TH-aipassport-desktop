@@ -201,6 +201,49 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **The tool activity is routed the same way with and without streaming.**
+  `AIPASS_TOOL_VISIBILITY=text` put the tool activity inline in the streamed
+  reply and in the reasoning field in the plain one, so the same request
+  answered differently depending on how the client asked. Both go through one
+  function now, and a `note` never rides in the content — it is a line for the
+  person, not something a client may quote back as the answer.
+- **An attachment-only message carries its text upstream.** The bridge
+  computed a placeholder (`[notes.csv]`, `[Image]`) because the upstream
+  composer rejects an empty message — but put it in the text field only, and
+  the extension builds the upstream message from the parts and ignores the
+  text whenever there are parts. The placeholder never reached the model, so
+  the message went up as a bare attachment, which is the empty composer the
+  placeholder was there to avoid.
+- **A media frame with no payload no longer strands the job.** An empty media
+  frame threw inside the delta handler, so the job was never settled and the
+  client waited out the whole idle timeout; the flush runs in a timer, so the
+  exception could take the bridge process with it.
+- **The assistant the page created is reported back to the bridge.** The
+  worker had no branch for the assistant reply, so the id was dropped on the
+  floor: the job sat until it timed out, and the assistant was really created
+  on the account all the same.
+- **An error page is not carried back as if it were the media.** `fetch` does
+  not reject on a 4xx or a 5xx, and the body of one is an error page — so a
+  media URL that answered with one was carried inline as the picture, and a
+  broken image tag was all the caller saw. A frame carrying `url: ""` beside a
+  real `snapshotUrl` lost the media altogether.
+- **An edit does not expand `$` patterns in the replacement.** `$$`, `$&` and
+  `` $` `` are replacement patterns in `String.replace`, and the model writes
+  shell scripts and JavaScript, where they are ordinary characters. An edit
+  could land with bytes the model never wrote — while reporting the edit as
+  applied.
+- **Reading past the end of a file says so.** A range starting past the end
+  produced an empty read and a note claiming "lines 500-100 of 100", which
+  reads like the file is empty; and a file ending with a newline had a
+  phantom last line, which the model copies under `FIND` and the edit then
+  never matches.
+- **A switch flag no longer swallows the task.** "A token that starts with
+  `--` is a flag, and the token after it is its value" is only true for a flag
+  that takes a value; for a switch it ate the task, so
+  `npm run agent -- --apply "fix the bug"` printed the usage and exited. A
+  flag given without a value keeps its default instead of handing back
+  `undefined`, which crashed the caller outright.
+
 - **A rotated conversation is seeded even when the run is not the session's
   first.** Between-runs compaction fires on exactly the runs that are not
   first, and the seed was gated on `first`: the fresh conversation restarted
