@@ -22,6 +22,11 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// The loopback token, the same one every other client presents. Without it
+// the backend answers "unauthorized", and the live check would report a
+// healthy backend as a broken one.
+import { authHeaders } from '../aipass-bridge/harness/authtoken.mjs';
+import { liveVerdict } from './live-check.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const here = (p) => path.join(repo, p);
@@ -81,7 +86,7 @@ try {
   const ask = async () => {
     const res = await fetch(BASE, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ method: 'status' }),
       signal: AbortSignal.timeout(8000),
     });
@@ -91,10 +96,11 @@ try {
   // check retries once before declaring it down.
   let st = await ask().catch(() => null);
   if (!st) st = await ask().catch(() => null);
-  const ctx = st.result?.context ?? {};
-  const compactAt = ctx.compactAt ?? 40;
-  line('ok', 'live backend', `model ${st.result?.model} · context ${ctx.percent ?? 0}% (rotates at ${compactAt}%) · ${st.result?.extensions ?? 0} extension(s)`);
-  if (ctx.needsCompaction) line('warn', 'context is at the rotation point', 'the next run will summarise and rotate');
+  // A backend that answers "unauthorized" is running and refusing: it is not
+  // a healthy one, and the old check printed it as ok with an undefined model.
+  const verdict = liveVerdict(st);
+  line(verdict.state, 'live backend', verdict.detail);
+  if (verdict.needsCompaction) line('warn', 'context is at the rotation point', 'the next run will summarise and rotate');
 } catch {
   line('warn', 'live backend', 'not running — start it with `aipass desktop`');
 }
