@@ -199,6 +199,18 @@ function splitTopCommas(body) {
   parts.push(cur);
   return parts;
 }
+
+// A trailing newline ends the last line; it does not begin an empty one.
+// Splitting on "\n" alone invents a phantom last line for every file that
+// ends with one, and the model copies what it is shown: that phantom line
+// under FIND is a line the file does not have, so the edit never matches.
+export function splitLines(text) {
+  const s = String(text);
+  if (s === '') return [];
+  const lines = s.split('\n');
+  if (s.endsWith('\n')) lines.pop();
+  return lines;
+}
 export function expandBraces(pattern) {
   const out = [];
   const walk = (p) => {
@@ -343,10 +355,24 @@ export function createTools(ctx) {
       }
 
       readSet.add(abs); // seen by the run: the write gate lets CREATE replace it now
-      const lines = readAt(abs).split('\n');
+      const lines = splitLines(readAt(abs));
       const total = lines.length;
       let start = 1, end = total;
-      if (range) { start = Math.max(1, range[0]); end = Math.min(total, range[1]); }
+      if (range) {
+        // The range is the model's own arithmetic, and it gets it wrong. A
+        // start past the end of the file used to produce an empty read and a
+        // note claiming "lines 500-100 of 100" — which reads like the file is
+        // empty, and the model then creates it again.
+        const [from, to] = range;
+        if (from > to) {
+          return `err: ${rel} has ${total} line(s). The range ${from}-${to} runs backwards — ask for ${to}-${from} instead.`;
+        }
+        if (from > total) {
+          return `err: ${rel} has ${total} line(s). Line ${from} is past the end — ask for a range within it.`;
+        }
+        start = from;
+        end = Math.min(to, total);
+      }
       else if (total > readLines) end = readLines;
 
       const page = lines.slice(start - 1, end);
@@ -421,7 +447,7 @@ export function createTools(ctx) {
         // model's copy step, not in this tool.
         const normalized = stripInvisibles(before);
         if (normalized !== before && text.split(normalized).length - 1 === 1) {
-          const matched = text.replace(normalized, after);
+          const matched = text.replace(normalized, () => after);
           overlay.set(abs, matched);
           const note = await syntaxNote(arg, matched);
           return `updated ${arg} (1 change; the FIND text carried invisible characters — they were dropped to make the match)${note ? '\n' + note : ''}`;
@@ -444,7 +470,11 @@ export function createTools(ctx) {
         return `err: that text appears ${count} times in ${arg}${where}. Include a few more surrounding lines under FIND so it matches exactly one place.`;
       }
 
-      const updated = text.replace(before, after);
+      // A function, not a string: `$$`, `$&` and `` $` `` are replacement
+      // patterns in String.replace, and a string replacement expands them
+      // into something the model never wrote. A shell script or a line of
+      // JavaScript is full of them.
+      const updated = text.replace(before, () => after);
       overlay.set(abs, updated);
       const note = await syntaxNote(arg, updated);
       return `updated ${arg} (1 change)${note ? '\n' + note : ''}`;
