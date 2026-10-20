@@ -44,6 +44,8 @@ process.env.AIPASS_HOME = HOME;
 // The 403 waits are pinned by their own tests; here H5 only needs the retry
 // order, not the clock.
 process.env.AIPASS_EDGE_WAITS_MS = '0';
+// The run-level pause before a refused send is given the message again.
+process.env.AIPASS_RECOVER_WAITS_MS = '0';
 after(() => fs.rmSync(HOME, { recursive: true, force: true }));
 
 /** Tools over a plain directory, the way the CLI and the harness build them. */
@@ -324,6 +326,45 @@ test('a denied read is refused with a reason before the file is opened (H9)', as
   const denied = seen.find((p) => p.kind === 'read' && p.arg === '.env');
   assert.ok(denied, `the model asked for the file:\n${JSON.stringify(seen)}`);
   assert.match(denied.head, /denies reading \.env/, `the rule answered before the read happened:\n${denied.head}`);
+});
+
+/* H5 â€” only the sends the server accepted are recorded --------------------- */
+
+/* H12 â€” an attachment queued for the next message rides every attempt of it - */
+
+test('an attachment queued for the next message survives a refused send (H12)', async () => {
+  const dir = tempDir({ 'shot.png': 'pretend this is a picture\n' });
+  const store = new SessionStore(path.join(dir, 'sessions'));
+  const session = store.create({ root: dir });
+  const tools = createTools({ root: dir, overlay: new Overlay(dir) });
+
+  // The model asks for the file, the tool queues it, and the send that
+  // carries it is refused once and retried. The parts are taken by handing
+  // them over, and they were taken again on the retry â€” so the retry went
+  // out without the attachment, and nothing said so: the tool had already
+  // answered "queued â€¦ it goes out with your next message".
+  const replies = ['ATTACH shot.png', 'DONE attached'];
+  const sent = [];
+  let calls = 0;
+  const result = await runTask('attach the shot', {
+    bridge: {
+      async chat({ message, parts }) {
+        calls++;
+        sent.push({ message, parts });
+        if (calls === 2) throw new Error('bridge returned 503');
+        return { text: replies[Math.min(calls - 1, replies.length - 1)] };
+      },
+      async quota() { return { available: 1 }; },
+    },
+    tools, overlay: new Overlay(dir), session,
+    options: { maxSteps: 3 }, first: true,
+  });
+
+  assert.ok(calls >= 3, `the refused send was retried (calls: ${calls})`);
+  assert.ok(sent[1].parts?.length, 'the first attempt carried the attachment');
+  assert.ok(sent[2].parts?.length, 'and the retry carried it too');
+  assert.equal(sent[2].parts[0].type, 'file');
+  assert.equal(result.stopReason, 'done');
 });
 
 /* H5 â€” only the sends the server accepted are recorded --------------------- */

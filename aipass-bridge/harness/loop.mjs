@@ -520,9 +520,15 @@ export async function runTask(taskText, ctx = {}) {
     let reply;
     let sendGivenUp = false;
     const recover = recoverWaits();
+    // The parts are taken once, before the attempts, not once per attempt: the
+    // queue is emptied by taking them, so an attempt after a refused send
+    // found it empty and the attachment queued for this message was lost —
+    // silently, because the tool had already answered "queued … it goes out
+    // with your next message".
+    const parts = partsForSend();
     for (let attempt = 0; ; attempt++) {
       try {
-        reply = await saySafe(next, partsForSend());
+        reply = await saySafe(next, parts);
         // (listing delta) The memory only becomes true once the message that
         // carries the listing was accepted. The first send of the run is the
         // composed `next`; every later message carries results or the seed,
