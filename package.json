@@ -2,6 +2,7 @@
   "name": "aipass-desktop",
   "version": "0.2.0",
   "private": true,
+  "type": "module",
   "license": "MIT",
   "description": "AiPASS in a desktop window — bridge, chat and a file agent with a pi-style harness.",
   "bin": {
