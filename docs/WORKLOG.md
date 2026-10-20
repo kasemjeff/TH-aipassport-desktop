@@ -6,6 +6,37 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-20 — opencode — the suite runs on the branch this repository has
+
+- **Files**: `.github/workflows/test.yml` (the push filter names `main` — it
+  said `master`, a branch the remote does not have, so no push ever started
+  the suite); `package.json` (`"type": "module"`, so Node reads the window's
+  `.js` files as ES modules instead of re-parsing them and warning on every
+  run); `aipass-bridge/README.md` (the command table carries all nineteen
+  subcommands the CLI dispatches — `chat`, `providers`, `scale`, `plugin`,
+  `mcp`, `setup` and `stop` were missing — and the link to `DOCS.md` points
+  at the directory it lives in); `aipass-bridge/docs/DOCS.md` (the link back
+  to the bridge's README points one level up, where the README is);
+  `README.md` (the documentation table lists all fifteen files in `docs/` —
+  `UX.md`, `PLUGINS_MCP_DESIGN.md` and `WORKLOG.md` were missing);
+  `CHANGELOG.md`; `docs/WORKLOG.md`; `.gitignore` (`*.tsbuildinfo` — the
+  editor's build cache was sitting untracked in the root); `AGENTS.md` (the
+  `Last verified:` date).
+- **Tests**: `npm test` 794 tests, 791 pass / 0 fail / 3 skipped;
+  `npm run agents:lint` ok — 32 anchors resolve against 780 test titles. Both
+  ran on the tree as it stands, before the commits were cut. No test file was
+  touched, so this is the same suite the previous commit ran.
+- **Deferred**: the build cache is ignored rather than deleted — the file is
+  left on disk, it is only out of git now. It is stale either way: it tracks
+  a root `tsconfig.json` that no longer exists, and the repository's only
+  config is `aipass-bridge/jsconfig.json`, which emits nothing.
+- **Risks**: `"type": "module"` changes how Node reads every `.js` file under
+  the root — the window's three scripts are the only ones, and the suite
+  passes with them read as ES modules. The workflow change stays invisible
+  until the next push, and that push is the first time this repository's CI
+  has ever run.
+- **Cleanup**: none — no process was started and no file was removed.
+
 ## 2026-10-20 — opencode — eight defects found by review, each with a test
 
 - **Files**: `aipass-bridge/argv.mjs` (new — the parser that knows which flags

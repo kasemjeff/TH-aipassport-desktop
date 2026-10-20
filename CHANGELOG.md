@@ -159,6 +159,25 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **The suite now runs when the code lands.** The workflow's push filter named
+  `master`, but this repository's only branch is `main` — the remote has no
+  `master` at all, and the history holds no pull-request merge either, so
+  every push went in without the suite ever being triggered. The filter names
+  `main` now, and the comment above it says which branch the repository
+  actually uses (`.github/workflows/test.yml`).
+- **The command list is the whole list.** The bridge README's command table
+  carried twelve of the nineteen subcommands the CLI dispatches: `chat`,
+  `providers`, `scale`, `plugin`, `mcp`, `setup` and `stop` were all absent
+  from it, so a reader working from the table alone would not have known they
+  existed. The table now carries every one of them, and `aipass --help`
+  remains the list the CLI itself prints (`aipass-bridge/README.md`).
+- **The docs that describe the repo can be found from the repo.** The README's
+  documentation table listed twelve of the fifteen files in `docs/` —
+  `UX.md` and `PLUGINS_MCP_DESIGN.md` were not in it, so the window's design
+  notes and the plugin/MCP install design were reachable only from the
+  worklog. And the two links that point between the bridge's README and its
+  internals reference aimed one directory too high, so neither resolved from
+  where it was written. All three are listed and both links resolve now.
 - **Node 22 is the floor, stated everywhere.** `engines` has said `>=22` since
   the type-check seed, while the installers, `aipass status`, the setup doctor
   and `aipass-bridge/package.json` still said `>=20`. They all say 22 now,
@@ -495,6 +514,13 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Changed
 
+- **The root package says it is an ES module.** `package.json` had no `type`
+  field, so Node read the window's three scripts (`desktop/ui/app.js`,
+  `markers.js`, `md.js`) as CommonJS and re-parsed them as ES modules on
+  every run, warning each time. Every `.js` file in the repository is already
+  an ES module — the extension's are loaded by Chrome, and the test harness
+  runs them through `new Function` — so the field is simply declared now
+  (`package.json`).
 - **The rail is the work, not the configuration.** The window's left column
   carried nine rows, and half of them led nowhere: "ค้นหาแชท" focused a search
   box folded away inside another row, so clicking it did nothing you could
