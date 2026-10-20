@@ -101,8 +101,48 @@ test('failures carry the err: prefix the loop keys on', async () => {
   assert.match(tools.read('a.txt'), /^1 \| hello/);
 });
 
-test('SEARCH -i matches without letter case; plain SEARCH stays exact', async () => {
-  const dir = mkTracked({ 'case.txt': 'Hello World\nbye\n' });
+// `$$`, `$&` and `` $` `` are replacement patterns in String.replace. The
+// model writes shell scripts and JavaScript, where they are ordinary text,
+// and a string replacement expanded them into something the model never
+// wrote — while reporting the edit as applied.
+test('an edit does not expand $ patterns in the replacement', async () => {
+  const dir = mkTracked({ 'script.sh': 'echo hi\n' });
+  const tools = toolsIn(dir);
+  const out = await tools.replace('script.sh', ['echo hi', 'echo $$HOME and $&']);
+  assert.match(out, /^updated script\.sh \(1 change\)/, 'the edit is applied');
+  assert.equal(
+    tools.read('script.sh').split('\n')[0],
+    '1 | echo $$HOME and $&',
+    'the bytes are the ones the model wrote',
+  );
+});
+
+// The range is the model's own arithmetic, and it gets it wrong. A start
+// past the end of the file used to produce an empty read and a note claiming
+// "lines 500-100 of 100" — which reads like the file is empty, and the model
+// then creates it again.
+test('a range past the end of the file says so, instead of reading nothing', async () => {
+  const dir = mkTracked({ 'small.txt': 'one\ntwo\n' });
+  const tools = toolsIn(dir);
+  const out = tools.read('small.txt 500-600');
+  assert.match(out, /^err: small\.txt has 2 line\(s\)/);
+  assert.match(out, /past the end/);
+  assert.doesNotMatch(out, /lines 500-/, 'and no nonsensical range');
+});
+
+// A trailing newline ends the last line; it does not begin an empty one.
+// Splitting on "\n" alone invents a phantom last line for every file that
+// ends with one, and the model copies what it is shown.
+test('a file that ends with a newline has no phantom last line', async () => {
+  const dir = mkTracked({ 'notes.txt': 'one\ntwo\n' });
+  const tools = toolsIn(dir);
+  const out = tools.read('notes.txt');
+  assert.match(out, /1 \| one/);
+  assert.match(out, /2 \| two/);
+  assert.doesNotMatch(out, /3 \|/, 'there is no third line');
+});
+
+test('SEARCH -i matches without letter case; plain SEARCH stays exact', async () => {  const dir = mkTracked({ 'case.txt': 'Hello World\nbye\n' });
   const tools = toolsIn(dir);
   assert.match(await tools.search('hello world'), /no matches/);
   assert.match(await tools.search('-i hello world'), /case\.txt:1: Hello World/);
