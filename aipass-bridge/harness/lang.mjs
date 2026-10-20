@@ -1,3 +1,4 @@
+// @ts-check
 // Thai-language helpers for the loop: digit conversion, invisible characters,
 // Buddhist-era years, and the Thai-character ratio used by the reply-language
 // check.

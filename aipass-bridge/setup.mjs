@@ -56,8 +56,8 @@ function info(msg) { console.log(`  ${dim(msg)}`); }
 // 1. Node
 step(1, 'Node');
 const major = Number(process.versions.node.split('.')[0]);
-if (major < 20) {
-  warn(`need Node >= 20 (have ${process.versions.node}) — https://nodejs.org`);
+if (major < 22) {
+  warn(`need Node >= 22 (have ${process.versions.node}) — https://nodejs.org`);
   process.exit(1);
 }
 ok(`Node ${process.versions.node}`);

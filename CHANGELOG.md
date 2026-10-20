@@ -159,6 +159,11 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **Node 22 is the floor, stated everywhere.** `engines` has said `>=22` since
+  the type-check seed, while the installers, `aipass status`, the setup doctor
+  and `aipass-bridge/package.json` still said `>=20`. They all say 22 now,
+  matching the CI matrix (22/24) and the September 2026 runner floor. The
+  README badge already said 22.
 - **The test suite no longer writes into the real `~/.aipass`.** The
   cross-session memory store named its directory when the module loaded, so a
   suite that pointed `AIPASS_HOME` at a scratch home *after* that import still
