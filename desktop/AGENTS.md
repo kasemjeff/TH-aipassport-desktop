@@ -2,6 +2,11 @@
 
 > Local law for the window. Root law: `../AGENTS.md`. Verify: `npm test`.
 
+The window is this repository's own work — the product — and so is the
+harness under `../aipass-bridge/harness/` that it drives. The bridge, the
+extension and the CLI under `../aipass-bridge/` are upstream and continued
+here: extend them when the window needs more, do not fork them.
+
 ## Shape
 
 - `main.mjs` — the desktop shell (spawns or attaches to the bridge backend).
