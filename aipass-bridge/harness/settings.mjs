@@ -1,4 +1,4 @@
-// Settings â€” one JSON file, everything the window and the CLI share.
+// Settings — one JSON file, everything the window and the CLI share.
 //
 // It lives at `~/.aipass/settings.json` on purpose: the CLI, the backend and
 // every future surface read the same file, so a change made in the window is
@@ -31,13 +31,13 @@ export const DEFAULTS = {
   maxSteps: 0,
   // Per-run budgets, checked by the loop and recorded as stop reasons in
   // run_stats: the most tool calls one run may execute, and its wall-clock
-  // ceiling in ms. Generous by design â€” they catch a runaway reply (a hundred
+  // ceiling in ms. Generous by design — they catch a runaway reply (a hundred
   // markers in one message) or a stuck command, not ordinary work. A zero or
   // nonsense value falls back to the default; there is no off switch.
   maxToolCalls: 300,
   maxWallClockMs: 1_800_000,
   // The optional credit cap: stop a run once observed spend reaches this many
-  // credits. 0 (the default) means no cap â€” the one budget with an off switch.
+  // credits. 0 (the default) means no cap — the one budget with an off switch.
   // Checked against the bridge's cached quota, which upstream refreshes at
   // most every 30s, so it bounds a runaway run without a request per step.
   maxCredits: 0,
@@ -93,7 +93,7 @@ export const DEFAULTS = {
   // plugins to load, by name, from ~/.aipass/plugins
   plugins: [],
   // permission path rules, checked before the mode: [{pattern, decision, kinds?}]
-  // â€” `docs/** â†’ allow` stops a run asking about its own docs, `.env* â†’ deny`
+  // — `docs/** → allow` stops a run asking about its own docs, `.env* → deny`
   // keeps secrets out of every mode including yolo. First match wins.
   rules: [],
   // theme: 'dark' | 'light' | follow the system with 'auto'
@@ -115,11 +115,11 @@ export const DEFAULTS = {
  * editable one, and folding these into it would duplicate them into the file
  * on every save (Settings.set writes every key) and freeze a copy there. The
  * engine checks them after the user's own rules, so an explicit rule wins,
- * and only for mutation kinds â€” opening package.json is how the model answers
+ * and only for mutation kinds — opening package.json is how the model answers
  * most questions, and a question per read would make the tool unusable.
  *
  * Each name appears twice: a nested pattern keeps its leading `**` and a
- * separator, so it cannot also match the top-level spelling â€” each is a
+ * separator, so it cannot also match the top-level spelling — each is a
  * pattern of its own (globMatch has no implicit prefix).
  */
 const MUTATIONS = ['write', 'replace', 'delete', 'move'];
@@ -136,7 +136,7 @@ export const SAFETY_RULES = [
 /**
  * The secret floor: files that must never reach the model without an explicit
  * human override, in ANY mode including yolo. Unlike SAFETY_RULES (mutation
- * kinds only) these carry no `kinds`, so they match reads too â€” NEED/CREATE
+ * kinds only) these carry no `kinds`, so they match reads too — NEED/CREATE
  * with a .env path is denied before the mode is consulted.
  *
  * Each name appears twice (top-level plus a nested `**`-prefixed spelling)
@@ -203,10 +203,10 @@ export class Settings {
    * Clamp the values that can silently break a run.
    *
    * A negative or unparsable step count is the case that justifies this: it
-   * used to reach the loop and stop a run before its first step â€” the window
+   * used to reach the loop and stop a run before its first step — the window
    * accepted the message and answered nothing, no error anywhere. Zero no
    * longer belongs in that family (it means "no cap" by design), so only the
-   * values that break a run are clamped here â€” the one place the CLI, the
+   * values that break a run are clamped here — the one place the CLI, the
    * window and any future surface all write through.
    */
   static sane(values) {
@@ -278,9 +278,9 @@ export class Settings {
         }))
         .slice(0, 100)
       : [];
-    // Path-shaped keys are resolved by whoever reads them first â€” the window's
+    // Path-shaped keys are resolved by whoever reads them first — the window's
     // project list, the backend's root pick, the uploads staging folder, the
-    // skill library's dirs â€” so a wrong-shaped value is not state, it is a
+    // skill library's dirs — so a wrong-shaped value is not state, it is a
     // crash waiting for the next call. Dropped here, like every other value
     // that cannot work.
     next.root = typeof next.root === 'string' && next.root.trim() ? next.root : null;
