@@ -8,16 +8,14 @@
 // guessing.
 import fs from 'node:fs';
 import { authHeaders } from './harness/authtoken.mjs';
+import { parseArgs } from './argv.mjs';
 const argv = process.argv.slice(2);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 if (argv.includes('--version') || argv.includes('-v')) {
   console.log(`aipass-doctor ${VERSION}`);
   process.exit(0);
 }
-const flag = (name, fallback = null) => {
-  const i = argv.indexOf(`--${name}`);
-  return i === -1 ? fallback : argv[i + 1];
-};
+const { flag } = parseArgs(argv, new Set(['bridge']));
 
 if (argv.includes('--help') || argv.includes('-h')) {
   console.log(`usage: npm run doctor [options]

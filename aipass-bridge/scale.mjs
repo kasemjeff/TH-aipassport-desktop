@@ -10,11 +10,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Harness } from './harness/harness.mjs';
 import { SkillLibrary } from './harness/skills.mjs';
+import { parseArgs } from './argv.mjs';
 
 const argv = process.argv.slice(2);
-const flag = (name, fallback = null) => { const i = argv.indexOf(`--${name}`); return i === -1 ? fallback : argv[i + 1]; };
-const has = (name) => argv.includes(`--${name}`);
-const task = argv.filter((a, i) => !a.startsWith('--') && !argv[i - 1]?.startsWith('--')).join(' ').trim();
+const { positional, flag, has } = parseArgs(argv, new Set(['root', 'bridge', 'model', 'n', 'max']));
+const task = positional.join(' ').trim();
 if (!task) { console.error('usage: aipass scale "task" [--n 3] [--root .] [--allow-run] [--max N]'); process.exit(1); }
 const ROOT = path.resolve(flag('root', process.cwd()));
 const BRIDGE = (flag('bridge', 'http://127.0.0.1:8787')).replace(/\/+$/, '');

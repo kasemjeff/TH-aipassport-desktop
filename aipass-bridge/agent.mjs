@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Harness } from './harness/harness.mjs';
 import { SkillLibrary } from './harness/skills.mjs';
+import { parseArgs } from './argv.mjs';
 
 const argv = process.argv.slice(2);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -27,13 +28,17 @@ if (argv.includes('--version') || argv.includes('-v')) {
   console.log(`aipass-agent ${VERSION}`);
   process.exit(0);
 }
-const flag = (name, fallback = null) => {
-  const i = argv.indexOf(`--${name}`);
-  return i === -1 ? fallback : argv[i + 1];
-};
-const has = (name) => argv.includes(`--${name}`);
+// The flags that take a value. Everything else is a switch, so a task after
+// one is a task and not the flag's value. --rule is repeatable, so it is
+// collected by hand further down — but the parser still eats its value, or
+// the rule text would land in the task.
+const VALUE_FLAGS = new Set([
+  'root', 'bridge', 'model', 'max', 'max-result', 'read-lines', 'thinking',
+  'temperature', 'conversation', 'assistant', 'skills', 'rule',
+]);
+const { positional, flag, has } = parseArgs(argv, VALUE_FLAGS);
 
-const task = argv.filter((a, i) => !a.startsWith('--') && !argv[i - 1]?.startsWith('--')).join(' ').trim();
+const task = positional.join(' ').trim();
 const ROOT = path.resolve(flag('root', process.cwd()));
 const BRIDGE = (flag('bridge', 'http://127.0.0.1:8787')).replace(/\/+$/, '');
 const MODEL = flag('model', null);
