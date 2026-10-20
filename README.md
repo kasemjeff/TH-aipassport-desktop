@@ -11,14 +11,22 @@
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgray?style=flat-square" alt="Platforms" />
 </p>
 
-![aipass terminal chat](./public/image.png)
+![the aipass desktop window](./public/image.png)
+
+<p align="center">
+  <em>The window: sessions on the left, the project tree under them, the
+  conversation in the middle — every tool call a row you can open, every
+  pending edit a file you tick.</em>
+</p>
 
 ---
 
 ## Contents
 
 - [What this repo is](#what-this-repo-is)
+- [What this repo does well](#what-this-repo-does-well)
 - [Architecture](#architecture)
+- [Installing](#installing)
 - [Quick start](#quick-start)
 - [The desktop window](#the-desktop-window)
 - [The harness](#the-harness)
@@ -62,6 +70,56 @@ tool-writing guidance (token-efficient results, head+tail clipping) follow the
 published agent-tool literature. Those are influences on the design, not code
 taken from anywhere.
 
+## What this repo does well
+
+These are the parts worth having, and each one is a decision with a test
+behind it.
+
+**The agent is reviewable, not a black box.** Every tool call is a row you can
+open; every pending edit is a file with a checkbox and a real diff; the plan
+card shows what is done and what is not. The stop button ends the *work* — the
+tool of the reply that was running, the command in flight (with its tree), the
+web search, the MCP call, the run that had just started — and the window says
+what the stop found, instead of going quiet.
+
+**Nothing lands on disk without you.** The overlay is the only write surface of
+a run: a dry run shows the diff and writes nothing, and an edit lands only when
+you tick it. The sandbox projection lives *outside* your project, so a copy of
+your source can never be committed by accident.
+
+**It is honest about what the upstream can do.** The endpoint takes one user
+message and owns the conversation history, so the harness keeps its own
+session log, summarises and rotates when the context fills, and never pretends
+there is a message array to manage. It works around the edge instead of
+against it.
+
+**The window and the terminal cannot drift.** One harness, one settings file
+(`~/.aipass/settings.json`), one run. The window drives the harness; `aipass
+agent` drives the same one; a change in the settings file is true everywhere
+immediately. The tests drive both surfaces, not a mock of either.
+
+**The credential never leaves your browser.** The request runs as ordinary page
+JavaScript inside your own logged-in tab, so the site's cookie rides along by
+itself — the bridge never sees it and stores nothing. The loopback token is
+`0600` in your home directory, the settings file holds no secret, and even a
+command's *output* is screened before it goes upstream.
+
+**It is honest about its own quality.** `docs/MATURITY.md` names every
+capability — production, experimental, not shipped, won't build — with the
+evidence and the owner. The eval set carries a holdout, a safety set and
+Thai/English pairs; the experiment queue records what was tried, what it cost
+and what would change a decision. A capability that stops holding its criteria
+is demoted, not quietly kept.
+
+**It runs wherever a Node does.** Zero dependencies, no build step for the
+window, nothing to install to run it. The suite is plain `node --test` and it
+drives the real bridge as a subprocess with a scriptable stand-in for the
+extension, so a green run means the HTTP surface works, not that a mock was
+happy. CI runs Windows, macOS and Linux on two Node versions.
+
+**Thai-first, and it says so.** The reply-language policy, the Thai/English
+eval pairs and a window written in Thai first — not translated into it.
+
 ## Architecture
 
 ```text
@@ -81,41 +139,89 @@ taken from anywhere.
              de.aipass.net tab ──▶ /actions/send-message/<id>
 ```
 
-No credentials are stored anywhere. Every request runs as ordinary page
+No credential is stored anywhere: every request runs as ordinary page
 JavaScript inside your own logged-in tab, so the site's session cookie rides
-along by itself — the bridge never sees your aipass password. (It has a
-loopback token of its own; see *The bridge and the CLI*, below.)
+along by itself. The bridge has a loopback token of its own — see *The bridge
+and the CLI*, below.
+
+## Installing
+
+### What you need
+
+| you need | why |
+|---|---|
+| **Node ≥ 22** | the only requirement to run it — the app imports `node:*` builtins and nothing else |
+| **Chrome** (or Chromium) | the extension is the only thing that ever touches your session |
+| **A de.aipass.net account** | the site the window talks to; your logged-in browser tab *is* the credential |
+| **Nothing else** | no `npm install` to run it, no build step, no database, no API key |
+
+### One command
+
+```bash
+aipass setup            # or: npm run setup, from the repo
+```
+
+`setup` is idempotent — re-run it any time, and re-running it after moving the
+repo repairs the PATH link. It does six things, in this order:
+
+1. **Node** — checks the version and stops if it is too old.
+2. **State directory** — creates `~/.aipass/` (`0700`) and mints the loopback
+   token at `~/.aipass/.token` (`0600`).
+3. **PATH** — puts `aipass` on your PATH: `npm link` on Windows, a symlink
+   into `~/.local/bin` or `~/bin` elsewhere, with the manual line printed if
+   neither works.
+4. **Clipboard** — copies the token, so pasting it into the extension popup
+   is one keystroke.
+5. **Bridge** — starts it, or adopts the one already running, and waits for
+   `/status` to answer.
+6. **Browser** — opens `de.aipass.net/chat` and `chrome://extensions`, so the
+   two one-time browser steps are in front of you.
+
+### The two browser steps (once per browser)
+
+1. **Load the extension** — `chrome://extensions` → **Developer mode** →
+   **Load unpacked** → pick `aipass-bridge/extension`.
+2. **Give it the token** — the extension popup → **Advanced** → **Loopback
+   token** → paste the contents of `~/.aipass/.token` → save. Then open
+   <https://de.aipass.net/chat>, log in, and leave the tab open: that tab is
+   what does the talking.
+
+`aipass status` says where you are; `aipass doctor` explains what is missing
+and what to do about it.
+
+### The native app
+
+The window runs in any browser today — `npm run desktop` serves it on
+`127.0.0.1:8790`. For the real window (tray, native menu, an installer):
+
+```bash
+npm run tauri:build     # NSIS on Windows, .app/.dmg on macOS, deb/appimage on Linux
+```
+
+The packaged build carries the Node runtime inside it, so the machine that
+installs it needs no Node of its own.
+
+### Where the state lives
+
+`~/.aipass/` — settings, sessions, plugins, uploads, logs, the token. Nothing
+outside your project is touched, and the token is the only secret: the key of
+an added API provider lives in `~/.aipass/credentials.json` (owner-only) or in
+the environment, never in `settings.json`.
+
+### Uninstalling
+
+```bash
+rm -f ~/.local/bin/aipass      # or: npm rm -g aipass, if you used npm link
+rm -rf ~/.aipass               # only if you want the sessions and settings gone too
+```
+
+Remove the extension from `chrome://extensions`, and the app from your
+desktop.
 
 ## Quick start
 
-Node ≥ 22. Nothing to install to run it: the bridge, the harness, the window
-and the tests run on node builtins alone.
-
-The fastest path on a fresh machine is one command:
-
-```bash
-aipass setup            # or: npm run setup
-```
-
-It checks Node, puts `aipass` on your PATH, mints the loopback token (and copies
-it to your clipboard), starts the bridge, and opens the extension and site pages
-so you can finish the one-time browser steps. Re-run it any time — it is
-idempotent. The manual steps below are what it automates.
-
-### 1. The extension (once)
-
-1. Open `chrome://extensions`, turn on **Developer mode**, **Load unpacked**,
-   and pick `aipass-bridge/extension`.
-2. Open https://de.aipass.net/chat and log in. Keep the tab around while you
-   work — it is what does the talking.
-3. The bridge mints a loopback token at `~/.aipass/.token` and prints the path
-   when it starts. Open the extension popup → **Advanced**, paste the file's
-   contents into **Loopback token**, save. One time per browser; without it
-   the popup says the bridge needs a token.
-4. Recommended: Chrome **Settings → Performance → Always keep these sites
-   active → add `de.aipass.net`**, so a long run is never frozen mid-stream.
-
-### 2. The window
+With the machine set up — see [Installing](#installing) — the window is one
+command:
 
 ```bash
 npm run desktop     # the desktop window (starts the bridge itself if needed)
@@ -126,7 +232,7 @@ aipass desktop
 It starts the bridge if it is not already up, starts the backend on
 `127.0.0.1:8790`, and opens the window. See *The desktop window*.
 
-### 3. The terminal (optional)
+The terminal, if you want it:
 
 ```bash
 aipass dev          # the bridge alone, logs in this terminal (Ctrl+C to stop)
@@ -135,8 +241,10 @@ aipass agent "task" # the file agent from the command line
 ```
 
 `aipass` lives at `aipass-bridge/bin/aipass.mjs`; without putting it on your
-PATH, `node aipass-bridge/bin/aipass.mjs` is the same thing. Install scripts sit
-beside it (`install.ps1` on Windows, `install.sh` elsewhere).
+PATH, `node aipass-bridge/bin/aipass.mjs` is the same thing.
+
+One tip for long runs: Chrome **Settings → Performance → Always keep these
+sites active → add `de.aipass.net`**, so a run is never frozen mid-stream.
 
 ## The desktop window
 

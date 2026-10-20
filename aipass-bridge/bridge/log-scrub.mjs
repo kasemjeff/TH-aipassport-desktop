@@ -1,3 +1,4 @@
+// @ts-check
 // Log scrubbing — the shapes that look like live credentials never reach
 // stdout / bridge.log. OWASP Logging Cheat Sheet: never log secrets. Sessions
 // on disk intentionally keep the user's own text verbatim; logs do not need
@@ -16,6 +17,16 @@ export const SECRET_PATTERNS = [
   /Bearer\s+[A-Za-z0-9\-._~+/=]{8,}/gi,       // authorization headers quoted in errors
 ];
 
-export const scrubSecrets = (v) => (typeof v === 'string'
-  ? SECRET_PATTERNS.reduce((s, re) => s.replace(re, '[redacted]'), v)
-  : v);
+/**
+ * Strings are scrubbed; anything else (objects, numbers, null) passes through.
+ * @template T
+ * @overload
+ * @param {T} v
+ * @returns {T}
+ */
+/** @param {any} v @returns {any} */
+export function scrubSecrets(v) {
+  return typeof v === 'string'
+    ? SECRET_PATTERNS.reduce((s, re) => s.replace(re, '[redacted]'), v)
+    : v;
+}

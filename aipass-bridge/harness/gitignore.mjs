@@ -1,3 +1,4 @@
+// @ts-check
 // A small .gitignore reader for the tools that walk the tree (SEARCH, GLOB).
 //
 // Only the common grammar is honoured — blank lines, `#` comments, `!`
@@ -10,10 +11,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+/** @typedef {{ negate: boolean, dirOnly: boolean, re: RegExp }} IgnoreRule */
+
 // A gitignore pattern body → regex over a posix relative path. `**` spans
 // directories, `*` and `?` never cross a `/`. A pattern with no slash in it
 // matches at any depth, as git's would; one with a slash is anchored to the
 // root (the leading `/` has already been stripped by the parser).
+/** @param {string} body @param {boolean} anchored @returns {RegExp} */
 const ruleRe = (body, anchored) => {
   const src = body
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
@@ -26,7 +30,9 @@ const ruleRe = (body, anchored) => {
   return new RegExp(anchored ? `^${src}$` : `^(?:.*/)?${src}$`);
 };
 
+/** @param {string} text @returns {IgnoreRule[]} */
 export function parseGitignore(text) {
+  /** @type {IgnoreRule[]} */
   const rules = [];
   for (const raw of String(text).split(/\r?\n/)) {
     let line = raw.trim();
@@ -43,7 +49,8 @@ export function parseGitignore(text) {
   return rules;
 }
 
-/** Last matching rule wins, exactly as git reads the file. */
+/** Last matching rule wins, exactly as git reads the file.
+ * @param {IgnoreRule[]} rules @param {string} rel @param {boolean} isDir */
 export const ignoredBy = (rules, rel, isDir) => {
   let hit = false;
   for (const r of rules) {
@@ -53,9 +60,14 @@ export const ignoredBy = (rules, rel, isDir) => {
   return hit;
 };
 
-/** Read `<root>/.gitignore` once per walk; a missing or unreadable file ignores nothing. */
+/** Read `<root>/.gitignore` once per walk; a missing or unreadable file ignores nothing.
+ * @param {string} root */
 export function loadGitignore(root) {
+  /** @type {IgnoreRule[]} */
   let rules = [];
   try { rules = parseGitignore(fs.readFileSync(path.join(root, '.gitignore'), 'utf8')); } catch { /* no file, no rules */ }
-  return { ignored: (rel, isDir) => ignoredBy(rules, rel, isDir) };
+  return {
+    /** @param {string} rel @param {boolean} isDir */
+    ignored: (rel, isDir) => ignoredBy(rules, rel, isDir),
+  };
 }
