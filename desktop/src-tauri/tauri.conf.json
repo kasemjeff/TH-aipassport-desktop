@@ -46,6 +46,7 @@
       "../../aipass-bridge/.gitignore": "aipass-bridge/.gitignore",
       "../../aipass-bridge/README.md": "aipass-bridge/README.md",
       "../../aipass-bridge/agent.mjs": "aipass-bridge/agent.mjs",
+      "../../aipass-bridge/argv.mjs": "aipass-bridge/argv.mjs",
       "../../aipass-bridge/assistant-prompt.mjs": "aipass-bridge/assistant-prompt.mjs",
       "../../aipass-bridge/chat.mjs": "aipass-bridge/chat.mjs",
       "../../aipass-bridge/difflib.mjs": "aipass-bridge/difflib.mjs",

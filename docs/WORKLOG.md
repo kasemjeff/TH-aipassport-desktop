@@ -6,6 +6,52 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-20 — opencode — eight defects found by review, each with a test
+
+- **Files**: `aipass-bridge/argv.mjs` (new — the parser that knows which flags
+  take a value); `aipass-bridge/bridge/server.mjs` (one `routeDelta()` for
+  both reply modes; the attachment placeholder becomes a part; a media frame
+  with no payload no longer throws; the delta flush drops a bad frame instead
+  of taking the job with it); `aipass-bridge/extension/background.js` (the
+  assistant reply is routed to `/ext/assistant`); `aipass-bridge/extension/page.js`
+  (a media fetch checks its status; `url: ""` falls through to `snapshotUrl`);
+  `aipass-bridge/harness/tools.mjs` (an edit takes its replacement as a
+  function, so `$&` is not a pattern; a range past the end says so; a file
+  ending with a newline has no phantom last line);
+  `aipass-bridge/{agent,chat,doctor,setup-assistant,stats,scale}.mjs` (the
+  new parser); `aipass-bridge/docs/DOCS.md` (the `/ext/assistant` route the
+  table never listed); `CHANGELOG.md`;
+  `aipass-bridge/test/{bridge,page,tools,agent,chat}.test.mjs` (+17 tests) and
+  `aipass-bridge/test/background{,-harness}.mjs` (new — the service worker
+  in-process, with a chrome small enough to be a stub);
+  `desktop/src-tauri/tauri.conf.json` (`argv.mjs` joins the packaged
+  resources, or the native build would ship a CLI that cannot start).
+- **Tests**: `npm test` 787 tests, 784 pass / 0 fail / 3 skipped;
+  `npm run agents:lint` ok; `node --check` clean on every file touched. Each
+  new test was run against the unfixed code and failed there — the reply
+  routing, the attachment placeholder, the stranded media frame, the dropped
+  assistant, the error page, the `$` expansion, the read range, the phantom
+  line and the swallowed task all reproduce without their fix. The fixes came
+  from `TH-aipassport-harness`, where they were made; they are ported here,
+  and two of this tree's value flags — `--verify-command` and `--provider` —
+  were not in the list the parser shipped with, so they are in it now, or
+  their values would land in the task.
+- **Deferred**: the bridge still answers a `null` JSON body with a 500, and
+  `readBody()` still destroys the socket on an oversized body, so the client
+  gets ECONNRESET instead of a 413 — both want a status-code decision, not a
+  one-liner. The retry that walks past a rejected conversation still skips the
+  most recent one, and `startChat()` still cannot abort before its job
+  exists. The bridge's `/config` and `/conversations/new` accept a `null`
+  body for the same reason.
+- **Risks**: `routeDelta()` now decides where every delta goes, so a kind it
+  does not know falls to the content — that is the old behaviour, but the
+  decision is in one place now. The new parser changes what a CLI does with a
+  value-less flag (it keeps the default instead of crashing) and with
+  `--name=value` (now accepted); no flag was dropped, but `agent --file` and
+  `agent --session` are still only in the help text, not implemented.
+- **Cleanup**: none — the bridge was only ever driven from the test harness,
+  and no background process was left running.
+
 ## 2026-10-20 — opencode — the suite stops writing into the real home, and the scratch it makes goes with it
 
 - **Files**: `scripts/test.mjs` (the runner hands the whole run a scratch
