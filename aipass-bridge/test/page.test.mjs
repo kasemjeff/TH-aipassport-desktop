@@ -161,6 +161,49 @@ test('a signed storage link is passed through, not fetched and inlined', async (
   assert.match(page.parts('j1').find((p) => p.kind === 'audio').text, /^https:\/\/storage\.googleapis\.com/);
 });
 
+// fetch does not reject on a 4xx or a 5xx, and the body of one is an error
+// page, not the media. Reading it anyway carried a login page back as if it
+// were the picture.
+test('a media URL that answers with an error is not carried inline', async () => {
+  const page = loadPage({
+    onFetch: async (url) => (url.includes('/actions/send-message')
+      ? sseResponse([
+        { type: 'file', mediaType: 'image/png', url: '/media/shot.png' },
+        { type: 'finish', finishReason: 'stop' },
+      ])
+      : new Response('<html>please sign in</html>', { status: 401, headers: { 'content-type': 'text/html' } })),
+  });
+
+  page.run(chatJob());
+  await page.settled('j1');
+
+  const parts = page.parts('j1');
+  const media = parts.find((p) => p.kind === 'image');
+  assert.ok(media, 'the media is still reported');
+  assert.match(media.text, /\/media\/shot\.png$/, 'as the link, not as the error page');
+  assert.doesNotMatch(media.text, /data:/, 'the error body must not be carried inline');
+  assert.ok(parts.some((p) => p.kind === 'status' && /could not read it here/.test(p.text)),
+    'and the caller is told why');
+});
+
+// A frame can carry `url: ""` beside a real `snapshotUrl`, and `??` keeps the
+// empty string — which loses the media altogether.
+test('a media frame with an empty url still uses its snapshotUrl', async () => {
+  const page = loadPage({
+    onFetch: async () => sseResponse([
+      { type: 'file', mediaType: 'video/mp4', url: '', snapshotUrl: 'https://storage.googleapis.com/clip.mp4' },
+      { type: 'finish', finishReason: 'stop' },
+    ]),
+  });
+
+  page.run(chatJob());
+  await page.settled('j1');
+
+  const video = page.parts('j1').find((p) => p.kind === 'video');
+  assert.ok(video, 'the video must not be dropped');
+  assert.equal(video.text, 'https://storage.googleapis.com/clip.mp4');
+});
+
 // The reattach added for the run that cost 551 credits and returned nothing.
 // It is deliberately narrow, and both halves of that matter.
 test('a stream that dies before any content is reattached', async () => {

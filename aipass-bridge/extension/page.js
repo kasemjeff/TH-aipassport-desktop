@@ -558,9 +558,13 @@
               // Music comes back with `url`; video has no `url` at all, only
               // `snapshotUrl` beside `storageKey` and `filename`. Reading just
               // `url` dropped every generated video on the floor.
-              const url = evt.url ?? evt.snapshotUrl ?? d.url ?? d.snapshotUrl ?? '';
+              //
+              // `||` and not `??`: a frame can carry `url: ""` beside a real
+              // `snapshotUrl`, and `??` keeps the empty string — which loses
+              // the media altogether.
+              const url = evt.url || evt.snapshotUrl || d.url || d.snapshotUrl || '';
               if (!url) break;
-              const mediaType = evt.mediaType ?? d.mediaType ?? '';
+              const mediaType = evt.mediaType || d.mediaType || '';
               const filename = evt.filename ?? d.filename ?? '';
               // The kind decides how the client renders it: an mp4 in an image
               // tag is a broken image, not a video.
@@ -574,6 +578,10 @@
               if (!/^https?:\/\//i.test(url) || url.startsWith(location.origin)) {
                 try {
                   const r = await fetch(url, { credentials: 'include', signal: controller.signal });
+                  // fetch does not reject on a 4xx or a 5xx, and the body of
+                  // one is an error page, not the media. Reading it anyway
+                  // carried a login page back as if it were the picture.
+                  if (!r.ok) throw new Error(`aipass returned ${r.status} ${r.statusText}`);
                   const blob = await r.blob();
                   const cap = INLINE_CAP[kind] ?? INLINE_CAP.file;
                   push('status', `[${kind}] ${(blob.size / 1048576).toFixed(2)} MB`);
