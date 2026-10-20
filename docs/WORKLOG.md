@@ -47,6 +47,46 @@ suite.
 - **Cleanup**: none — the bridge was only ever driven from the test harness,
   and no background process was left running.
 
+## 2026-10-20 — opencode — the second sweep: the WAF table, the session store, the harn
+
+- **Files**: `aipass-bridge/harness/waf.mjs` (the `Bypass` placeholder is one
+  word now, so its own rule cannot see it);
+  `aipass-bridge/harness/session.mjs` (a fork states its own entry count; a
+  removal says whether it removed anything);
+  `aipass-bridge/harness/loop.mjs` (the parts are taken once, before the
+  attempts); `aipass-bridge/harness/tools.mjs` (a range that starts at zero is
+  refused); `aipass-bridge/harness/settings.mjs` (the mojibake);
+  `desktop/main.mjs` (the readiness probe presents the loopback token);
+  `scripts/live-check.mjs` (new — the QA loop's live verdict, so it can be
+  tested); `scripts/qa-loop.mjs` (the verdict, and the token);
+  `scripts/evals.mjs` (a task's own `budget.maxCredits` survives);
+  `aipass-bridge/test/{waf,data-integrity,harness-fixes,tools,desktop,harness-qa,evals}.test.mjs`
+  (+8 tests); `CHANGELOG.md`.
+- **Tests**: `npm test` 625 pass / 0 fail / 2 skipped (620 before, 618 passing);
+  `npm run agents:lint` ok (17 Verify anchors resolve against 613 titles);
+  `npm run typecheck` clean; `node --check` clean on every file touched. Each
+  new test was run against the unfixed code and failed there — the doubled
+  WAF encoding, the overstated fork header, the silent removal, the backwards
+  zero range, the lost attachment, the refusing backend and the dropped
+  credit cap all reproduce without their fix.
+- **Deferred**: the WAF restore is still case-sensitive where the
+  substitution is case-insensitive, so `Localhost` comes back `localhost` —
+  the repo documents that as the one lossy edge, and the comment that says it
+  "never costs a bad write" is the part that is wrong. The MCP server and tool
+  names still land raw in a compiled regex, so a name with a bracket in it
+  throws inside `prose()`. The bare `ASK` marker is still stripped from the
+  prose without becoming a call. A `FIND` block with no `NEW` still deletes
+  the text it found. The plan-approval gate still runs after the reply's tool
+  calls have executed. The desktop UI's `/model <id>` still does not update
+  the picker, and the theme toggle still replaces its own icons.
+- **Risks**: the WAF placeholder changed, so a transcript written before this
+  carries a `BYPASS-ARG` that the new restore does not decode — cosmetic, and
+  only in a session that predates it. `scripts/live-check.mjs` is a new file
+  in `scripts/`, next to the other small helpers. The `BYPASSARG` form is
+  still caught by the redact fallback, which matches `BYPASS` anywhere.
+- **Cleanup**: none — the bridge was only ever driven from the test harness,
+  and no background process was left running.
+
 ## 2026-10-18 — opencode — UX: design first, then the window and the popup
 
 - **Files**: `docs/UX.md` (new — principles, surfaces, ranked pain points

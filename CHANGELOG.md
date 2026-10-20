@@ -201,6 +201,45 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **The WAF placeholder for `Bypass` matched its own rule.** The table's
+  promise is that a placeholder shares no substring with the original;
+  `BYPASS-ARG` broke it, because the rule matches `Bypass` at any word
+  boundary and `-` is one. A text encoded twice — a tool result, encoded
+  by its caller and again by the message it rides in — came back as
+  `Bypass-ARG`, and an edit that quoted the file as the model had seen it
+  no longer matched. The placeholder is one word now, and the rule that
+  no placeholder matches its own rule is pinned.
+- **A forked session stated the parent's entry count.** A fork's header
+  was a copy of the parent's, so a fork from one entry claimed the
+  parent's whole count — and the count may lag, never overstate. The fork
+  states its own now.
+- **Removing a session said nothing.** `remove()` answered "did I remove
+  it?" with an existence check that ran after the unlink, so the answer
+  was always no.
+- **A range that starts at zero was read backwards.** Lines are counted
+  from 1; a range starting at 0 sliced with a negative index, which
+  means "from the last element". It is named as such instead.
+- **An attachment queued for the next message was lost when the send was
+  retried.** The queue is emptied by handing the parts over, and they
+  were taken again on every attempt, so a refused send went out without
+  the attachment — silently, because the tool had already answered
+  "queued … it goes out with your next message".
+- **The desktop shell's readiness probe went in without the token.** The
+  backend refuses every `/rpc` call without the loopback bearer, so a
+  probe that went in bare was answered "unauthorized" — which the probe
+  read as "not running". The shell took a busy port as a free one, and
+  the backend `tauri dev` waits for never came up.
+- **The QA loop called a refusing backend healthy.** The live check
+  printed its answer as "ok" without looking at it, so a backend that
+  refused every call came back as a green line with an undefined model.
+- **A task's own credit budget was dropped.** A task may cap its own
+  credits; the key was read off the raw spec and lost by the
+  normaliser, so the cap came out as 0 — off — and the row recorded
+  "maxCredits: 0" for a run that was supposed to be capped.
+- **Forty-two em dashes, arrows and ellipses in two files were mojibake** —
+  read as latin-1 and written back as UTF-8. The text was still valid
+  UTF-8, so the check for mangled files never saw them.
+
 - **The tool activity is routed the same way with and without streaming.**
   `AIPASS_TOOL_VISIBILITY=text` put the tool activity inline in the streamed
   reply and in the reasoning field in the plain one, so the same request
