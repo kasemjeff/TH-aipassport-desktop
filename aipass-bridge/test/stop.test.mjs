@@ -122,7 +122,7 @@ test('a stop that lands right after the run started is not lost', async () => {
   const bridge = new StubBridge(['DONE never reached']);
   const h = new Harness({
     root: dir,
-    bridge,
+    client: bridge,
     store: new SessionStore(path.join(dir, 'sessions')),
     options: { mode: 'yolo' },
   });

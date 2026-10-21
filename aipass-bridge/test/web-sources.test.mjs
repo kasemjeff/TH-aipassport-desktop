@@ -133,7 +133,7 @@ test("a search's sources ride along with the tool row, so the window can show th
   const events = new Emitter();
   const h = new Harness({
     root,
-    bridge: new StubBridge([
+    client: new StubBridge([
       'WEB ai research\n',
       'DONE looked it up\n',
     ]),

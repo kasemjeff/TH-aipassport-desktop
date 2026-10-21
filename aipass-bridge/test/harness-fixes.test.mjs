@@ -254,7 +254,7 @@ test('a helper run that edits a denied path is declined, and nothing is staged',
   const events = new Emitter();
   const h = new Harness({
     root,
-    bridge: new StubBridge([
+    client: new StubBridge([
       'SUBAGENT\ntask: change the secret\nEND\n',
       'EDIT .env\nFIND\nSECRET=1\nNEW\nSECRET=2\nEND\nDONE helper done\n',
       'DONE parent done\n',
@@ -317,7 +317,7 @@ test('a denied read is refused with a reason before the file is opened (H9)', as
   const events = new Emitter();
   const h = new Harness({
     root,
-    bridge: new StubBridge(['NEED file .env\n', 'DONE kept it local\n']),
+    client: new StubBridge(['NEED file .env\n', 'DONE kept it local\n']),
     store: new SessionStore(tempDir()),
     rules: [{ pattern: '.env*', decision: 'deny' }],
     events,
@@ -662,7 +662,7 @@ test('a roled helper is read-only: its edit is refused and nothing is staged', a
   const events = new Emitter();
   const h = new Harness({
     root,
-    bridge: new StubBridge([
+    client: new StubBridge([
       'SUBAGENT\nrole: verifier\ntask: check src/app.ts\nEND\n',
       'EDIT src/app.ts\nFIND\nconst a = 1;\nNEW\nconst a = 2;\nEND\nDONE ran the check\n',
       'DONE parent done\n',
@@ -707,7 +707,7 @@ test("a helper reads the parent staged edit, not the disk", async () => {
   events.on('tool', (p) => seen.push(p));
   const h = new Harness({
     root,
-    bridge: new StubBridge([
+    client: new StubBridge([
       `EDIT notes.md
 FIND
 two
@@ -768,7 +768,7 @@ test("parallel helpers editing one file: the first version lands and the other i
   events.on('helper_end', (p) => helperEnds.push(p));
   const h = new Harness({
     root,
-    bridge: new StubBridge([
+    client: new StubBridge([
       `SUBAGENT
 task: write A
 END
@@ -827,7 +827,7 @@ test("a read in an earlier run does not license a blind CREATE in the next", asy
   events.on('tool', (p) => seen.push(p));
   const h = new Harness({
     root,
-    bridge: new StubBridge([
+    client: new StubBridge([
       'NEED file notes.txt\n',
       'DONE noted\n',
       'CREATE notes.txt\nreplacement\nEND\n',
@@ -877,7 +877,7 @@ test("a rotation keeps the conversation its create returned, not the shared poin
   events.on('compacted', (p) => compacted.push(p));
   const h = new Harness({
     root,
-    bridge,
+    client: bridge,
     store: new SessionStore(tempDir()),
     events,
     options: { mode: 'yolo', allowRun: false, maxSteps: 3 },
@@ -931,7 +931,7 @@ END
   events.on('compacted', (p) => compacted.push(p));
   const h = new Harness({
     root,
-    bridge,
+    client: bridge,
     store: new SessionStore(tempDir()),
     events,
     compaction: { contextTokens: 60, reserveTokens: 0, keepRecentBytes: 0 },
@@ -977,7 +977,7 @@ test("a run's max-result and read-lines options reach the tools (H11)", async ()
   const bridge = new StubBridge(['NEED file big.txt\nNEED file lines.txt\n', 'DONE read both\n']);
   const h = new Harness({
     root,
-    bridge,
+    client: bridge,
     store: new SessionStore(tempDir()),
     events: new Emitter(),
     options: { mode: 'auto', maxSteps: 3, maxResult: 500, readLines: 3 },

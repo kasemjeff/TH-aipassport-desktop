@@ -25,11 +25,11 @@ import { sweepSandboxes } from './sandbox.mjs';
 import { loadGitignore } from './gitignore.mjs';
 // One address for "where this app keeps its state", shared with the rpc layer:
 // AIPASS_HOME when a surface (a test) names one, ~/.aipass otherwise.
-import { aipassHome, DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_WALL_CLOCK_MS } from './settings.mjs';
+import { aipassHome, harnessOptions } from './settings.mjs';
+
+/** @typedef {import('./settings.mjs').HarnessOptions} HarnessOptions */
 
 const REPO_SKILLS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills');
-
-const home = () => aipassHome();
 
 export class Harness {
   /** Resolves the plan-approval gate; null when nobody is waiting on it. */
@@ -72,8 +72,15 @@ export class Harness {
    * @param {object} opts
    * @param {string} opts.root           directory the agent may touch
    * @param {string} opts.bridgeURL      base URL of the local bridge
+   * @param {object} [opts.client]       the client to talk through — a bridge
+   *   client or a provider client. ONE name for both, because a provider is a
+   *   client and not a second loop (rule 14): the harness needs the contract,
+   *   not to know which edge answered it. Without one, it opens a bridge
+   *   client of its own.
    * @param {string} [opts.model]        default model id
-   * @param {object} [opts.options]      {maxSteps, allowRun, mode, slim, plan, subagent, requirePlanApproval, verifyCommand, requireCheck, conversation, reuse, permanent, assistant}
+   * @param {Partial<HarnessOptions>} [opts.options] the run's option sheet —
+   *   its defaults live in `settings.mjs` (`HarnessOptions`), so the harness
+   *   and the loop read one sheet and cannot drift apart.
    * @param {Array}  [opts.rules]        permission path rules
    * @param {Emitter}[opts.events]
    * @param {SessionStore} [opts.store]
@@ -81,49 +88,23 @@ export class Harness {
   constructor(opts = {}) {
     this.root = path.resolve(opts.root ?? process.cwd());
     this.events = opts.events ?? new Emitter();
-    this.options = {
-      maxSteps: 0,   // no cap — settings.mjs ships the same default
-      maxToolCalls: DEFAULT_MAX_TOOL_CALLS,
-      maxWallClockMs: DEFAULT_MAX_WALL_CLOCK_MS,
-      maxCredits: 0,
-      allowRun: false,
-      // A fetch the model invented is a question, not a read. Off by default:
-      // the surface has to say yes on purpose (`--allow-fetch`), because a
-      // page the agent read can talk it into posting the project's contents
-      // somewhere the person never saw.
-      allowFetch: false,
-      mode: 'ask',
-      plan: false,
-      subagent: false,
-      requirePlanApproval: false,
-      conversation: null,
-      reuse: false,
-      permanent: false,
-      assistant: null,
-      searchI: false,
-      attach: false,
-      webScratch: false,
-      parallelHelpers: false,
-      // The declared check (docs/SPEC_CHECKER.md): a caller-named command that
-      // replaces `.aipass/check.txt` when set, and the strict gate that refuses
-      // a DONE while that check is failing. Both off by default — the checker
-      // stays advisory unless a project or a person asks for the gate.
-      verifyCommand: null,
-      requireCheck: false,
-      ...(opts.options ?? {}),
-    };
-    this.bridge = opts.bridge instanceof BridgeClient
-      ? opts.bridge
-      : (opts.client ?? new BridgeClient(opts.bridgeURL ?? DEFAULT_BRIDGE_URL, {
-          model: opts.model ?? this.options.model ?? null,
-          // A 429 wait must read as a pause, not a stuck run: the client's
-          // note rides the same dim-note channel as the firewall notes.
-          onNote: (text) => this.events.emit('firewall_note', { text }),
-          // A mid-reply model switch is the site talking to the person: it
-          // belongs in the transcript as a visible note line, not folded
-          // into the reasoning beside the tool churn.
-          onStreamNote: (text) => this.events.emit('note', { text }),
-        }));
+    // One option sheet, one owner: `settings.mjs` holds the defaults and the
+    // typedef, so a key cannot be defaulted here and read there. The values
+    // themselves are the harness's own — a fetch the model invented is a
+    // question, not a read (off until a surface says yes on purpose), helpers
+    // are off until the caller asks for them, and the declared check stays
+    // advisory until a project or a person names one.
+    this.options = harnessOptions(opts.options);
+    this.bridge = opts.client ?? new BridgeClient(opts.bridgeURL ?? DEFAULT_BRIDGE_URL, {
+      model: opts.model ?? this.options.model ?? null,
+      // A 429 wait must read as a pause, not a stuck run: the client's
+      // note rides the same dim-note channel as the firewall notes.
+      onNote: (text) => this.events.emit('firewall_note', { text }),
+      // A mid-reply model switch is the site talking to the person: it
+      // belongs in the transcript as a visible note line, not folded
+      // into the reasoning beside the tool churn.
+      onStreamNote: (text) => this.events.emit('note', { text }),
+    });
     // Which provider this harness talks to. The client is the thing that
     // knows; this is the label the window and the session header carry.
     this.providerId = this.bridge.providerId ?? 'aipass';
@@ -131,7 +112,7 @@ export class Harness {
     // bridge client does — they are harness events, not client trivia.
     if (opts.client) this.#wireNotes(this.bridge);
     this.skills = opts.skills ?? SkillLibrary.default({ root: this.root, repoDir: REPO_SKILLS });
-    this.store = opts.store === 'off' ? null : (opts.store ?? new SessionStore(path.join(home(), 'sessions')));
+    this.store = opts.store === 'off' ? null : (opts.store ?? new SessionStore(path.join(aipassHome(), 'sessions')));
     this.overlay = new Overlay(this.root);
     /* ------------------------------------------------------------- path rules *
      *

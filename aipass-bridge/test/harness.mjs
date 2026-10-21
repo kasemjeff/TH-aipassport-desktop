@@ -6,6 +6,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// The pid file, read the way the bridge writes it.
+import { readRecordedPids } from '../harness/bridge-pid.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const SERVER = path.join(HERE, '..', 'bridge', 'server.mjs');
@@ -82,22 +84,24 @@ export function freePort() {
 /**
  * End the bridge a CLI in this suite auto-started.
  *
- * `aipass` starts the bridge in the BACKGROUND and records its pid next to
- * the state home (bin/aipass.mjs). The suite's home is scratch space, so that
- * pid file disappears with the scratch directory and `aipass stop` — which
- * reads the developer's real home — can never reach the process it names.
- * The bridge is detached, so it outlives the suite. Reading the pid file
- * before the scratch directory goes is the only chance to end it.
+ * `aipass` starts the bridge in the BACKGROUND, and the bridge records its own
+ * pid next to the state home (harness/bridge-pid.mjs). The suite's home is
+ * scratch space, so that pid file disappears with the scratch directory and
+ * `aipass stop` — which reads the developer's real home — can never reach the
+ * process it names. The bridge is detached, so it outlives the suite. Reading
+ * the pid file before the scratch directory goes is the only chance to end it.
+ *
+ * The file holds EVERY bridge of ours that is still running, one pid per
+ * line, so all of them are ended — and the helper that reads it is the one
+ * the bridge wrote it with, so the two cannot disagree about the format.
  */
 function stopBackgroundBridge() {
   const home = process.env.AIPASS_HOME;
   if (!home) return;
-  let pid = 0;
-  try {
-    pid = Number(fs.readFileSync(path.join(home, 'bridge.pid'), 'utf8').trim());
-  } catch { return; /* no bridge was started */ }
-  if (!Number.isInteger(pid) || pid <= 0) return;
-  try { process.kill(pid); } catch { /* already gone */ }
+  const file = path.join(home, 'bridge.pid');
+  for (const pid of readRecordedPids(file)) {
+    try { process.kill(pid); } catch { /* already gone */ }
+  }
 }
 
 // Registered whatever the home is: a test file may bring its own AIPASS_HOME,

@@ -22,6 +22,10 @@
     "harness/lang.mjs",
     "harness/authtoken.mjs",
     "harness/waf.mjs",
+    "harness/run/options.mjs",
+    "harness/run/context.mjs",
+    "harness/run/budgets.mjs",
+    "harness/rpc/context.mjs",
     "bridge/log-scrub.mjs",
     "bridge/private-hosts.mjs",
     "bridge/attachment-types.mjs"

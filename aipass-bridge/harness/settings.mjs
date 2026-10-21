@@ -141,6 +141,129 @@ export const DEFAULTS = {
 };
 
 /**
+ * The options one run is built from.
+ *
+ * One shape, one owner: the harness fills it, the loop reads it, and the
+ * settings file decides what most of it says. The typedef lives here because
+ * this file is where the numbers live — a JSDoc block in `harness.mjs` that
+ * listed a third of the keys is what let `this.options.model` be read from an
+ * object that never had one.
+ *
+ * @typedef {object} HarnessOptions
+ * @property {string|null} [model]            the model a run starts on
+ * @property {number} [maxSteps]              the step cap; 0 = no cap
+ * @property {number} [maxToolCalls]          the tool-call budget of one run
+ * @property {number} [maxWallClockMs]        the wall-clock budget of one run
+ * @property {number} [maxCredits]            the optional credit cap; 0 = off
+ * @property {string} [mode]                  'ask' | 'auto' | 'yolo'
+ * @property {boolean} [allowRun]             may the run reach the shell
+ * @property {boolean} [allowFetch]           may the run send data out
+ * @property {boolean} [plan]                 plan mode
+ * @property {boolean} [requirePlanApproval]  wait for a human before the work
+ * @property {boolean} [subagent]             may the run call a helper
+ * @property {boolean} [parallelHelpers]      may helpers run beside each other
+ * @property {boolean} [searchI]              the case-insensitive SEARCH
+ * @property {boolean} [attach]               the ATTACH of a non-text file
+ * @property {boolean} [webScratch]           the scratch conversation
+ * @property {string|null} [conversation]     the conversation to send into
+ * @property {boolean} [reuse]                reuse the bridge's conversation
+ * @property {boolean} [permanent]            keep the conversation afterwards
+ * @property {string|null} [assistant]        the assistant persona to run as
+ * @property {string|null} [verifyCommand]    the declared check (docs/SPEC_CHECKER.md)
+ * @property {boolean} [requireCheck]         the strict DONE gate
+ * @property {string|null} [thinking]         'off' | 'low' | … | 'max'
+ * @property {number|null} [temperature]      0..2, or null for the site's own
+ * @property {'th'|'en'} [replyLanguage]      the language the reply is in
+ * @property {boolean} [langCheck]            measure the closing message
+ * @property {number} [minThaiRatio]          the share of Thai letters asked for
+ * @property {boolean} [repeatGuard]          refuse an identical call
+ * @property {number} [repeatGuardMax]        refusals one run may collect
+ * @property {boolean} [slim]                 the compact first message
+ * @property {string|null} [seedText]         the seed of a rotated conversation
+ * @property {Array} [pluginTools]            the plugin markers this run may use
+ * @property {AbortSignal|null} [signal]      the run's stop switch
+ * @property {Array|null} [parts]             the attachments of the first send
+ */
+
+/**
+ * The shipped defaults for a run's options.
+ *
+ * The numbers come from the settings file, so the shipped setting and the
+ * fallback can never drift apart — the same promise `DEFAULTS` makes for the
+ * file itself. Everything the loop clamps lives here too: `harness.mjs` and
+ * `loop.mjs` read one sheet, so a key cannot be defaulted in one place and
+ * read in another.
+ */
+export const HARNESS_OPTION_DEFAULTS = Object.freeze({
+  // the model a run starts on; the window can still switch per session
+  model: null,
+  // the step cap: 0 = no cap, the run goes until DONE, a guard or a budget
+  maxSteps: 0,
+  // the per-run budgets — the real bound once the step cap is off
+  maxToolCalls: DEFAULT_MAX_TOOL_CALLS,
+  maxWallClockMs: DEFAULT_MAX_WALL_CLOCK_MS,
+  maxCredits: 0,
+  // who may write, and who may reach the shell
+  mode: 'ask',
+  allowRun: false,
+  allowFetch: false,
+  // plan mode: the model writes a plan first, and waits for the human
+  plan: false,
+  requirePlanApproval: false,
+  // helpers: one at a time, or several beside each other
+  subagent: false,
+  parallelHelpers: false,
+  // what the preamble may offer the model
+  searchI: false,
+  attach: false,
+  webScratch: false,
+  // the conversation the run sends into
+  conversation: null,
+  reuse: false,
+  permanent: false,
+  assistant: null,
+  // the declared check and the strict DONE gate
+  verifyCommand: null,
+  requireCheck: false,
+  // how hard the model thinks, and how varied the answer is
+  thinking: null,
+  temperature: null,
+  // the reply-language policy: the preamble says which language, the hook
+  // measures the closing message
+  replyLanguage: 'th',
+  langCheck: false,
+  minThaiRatio: 0.4,
+  // the pre-tool guards
+  repeatGuard: false,
+  repeatGuardMax: 4,
+  // the compact first message, and the seed of a rotated conversation
+  slim: false,
+  seedText: null,
+  pluginTools: [],
+  // the run's own switch, and the parts its first message carries
+  signal: null,
+  parts: null,
+});
+
+/**
+ * One option sheet: the shipped defaults, with what the caller passed on top.
+ *
+ * A key whose value is `undefined` counts as "not said" and keeps the
+ * default — the alternative is a sheet where `maxToolCalls: undefined` reads
+ * as "no budget" and a run stops before its first step.
+ *
+ * @param {Partial<HarnessOptions>} [overrides]
+ * @returns {HarnessOptions}
+ */
+export function harnessOptions(overrides = {}) {
+  const out = { ...HARNESS_OPTION_DEFAULTS };
+  for (const [key, value] of Object.entries(overrides ?? {})) {
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
+}
+
+/**
  * The safety floor under every mode: a MUTATION of a file a build resolves
  * through is asked about before anything changes, because that mistake is
  * invisible until something else breaks (a dependency silently floats, a
@@ -457,6 +580,17 @@ export class Settings {
 
   /** Merge a patch in and write it back. Returns the whole object. */
   set(patch = {}) {
+    // The file is the truth, and another surface may have written it since
+    // this process last looked: the CLI, a second backend, a backup restored
+    // underneath it. Merging into the copy this process happens to hold
+    // would write that other change back out unchanged — the window's save
+    // would quietly undo it, and a project that had been moved would land
+    // back under its old path. So the file is read again before the merge.
+    //
+    // The window between the read and the write is still open (two surfaces
+    // writing at the same moment is a lost update either way), but it is now
+    // a moment instead of the whole life of the process.
+    this.reload();
     let next = { ...this.values, ...patch };
     if (patch.compaction) next.compaction = { ...this.values.compaction, ...patch.compaction };
     next = Settings.sane(next);
@@ -492,6 +626,10 @@ export class Settings {
 
   /** Remember a project and make it the current root. */
   addProject(projectPath, name = null) {
+    // The list is read from the file first: the copy this process holds may
+    // be older than a change another surface made to it, and a list built from
+    // a stale copy would write that change back out.
+    this.reload();
     const abs = path.resolve(projectPath);
     const projects = (this.values.projects ?? []).filter((p) => p.path !== abs);
     projects.unshift({ name: name ?? path.basename(abs), path: abs });
@@ -499,6 +637,7 @@ export class Settings {
   }
 
   removeProject(projectPath) {
+    this.reload();
     const abs = path.resolve(projectPath);
     const projects = (this.values.projects ?? []).filter((p) => p.path !== abs);
     const root = path.resolve(this.values.root ?? '') === abs ? null : this.values.root;
