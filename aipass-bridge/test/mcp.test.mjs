@@ -74,6 +74,35 @@ process.stdin.on('data', (chunk) => {
 setInterval(() => {}, 1000);
 `;
 
+/** A server that reports one environment variable. */
+const ENV = `
+process.stdin.setEncoding('utf8');
+let buf = '';
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let idx;
+  while ((idx = buf.indexOf('\\n')) !== -1) {
+    const line = buf.slice(0, idx).trim();
+    buf = buf.slice(idx + 1);
+    if (!line) continue;
+    const msg = JSON.parse(line);
+    const send = (result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }) + '\\n');
+    if (msg.method === 'initialize') send({ protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'env', version: '1.0.0' } });
+    else if (msg.method === 'tools/list') send({ tools: [
+      { name: 'secret', description: 'one environment variable', inputSchema: { type: 'object', properties: {} } },
+    ] });
+    else if (msg.method === 'tools/call') send({ content: [{ type: 'text', text: process.env.AIPASS_TEST_SECRET ?? '(unset)' }] });
+    else if (msg.id !== undefined) send({});
+  }
+});
+`;
+
+/** A server that leaves a canary behind the moment it starts. */
+const canary = (file) => `
+import fs from 'node:fs';
+fs.writeFileSync(${JSON.stringify(file)}, 'ran');
+` + FIXTURE;
+
 function writeFixture(dir, name, body) {
   const file = path.join(dir, `${name}.mjs`);
   fs.writeFileSync(file, body);
@@ -90,7 +119,6 @@ const writeJson = (file, data) => {
   fs.writeFileSync(file, JSON.stringify(data, null, 2));
 };
 const readServers = (file) => JSON.parse(fs.readFileSync(file, 'utf8')).servers;
-
 /**
  * Run with AIPASS_HOME pointed at a fresh temp dir: the home layer of the
  * config is read through aipassHome(), and a test must never see the real
@@ -188,6 +216,9 @@ test('a stop ends an mcp call the server never answers', () => withHome(async (h
   writeJson(path.join(root, '.aipass', 'mcp.json'), {
     servers: [{ name: 'silent', ...fixtureArgs(dir, 'silent', SILENT_CALL) }],
   });
+  // A project-scoped server runs only when the user has approved it by
+  // name, and the approval is kept in the home file.
+  writeJson(path.join(home, 'mcp.json'), { servers: [], approved: ['silent'] });
 
   const manager = new McpManager({ root, log: () => {} });
   try {
@@ -212,6 +243,7 @@ test("a server's cwd is where it runs, not where the harness happens to stand", 
   writeJson(path.join(root, '.aipass', 'mcp.json'), {
     servers: [{ name: 'here', ...fixtureArgs(dir, 'pwd', FIXTURE), cwd: 'work' }],
   });
+  writeJson(path.join(home, 'mcp.json'), { servers: [], approved: ['here'] });
 
   const manager = new McpManager({ root, log: () => {} });
   try {
@@ -244,6 +276,102 @@ test('reload is how a config edit reaches the running manager', () => withHome(a
   } finally {
     manager.close();
   }
+}));
+
+test('a project-scoped server is not spawned without the user approving it by name', () => withHome(async (home) => {
+  // A project file is repository content: it arrives with the code, and a
+  // repository that ships .aipass/mcp.json would otherwise get its program
+  // executed the moment the project is opened.
+  const dir = tempDir();
+  const root = tempDir();
+  const started = path.join(dir, 'STARTED');
+  const projectFile = path.join(root, '.aipass', 'mcp.json');
+  writeJson(projectFile, {
+    servers: [{ name: 'repo', ...fixtureArgs(dir, 'repo', canary(started)) }],
+  });
+
+  const manager = new McpManager({ root, log: () => {} });
+  try {
+    await manager.ensureLoaded();
+    const row = manager.status().find((r) => r.name === 'repo');
+    assert.equal(row.connected, false, 'a repository does not get to start a program');
+    assert.equal(row.blocked, true, 'the row says it is waiting for the user');
+    assert.equal(fs.existsSync(started), false, 'and the program never ran');
+    assert.deepEqual(manager.toolTable(), [], 'no tools from a server that never started');
+
+    // The reason names the file that declares the server, the file the
+    // approval goes in, and the edit itself.
+    assert.match(row.error, /not approved/);
+    assert.ok(row.error.includes(projectFile), 'the file that declares it');
+    assert.ok(row.error.includes(path.join(home, 'mcp.json')), 'the file the approval goes in');
+    assert.ok(row.error.includes('"approved": ["repo"]'), 'and the exact edit');
+
+    // The approval is the user's, kept in the home file — the one file a
+    // repository cannot write.
+    writeJson(path.join(home, 'mcp.json'), { servers: [], approved: ['repo'] });
+    await manager.reload();
+    const approved = manager.status().find((r) => r.name === 'repo');
+    assert.equal(approved.connected, true, 'approved is allowed');
+    assert.equal(fs.existsSync(started), true, 'and the program runs');
+  } finally {
+    manager.close();
+  }
+}));
+
+test('a project file cannot talk itself into the read tier', () => withHome(async (home) => {
+  const dir = tempDir();
+  const root = tempDir();
+  writeJson(path.join(home, 'mcp.json'), {
+    servers: [{ name: 'home-read', ...fixtureArgs(dir, 'home-read', FIXTURE), risk: 'read' }],
+  });
+  writeJson(path.join(root, '.aipass', 'mcp.json'), {
+    servers: [{ name: 'repo-read', ...fixtureArgs(dir, 'repo-read', FIXTURE), risk: 'read' }],
+  });
+
+  const servers = loadConfig(root);
+  assert.equal(servers.find((s) => s.name === 'home-read').risk, 'read', "the user's own file keeps its declared risk");
+  assert.equal(servers.find((s) => s.name === 'repo-read').risk, 'write', 'a repository file does not get the read tier');
+
+  // The user's approval is what makes a declared read count.
+  writeJson(path.join(home, 'mcp.json'), {
+    servers: [{ name: 'home-read', ...fixtureArgs(dir, 'home-read', FIXTURE), risk: 'read' }],
+    approved: ['repo-read'],
+  });
+  assert.equal(loadConfig(root).find((s) => s.name === 'repo-read').risk, 'read', 'approved by name, the declared risk counts');
+}));
+
+test('a project-scoped child does not inherit the harness environment', () => withHome(async (home) => {
+  const dir = tempDir();
+  const root = tempDir();
+  process.env.AIPASS_TEST_SECRET = 'do-not-leak';
+  try {
+    writeJson(path.join(home, 'mcp.json'), {
+      servers: [{ name: 'home-env', ...fixtureArgs(dir, 'home-env', ENV) }],
+      approved: ['repo-env'],
+    });
+    writeJson(path.join(root, '.aipass', 'mcp.json'), {
+      servers: [{ name: 'repo-env', ...fixtureArgs(dir, 'repo-env', ENV) }],
+    });
+
+    const manager = new McpManager({ root, log: () => {} });
+    try {
+      await manager.ensureLoaded();
+      assert.equal(await manager.runTool('MCP__home-env__secret', {}), 'do-not-leak', "the user's own server keeps the environment");
+      assert.equal(await manager.runTool('MCP__repo-env__secret', {}), '(unset)', "a repository's server does not get the harness's credentials");
+    } finally {
+      manager.close();
+    }
+  } finally {
+    delete process.env.AIPASS_TEST_SECRET;
+  }
+}));
+
+test("the config file holds tokens, so it is owner-only", { skip: process.platform === 'win32' ? 'POSIX modes only' : false }, () => withHome(async (home) => {
+  const root = tempDir();
+  addServer({ name: 'secretive', command: 'echo', env: { TOKEN: 'abc' } }, { home, root });
+  const file = path.join(home, 'mcp.json');
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600, "the file is the owner's alone");
+  assert.equal(fs.statSync(path.join(home)).mode & 0o777, 0o700, 'and so is the folder it is in');
 }));
 
 test('addServer refuses the names and shapes that would never run', () => withHome(async (home) => {

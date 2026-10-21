@@ -20,6 +20,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { aipassHome } from './settings.mjs';
+import { writeFileAtomic } from './atomic-write.mjs';
 
 /** The provider the app was built around: the local bridge and its tab. */
 export const AIPASS_PROVIDER = 'aipass';
@@ -223,25 +224,24 @@ export class ProviderStore {
 
   #writeSpecs(list) {
     fs.mkdirSync(this.dir, { recursive: true });
-    const tmp = `${this.file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ providers: list }, null, 2) + '\n');
-    fs.renameSync(tmp, this.file); // atomic: a crash mid-write never loses the list
+    // The shared atomic swap: the specs are a file two surfaces can write
+    // (this store and a CLI), and a copy of the swap is a copy that can
+    // disagree with the shared one about what "atomic" means.
+    writeFileAtomic(this.file, JSON.stringify({ providers: list }, null, 2) + '\n');
   }
 
   /**
    * The keys, owner-only.
    *
-   * The mode is set on the temporary file AND after the rename, because
-   * `writeFileSync`'s `mode` only applies when it creates the file — a stale
-   * .tmp from an earlier run would otherwise keep its old permissions.
+   * The mode rides the shared atomic write: the temp file is created 0600,
+   * pinned again after the bytes are in it (a `mode` only applies on
+   * creation, and the umask takes bits off it), and the rename carries that
+   * mode onto the destination — so the key file is never readable by another
+   * user, not even for the moment between the write and the swap.
    */
   #writeCredentials(creds) {
     fs.mkdirSync(this.dir, { recursive: true });
-    const tmp = `${this.credentialsFile}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 });
-    try { fs.chmodSync(tmp, 0o600); } catch { /* windows has no POSIX modes */ }
-    fs.renameSync(tmp, this.credentialsFile);
-    try { fs.chmodSync(this.credentialsFile, 0o600); } catch { /* windows has no POSIX modes */ }
+    writeFileAtomic(this.credentialsFile, JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 });
   }
 }
 

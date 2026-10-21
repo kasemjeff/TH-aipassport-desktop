@@ -21,9 +21,28 @@ const HOST = process.env.AIPASS_HOST ?? '127.0.0.1';
 {
   const loopback = HOST === '127.0.0.1' || HOST === 'localhost' || HOST === '::1' || HOST === '::ffff:127.0.0.1';
   if (!loopback && process.env.AIPASS_ALLOW_REMOTE !== '1') {
-    console.error(`refusing to bind ${HOST} without AIPASS_ALLOW_REMOTE=1 (bridge has no auth; keep it on 127.0.0.1)`);
+    console.error(`refusing to bind ${HOST} without AIPASS_ALLOW_REMOTE=1 (the token is a loopback secret; keep it on 127.0.0.1)`);
     process.exit(1);
   }
+}
+// The shared DEFAULT port with the token gate OFF is the one combination that
+// leaves the account reachable by anything on the machine — and, because a
+// cross-origin "simple" request needs no preflight, by any web page the user
+// visits. The escape hatch (AIPASS_REQUIRE_AUTH=0) is for a foreground
+// `aipass dev` and for the test suite, and neither wants the shared port
+// without the token. A bridge on another port is harmless: the port is the
+// only thing a web page can guess.
+//
+// This is the last line of defence for a case that kept happening: a run
+// somewhere else started a bridge on 8787 with the gate off and left it
+// there, and a web page could blind-POST to it and spend the account's
+// credits. Opt out with AIPASS_ALLOW_INSECURE_DEFAULT_PORT=1 if you really
+// mean it.
+if (!authRequired() && PORT === 8787 && process.env.AIPASS_ALLOW_INSECURE_DEFAULT_PORT !== '1') {
+  console.error('refusing to serve 8787 without the loopback bearer token (AIPASS_REQUIRE_AUTH=0).');
+  console.error('  The no-token mode is for a foreground `aipass dev` and for the test suite, and neither wants the shared port.');
+  console.error('  Use another port (AIPASS_PORT), or say AIPASS_ALLOW_INSECURE_DEFAULT_PORT=1 if you mean it.');
+  process.exit(1);
 }
 const MODELS_FALLBACK = (process.env.AIPASS_MODELS ?? 'gemini-3.1-flash-lite,claude-sonnet-5@default')
   .split(',').map((s) => s.trim()).filter(Boolean);
@@ -59,13 +78,14 @@ let assistantId = process.env.AIPASS_ASSISTANT_ID ?? '';
 let aspectRatio = process.env.AIPASS_ASPECT_RATIO ?? '1:1';
 const ASSISTANT_FIELD = process.env.AIPASS_ASSISTANT_FIELD ?? 'aiAssistantId';
 
-// This bridge has no authentication, so it must not be reachable from arbitrary
-// web pages — anything that can talk to it can spend the account's credits.
-//
-// CORS is therefore OFF by default: the CLI clients ignore CORS entirely and the
-// extension reaches the bridge with host-permission privilege, so neither needs
-// it. Set AIPASS_CORS_ORIGIN only if you deliberately want a browser page to
-// call the bridge. Admin/deployment routes stay off unless AIPASS_ADMIN=1.
+// The bridge has a bearer gate — every route but /status and /health needs
+// the loopback token — so it is not open to whoever finds the port. The
+// token is a loopback secret, though, and a page in the user's browser can
+// still reach 127.0.0.1, so CORS is OFF by default: the CLI clients ignore
+// CORS entirely and the extension reaches the bridge with host-permission
+// privilege, so neither needs it. Set AIPASS_CORS_ORIGIN only if you
+// deliberately want a browser page to call the bridge. Admin/deployment
+// routes stay off unless AIPASS_ADMIN=1.
 const CORS_ORIGIN = process.env.AIPASS_CORS_ORIGIN ?? '';
 const ADMIN = process.env.AIPASS_ADMIN === '1';
 const ALLOWED_HOSTS = new Set([
@@ -91,6 +111,22 @@ import { scrubSecrets } from './log-scrub.mjs';
 import { formatLogLine, requestId } from '../harness/log-line.mjs';
 
 const log = (...a) => console.log(formatLogLine({ msg: a.map((x) => scrubSecrets(x instanceof Error ? x.stack : String(x))).join(' ') }));
+
+// An extension without the loopback token is a silent loop: it retries every
+// three seconds, every retry is a 401, and `/status` only says
+// `extensions: 0` — nothing says why. The bridge says it once, with the
+// remedy, instead of leaving the reader to guess between "no extension
+// loaded" and "the token was never pasted". Throttled, because the retry
+// loop would otherwise fill the log with the same line.
+let lastUnauthExtensionLog = 0;
+const UNAUTH_EXTENSION_LOG_EVERY_MS = 30_000;
+function noteUnauthenticatedExtension() {
+  const now = Date.now();
+  if (now - lastUnauthExtensionLog < UNAUTH_EXTENSION_LOG_EVERY_MS) return;
+  lastUnauthExtensionLog = now;
+  log('the extension was refused: it has no loopback token — paste the contents of '
+    + '~/.aipass/.token into the extension popup (Advanced -> Loopback token) and save');
+}
 
 /* ------------------------------------------------- react-router turbo-stream */
 
@@ -577,14 +613,18 @@ async function getQuota({ force = false } = {}) {
         // The window polls credits every 10s while idle, so this line used to
         // repeat identically thousands of times a day. Log only a change —
         // the first sighting, a different figure, or a new limit.
+        //
+        // The change is measured on the figures the LINE shows, rounded: a
+        // balance that moves by a fraction prints the same numbers again, and
+        // printing the same line is the noise this guard exists to stop.
+        const shown = (v) => Number(v).toFixed(0);
         const prev = quotaCache.value;
         const changed = !prev
-          || prev.available !== value.available
-          || prev.used !== value.used
-          || prev.limit !== value.limit;
+          || shown(prev.available) !== shown(value.available)
+          || shown(prev.limit) !== shown(value.limit);
         quotaCache = { at: Date.now(), value };
         if (changed) {
-          log(`credits ${value.available.toFixed(0)} of ${value.limit.toFixed(0)} left`);
+          log(`credits ${shown(value.available)} of ${shown(value.limit)} left`);
         }
       }
     } catch (err) {
@@ -764,8 +804,8 @@ function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, te
 
 // The private-network classifier lives in its own module so the harness's
 // FETCH tool guards with exactly the same rules as the attachment path here.
-import { isPrivateHost, hostResolvesPrivate } from './private-hosts.mjs';
-import { authorized, tokenPath, loadOrMintToken } from '../harness/authtoken.mjs';
+import { isPrivateHost, hostResolvesPrivate, pinnedGet, resolveVetted } from './private-hosts.mjs';
+import { authorized, authRequired, tokenPath, loadOrMintToken } from '../harness/authtoken.mjs';
 
 // What may be attached to a message — the table is shared with the desktop's
 // staged uploads and the agent's ATTACH tool, in bridge/attachment-types.mjs,
@@ -778,7 +818,11 @@ import { authorized, tokenPath, loadOrMintToken } from '../harness/authtoken.mjs
 // Redirects are followed manually so every hop is re-checked: fetch's own
 // follow would happily deliver a public URL that 302s to 169.254.169.254,
 // which is the classic way past a first-URL-only guard.
-async function fetchRemoteAsDataUri(urlStr, kind = 'image') {
+//
+// `transport` is the request that carries the vetted address to the socket
+// (private-hosts.mjs); it is a parameter so the guard can be driven without
+// a network in a test.
+async function fetchRemoteAsDataUri(urlStr, kind = 'image', { transport = pinnedGet } = {}) {
   const REDIRECTS = new Set([301, 302, 303, 307, 308]);
   let current = new URL(urlStr);
   for (let hop = 0; ; hop++) {
@@ -789,15 +833,31 @@ async function fetchRemoteAsDataUri(urlStr, kind = 'image') {
     if (isPrivateHost(host)) {
       throw new Error(`refusing private/internal network fetch: ${host}`);
     }
-    if (!isPrivateHost(host) && !/^(\d{1,3}\.){3}\d{1,3}$/.test(host) && !host.includes(':')) {
-      if (await hostResolvesPrivate(host)) {
+    // The name is resolved ONCE and the connection is pinned to the answer
+    // that was vetted. Resolving twice — once for the check, once for the
+    // request — is the DNS-rebinding hole: a name with a TTL of zero answers
+    // public for the check and private for the request, and the request
+    // lands on 127.0.0.1 while the guard saw a public address.
+    let addresses = null;
+    if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(host) && !host.includes(':')) {
+      let vetted;
+      try {
+        vetted = await resolveVetted(host);
+      } catch {
+        // No answer, no verdict: a name that cannot be resolved cannot be
+        // vetted, and an unvetted name is not fetched.
+        throw new Error(`refusing fetch: ${host} could not be resolved, and an unresolvable name cannot be vetted`);
+      }
+      if (vetted.private) {
         throw new Error(`refusing fetch: ${host} resolves to a private/internal address`);
       }
+      addresses = vetted.addresses;
     }
 
-    const res = await fetch(current, {
-      redirect: 'manual',
-      signal: AbortSignal.timeout(15_000),
+    const res = await transport(current, {
+      addresses,
+      maxBytes: MAX_ATTACHMENT_BYTES,
+      timeoutMs: 15_000,
       headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
     });
     if (REDIRECTS.has(res.status)) {
@@ -814,8 +874,8 @@ async function fetchRemoteAsDataUri(urlStr, kind = 'image') {
       throw new Error(`unsupported content-type: ${contentType}`);
     }
     const arrayBuffer = await res.arrayBuffer();
-    if (arrayBuffer.byteLength > MAX_ATTACHMENT_BYTES) {
-      throw new Error(`attachment too large: ${arrayBuffer.byteLength} bytes`);
+    if (res.truncated || arrayBuffer.byteLength > MAX_ATTACHMENT_BYTES) {
+      throw new Error(`attachment too large: over ${MAX_ATTACHMENT_BYTES} bytes`);
     }
     const base64 = Buffer.from(arrayBuffer).toString('base64');
     return `data:${contentType};base64,${base64}`;
@@ -1386,6 +1446,7 @@ const server = http.createServer(async (req, res) => {
   // Preflight above stays open — browsers never carry auth on OPTIONS.
   if (!(req.method === 'GET' && (path === '/status' || path === '/health'))) {
     if (!authorized(req)) {
+      if (path === '/ext/events') noteUnauthenticatedExtension();
       res.writeHead(401, { 'content-type': 'text/plain', ...corsHeaders() });
       return res.end('unauthorized: missing or wrong loopback bearer token\n');
     }

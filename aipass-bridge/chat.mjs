@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execSync, spawnSync } from 'node:child_process';
-import { authHeaders } from './harness/authtoken.mjs';
+import { authHeaders, isLoopbackUrl } from './harness/authtoken.mjs';
 import { edgeWaits, rateWaits, waitLabel, RATE_REFUSED } from './harness/bridge.mjs';
 import { outbound, inbound } from './harness/waf.mjs';
 import { parseArgs } from './argv.mjs';
@@ -105,10 +105,13 @@ With a question, it answers and exits. Without one it stays interactive, where
 }
 
 const BRIDGE = (flag('bridge', 'http://127.0.0.1:8787') ?? '').replace(/\/+$/, '');
-// Every bridge-bound request carries the loopback bearer token; anything else
+// Bridge-bound requests carry the loopback bearer token; anything else
 // (upstream fetches) goes out untouched — the token must never leave the box.
+// The test is about the HOST, not about a string prefix: every call site
+// builds its URL as `${BRIDGE}${path}`, so "starts with BRIDGE" was true by
+// construction and a remote `--bridge` shipped the token there.
 const bridgeFetch = (url, opts = {}) => (
-  String(url).startsWith(BRIDGE)
+  isLoopbackUrl(url)
     ? fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers ?? {}) } })
     : fetch(url, opts)
 );

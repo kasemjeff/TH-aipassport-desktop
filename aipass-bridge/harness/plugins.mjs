@@ -6,9 +6,13 @@
 //
 //   rpc.method(name, fn)      answer a new /rpc method — the window calls it
 //   tools.register(marker, …) teach the model a new marker, e.g. `NOTE …`
-//                             ({risk: 'write'|'shell'} puts the marker behind
-//                             the permission gate a built-in of that kind
-//                             rides; without it the tool is trusted as before)
+//                             ({risk: 'read'|'write'|'shell'} says what the
+//                             marker does, and the marker then rides the same
+//                             permission gate a built-in of that kind rides.
+//                             Without a declaration it is classified like a
+//                             write: a plugin's code runs in this process
+//                             with the harness's access, so silence is not a
+//                             declaration of trust)
 //   panel({id, title, render}) add a section to the window's sidebar
 //   settings.define({key, …}) add a setting the window renders for you
 //   events.on(type, fn)       watch a run as it happens
@@ -32,7 +36,44 @@ import { pathToFileURL } from 'node:url';
 
 export const PLUGIN_API = 1;
 
+/**
+ * The name a plugin declares, read from its TEXT and never from its code.
+ *
+ * The enabled-list is a list of names, and a name can only be read by running
+ * the file — which is the one thing a disabled plugin must not do. So the name
+ * is taken from the source as written: a literal in the object the plugin
+ * exports. A name that is computed at runtime cannot be read this way, and
+ * such a file then answers to the name it is filed under.
+ */
+const DECLARED_NAME = /\bname\s*:\s*(['"`])([^'"`\r\n]{1,64})\1/;
+
+function declaredName(source) {
+  const text = String(source ?? '');
+  // The export is where the plugin's own object lives; a `name:` before it
+  // belongs to something else (an import, a helper), so the search starts
+  // there when there is an export to start from.
+  const at = text.indexOf('export default');
+  const tail = at >= 0 ? text.slice(at) : text;
+  const hit = DECLARED_NAME.exec(tail) ?? DECLARED_NAME.exec(text);
+  const name = String(hit?.[2] ?? '').trim();
+  return /^[A-Za-z0-9._-]{1,64}$/.test(name) ? name : '';
+}
+
+/** The name a plugin file is filed under: its own name, or the folder a
+ *  folder plugin lives in — that is how aipass installs one. */
+function filedName(file) {
+  const base = path.basename(file);
+  if (base.toLowerCase() === 'plugin.mjs') {
+    const folder = path.basename(path.dirname(file));
+    return folder && folder !== '.' ? folder : '';
+  }
+  return base.replace(/\.mjs$/i, '');
+}
+
 export class PluginManager {
+  /** The cache-buster's counter — every import gets its own module URL. */
+  #imports = 0;
+
   constructor({ dir = path.join(aipassHome(), 'plugins'), settings = null, events = null, log = () => {} } = {}) {
     this.dir = dir;
     this.settings = settings;
@@ -69,9 +110,27 @@ export class PluginManager {
   }
 
   /** Name filter: an empty list in settings means "everything found". */
-  #wanted(name) {
+  #wantedName(name) {
     const list = this.settings?.get('plugins') ?? [];
     return !Array.isArray(list) || list.length === 0 || list.includes(name);
+  }
+
+  /**
+   * The names a plugin file answers to, read WITHOUT running it.
+   *
+   * The declared name comes first: it is the name the settings list holds,
+   * and reading it from the source as text is the only way to know it before
+   * the file runs. A file whose name is computed at runtime cannot be read
+   * that way, and answers to the name it is filed under instead — which is
+   * how aipass installs a plugin (the folder or the file carries the name).
+   */
+  #namesOf(file, source) {
+    const declared = declaredName(source);
+    const filed = filedName(file);
+    return {
+      name: declared || filed,
+      label: declared || filed || path.basename(file),
+    };
   }
 
   /** The four registration tables, copied for a rollback. */
@@ -114,7 +173,27 @@ export class PluginManager {
         // answerable question without re-reading every file by hand.
         const bytes = fs.readFileSync(file);
         const stat = fs.statSync(file);
-        const mod = await import(`${pathToFileURL(file).href}?t=${Date.now()}`);
+        // The enabled-list is read BEFORE the import. A plugin that is
+        // disabled must not RUN, and the top level of a plugin is where it
+        // does its damage — reading ~/.ssh, reading process.env, spawning a
+        // process, fetching out. The old order imported the file first and
+        // only then decided not to register it, so "disabled" was a
+        // registration filter and never an execution one.
+        //
+        // The name is read from the source as text (declaredName) because a
+        // name can only be known by running the file. A file whose name
+        // cannot be read that way answers to the name it is filed under.
+        const names = this.#namesOf(file, bytes.toString('utf8'));
+        if (!this.#wantedName(names.name)) {
+          this.log(`plugin ${names.label} is disabled in settings — not importing it, so its code never runs`);
+          continue;
+        }
+        // A cache-buster that cannot collide: `Date.now()` alone repeats
+        // inside one millisecond, and two load() calls that close would then
+        // resolve to the same module URL — the ESM cache would hand back the
+        // OLD module, and an edited plugin would silently not be reloaded.
+        // The counter is what makes every import its own URL.
+        const mod = await import(`${pathToFileURL(file).href}?t=${Date.now()}-${++this.#imports}`);
         const plugin = mod.default ?? mod;
         if (typeof plugin?.setup !== 'function') throw new Error('no default export with a setup(ctx) function');
         const name = plugin.name ?? path.basename(file);
@@ -123,8 +202,12 @@ export class PluginManager {
         // afterwards would keep its tools, methods and panels live while the
         // listing said the plugin was off — "disabled in settings" has to mean
         // nothing of it is loaded, not that the window forgot to mention it.
-        if (!this.#wanted(name)) {
-          this.log(`plugin ${name} is disabled in settings — not registering it`);
+        // The name the plugin declares is the name the settings list holds, so
+        // it is the name that decides here — and a file whose name could not
+        // be read without running it was imported on the strength of the name
+        // it is filed under, which the log says out loud.
+        if (!this.#wantedName(name)) {
+          this.log(`plugin ${name} is disabled in settings — not registering it (the file was imported to learn its name)`);
           continue;
         }
         // A plugin that needs a newer API must not run setup at all: half a
@@ -174,9 +257,12 @@ export class PluginManager {
       tools: {
         // The model writes `MARKER rest-of-line` (or a block ending in END when
         // takesBody is true) and gets the string back as a tool result.
-        // `risk` is optional and additive: 'read' (or nothing) keeps the old
-        // behavior, 'write'/'shell' routes the marker through the same
-        // permission gate a built-in of that kind rides (loop.mjs).
+        // `risk` is the plugin's own word about what the marker does: 'read'
+        // keeps it a read, 'write' and 'shell' route it through the same
+        // permission gate a built-in of that kind rides (loop.mjs). Left out,
+        // the marker is classified like a write (permissions.mjs#classifyPlugin)
+        // — trust is what a plugin asks for by name, not what it gets by
+        // silence.
         register: (marker, impl, { takesBody = false, description = '', risk = null } = {}) => {
           if (!/^[A-Z][A-Z0-9_-]*$/.test(marker)) throw new Error(`marker must be UPPER_SNAKE, got ${marker}`);
           if (typeof impl !== 'function') throw new Error('tools.register(marker, fn)');

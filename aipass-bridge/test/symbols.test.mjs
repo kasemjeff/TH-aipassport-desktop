@@ -10,10 +10,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { tempDir } from './harness.mjs';
 import { Overlay } from '../harness/overlay.mjs';
 import { createTools } from '../harness/tools.mjs';
 import { runTask } from '../harness/loop.mjs';
+import { saveMemory, memoryPath } from '../harness/memory-store.mjs';
 
 // The symbol index is cached under the state home. Point it at a temp dir so
 // the suite never writes into the real ~/.aipass.
@@ -52,6 +54,27 @@ test('SYMBOLS, DEF and REFS answer from the project', async () => {
 
   const refs = await tools.refs('greet');
   assert.match(refs, /src\/use\.js:2/, 'and the reference names the other file');
+});
+
+test("the index and the memory store are the owner's alone", { skip: process.platform === 'win32' ? 'POSIX modes only' : false }, async () => {
+  // Both hold user data: the index names every source file and every symbol
+  // in the project, and the memory store holds the model's durable facts
+  // about it. Neither may be world-readable.
+  const root = tempDir(PROJECT);
+  const tools = toolsIn(root);
+  await tools.symbols('src/app.js');
+
+  const hash = crypto.createHash('sha1').update(path.resolve(root)).digest('hex').slice(0, 12);
+  const indexFile = path.join(HOME, 'symbols', `${hash}.json`);
+  assert.ok(fs.existsSync(indexFile), 'the index was written');
+  assert.equal(fs.statSync(indexFile).mode & 0o777, 0o600, "the index is the owner's alone");
+  assert.equal(fs.statSync(path.join(HOME, 'symbols')).mode & 0o777, 0o700, 'and so is the folder it is in');
+
+  saveMemory(root, ['the build is npm run build']);
+  const facts = memoryPath(root);
+  assert.ok(fs.existsSync(facts), 'the facts were written');
+  assert.equal(fs.statSync(facts).mode & 0o777, 0o600, "the memory file is the owner's alone");
+  assert.equal(fs.statSync(path.dirname(facts)).mode & 0o777, 0o700, 'and so is the folder it is in');
 });
 
 test('a code-navigation marker in a reply reaches the tool', async () => {

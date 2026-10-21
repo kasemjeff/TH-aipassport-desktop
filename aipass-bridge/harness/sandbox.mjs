@@ -46,11 +46,54 @@ export function sandboxRoot(root) {
   return path.join(aipassHome(), 'run', `${slug}-${hash}`);
 }
 
-/** A fresh sandbox directory for one RUN. */
+/**
+ * The stamp that says who owns a projection.
+ *
+ * It sits NEXT to the projection, never inside it: the sandbox is a copy of
+ * the user's project, and a file of ours inside it would show up in the
+ * command's own `git status` and in the tree it walks.
+ */
+const OWNER_SUFFIX = '.owner';
+
+/** A fresh sandbox directory for one RUN, stamped with its owner. */
 export function createSandbox(root) {
   const dir = sandboxRoot(root);
   fs.mkdirSync(dir, { recursive: true });
-  return fs.mkdtempSync(path.join(dir, 'run-'));
+  const sandbox = fs.mkdtempSync(path.join(dir, 'run-'));
+  // The owner stamp: the pid that made this projection. A janitor reads it to
+  // tell a projection a dead backend left behind from one a live run is
+  // still using — the difference between "collect it now" and "leave it".
+  try {
+    fs.writeFileSync(`${sandbox}${OWNER_SUFFIX}`, JSON.stringify({ pid: process.pid, at: Date.now() }));
+  } catch { /* the stamp is a hint, not a requirement */ }
+  return sandbox;
+}
+
+/** Remove a projection and its owner stamp. */
+export function removeSandbox(sandbox) {
+  if (!sandbox) return;
+  try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* already gone */ }
+  try { fs.rmSync(`${sandbox}${OWNER_SUFFIX}`, { force: true }); } catch { /* already gone */ }
+}
+
+/** The pid that owns a projection, or null when the stamp is missing or unreadable. */
+async function readOwner(stamp) {
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(stamp, 'utf8'));
+    return Number.isInteger(parsed?.pid) ? parsed : null;
+  } catch { return null; }
+}
+
+/**
+ * Is that pid still running?
+ *
+ * EPERM means it exists and is simply not ours to signal — that is a live
+ * process, not a dead one. Everything else (ESRCH, a pid that never existed)
+ * means the owner is gone.
+ */
+function alive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (err) { return err?.code === 'EPERM'; }
 }
 
 /**
@@ -58,25 +101,41 @@ export function createSandbox(root) {
  *
  * A RUN removes its own sandbox when it ends, but a backend that was killed
  * mid-command leaves the whole copy behind — and nothing else ever collected
- * it. The age is the safety margin: a live run's wall-clock budget is half an
- * hour by default, so six hours is well past any run that could still be
- * using one.
+ * it. Two margins, because there are two cases:
+ *
+ *   - the owner is gone (the stamp names a pid that is not running): nobody
+ *     can ever finish that projection, so it waits out a short grace and
+ *     goes — a crash costs minutes of disk, not six hours of it;
+ *   - the owner is alive, or the stamp is missing (an older projection): the
+ *     age decides, because a live run's wall-clock budget is half an hour by
+ *     default and six hours is well past any run that could still be using
+ *     one.
+ *
+ * Async on purpose: the tree it deletes is a copy of the user's project, and
+ * a synchronous removal of it would freeze the backend's event loop — the
+ * window's stream, its pings, every other call — for the length of the walk.
  */
-export function sweepSandboxes(root, { maxAgeMs = 6 * 60 * 60 * 1000 } = {}) {
+export async function sweepSandboxes(root, { maxAgeMs = 6 * 60 * 60 * 1000, deadGraceMs = 10 * 60 * 1000 } = {}) {
   const dir = sandboxRoot(root);
   let names = [];
-  try { names = fs.readdirSync(dir); } catch { return 0; }
+  try { names = await fs.promises.readdir(dir); } catch { return 0; }
   const now = Date.now();
   let removed = 0;
   for (const name of names) {
+    if (name.endsWith(OWNER_SUFFIX)) continue; // a stamp goes with its projection
     if (!name.startsWith('run-')) continue;
     const target = path.join(dir, name);
+    const stamp = path.join(dir, `${name}${OWNER_SUFFIX}`);
+    let age;
+    try { age = now - (await fs.promises.stat(target)).mtimeMs; } catch { continue; }
+    const owner = await readOwner(stamp);
+    const limit = owner && !alive(owner.pid) ? deadGraceMs : maxAgeMs;
+    if (age < limit) continue; // a run may still own it
     try {
-      const st = fs.statSync(target);
-      if (now - st.mtimeMs < maxAgeMs) continue; // a run may still own it
-      fs.rmSync(target, { recursive: true, force: true });
+      await fs.promises.rm(target, { recursive: true, force: true });
       removed++;
-    } catch { /* already gone */ }
+    } catch { /* in use, or already gone */ }
+    try { await fs.promises.rm(stamp, { force: true }); } catch { /* already gone */ }
   }
   return removed;
 }

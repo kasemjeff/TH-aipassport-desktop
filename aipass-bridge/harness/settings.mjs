@@ -9,6 +9,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { DEFAULT_MODEL_BUDGETS } from './compact.mjs';
+import { writeFileAtomic } from './atomic-write.mjs';
+import { formatLogLine } from './log-line.mjs';
 
 /**
  * Where the app's state lives, whichever surface is asking.
@@ -120,6 +122,20 @@ export const DEFAULTS = {
   // where the chat tab lives, and whether a run that needs one opens it itself
   chatUrl: 'https://de.aipass.net/chat',
   autoOpenTab: true,
+  // What the run's preamble may offer: the case-insensitive SEARCH, the
+  // ATTACH of a file that is not plain text, and the scratch conversation
+  // for a web question. All three default to false — the harness's own
+  // defaults (harness/harness.mjs), which is where the values come from.
+  // They were missing here, and the applier in rpc.mjs reads all three: a
+  // key that is not there reads as `undefined`, and that overwrote the
+  // harness default with nothing.
+  searchI: false,
+  attach: false,
+  webScratch: false,
+  // A fetch the model chose is a question the person sees — unless the
+  // machine has been told to let it through. The window asks (and says
+  // where); the CLI's `--allow-fetch` says yes on the command line.
+  allowFetch: false,
   // where staged uploads wait before they are sent
   uploads: null,
 };
@@ -182,22 +198,107 @@ export const SECRET_RULES = [
   denys('aipass*.md'), denys('**/aipass*.md'),
 ];
 
+/**
+ * The keys that must never enter a settings object.
+ *
+ * `__proto__` is the one that bites. `JSON.parse` puts it in as an own
+ * property, and `Object.assign(target, settings)` copies own properties with
+ * a SET — the inherited `__proto__` setter then replaces the target's
+ * prototype. So a settings file (or an RPC payload) carrying
+ * `{"compaction": {"__proto__": {...}}}` could hand every consumer of a
+ * `Settings` object an object whose prototype somebody else chose, and the
+ * next `Object.assign` in the chain would copy the injected keys onto it.
+ * `constructor` and `prototype` are the other two names a merge walks into.
+ *
+ * The rule is therefore not "the prototype must not change" — that is what
+ * the spread and the clone already guarantee — but "the key must not be
+ * there at all", because the key is what a later `Object.assign` acts on.
+ */
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** Every dangerous key, at every depth, gone. */
+function stripDangerousKeys(value, depth = 0) {
+  if (depth > 12 || !value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    for (const item of value) stripDangerousKeys(item, depth + 1);
+    return value;
+  }
+  for (const key of Object.keys(value)) {
+    if (DANGEROUS_KEYS.has(key)) {
+      // The OWN property, never the inherited one: `delete` on a name the
+      // object does not own would be a no-op, and going through the setter
+      // would be worse than the thing we are removing.
+      Reflect.deleteProperty(value, key);
+      continue;
+    }
+    stripDangerousKeys(value[key], depth + 1);
+  }
+  return value;
+}
+
 export class Settings {
-  /** @param {string} [dir] where the file lives; defaults to `aipassHome()` */
-  constructor(dir = aipassHome(), file = 'settings.json') {
+  /**
+   * @param {string} [dir] where the file lives; defaults to `aipassHome()`
+   * @param {string} [file] the file's name inside that directory
+   * @param {Function} [log] where a problem with the file is reported; the
+   *   default writes one line to stderr, so a broken file is never silent
+   */
+  constructor(dir = aipassHome(), file = 'settings.json', log = null) {
     this.dir = dir;
     this.file = path.join(dir, file);
+    this.log = typeof log === 'function'
+      ? log
+      : (text) => console.error(formatLogLine({ level: 'warn', msg: text }));
     this.values = structuredClone(DEFAULTS);
+    // What the last load found wrong, newest last. The window can read it;
+    // the logger says it out loud.
+    this.problems = [];
     this.reload();
   }
 
+  /** A problem with the settings file, said once and kept. */
+  #problem(text) {
+    this.problems.push(text);
+    try { this.log(text); } catch { /* a logger must not break the load */ }
+  }
+
+  /**
+   * Read the file again and adopt what it says.
+   *
+   * A file that is not there is the normal first run: the defaults are the
+   * answer and there is nothing to report. A file that IS there and cannot
+   * be read — or cannot be parsed — is a problem, and it is reported: both
+   * were swallowed alike, so a corrupted file looked exactly like an empty
+   * one and the app went quietly back to `mode: 'ask'` with no rules, as if
+   * the person had never set anything. The safe defaults still apply; they
+   * are just no longer the only thing that happened.
+   */
   reload() {
+    this.problems = [];
+    let raw;
     try {
-      const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      this.values = Settings.sane({ ...structuredClone(DEFAULTS), ...parsed, compaction: { ...DEFAULTS.compaction, ...(parsed.compaction ?? {}) } });
-    } catch {
-      // Missing or unreadable is the normal first-run case; defaults apply.
+      raw = fs.readFileSync(this.file, 'utf8');
+    } catch (err) {
+      if (err?.code !== 'ENOENT') {
+        this.#problem(`the settings file ${this.file} cannot be read (${err?.code ?? err?.message}) — the defaults are in use`);
+      }
+      this.values = structuredClone(DEFAULTS);
+      return this.values;
     }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      this.#problem(`the settings file ${this.file} is not valid JSON (${err?.message}) — the defaults are in use`);
+      this.values = structuredClone(DEFAULTS);
+      return this.values;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      this.#problem(`the settings file ${this.file} is not a settings object — the defaults are in use`);
+      this.values = structuredClone(DEFAULTS);
+      return this.values;
+    }
+    this.values = Settings.sane({ ...structuredClone(DEFAULTS), ...parsed, compaction: { ...DEFAULTS.compaction, ...(parsed.compaction ?? {}) } });
     return this.values;
   }
 
@@ -211,9 +312,9 @@ export class Settings {
     const keep = { root: this.values.root, projects: this.values.projects };
     const next = Settings.sane({ ...structuredClone(DEFAULTS), ...keep });
     fs.mkdirSync(this.dir, { recursive: true });
-    const tmp = `${this.file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n');
-    fs.renameSync(tmp, this.file);
+    // The shared atomic swap, not a copy of it: a second copy of a swap is a
+    // second copy that can disagree with the first about what "atomic" means.
+    writeFileAtomic(this.file, JSON.stringify(next, null, 2) + '\n');
     this.values = next;
     return next;
   }
@@ -230,6 +331,11 @@ export class Settings {
    */
   static sane(values) {
     const next = structuredClone(values);
+    // The dangerous keys go first, before anything reads a value out of the
+    // object: the sanitiser is the one place every surface writes through,
+    // so a settings file and an RPC payload are both clean by the time any
+    // consumer can see them.
+    stripDangerousKeys(next);
     const num = (v, min, max, fallback) => {
       const n = Number(v);
       if (!Number.isFinite(n)) return fallback;
@@ -355,9 +461,9 @@ export class Settings {
     if (patch.compaction) next.compaction = { ...this.values.compaction, ...patch.compaction };
     next = Settings.sane(next);
     fs.mkdirSync(this.dir, { recursive: true });
-    const tmp = `${this.file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n');
-    fs.renameSync(tmp, this.file); // atomic: a crash mid-write never loses settings
+    // The shared atomic swap: a crash mid-write never loses settings, and
+    // two writers (this one and a CLI) never share a temp name.
+    writeFileAtomic(this.file, JSON.stringify(next, null, 2) + '\n');
     this.values = next;
     return next;
   }

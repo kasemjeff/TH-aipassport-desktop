@@ -47,9 +47,24 @@ const bridgeUp = () =>
     .then((r) => r.ok)
     .catch(() => false);
 
+// Exit by drain, not process.exit(): on Windows, process.exit() right after
+// network I/O races Node's teardown and trips libuv's assert in
+// win/async.c:94 (0xC0000409) — the process aborts *after* printing a
+// perfect report, so `aipass status` showed everything and still exited with
+// a crash code (nodejs/node#56645). Setting exitCode and letting the loop
+// run out produces the same code cleanly.
+//
+// The loop only runs out once the keep-alive socket is gone, so the sockets
+// are drained on the way out: an open connection would hold the process for
+// seconds after the work is done.
+function finish(code = 0) {
+  process.exitCode = code;
+  try { globalThis[Symbol.for('undici.globalDispatcher.1')]?.destroy?.(); } catch { /* nothing to drain */ }
+}
+
 /** Ensure the bridge is running — starting it in the background if it is not. */
 async function ensureBridge() {
-  if (await bridgeUp()) return;
+  if (await bridgeUp()) return true;
   // The help text has always promised `aipass` starts the bridge itself; this
   // is that promise. Detached, stdio ignored, pid recorded — `aipass stop`
   // reads exactly this file — then wait for /status before talking to it.
@@ -61,7 +76,7 @@ async function ensureBridge() {
   while (Date.now() < deadline) {
     if (await bridgeUp()) {
       console.log(dim(`started the bridge in the background (pid ${child.pid}; aipass stop ends it)`));
-      return;
+      return true;
     }
     await new Promise((r) => setTimeout(r, 300));
   }
@@ -72,7 +87,8 @@ async function ensureBridge() {
     dim(`  It was started in the background but did not answer. Run it in the foreground to see why:\n`) +
     `  ${dim('$')} \x1b[36maipass dev\x1b[0m   ${dim('(or npm run dev)')}\n\n`
   );
-  process.exit(1);
+  finish(1);
+  return false;
 }
 
 function stopBridge() {
@@ -130,91 +146,91 @@ const HELP = `aipass — de.aipass.net from your terminal
 switch (cmd) {
   case undefined:
   case 'chat':
-    await ensureBridge();
-    process.exit(await run('chat.mjs', ['--bridge', BRIDGE, ...rest]));
+    if (!(await ensureBridge())) break;
+    finish(await run('chat.mjs', ['--bridge', BRIDGE, ...rest]));
     break;
 
   case 'dev':
-    process.exit(await run('bridge/server.mjs', rest));
+    finish(await run('bridge/server.mjs', rest));
     break;
 
   case 'desktop':
     // The desktop window: bridge (if needed) + harness backend + UI.
-    process.exit(await run('../../desktop/main.mjs', rest));
+    finish(await run('../../desktop/main.mjs', rest));
     break;
 
   case 'agent':
-    await ensureBridge();
+    if (!(await ensureBridge())) break;
     // agent.mjs already defaults --root to the current directory.
-    process.exit(await run('agent.mjs', [...rest, '--bridge', BRIDGE]));
+    finish(await run('agent.mjs', [...rest, '--bridge', BRIDGE]));
     break;
 
   case 'models':
   case 'conversations':
   case 'credits':
   case 'styles':
-    await ensureBridge();
-    process.exit(await run('list.mjs', [cmd, ...rest], { env: { ...process.env, AIPASS_BRIDGE: BRIDGE } }));
+    if (!(await ensureBridge())) break;
+    finish(await run('list.mjs', [cmd, ...rest], { env: { ...process.env, AIPASS_BRIDGE: BRIDGE } }));
     break;
 
   case 'providers':
     // The provider registry is a file, not a bridge: it is read and written
     // here, so it needs no bridge and no extension.
-    process.exit(await run('providers.mjs', rest));
+    finish(await run('providers.mjs', rest));
     break;
 
   case 'doctor':
-    process.exit(await run('doctor.mjs', ['--bridge', BRIDGE, ...rest]));
+    finish(await run('doctor.mjs', ['--bridge', BRIDGE, ...rest]));
     break;
 
   case 'setup-assistant':
-    await ensureBridge();
-    process.exit(await run('setup-assistant.mjs', ['--bridge', BRIDGE, ...rest]));
+    if (!(await ensureBridge())) break;
+    finish(await run('setup-assistant.mjs', ['--bridge', BRIDGE, ...rest]));
     break;
 
   case 'setup':
-    process.exit(await run('setup.mjs', rest));
+    finish(await run('setup.mjs', rest));
     break;
 
   case 'memory':
-    process.exit(await run('memory.mjs', rest));
+    finish(await run('memory.mjs', rest));
     break;
 
   case 'relocate':
-    process.exit(await run('relocate.mjs', rest));
+    finish(await run('relocate.mjs', rest));
     break;
 
   case 'scale':
-    process.exit(await run('scale.mjs', rest));
+    finish(await run('scale.mjs', rest));
     break;
 
   case 'mcp':
-    process.exit(await run('mcp.mjs', rest));
+    finish(await run('mcp.mjs', rest));
     break;
 
   case 'plugin':
-    process.exit(await run('plugin.mjs', rest));
+    finish(await run('plugin.mjs', rest));
     break;
 
   case 'status':
     await status();
-    process.exit(0);
+    finish(0);
     break;
 
   case 'stop':
     stopBridge();
-    process.exit(0);
+    finish(0);
     break;
 
   case 'help':
   case '--help':
   case '-h':
     console.log(HELP);
-    process.exit(0);
+    finish(0);
     break;
 
   default:
     // Anything else is treated as a one-shot question.
-    await ensureBridge();
-    process.exit(await run('chat.mjs', ['--bridge', BRIDGE, cmd, ...rest]));
+    if (!(await ensureBridge())) break;
+    finish(await run('chat.mjs', ['--bridge', BRIDGE, cmd, ...rest]));
 }

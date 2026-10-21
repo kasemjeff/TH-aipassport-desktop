@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { outbound, inbound, SUBSTITUTIONS, RESTORE } from '../harness/waf.mjs';
+import { outbound, inbound, SUBSTITUTIONS, RESTORE, restoreTable } from '../harness/waf.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const read = (rel) => fs.readFileSync(path.join(HERE, '..', rel), 'utf8');
@@ -23,6 +23,25 @@ test('chat.mjs carries no fork of the WAF table', () => {
   assert.match(src, /from '\.\/harness\/waf\.mjs'/, 'chat.mjs imports the shared table');
   // agent.mjs imports the same module through the harness core.
   assert.match(read('harness/waf.mjs'), /export const SUBSTITUTIONS/);
+});
+
+// The window shows the real text behind the wire spellings — a URL a search
+// brought back is HTTPS-URL… until somebody puts it back. It must show the
+// SAME text the model saw, so it asks the backend for the table instead of
+// keeping a copy: one table, one owner, whatever surface asks.
+test('the window keeps no copy of the WAF table — it asks the backend for it', () => {
+  const ui = read('../desktop/ui/waf-restore.js');
+  assert.ok(!/HTTPS-URL/.test(ui), 'the window must not spell a placeholder out');
+  assert.ok(!/new RegExp\(['"]/.test(ui), 'and must not build rules of its own');
+  assert.match(ui, /setRestoreTable/, 'it takes the rules it is given');
+
+  const pairs = restoreTable();
+  assert.equal(pairs.length, RESTORE.length, 'the table travels whole');
+  const rebuilt = pairs.map(([source, flags, to]) => [new RegExp(source, flags), to]);
+  const text = 'see HTTPS-URLmedium.com/a and LCLHST and CONSOLE-LOG';
+  const restored = rebuilt.reduce((acc, [re, to]) => acc.replace(re, to), text);
+  assert.equal(restored, 'see https://medium.com/a and localhost and console.log',
+    'the window puts the text back exactly as the backend would');
 });
 
 // Every placeholder has a restore, or a file the model read comes back with a

@@ -5,7 +5,7 @@
 //   npm run setup-assistant
 import fs from 'node:fs';
 import { ASSISTANT_CHARACTER } from './assistant-prompt.mjs';
-import { authHeaders } from './harness/authtoken.mjs';
+import { authHeaders, isLoopbackUrl } from './harness/authtoken.mjs';
 import { parseArgs } from './argv.mjs';
 
 const argv = process.argv.slice(2);
@@ -33,9 +33,11 @@ resend it. Prints the id to put in AIPASS_ASSISTANT_ID.`);
 
 const BRIDGE = (flag('bridge', process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787')).replace(/\/+$/, '');
 // Bridge-bound requests carry the loopback bearer token (see authtoken.mjs);
-// /status stays open, so the probe below needs no header.
+// /status stays open, so the probe below needs no header. The test is about
+// the HOST: a string prefix would be true by construction and would ship the
+// token to a remote bridge.
 const bridgeFetch = (url, opts = {}) => (
-  String(url).startsWith(BRIDGE)
+  isLoopbackUrl(url)
     ? fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers ?? {}) } })
     : fetch(url, opts)
 );

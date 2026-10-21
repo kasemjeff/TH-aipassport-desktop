@@ -116,7 +116,7 @@ test('two projects never share a projection folder', () => {
   assert.notEqual(a, b, 'the folder name carries the path, not only the slug');
 });
 
-test('the janitor collects what a killed backend left behind', () => {
+test('the janitor collects what a killed backend left behind', async () => {
   const dir = tempDir();
   const root = sandboxRoot(dir);
   fs.mkdirSync(root, { recursive: true });
@@ -129,11 +129,54 @@ test('the janitor collects what a killed backend left behind', () => {
   const old = new Date(Date.now() - 12 * 60 * 60 * 1000);
   fs.utimesSync(stale, old, old);
 
-  const removed = sweepSandboxes(dir, { maxAgeMs: 6 * 60 * 60 * 1000 });
+  const removed = await sweepSandboxes(dir, { maxAgeMs: 6 * 60 * 60 * 1000 });
   assert.equal(removed, 1, 'the abandoned projection is gone');
   assert.equal(fs.existsSync(stale), false);
   assert.equal(fs.existsSync(fresh), true, 'and a live one is left alone');
   fs.rmSync(fresh, { recursive: true, force: true });
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a projection whose owner is gone is collected long before the age margin', async () => {
+  // The crash case: the backend died mid-RUN and the copy of the project is
+  // still on disk. Waiting six hours for it is six hours of disk for a
+  // projection nobody can ever finish — so a dead owner waits out minutes.
+  const dir = tempDir();
+  const root = sandboxRoot(dir);
+  fs.mkdirSync(root, { recursive: true });
+  const dead = path.join(root, 'run-dead');
+  fs.mkdirSync(dead, { recursive: true });
+  fs.writeFileSync(path.join(dead, 'copy.txt'), 'x');
+  // A pid that cannot be running: the stamp names a process that is gone.
+  fs.writeFileSync(`${dead}.owner`, JSON.stringify({ pid: 0x7ffffffe, at: Date.now() }));
+  const old = new Date(Date.now() - 30 * 60 * 1000);
+  fs.utimesSync(dead, old, old);
+
+  const removed = await sweepSandboxes(dir, { maxAgeMs: 6 * 60 * 60 * 1000, deadGraceMs: 10 * 60 * 1000 });
+  assert.equal(removed, 1, 'the dead owner\'s projection is gone');
+  assert.equal(fs.existsSync(dead), false);
+  assert.equal(fs.existsSync(`${dead}.owner`), false, 'and so is its stamp');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a projection a live run owns is left alone, however old it looks', async () => {
+  const dir = tempDir();
+  const root = sandboxRoot(dir);
+  fs.mkdirSync(root, { recursive: true });
+  const live = path.join(root, 'run-live');
+  fs.mkdirSync(live, { recursive: true });
+  // This process is the owner, and it is running.
+  fs.writeFileSync(`${live}.owner`, JSON.stringify({ pid: process.pid, at: Date.now() }));
+  // Older than the dead owner's grace, younger than the age margin: this is
+  // the case the dead-owner path must not touch.
+  const old = new Date(Date.now() - 30 * 60 * 1000);
+  fs.utimesSync(live, old, old);
+
+  const removed = await sweepSandboxes(dir, { maxAgeMs: 6 * 60 * 60 * 1000, deadGraceMs: 10 * 60 * 1000 });
+  assert.equal(removed, 0, 'a live owner keeps its projection');
+  assert.equal(fs.existsSync(live), true);
+  fs.rmSync(live, { recursive: true, force: true });
+  fs.rmSync(`${live}.owner`, { force: true });
   fs.rmSync(root, { recursive: true, force: true });
 });
 

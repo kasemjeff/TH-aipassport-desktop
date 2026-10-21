@@ -27,14 +27,14 @@ This directory holds both layers, and the difference decides how you work:
 | `harness/loop.mjs` | runs the model loop; dispatches tools as `await tools[call.kind](…)` (the tools are async); guards: steps, wall clock, `maxCredits`, R1 stagnation. |
 | `harness/harness.mjs` | assembles a run; the DONE checker (see `../docs/SPEC_CHECKER.md`). |
 | `harness/rpc.mjs` | desktop backend: `/rpc`, `/events` SSE with a bounded replay buffer (count + bytes, frames precomputed), fs list/read (async), permission answers. The `needs_tab` listener hangs off the shared event bus so autoOpenTab works in every project. |
-| `harness/tools.mjs` | the marker tools (NEED/SEARCH/EDIT/CREATE/RUN/ATTACH/…). Async I/O only; staged `.mjs` writes are syntax-checked via spawn; long results spill to `.aipass/spill/`. |
+| `harness/tools.mjs` | the marker tools (NEED/SEARCH/EDIT/CREATE/RUN/ATTACH/…). Async I/O only; staged `.mjs` writes are syntax-checked via spawn; long results spill to `.aipass/spill/`. A web search's sources are read and their redirects resolved in `harness/web-sources.mjs`. |
 | `harness/overlay.mjs` | pending-writes map; `diskText`/`changeFor` memoized on mtime+size. |
 | `harness/sandbox.mjs` | `materializeTree`: async, gated parallel copies, heavy dirs junctioned, `.git` never projected (a boundary marker is written instead). |
 | `harness/session.mjs` | session JSONL: append-only, padded fixed-width header (2048 B) rewritten in place, `HEADER_EVERY = 25` batches the rewrite. |
 | `harness/protocol.mjs` | marker grammar; compiled regexes cached. `harness/compact.mjs` compacts context. `harness/waf.mjs` is the substitution table. |
 | `harness/authtoken.mjs` | mint/cache `~/.aipass/.token` (memo revalidated on mtime+size). |
 | `harness/providers.mjs` | the provider registry: the specs (`~/.aipass/providers.json`) and the keys (`~/.aipass/credentials.json`, owner-only; an env var named by a spec wins). `harness/provider-client.mjs` is the other half — the OpenAI-compatible and Anthropic adapters that answer the same client contract as the bridge. A provider is a swap, not a second loop. |
-| `harness/permissions.mjs`, `rules.mjs`, `plugins.mjs`, `skills.mjs`, `settings.mjs`, `events.mjs`, `log-file.mjs`, `log-line.mjs`, `argguard.mjs`, `gitignore.mjs`, `bridge.mjs`, `lang.mjs` | supporting systems; the deep reference is `docs/DOCS.md` (below). |
+| `harness/permissions.mjs`, `rules.mjs`, `plugins.mjs`, `skills.mjs`, `settings.mjs`, `events.mjs`, `log-file.mjs`, `log-line.mjs`, `argguard.mjs`, `gitignore.mjs`, `bridge.mjs`, `lang.mjs`, `open-command.mjs`, `browser.mjs` | supporting systems; the deep reference is `docs/DOCS.md` (below). The browser is one of them: Chrome first (the extension is a Chrome MV3 extension, so a tab in Edge answers nobody), and a private profile makes the browser an instance of its own — so the suite closes what it opened, never the developer's own Chrome. |
 | `bin/aipass.mjs` | CLI dispatcher (`aipass dev\|agent\|models\|status\|stop\|…`); everything but `dev` auto-starts a detached bridge and writes `~/.aipass/bridge.pid` — that is the file `aipass stop` reads. Install via `install.sh` / `install.ps1`. |
 | `chat.mjs`, `agent.mjs`, `list.mjs`, `stats.mjs`, `doctor.mjs`, `setup-assistant.mjs`, `assistant-prompt.mjs`, `difflib.mjs`, `providers.mjs` | terminal clients and helpers. `providers.mjs` is the registry from the terminal (`aipass providers list|add|remove|use|test`). |
 
@@ -60,8 +60,7 @@ Read it before non-trivial bridge changes and keep it current with them.
   `encodeTurboStream()` in `test/harness.mjs` builds fixtures the same way.
   Keep the pair in sync.
 - **Job lifecycle**: `delta` → flush → `done|fail|abort`; nothing reaches the
-  consumer after settle, and the delta buffer always flushes before settling
-  (retry semantics depend on which parts were delivered).
+  consumer after settle, and the delta buffer always flushes before settling.
 - **SSE replay**: sequence numbers are monotonic; a reconnect with `since`
   must never receive a duplicate frame; the window is bounded by count and
   bytes.
@@ -72,17 +71,32 @@ Read it before non-trivial bridge changes and keep it current with them.
   `process.env`→`PROCESS-ENV`, `.env`→`DOT-ENV`, SSRF IPs, …) and `inbound()`
   restores everything read back — including the model's own actions — so bytes
   written to disk are exactly the file's.
-- **`sayResilient()`**: on a 403, halve the message and resend the halves in
-  order (recursively, down to ~300 bytes); last resort `redact()` blanks lines
-  matching `RISKY_LINE`. Tool results are capped at `--max-result` bytes.
-  Both the WAF encoding and that rewrite chain are the AiPASS edge's own: a
-  provider client sets `waf = false`, so its bytes go out as they are and its
-  403 is a permission error, not a payload to split.
+- **`sayResilient()`**: on a 403 the chain is `redact()` → a **shorter** copy
+  of a big message (the run's next step must happen) → the identical message
+  waited out (`EDGE_WAITS_MS`, a pace refusal) → the message halved and resent
+  (down to ~300 bytes). A small message is never shortened (that is the pace
+  case), and neither is the run's first message — it carries the protocol. A
+  provider client sets `waf = false`, so its 403 is a permission error, not a
+  payload to split (`docs/LOOP_DESIGN.md` has the chain).
+  Verify: "a refused big message is sent again, shorter, so the run continues"
 - **A provider client owns the history.** de.aipass.net keeps the conversation
   and takes one user message per request; an API provider is given the whole
-  list, so `harness/provider-client.mjs` keeps one array per conversation id —
-  the same id the harness already passes around.
-- **Overlay FS**: edits land in an in-memory Map so the model can read back its
+  list, so `harness/provider-client.mjs` keeps one array per conversation id.
+- **A grant is not a permanent yes.** The user's own path rules and the
+  secret floor are checked BEFORE the remembered "always" grants: a `deny`
+  rule written later wins over a grant given earlier, and a secret file
+  stays denied in every mode. The grant still beats the safety floor.
+  Verify: "a grant does not outlive the rule that came after it, and never reaches a secret file"
+- **A session id is matched whole.** The file is `session-<id>.jsonl` and the
+  id is the whole name: a substring match made `session.delete {id:"a"}` land
+  on whichever session came first. The lookup is scoped to the caller's
+  project, so one window cannot act on another's session.
+  Verify: "a short session id does not delete a session"
+- **A relative path is relative to the project.** `/file src/app.js` and the
+  window's file panel mean "the file in the project I am looking at", so a
+  relative attachment path resolves against that root, not the backend's.
+  Verify: "a relative attachment path is relative to the project, not to the backend"
+- **The overlay FS**: edits land in an in-memory Map so the model can read back its
   own pending work; apply flushes to disk. `EDIT` refuses a `FIND` block that
   isn't unique.
 - **The agent's marker protocol**: actions are prose lines, one per line —
@@ -110,6 +124,6 @@ Harness and clients: `AIPASS_HOME` (state dir), `AIPASS_BRIDGE` (bridge URL),
 `AIPASS_SPILL_KEEP` (spill files kept per project, 200),
 `AIPASS_ELIDE` (elision tier on — off by default),
 `AIPASS_MEMORY` (`off` stops carrying facts across rotations),
-`AIPASS_LOG_MAX_BYTES` (log rotation cap, 5 MB), `AIPASS_LOG_FORMAT=json`.
+`AIPASS_LOG_MAX_BYTES` (log rotation cap, 5 MB), `AIPASS_LOG_FORMAT=json`, `AIPASS_BROWSER_PROFILE` / `AIPASS_BROWSER_PIDFILE` (the suite's own browser: a private Chrome profile, and the pids it opened — set by `scripts/test.mjs`, not by a person).
 
 Desktop: `AIPASS_DESKTOP_PORT` (8790), `AIPASS_DESKTOP_NO_OPEN`.

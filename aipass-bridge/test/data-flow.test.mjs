@@ -9,13 +9,13 @@ import http from 'node:http';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createRpc } from '../harness/rpc.mjs';
+
 import { Settings } from '../harness/settings.mjs';
 import { SessionStore } from '../harness/session.mjs';
 import { RulesStore } from '../harness/rules.mjs';
 import { loadMemory, saveMemory } from '../harness/memory-store.mjs';
 import { relocateProject } from '../harness/relocate.mjs';
-import { tempDir, freePort } from './harness.mjs';
+import { tempDir, freePort, startRpcServer } from './harness.mjs';
 
 const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'relocate.mjs');
 
@@ -26,9 +26,7 @@ const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'reloc
  */
 async function startRpc({ files = {}, ...rest } = {}) {
   const root = rest.root ? path.resolve(rest.root) : tempDir(files);
-  const port = await freePort();
-  const rpc = createRpc({
-    port,
+  const rpc = await startRpcServer({
     root,
     bridgeURL: 'http://127.0.0.1:1',
     autostartBridge: false,
@@ -37,6 +35,7 @@ async function startRpc({ files = {}, ...rest } = {}) {
     rulesFile: path.join(tempDir(), 'rules.json'),
     ...rest,
   });
+  const port = rpc.port;
   return {
     root,
     rpc,

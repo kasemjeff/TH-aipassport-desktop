@@ -158,22 +158,29 @@ test('a command past its timeout takes its whole process tree down', async () =>
   // server it started, a watcher — survived and kept holding the files they
   // had open (a later RUN met EBUSY from a process nobody could see). The
   // tree is killed now, so the grandchild never gets to write its marker.
+  //
+  // The margin is the point, and it has to be generous: the pin is "the tree
+  // is killed when the timeout fires", not "the machine kills a tree within
+  // 600 ms". The grandchild writes well after the timeout, so a slow kill
+  // under load (this suite runs in parallel with other sessions') cannot let
+  // the marker land — the old numbers left 600 ms for that, and one run in
+  // fifteen failed on a busy machine.
   const dir = tmp();
   try {
     const marker = path.join(dir, 'alive.txt');
     const script = path.join(dir, 'wrapper.cjs');
-    const write = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'alive'), 1200)`;
+    const write = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'alive'), 4000)`;
     fs.writeFileSync(script, [
       "const { spawn } = require('node:child_process');",
       `spawn(process.execPath, ['-e', ${JSON.stringify(write)}], { stdio: 'ignore' });`,
-      'setTimeout(() => {}, 5000); // the parent outlives the timeout, so the tree must be killed',
+      'setTimeout(() => {}, 8000); // the parent outlives the timeout, so the tree must be killed',
     ].join('\n'));
 
     const err = await runShell(`"${process.execPath}" "${script}"`, { cwd: dir, timeoutMs: 600 })
       .then(() => null, (e) => e);
     assert.ok(err, 'the timeout rejects with the captured output');
     assert.equal(err.signal, 'SIGTERM', 'and it says the command was killed');
-    await new Promise((r) => setTimeout(r, 1800));
+    await new Promise((r) => setTimeout(r, 5200));
     assert.equal(fs.existsSync(marker), false, 'nothing in the tree survived to write');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

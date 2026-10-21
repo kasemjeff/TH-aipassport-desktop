@@ -8,8 +8,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { freePort, tempDir } from './harness.mjs';
-import { createRpc } from '../harness/rpc.mjs';
+import { freePort, tempDir, startRpcServer } from './harness.mjs';
+
 import { Settings } from '../harness/settings.mjs';
 
 // Same rule as the other suites: nothing may touch the real ~/.aipass.
@@ -18,15 +18,14 @@ process.env.AIPASS_HOME = HOME;
 after(() => fs.rmSync(HOME, { recursive: true, force: true }));
 
 async function startBackend() {
-  const port = await freePort();
-  const rpc = createRpc({
-    port,
+  const rpc = await startRpcServer({
     root: tempDir(),
     bridgeURL: `http://127.0.0.1:${await freePort()}`,
     autostartBridge: false,
     store: tempDir(),
     settings: new Settings(tempDir(), 'settings.json'),
   });
+  const port = rpc.port;
   const call = async (method, params = {}) => {
     const res = await fetch(`http://127.0.0.1:${port}/rpc`, {
       method: 'POST',

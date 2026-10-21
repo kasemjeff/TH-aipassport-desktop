@@ -35,6 +35,20 @@ if (!process.env.AIPASS_HOME?.trim()) {
 if (!process.env.AIPASS_REQUIRE_AUTH?.trim()) {
   process.env.AIPASS_REQUIRE_AUTH = '0';
 }
+// The suite must not touch the developer's real bridge port. A CLI the suite
+// runs auto-starts a bridge (bin/aipass.mjs) and that bridge binds AIPASS_PORT
+// — the real 8787 — with the no-token escape hatch this file turns on. It is
+// spawned DETACHED, so it outlives the suite, and its pid lands in the scratch
+// home below, where `aipass stop` (which reads the real one) can never reach
+// it. The result was an unauthenticated bridge squatting the developer's
+// port long after the run: any web page could blind-POST to it and spend the
+// account's credits. A scratch port of the suite's own takes that away.
+// The residual race is the one freePort() already documents: the port is
+// handed over rather than held. Losing it costs a CLI test, never the
+// developer's bridge.
+if (!process.env.AIPASS_PORT?.trim()) {
+  process.env.AIPASS_PORT = String(await freePort());
+}
 // The proactive token bucket paces real sends at nine per four minutes (the
 // measured edge envelope); the suite talks to a fake extension on loopback and
 // must not pay that wall clock. A test that pins pacing builds a TokenBucket
@@ -63,6 +77,48 @@ export function freePort() {
       srv.close(() => resolve(port));
     });
   });
+}
+
+/**
+ * End the bridge a CLI in this suite auto-started.
+ *
+ * `aipass` starts the bridge in the BACKGROUND and records its pid next to
+ * the state home (bin/aipass.mjs). The suite's home is scratch space, so that
+ * pid file disappears with the scratch directory and `aipass stop` — which
+ * reads the developer's real home — can never reach the process it names.
+ * The bridge is detached, so it outlives the suite. Reading the pid file
+ * before the scratch directory goes is the only chance to end it.
+ */
+function stopBackgroundBridge() {
+  const home = process.env.AIPASS_HOME;
+  if (!home) return;
+  let pid = 0;
+  try {
+    pid = Number(fs.readFileSync(path.join(home, 'bridge.pid'), 'utf8').trim());
+  } catch { return; /* no bridge was started */ }
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  try { process.kill(pid); } catch { /* already gone */ }
+}
+
+// Registered whatever the home is: a test file may bring its own AIPASS_HOME,
+// and the bridge a CLI auto-started is still ours to end.
+process.on('exit', stopBackgroundBridge);
+
+/**
+ * The backend, on a port the OS picks, already listening.
+ *
+ * `freePort()` closes the socket before it hands the port over, so there is a
+ * window in which another process — a second suite on this machine, a
+ * browser — can take it. One suite is not enough to hit that window; three
+ * are, and this repository's suites run in parallel with other sessions'. Port
+ * 0 means "any free port" and the OS hands it out atomically, so the race is
+ * not possible at all.
+ */
+export async function startRpcServer(options = {}) {
+  const { createRpc } = await import('../harness/rpc.mjs');
+  const rpc = createRpc({ port: 0, ...options });
+  await new Promise((resolve) => (rpc.server.listening ? resolve() : rpc.server.once('listening', resolve)));
+  return rpc;
 }
 
 export async function waitFor(check, { timeout = 5000, every = 25 } = {}) {

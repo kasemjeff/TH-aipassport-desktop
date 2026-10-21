@@ -290,6 +290,19 @@ export class SessionStore {
     return dir;
   }
 
+  /**
+   * Where a session id may live.
+   *
+   * The project's own directory comes first — a session id is the one thing a
+   * window acts on (open it, rename it, delete it), and the answer must be the
+   * one in the project the caller is looking at. The store's other
+   * directories follow, so a session whose project folder moved still opens by
+   * id.
+   */
+  dirsFor(root = null) {
+    return root ? [this.dirFor(root), this.dir, ...readDirs(this.dir)] : [this.dir, ...readDirs(this.dir)];
+  }
+
   create({ root = process.cwd(), model = null, title = null, forkedFrom = null }) {
     const dir = this.dirFor(root);
     const header = {
@@ -333,10 +346,34 @@ export class SessionStore {
     return out.sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0));
   }
 
-  load(idOrFile) {
-    const file = idOrFile.includes(path.sep) || idOrFile.includes('/')
-      ? idOrFile
-      : findById(this.dir, idOrFile);
+  /**
+   * The file a session handle names, or null when it names nothing here.
+   *
+   * A handle is an id, not a path — but the window lists sessions with their
+   * absolute `file`, and passes that back to open one, so an absolute path
+   * inside this store is a legitimate handle. A path OUTSIDE the store is
+   * not: an id that carried a separator used to be taken as a raw path, so
+   * `session.delete` with `id: 'C:\\Users\\ASUS\\.ssh\\id_rsa'` deleted that
+   * file and `session.rename` rewrote its first line. The containment check
+   * is `path.relative`, not a string prefix — a prefix would also match a
+   * sibling directory whose name merely begins with the store's.
+   */
+  resolveFile(idOrFile, { root = null } = {}) {
+    const dirs = this.dirsFor(root);
+    if (!idOrFile.includes(path.sep) && !idOrFile.includes('/')) {
+      return findById(dirs, idOrFile);
+    }
+    const abs = path.resolve(idOrFile);
+    for (const dir of dirs) {
+      const rel = path.relative(path.resolve(dir), abs);
+      if (!rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) continue;
+      return abs;
+    }
+    return null;
+  }
+
+  load(idOrFile, { root = null } = {}) {
+    const file = this.resolveFile(idOrFile, { root });
     if (!file || !fs.existsSync(file)) return null;
     const { header, recovered } = readSessionHeader(file);
     if (!header) return null;
@@ -367,14 +404,14 @@ export class SessionStore {
     return session;
   }
 
-  rename(id, title) {
-    const s = this.load(id);
+  rename(id, title, { root = null } = {}) {
+    const s = this.load(id, { root });
     if (s) { s.header.title = title; s.header.updated = Date.now(); rewriteHeader(s); }
     return s;
   }
 
-  remove(idOrFile) {
-    const file = idOrFile.includes(path.sep) || idOrFile.includes('/') ? idOrFile : findById(this.dir, idOrFile);
+  remove(idOrFile, { root = null } = {}) {
+    const file = this.resolveFile(idOrFile, { root });
     if (file && fs.existsSync(file)) {
       fs.rmSync(file);
       cleanBreadcrumb(file); // a breadcrumb without its session is litter
@@ -467,7 +504,7 @@ export class SessionStore {
     const archived = [];
     for (const s of picked) {
       try {
-        const file = s.file ?? findById(this.dir, s.id);
+        const file = s.file ?? findById(this.dirsFor(root), s.id);
         if (!file || !fs.existsSync(file)) continue;
         fs.renameSync(file, path.join(archiveDir, path.basename(file)));
         // The breadcrumb is part of the session on disk when a crash left
@@ -486,13 +523,23 @@ function readDirs(dir) {
   return entries.filter((e) => e.isDirectory()).map((e) => path.join(dir, e.name));
 }
 
-function findById(dir, id) {
-  for (const d of [dir, ...readDirs(dir)]) {
+/**
+ * The session file for an id.
+ *
+ * The name is exact — `session-<id>.jsonl` — and a substring match is a
+ * data-loss bug waiting to happen: every session file carries the id inside
+ * its name, so `f.includes(id)` made `session.delete {id:"a"}` land on
+ * whichever session happened to come first. The id is the whole name, or it
+ * is nothing.
+ */
+function findById(dirs, id) {
+  const wanted = `session-${id}.jsonl`;
+  for (const d of dirs) {
     let files = [];
     try { files = fs.readdirSync(d); } catch { continue; }
     // Only real session files: a .tmp left behind by a crash mid-rewrite must
     // never shadow the session it was born from.
-    const hit = files.find((f) => f.endsWith('.jsonl') && f.includes(id));
+    const hit = files.find((f) => f === wanted);
     if (hit) return path.join(d, hit);
   }
   return null;

@@ -19,6 +19,8 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Harness } from './harness.mjs';
 import { SessionStore, APP_VERSION } from './session.mjs';
+import { binaryKind } from './overlay.mjs';
+import { listSymbols, findDefinition, findReferences } from './symbols.mjs';
 import { SkillLibrary, skillDirsFor } from './skills.mjs';
 import { Settings, aipassHome } from './settings.mjs';
 import { PluginManager } from './plugins.mjs';
@@ -37,15 +39,68 @@ import { clientFor } from './provider-client.mjs';
 // and with desktop/main.mjs's probe: an explicit bridgeURL wins, otherwise
 // AIPASS_BRIDGE decides, otherwise the loopback default.
 import { resolveBridgeURL } from './bridge.mjs';
-import { openCommandFor } from './open-command.mjs';
-import { loadOrMintToken, authorized, authorizedQuery } from './authtoken.mjs';
+import { openBrowser } from './browser.mjs';
+import { restoreTable } from './waf.mjs';
+import { loadOrMintToken, authorized, authorizedQuery, UNAUTHORIZED } from './authtoken.mjs';
 import { openLogFile } from './log-file.mjs';
 import { formatLogLine } from './log-line.mjs';
 import { scrubSecrets } from '../bridge/log-scrub.mjs';
 
 // Re-exported for desktop/main.mjs, whose ensureBridge probe must resolve the
 // bridge exactly the way the harness's own client does.
+/**
+ * The Content-Security-Policy the window is served under.
+ *
+ * The window is a page that drives an agent that writes files. It is loaded
+ * from THIS backend over plain HTTP, so the policy that binds is the one the
+ * backend sends — not the one the shell's config declares: a webview loading
+ * an external URL is governed by that URL's own headers, and the shell's
+ * declaration covers the asset protocol, which this window does not use.
+ * The two are kept identical, and a test says so.
+ *
+ *   script    the app's own modules and nothing else — no inline, no eval
+ *   style     'unsafe-inline' because a plugin panel may style itself
+ *   img/media the model's own pictures and clips, from the web
+ *   connect   this backend, and the loopback it is served from
+ *
+ * The object is the shape tauri.conf.json wants, so the two can be compared
+ * key by key.
+ */
+export const WINDOW_CSP = {
+  'default-src': "'none'",
+  'script-src': "'self'",
+  'style-src': "'self' 'unsafe-inline'",
+  'img-src': "'self' data: blob: https: http:",
+  'media-src': "'self' data: blob: https: http:",
+  'font-src': "'self' data:",
+  'connect-src': "'self' http://127.0.0.1:* http://localhost:*",
+  'base-uri': "'self'",
+  'form-action': "'none'",
+  'frame-ancestors': "'none'",
+  'object-src': "'none'",
+};
+
+/** The same policy as one header value. */
+export const WINDOW_CSP_HEADER = Object.entries(WINDOW_CSP).map(([k, v]) => `${k} ${v}`).join('; ');
+
 export { resolveBridgeURL };
+
+/**
+ * The most a `/rpc` body may carry.
+ *
+ * One 20 MB attachment is ~27 MB of base64 on the wire, so the cap has to
+ * fit a couple of them — but it is a cap: the body is buffered in memory
+ * before it is parsed.
+ */
+const MAX_BODY = 64_000_000;
+
+/**
+ * The most a file the window opens may weigh.
+ *
+ * The same cap the tool layer puts on a file it reads: a 500 MB log is data,
+ * not a file to open.
+ */
+const MAX_FILE_READ = 1_000_000;
 
 /**
  * The file under `uiDir` a request path maps to, or null when it would leave
@@ -132,27 +187,13 @@ const isBrowserSameOrigin = (req) => {
 };
 
 /**
- * Open a URL in the platform browser. No shell, no interpolation: the URL is
- * allowlisted, then passed as argv — this method is reachable from loopback
- * without auth, so a string-built `cmd /c start "" "${url}"` would be RCE.
+ * Open a URL in the platform browser — Chrome, because that is where the
+ * extension lives. The rule (which browser, which argv, and the bookkeeping
+ * that lets a test close what it opened) is in browser.mjs; it is re-exported
+ * here because the backend and the desktop launcher are the two surfaces that
+ * open a URL, and the tests reach for it from here.
  */
-export async function openBrowser(url) {
-  const target = String(url ?? '').trim();
-  if (!/^https?:\/\/[^\s"'<>\\^|&;`$]+$/i.test(target)) return false;
-  const { execFile } = await import('node:child_process');
-  const run = (cmd, args) => new Promise((resolve) => {
-    const child = execFile(cmd, args, { windowsHide: true }, () => resolve());
-    child.on('error', () => resolve());
-  });
-  try {
-    // The platform→argv rule lives in one place (open-command.mjs), shared
-    // with the desktop launcher — and testable from any OS.
-    await run(...openCommandFor(process.platform, target));
-    return true;
-  } catch {
-    return false;
-  }
-}
+export { openBrowser };
 
 export function createRpc({
   port = 8790,
@@ -177,6 +218,9 @@ export function createRpc({
   // does), so a run never fails for want of a listener on 8787. Tests turn it
   // off — they run their own bridge on their own port.
   autostartBridge = true,
+  // The most a `/rpc` body may carry. A caller that needs a different cap
+  // (a test) says so; the default is the one a real window needs.
+  maxBody = MAX_BODY,
 } = {}) {
   const listeners = new Set();
   // Every frame carries a monotonic `seq` and an SSE `id:` of the same value,
@@ -445,7 +489,7 @@ export function createRpc({
    * temperature, budgets or path rules while every window shows the new ones.
    */
   const applySettingsTo = (h) => {
-    h.setPolicy({ mode: appSettings.get('mode'), allowRun: appSettings.get('allowRun') });
+    h.setPolicy({ mode: appSettings.get('mode'), allowRun: appSettings.get('allowRun'), allowFetch: appSettings.get('allowFetch') });
     Object.assign(h.options, {
       maxSteps: appSettings.get('maxSteps'),
       maxResult: appSettings.get('maxResult'),
@@ -460,6 +504,9 @@ export function createRpc({
       searchI: appSettings.get('searchI'),
       attach: appSettings.get('attach'),
       webScratch: appSettings.get('webScratch'),
+      // A fetch the model chose is a question the person sees, unless the
+      // settings say the machine has been told to let it through.
+      allowFetch: appSettings.get('allowFetch'),
       parallelHelpers: appSettings.get('parallelHelpers'),
       // (Thai pack) the language policy and the loop guards
       replyLanguage: appSettings.get('replyLanguage'),
@@ -525,6 +572,40 @@ export function createRpc({
   // becomes the first entry in the project list rather than a setting on its own.
   appSettings.addProject(current.root);
 
+  /**
+   * The harness a call is about.
+   *
+   * The backend holds one harness per project, and `current` is the one the
+   * last window to talk moved it to. A window names the project it is showing
+   * on every call, so two windows open on two projects cannot read each
+   * other's sessions, files or pending diffs — and one window's Apply button
+   * cannot write the other window's staged edits.
+   *
+   * The named project is looked up, never switched to: a call is a target, not
+   * a move of the machine's "current project" (the human's own switch still
+   * does that, through projects.switch).
+   *
+   * The key is `project`, not `root`: in settings.set, `root` already means
+   * "switch the machine to this project", and one key cannot mean two things.
+   * `root` is still read as a fallback, so a caller that only knows the older
+   * spelling keeps working.
+   */
+  const targetFor = (params = {}) => {
+    const wanted = params?.project ?? params?.root;
+    if (!wanted) return current;
+    const abs = path.resolve(wanted);
+    if (abs === current.root) return current;
+    if (!fs.existsSync(abs)) throw new Error(`no such folder: ${abs}`);
+    const known = harnesses.get(abs);
+    if (known) return known;
+    // A project the backend has not visited yet still needs a harness to
+    // answer for — and it must run under the settings file as it is now, not
+    // as it was when the backend started.
+    const h = harnessFor(abs);
+    applySettingsTo(h);
+    return h;
+  };
+
   /* --------------------------------------------------------------- attachments */
 
   const staged = new Map(); // id → {id, name, path, bytes, mime, at}
@@ -533,8 +614,13 @@ export function createRpc({
    * Stage an attachment. Either a data URL (drag-drop, picker, clipboard) or a
    * path on disk (/file, /image) — a desktop user usually has the path, not a
    * picker, and re-reading the bytes here keeps the window free of file access.
+   *
+   * A relative path is relative to the PROJECT the caller is on, not to the
+   * folder the backend happened to start in: the window's file panel hands
+   * over project-relative paths, and those only resolve for the project the
+   * window is showing.
    */
-  const stageAttachment = async ({ name, dataUrl, path: fromPath }) => {
+  const stageAttachment = async ({ name, dataUrl, path: fromPath }, baseRoot = root) => {
     const id = Math.random().toString(16).slice(2, 10);
     const dir = appSettings.uploadDir();
     let bytes;
@@ -547,7 +633,7 @@ export function createRpc({
         ? path.resolve(typed.replace(/^~(?=\/|\\|$)/, os.homedir()))
         : path.isAbsolute(typed)
           ? path.resolve(typed)
-          : path.resolve(root, typed);
+          : path.resolve(baseRoot, typed);
       if (!fs.existsSync(abs)) throw new Error(`no such file: ${fromPath}`);
       // The data-URL branch below enforces MAX_ATTACHMENT_BYTES; a path needs
       // the same cap BEFORE the read, or staging a multi-GB file OOMs the
@@ -644,16 +730,20 @@ export function createRpc({
   const methods = {
     /* ------------------------------------------------------------ reading */
 
-    async status() {
-      const st = await current.bridge.status().catch(() => null);
+    async status(params = {}) {
+      // The project the caller is looking at, not the one the backend happens
+      // to be on: two windows can be open on two projects, and each of them
+      // must see its own sessions, files and pending changes.
+      const h = targetFor(params);
+      const st = await h.bridge.status().catch(() => null);
       return {
-        root: current.root,
+        root: h.root,
         // Every project's running flag, not just the current one's: a window
         // on project A must be able to see that B still has a run going, so a
         // switch is an informed move instead of a surprise.
         projects: appSettings.projectList().map((p) => ({
           ...p,
-          current: p.path === current.root,
+          current: p.path === h.root,
           running: harnesses.get(path.resolve(p.path))?.running === true,
         })),
         bridge: Boolean(st?.ok),
@@ -670,22 +760,22 @@ export function createRpc({
         // own default is only a fallback, because the bridge remembers whatever
         // the browser tab last used — showing that instead would put a retired
         // model in the header while a different one answers.
-        model: current.bridge.model ?? st?.defaultModel ?? null,
+        model: h.bridge.model ?? st?.defaultModel ?? null,
         // Which provider the run talks to. The window shows it, so a run that
         // suddenly costs real money instead of credits says why.
-        provider: current.providerId ?? AIPASS_PROVIDER,
+        provider: h.providerId ?? AIPASS_PROVIDER,
         conversation: st?.conversation ?? null,
-        session: current.session ? current.session.meta() : null,
-        running: current.running,
-        mode: current.options.mode,
-        allowRun: current.options.allowRun,
-        maxSteps: current.options.maxSteps,
-        plan: current.options.plan,
-        subagent: current.options.subagent,
-        pending: current.pendingChanges(),
+        session: h.session ? h.session.meta() : null,
+        running: h.running,
+        mode: h.options.mode,
+        allowRun: h.options.allowRun,
+        maxSteps: h.options.maxSteps,
+        plan: h.options.plan,
+        subagent: h.options.subagent,
+        pending: h.pendingChanges(),
         // Context is invisible until it is not: this meter is the difference
         // between "it is handling that" and "why did it forget what I said".
-        context: current.contextUsage(),
+        context: h.contextUsage(),
         plugins: decoratedPlugins(),
         settings: appSettings.values,
       };
@@ -698,27 +788,28 @@ export function createRpc({
      * empty DOM; making it re-derive this from four calls is how it ends up
      * showing half a truth while the run it abandoned is still going.
      */
-    async snapshot() {
-      const status = await methods.status();
+    async snapshot(params = {}) {
+      const h = targetFor(params);
+      const status = await methods.status(params);
       return {
         status,
-        session: current.session ? current.session.meta() : null,
-        entries: current.session?.entries ?? [],
+        session: h.session ? h.session.meta() : null,
+        entries: h.session?.entries ?? [],
         // status answered both of these already; asking again was a second
         // diff of every staged file for a single reply.
         pending: status.pending,
-        asks: current.pendingAsks(),
+        asks: h.pendingAsks(),
         context: status.context,
-        skills: current.skills.list(),
+        skills: h.skills.list(),
       };
     },
 
-    async models() { return current.bridge.models(true); },
+    async models(params = {}) { return targetFor(params).bridge.models(true); },
     // Forced by default — a caller that asks for credits wants a number, not
     // a cache — but the window passes force:false while idle so the
     // extension's tab is not poked upstream every 10 seconds forever.
-    async credits(params = {}) { return current.bridge.quota(params.force !== false); },
-    async conversations() { return current.bridge.conversations(); },
+    async credits(params = {}) { return targetFor(params).bridge.quota(params.force !== false); },
+    async conversations(params = {}) { return targetFor(params).bridge.conversations(); },
 
     async 'config.set'(params = {}) {
       if (params.model != null) {
@@ -876,7 +967,11 @@ export function createRpc({
 
     async 'settings.get'() { return appSettings.values; },
     async 'settings.set'(params = {}) {
-      const next = appSettings.set(params);
+      // The scope key names the project the call is about; it is not a
+      // setting, and the settings file is not where that lives.
+      const patch = { ...params };
+      delete patch.project;
+      const next = appSettings.set(patch);
       // A change of root moves the live run onto another project first: every
       // policy below it belongs to the harness that keeps running.
       if (params.root != null) switchProject(params.root);
@@ -933,7 +1028,13 @@ export function createRpc({
       // The plugin list is the other setting a module of its own owns; it is
       // rebuilt by name here so the sheet has one contract instead of a
       // footnote saying "restart for this one".
-      if (params.plugins != null) void plugins.load();
+      // `void` DETACHES the promise: a rejection would become an unhandled
+      // rejection, and the process-level handler exits the backend. The RPC
+      // has already answered `{ok:true}` by then, so the window would show a
+      // saved setting over a dead backend.
+      if (params.plugins != null) {
+        plugins.load().catch((err) => console.error(formatLogLine({ level: 'error', msg: `plugin load failed: ${err?.message ?? err}` })));
+      }
       emit('settings', next);
       return next;
     },
@@ -943,8 +1044,8 @@ export function createRpc({
      * force, not a second copy the window keeps. Reading them back is how the
      * sheet proves a save landed.
      */
-    async 'rules.get'() {
-      return { rules: current.permissions.rules ?? [] };
+    async 'rules.get'(params = {}) {
+      return { rules: targetFor(params).permissions.rules ?? [] };
     },
 
     /**
@@ -975,32 +1076,34 @@ export function createRpc({
 
     /* ------------------------------------------------------- cross-session memory */
 
-    async 'memory.list'() {
-      return { facts: current.crossSessionMemory() };
+    async 'memory.list'(params = {}) {
+      return { facts: targetFor(params).crossSessionMemory() };
     },
-    async 'memory.clear'() {
-      current.clearCrossSessionMemory();
+    async 'memory.clear'(params = {}) {
+      targetFor(params).clearCrossSessionMemory();
       return { ok: true };
     },
 
     /* --------------------------------------------------------------- mcp tools */
 
-    async 'mcp.list'() {
-      await current.mcp.ensureLoaded();
+    async 'mcp.list'(params = {}) {
+      await targetFor(params).mcp.ensureLoaded();
       return mcpListing();
     },
-    async 'mcp.reload'() {
-      await current.mcp.reload();
+    async 'mcp.reload'(params = {}) {
+      await targetFor(params).mcp.reload();
       return mcpListing();
     },
     async 'mcp.add'(params = {}) {
-      const server = addServer(params, { home: aipassHome(), root: current.root });
-      await current.mcp.reload();
+      const h = targetFor(params);
+      const server = addServer(params, { home: aipassHome(), root: h.root });
+      await h.mcp.reload();
       return { server, ...mcpListing() };
     },
     async 'mcp.remove'(params = {}) {
-      const out = removeServer(params.name, { home: aipassHome(), root: current.root, scope: params.scope ?? null });
-      await current.mcp.reload();
+      const h = targetFor(params);
+      const out = removeServer(params.name, { home: aipassHome(), root: h.root, scope: params.scope ?? null });
+      await h.mcp.reload();
       return { ...out, ...mcpListing() };
     },
     async 'mcp.enable'(params = {}) { return mcpSetEnabled(params, true); },
@@ -1044,37 +1147,49 @@ export function createRpc({
     // Scoped to the project the window is on: the store keeps one directory
     // per root, and an unscoped list mixes in every other project — on this
     // machine that was thousands of test leftovers, not conversations.
-    async 'session.list'() { return current.store.list(current.root); },
+    async 'session.list'(params = {}) { const h = targetFor(params); return h.store.list(h.root); },
     async 'session.new'(params = {}) {
-      const s = await current.startSession({ title: params.title ?? null });
+      const h = targetFor(params);
+      const s = await h.startSession({ title: params.title ?? null });
       return s ? s.meta() : null;
     },
     async 'session.open'(params = {}) {
-      const s = await current.startSession({ sessionId: params.id });
+      const h = targetFor(params);
+      const s = await h.startSession({ sessionId: params.id });
       if (!s) throw new Error('session not found');
       emit('session_opened', s.meta());
       return s.entries;
     },
-    async 'session.entries'() { return current.session?.entries ?? []; },
-    async 'session.rename'(params = {}) { current.store.rename(params.id, params.title); return { ok: true }; },
-    async 'session.delete'(params = {}) { current.store.remove(params.id); return { ok: true }; },
+    async 'session.entries'(params = {}) { const h = targetFor(params); return h.session?.entries ?? []; },
+    async 'session.rename'(params = {}) {
+      const h = targetFor(params);
+      h.store.rename(params.id, params.title, { root: h.root });
+      return { ok: true };
+    },
+    async 'session.delete'(params = {}) {
+      const h = targetFor(params);
+      h.store.remove(params.id, { root: h.root });
+      return { ok: true };
+    },
     /**
      * Move idle sessions out of the picker's way. Nothing is deleted — files
      * move to `<project>/archive/` — and the live session is always kept even
      * when idle. `olderThanDays` 30 by default; `limit` caps the move count.
      */
     async 'session.archive'(params = {}) {
+      const h = targetFor(params);
       const days = Number(params.olderThanDays ?? 30);
-      const out = current.store.archiveIdle(current.root, {
+      const out = h.store.archiveIdle(h.root, {
         olderThanMs: Number.isFinite(days) && days >= 0 ? days * 24 * 3600 * 1000 : 30 * 24 * 3600 * 1000,
         limit: Math.min(200, Math.max(1, Math.floor(Number(params.limit ?? 50)) || 50)),
-        keepId: current.session?.id ?? null,
+        keepId: h.session?.id ?? null,
       });
       return { archived: out.archived, count: out.archived.length };
     },
     async 'session.fork'(params = {}) {
-      if (!current.session) throw new Error('no session to fork');
-      const forked = current.session.fork(current.store, { fromEntryId: params.from ?? null });
+      const h = targetFor(params);
+      if (!h.session) throw new Error('no session to fork');
+      const forked = h.session.fork(h.store, { fromEntryId: params.from ?? null });
       emit('session_forked', forked.meta());
       return forked.meta();
     },
@@ -1084,17 +1199,17 @@ export function createRpc({
     async run(params = {}) {
       if (!params.task?.trim()) throw new Error('no task given');
       // The window names the project it is looking at. Another window may have
-      // switched the backend since — running where `current` happens to point
+      // moved the backend since — running where `current` happens to point
       // would put the task in the wrong project and stream it to a window that
-      // is not showing that project. remember:false keeps the project list's
-      // order alone: this is a target for the call, not a switch by the human.
-      if (params.root && path.resolve(params.root) !== current.root) switchProject(params.root, { remember: false });
-      // Everything below belongs to the harness this call landed on, captured
-      // once: between this method's awaits (attachment reads, the attempts
-      // loop, the run itself) another window can switch the backend's
-      // `current`, and this run's policy, options and pending list must not
-      // follow it.
-      const h = current;
+      // is not showing that project. The project is looked up, not switched
+      // to: a run is a target, not a move of the machine's current project.
+      const h = targetFor(params);
+      // The file is the truth for the harness this run lands on, even one this
+      // backend built long before the last save: without this, a project
+      // visited in the morning ran on the morning's temperature, budgets and
+      // rules while the sheet (and every window) said the new ones were in
+      // force. The run's own mode and allow-run are applied on top of it.
+      applySettingsTo(h);
       h.setPolicy({ mode: params.mode ?? null, allowRun: params.allowRun ?? null });
       Object.assign(h.options, {
         plan: params.plan ?? h.options.plan,
@@ -1163,8 +1278,9 @@ export function createRpc({
       // cancel goes to that project's harness — another window may have made
       // a different project current since this window's run started. A root
       // with no harness (nothing ever ran there) has nothing to cancel.
-      const h = params.root ? harnesses.get(path.resolve(params.root)) : current;
-      if (!h) return { ok: false, running: false, reason: `no run in ${params.root ?? 'this project'}` };
+      const wanted = params.project ?? params.root;
+      const h = wanted ? harnesses.get(path.resolve(wanted)) : current;
+      if (!h) return { ok: false, running: false, reason: `no run in ${wanted ?? 'this project'}` };
       // What the harness says about the run it stopped: `running` was false
       // when the stop arrived, so there was nothing to stop and the window
       // says so instead of pretending the work ended.
@@ -1189,32 +1305,37 @@ export function createRpc({
 
     /* -------------------------------------------------------------- diffs */
 
-    async pending() { return current.pendingChanges(); },
-    async compact() {
-      if (!current.session) throw new Error('no session yet — send something first');
+    async pending(params = {}) { return targetFor(params).pendingChanges(); },
+    async compact(params = {}) {
+      const h = targetFor(params);
+      if (!h.session) throw new Error('no session yet — send something first');
       // A rotation replaces the conversation a running loop is sending into —
       // its next message would land in a context that never carried the run.
-      if (current.running) throw new Error('a run is in flight — compact when it ends');
-      const done = await current.compactNow();
+      if (h.running) throw new Error('a run is in flight — compact when it ends');
+      const done = await h.compactNow();
       // The summary has no run of its own yet: the next run builds its seed
       // against that run's task and carries it — facts included, or a long
       // session's spine is cut at the rotation.
-      current.rememberSummary(done.summary, done.memory);
-      return { summary: done.summary, context: current.contextUsage() };
+      h.rememberSummary(done.summary, done.memory);
+      return { summary: done.summary, context: h.contextUsage() };
     },
     async diff(params = {}) {
-      const abs = current.overlay.safe(params.file);
-      if (!current.overlay.has(abs)) throw new Error('no pending change for that file');
+      const h = targetFor(params);
+      const abs = h.overlay.safe(params.file);
+      if (!h.overlay.has(abs)) throw new Error('no pending change for that file');
       // One file's diff, not every staged file's diff searched for one: a
       // diff is the expensive part and the panel asks a file at a time.
-      return current.overlay.changeFor(abs);
+      return h.overlay.changeFor(abs);
     },
-    async apply(params = {}) { return current.apply(params.files ?? null); },
-    async discard() { return { dropped: current.discard() }; },
+    async apply(params = {}) { return targetFor(params).apply(params.files ?? null); },
+    async discard(params = {}) { return { dropped: targetFor(params).discard() }; },
 
     /* ---------------------------------------------------------- attachments */
 
-    async 'attachment.stage'(params = {}) { return stageAttachment(params); },
+    async 'attachment.stage'(params = {}) {
+      const h = targetFor(params);
+      return stageAttachment(params, h.root);
+    },
     async 'attachment.list'() { return [...staged.values()]; },
     async 'attachment.remove'(params = {}) { dropAttachment(params.id); return { ok: true }; },
 
@@ -1222,12 +1343,56 @@ export function createRpc({
 
     async 'browser.open'(params = {}) { return { ok: await openBrowser(params.url ?? appSettings.get('chatUrl')) }; },
 
-    /* ------------------------------------------------------------- skills */
+    /* ------------------------------------------------------------------ waf */
 
-    async 'skills.list'() { return current.skills.list(); },
-    async 'skills.index'() { return { index: current.skills.index() }; },
+    /**
+     * The restore table, as data.
+     *
+     * The window shows the real text behind the wire spellings — the URLs a
+     * search brought back are `HTTPS-URL…` until somebody puts them back. It
+     * must show the SAME text the model saw, so it rebuilds these rules from
+     * this table instead of keeping a copy of them: one table, one owner.
+     */
+    async 'waf.table'() { return { pairs: restoreTable() }; },
+
+    /* ------------------------------------------------------------- symbols */
+
+    /**
+     * The declarations of a file, the definition of a name, the places a name
+     * is used.
+     *
+     * The same index the SYMBOLS/DEF/REFS markers use, asked for from the
+     * window instead of from a run. The walk skips the heavy directories and
+     * the index is cached under the state home, so a second ask is cheap.
+     */
+    async 'symbols.list'(params = {}) {
+      const h = targetFor(params);
+      const file = String(params.file ?? '').trim();
+      if (!file) throw new Error('which file? — /symbols <file>');
+      const rel = path.isAbsolute(file) ? path.relative(h.root, file) : file;
+      // A path outside the project is not in the index, so it has no symbols —
+      // the same answer the SYMBOLS marker gives, and no way out of the root.
+      return { file: rel.replace(/\\/g, '/'), symbols: listSymbols(h.root, rel) };
+    },
+    async 'symbols.def'(params = {}) {
+      const h = targetFor(params);
+      const name = String(params.name ?? '').trim();
+      if (!name) throw new Error('which name? — /symbols <name>');
+      return { name, definitions: findDefinition(h.root, name) };
+    },
+    async 'symbols.refs'(params = {}) {
+      const h = targetFor(params);
+      const name = String(params.name ?? '').trim();
+      if (!name) throw new Error('which name? — /symbols <name>');
+      return { name, references: findReferences(h.root, name) };
+    },
+
+    /* -------------------------------------------------------------- skills */
+
+    async 'skills.list'(params = {}) { return targetFor(params).skills.list(); },
+    async 'skills.index'(params = {}) { return { index: targetFor(params).skills.index() }; },
     async 'skills.load'(params = {}) {
-      const found = current.skills.load(params.name);
+      const found = targetFor(params).skills.load(params.name);
       if (found.error) throw new Error(found.error);
       return found;
     },
@@ -1286,7 +1451,8 @@ export function createRpc({
     /* ----------------------------------------------------------------- fs */
 
     async 'fs.list'(params = {}) {
-      const dir = current.overlay.trySafe(params.dir ?? '.');
+      const h = targetFor(params);
+      const dir = h.overlay.trySafe(params.dir ?? '.');
       if (!dir) throw new Error(`outside project root: ${params.dir ?? '.'}`);
       // A panel click on a directory with thousands of entries: the async read
       // keeps the event loop free for the run's own stream while it fills.
@@ -1295,18 +1461,43 @@ export function createRpc({
         .filter((e) => !['node_modules', '.git', '.next', 'dist', 'build', '.cache'].includes(e.name));
     },
     async 'fs.read'(params = {}) {
-      const abs = current.overlay.trySafe(params.file);
+      const h = targetFor(params);
+      const abs = h.overlay.trySafe(params.file);
       if (!abs) throw new Error(`outside project root: ${params.file}`);
-      if (!current.overlay.existsAt(abs)) throw new Error('no such file');
-      const text = current.overlay.has(abs)
-        ? current.overlay.readAt(abs)
-        : await fs.promises.readFile(abs, 'utf8');
+      if (!h.overlay.existsAt(abs)) throw new Error('no such file');
+      // A binary file is not text: read as UTF-8 it is mojibake, and it costs
+      // a whole answer's worth of bytes on the wire. The tool layer refuses
+      // the same files for the model; the window refuses them for the reader.
+      const kind = binaryKind(abs, (p) => h.overlay.has(p));
+      if (kind) {
+        throw new Error(`${params.file} is ${kind === 'binary' ? 'a binary file' : `a ${kind} file`}, not text`);
+      }
+      const staged = h.overlay.has(abs);
+      const size = staged
+        ? Buffer.byteLength(h.overlay.readAt(abs), 'utf8')
+        : (await fs.promises.stat(abs)).size;
+      if (size > MAX_FILE_READ) {
+        throw new Error(`${params.file} is too large to open (${Math.round(size / 1024)} KB, cap ${Math.round(MAX_FILE_READ / 1024)} KB)`);
+      }
+      const text = staged ? h.overlay.readAt(abs) : await fs.promises.readFile(abs, 'utf8');
       return { file: params.file, text };
     },
   };
 
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    // A malformed request target throws here, and this is the FIRST statement
+    // of an async listener: the rejection escapes the handler, becomes an
+    // unhandled rejection, and the process-level handler exits the backend.
+    // One request — `GET //[ HTTP/1.1` — was enough to take the whole desktop
+    // backend down, from any local process and from any web page (a plain
+    // GET needs no preflight). The bridge answers 400 for the same input
+    // (bridge/server.mjs); the backend has to answer it here too.
+    let url;
+    try {
+      url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
+    } catch {
+      return json(res, 400, { ok: false, error: 'malformed request URL' });
+    }
 
     // Local only, for the reasons spelled out next to `isLocalRequest`. This
     // runs before any route, including the static UI files: a page that can
@@ -1367,15 +1558,34 @@ export function createRpc({
 
     if (url.pathname === '/rpc' && req.method === 'POST') {
       if (!authorized(req)) {
-        return json(res, 401, { ok: false, error: 'unauthorized: missing or wrong loopback bearer token' });
+        return json(res, 401, { ok: false, error: UNAUTHORIZED });
       }
       // Chunks collected, joined once: `body += c` re-flattens the whole body
       // on every packet — O(n²) on a big attachments upload — and can split a
       // UTF-8 sequence sitting across two chunks.
       const chunks = [];
       let size = 0;
-      req.on('data', (c) => { chunks.push(c); size += c.length; if (size > 32_000_000) req.destroy(); });
+      let answered = false;
+      req.on('data', (c) => {
+        size += c.length;
+        if (size > maxBody) {
+          // A body over the cap gets an ANSWER, not a dead socket. The old
+          // code destroyed the request, so the client saw a transport error it
+          // could not read — and the window's "attach" of a large file looked
+          // like the app had crashed. One 20 MB attachment is ~27 MB of
+          // base64, so the cap has to fit a couple of them.
+          answered = true;
+          json(res, 413, { ok: false, error: `request body too large (cap ${maxBody} bytes)` });
+          // The socket is closed after the answer is out: the client is still
+          // sending, and killing the socket now would take the answer with it.
+          res.on('finish', () => req.destroy());
+          req.pause();
+          return;
+        }
+        chunks.push(c);
+      });
       req.on('end', async () => {
+        if (answered) return;
         let msg = {};
         try {
           msg = JSON.parse(chunks.length ? Buffer.concat(chunks).toString('utf8') : '{}');
@@ -1399,8 +1609,19 @@ export function createRpc({
           }
           return json(res, 404, { ok: false, error: `no such method: ${msg.method}` });
         }
+        // The project the caller is on, when it named one. A window says which
+        // project it is showing, so two windows open on two projects cannot
+        // read each other's sessions, files or pending diffs — and one
+        // window's Apply button cannot write the other window's staged edits.
+        // A method that names its own project wins: the header says who is
+        // asking, the parameter says what the call is about.
+        const params = { ...(msg.params ?? {}) };
+        if (params.project == null) {
+          const scope = String(req.headers['x-aipass-project'] ?? '').trim();
+          if (scope) params.project = scope;
+        }
         try {
-          return json(res, 200, { ok: true, result: await fn(msg.params ?? {}) });
+          return json(res, 200, { ok: true, result: await fn(params) });
         } catch (err) {
           // A failure that knows its step carries it: the window can say which
           // door closed (fetch, validate, swap) instead of only that something
@@ -1423,7 +1644,17 @@ export function createRpc({
     // No headers the browser can revalidate with, so a cached copy would be
     // served blind — and this UI is edited live. no-cache forces the request
     // back to this server every reload; the file is on local disk anyway.
-    res.writeHead(200, { 'content-type': type, 'cache-control': 'no-cache' });
+    // The CSP rides with it: the window is a page that drives an agent that
+    // writes files, and this is the only header that binds on it — the shell's
+    // own declaration covers the asset protocol, which this window does not
+    // use, because it is loaded from here.
+    res.writeHead(200, {
+      'content-type': type,
+      'cache-control': 'no-cache',
+      'content-security-policy': WINDOW_CSP_HEADER,
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+    });
     fs.createReadStream(target).pipe(res);
   });
 
@@ -1442,7 +1673,20 @@ export function createRpc({
   });
 
   server.listen(port, '127.0.0.1');
-  return { server, harness: current, get current() { return current; }, plugins, settings: appSettings, events: bus, port, url: `http://127.0.0.1:${port}` };
+  // The port the server ACTUALLY got, not the one it was asked for: port 0
+  // means "any free port", and a probe-then-bind race (another suite on this
+  // machine takes the port between the probe and the bind) is then impossible.
+  const boundPort = () => server.address()?.port ?? port;
+  return {
+    server,
+    harness: current,
+    get current() { return current; },
+    plugins,
+    settings: appSettings,
+    events: bus,
+    get port() { return boundPort(); },
+    get url() { return `http://127.0.0.1:${boundPort()}`; },
+  };
 }
 
 const json = (res, code, body) => {

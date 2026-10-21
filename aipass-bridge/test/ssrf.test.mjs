@@ -1,16 +1,31 @@
-// Unit tests for the SSRF guard. The redirect behaviour cannot be driven through
-// the HTTP surface — a test server on this machine is itself on a private
-// address, which the very first check refuses — so the guard's own functions
-// are exercised directly, with fetch stubbed per hop.
+// Unit tests for the SSRF guard. The redirect behaviour cannot be driven
+// through the HTTP surface — a test server on this machine is itself on a
+// private address, which the very first check refuses — so the guard's own
+// functions are exercised directly, with the request stubbed per hop.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 
 process.env.AIPASS_PORT = '0'; // import starts the server; a random port collides with nothing
 const { isPrivateHost, hostResolvesPrivate, fetchRemoteAsDataUri, server } = await import('../bridge/server.mjs');
+const { pinnedGet, resolveVetted } = await import('../bridge/private-hosts.mjs');
 
 // The imported server holds the event loop open, which stalls the runner once
 // this file shares a process pool with the others — release it when done.
 after(() => { server.close(); server.closeAllConnections?.(); });
+
+// A request that answers whatever the test wants, one hop at a time. The
+// guard passes the vetted addresses in `opts`, so a test can also see what it
+// decided to connect to.
+const stub = (answers) => {
+  const seen = [];
+  const transport = async (url, opts) => {
+    seen.push({ url: String(url), opts });
+    return answers(seen.length, String(url));
+  };
+  transport.seen = seen;
+  return transport;
+};
 
 test('isPrivateHost catches every spelling of a private address', () => {
   const refused = [
@@ -22,84 +37,132 @@ test('isPrivateHost catches every spelling of a private address', () => {
     '::ffff:10.0.0.1', '::ffff:a00:1',                                // mapped RFC1918
     'fe80::1', 'fe90::1', 'febf::1',                                  // fe80::/10, not just the fe80 prefix
     'fc00::1', 'fd12:3456::1',                                        // fc00::/7
+    // The ranges a name on the internet can point at, each with a service
+    // behind it: CGNAT (and Tailscale's 100.x), the IETF protocol
+    // assignments (192.0.0.192 is Oracle Cloud's metadata), the benchmark
+    // range, and the reserved tail.
+    '100.64.0.1', '100.100.100.200', '100.127.255.255',
+    '192.0.0.192', '192.0.0.1',
+    '198.18.0.1', '198.19.255.255',
+    '240.0.0.1', '255.255.255.255',
+    // An IPv4 address carried inside an IPv6 one: the compatible form
+    // (::7f00:1) and the NAT64 form (64:ff9b::7f00:1) are 127.0.0.1, and
+    // the bridge skips the DNS check for any host containing ':'.
+    '::7f00:1', '[::7f00:1]', '64:ff9b::7f00:1', '[64:ff9b::7f00:1]',
   ];
   for (const host of refused) assert.ok(isPrivateHost(host), `${host} must be refused`);
 
   const allowed = [
     'example.com', 'de.aipass.net',
     '93.184.216.34', '172.32.0.1', '172.15.255.255', '169.253.0.1', '169.255.0.1',
+    '100.63.255.255', '100.128.0.1', '192.1.0.1', '198.20.0.1', '239.255.255.255',
     '::ffff:93.184.216.34', '2001:db8::1', 'fe00::1', 'ff00::1',
   ];
   for (const host of allowed) assert.ok(!isPrivateHost(host), `${host} must be allowed`);
 });
 
 test('a redirect to a private address is refused at the hop, not followed', async () => {
-  const realFetch = globalThis.fetch;
-  const fetched = [];
-  globalThis.fetch = async (input) => {
-    fetched.push(String(input));
-    if (fetched.length === 1) {
-      return new Response(null, { status: 302, headers: { location: 'http://169.254.169.254/latest/meta-data' } });
-    }
-    throw new Error('the private redirect target must never be fetched');
-  };
+  const transport = stub(() => new Response(null, { status: 302, headers: { location: 'http://169.254.169.254/latest/meta-data' } }));
   try {
-    await fetchRemoteAsDataUri('http://public.example/x.png', 'image');
+    await fetchRemoteAsDataUri('http://93.184.216.34/x.png', 'image', { transport });
     assert.fail('the mapped redirect must be refused');
   } catch (err) {
     assert.match(err.message, /refusing private\/internal network fetch/);
-    assert.equal(fetched.length, 1, 'only the public first hop is fetched');
-  } finally {
-    globalThis.fetch = realFetch;
+    assert.equal(transport.seen.length, 1, 'only the public first hop is fetched');
   }
 });
 
 test('redirects to public targets are followed until the payload', async () => {
-  const realFetch = globalThis.fetch;
-  const fetched = [];
-  globalThis.fetch = async (input) => {
-    fetched.push(String(input));
-    if (fetched.length === 1) return new Response(null, { status: 301, headers: { location: 'http://cdn.example/x.png' } });
-    return new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'image/png' } });
-  };
-  try {
-    const uri = await fetchRemoteAsDataUri('http://public.example/x.png', 'image');
-    assert.equal(uri, 'data:image/png;base64,AQID');
-    assert.deepEqual(fetched, ['http://public.example/x.png', 'http://cdn.example/x.png']);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+  const transport = stub((n) => (n === 1
+    ? new Response(null, { status: 301, headers: { location: 'http://198.51.100.7/x.png' } })
+    : new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'image/png' } })));
+  const uri = await fetchRemoteAsDataUri('http://93.184.216.34/x.png', 'image', { transport });
+  assert.equal(uri, 'data:image/png;base64,AQID');
+  assert.deepEqual(transport.seen.map((h) => h.url), ['http://93.184.216.34/x.png', 'http://198.51.100.7/x.png']);
 });
 
 test('a redirect chain that never settles is cut off', async () => {
-  const realFetch = globalThis.fetch;
-  let hops = 0;
-  globalThis.fetch = async (input) => {
-    hops += 1;
-    return new Response(null, { status: 302, headers: { location: `${input}/more` } });
-  };
+  const transport = stub((n, url) => new Response(null, { status: 302, headers: { location: `${url}/more` } }));
   try {
-    await fetchRemoteAsDataUri('http://public.example/x.png', 'image');
+    await fetchRemoteAsDataUri('http://93.184.216.34/x.png', 'image', { transport });
     assert.fail('an endless redirect must be cut off');
   } catch (err) {
     assert.match(err.message, /too many redirects/);
-    assert.equal(hops, 5, 'four hops followed, refused on the fifth');
-  } finally {
-    globalThis.fetch = realFetch;
+    assert.equal(transport.seen.length, 5, 'four hops followed, refused on the fifth');
   }
 });
 
 test('a redirect into a non-http scheme is refused', async () => {
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(null, { status: 302, headers: { location: 'file:///etc/passwd' } });
+  const transport = stub(() => new Response(null, { status: 302, headers: { location: 'file:///etc/passwd' } }));
   try {
-    await fetchRemoteAsDataUri('http://public.example/x.png', 'image');
+    await fetchRemoteAsDataUri('http://93.184.216.34/x.png', 'image', { transport });
     assert.fail('a file: redirect must be refused');
   } catch (err) {
     assert.match(err.message, /unsupported protocol/);
-  } finally {
-    globalThis.fetch = realFetch;
   }
+});
+
+test('a name that resolves private is refused before anything is fetched', async () => {
+  // `localhost.` — the trailing dot is the same name to the resolver and a
+  // different one to the literal check, which is exactly the split the DNS
+  // pass exists to close.
+  const transport = stub(() => new Response(null, { status: 200 }));
+  try {
+    await fetchRemoteAsDataUri('http://localhost./x.png', 'image', { transport });
+    assert.fail('a private-resolving name must be refused');
+  } catch (err) {
+    assert.match(err.message, /resolves to a private\/internal address/);
+    assert.equal(transport.seen.length, 0, 'nothing was fetched');
+  }
+});
+
+test('a name that cannot be resolved is refused — an unvetted name is not fetched', async () => {
+  // RFC 2606 reserves .invalid: it never resolves, so the guard cannot know
+  // where it points. Failing open here is what the rebinding attack needs.
+  const transport = stub(() => new Response(null, { status: 200 }));
+  try {
+    await fetchRemoteAsDataUri('http://public.invalid/x.png', 'image', { transport });
+    assert.fail('an unresolvable name must be refused');
+  } catch (err) {
+    assert.match(err.message, /could not be resolved/);
+    assert.equal(transport.seen.length, 0, 'nothing was fetched');
+  }
+});
+
+test('the request carries the address that was vetted, so the name is never resolved twice', async () => {
+  // The whole point of the pin: the answer the guard checked is the address
+  // the socket is made to. A name with a TTL of zero can answer public for
+  // the check and private for the request — there is no second lookup left
+  // for it to be fooled by.
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('pinned');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  try {
+    const res = await pinnedGet(`http://public.invalid:${port}/x`, {
+      addresses: [{ address: '127.0.0.1', family: 4 }],
+    });
+    assert.equal(await res.text(), 'pinned', 'the request went to the vetted address');
+    // The same URL without the pin is resolved for real, and .invalid does
+    // not resolve — which is what makes the pin the difference.
+    await assert.rejects(() => pinnedGet(`http://public.invalid:${port}/x`, {}), 'without the pin the name is resolved again');
+  } finally {
+    server.close();
+    server.closeAllConnections?.();
+  }
+});
+
+test('every answer is vetted, and the answers are the ones to pin to', async () => {
+  // The connection picks one of the answers and the attacker picks which, so
+  // a name that answers with a private address among public ones is refused.
+  // `localhost` answers with a loopback on every stack, which is the one
+  // private-resolving name every machine has without touching the network.
+  const vetted = await resolveVetted('localhost');
+  assert.equal(vetted.private, true, 'a private answer refuses the name');
+  assert.ok(vetted.addresses.length > 0, 'the answers are there to be pinned to');
+  assert.ok(vetted.addresses.every((a) => isPrivateHost(a.address)), 'and every one of them was vetted');
 });
 
 // DNS rebinding / split-horizon DNS: a bare domain that resolves to a private

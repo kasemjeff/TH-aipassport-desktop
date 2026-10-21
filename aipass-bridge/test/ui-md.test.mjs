@@ -15,6 +15,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderMarkdown, splitMarkdownStable } from '../../desktop/ui/md.js';
+import { setRestoreTable } from '../../desktop/ui/waf-restore.js';
+import { restoreTable } from '../harness/waf.mjs';
 
 const SAMPLES = [
   'plain paragraph',
@@ -91,6 +93,17 @@ test('a settled split is stable text: its rendering does not change as the tail 
       seen.set(stable, renderMarkdown(stable));
     }
   }
+});
+
+test('a URL the model quoted comes back as a link the reader can click', () => {
+  // The wire spelling is what the model writes — a search's address arrives as
+  // HTTPS-URL…, and the reader must see the address itself, or the link is
+  // neither clickable nor copyable.
+  setRestoreTable(restoreTable());
+  const html = renderMarkdown('ตามลิงก์นี้ [medium](HTTPS-URLmedium.com/@a/post) อ่านต่อ');
+  assert.match(html, /href="https:\/\/medium\.com\/@a\/post"/, 'the address is a real one');
+  assert.match(html, />medium</, 'and the label is still the label');
+  assert.equal(/HTTPS-URL/.test(html), false, 'no wire spelling reaches the screen');
 });
 
 test('pipe tables render a header, a body and per-column alignment', () => {

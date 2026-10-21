@@ -269,6 +269,11 @@ MV3, three script contexts, loaded unpacked.
   POSTed straight to `/ext/{chunk,done,error,loader}`.
 - The bridge URL lives in `chrome.storage.local.bridgeUrl` (default
   `http://127.0.0.1:8787`), editable from the popup.
+- The loopback token lives in `chrome.storage.local.bridgeToken` — pasted once
+  from `~/.aipass/.token` (popup → Advanced → Loopback token). Without it the
+  bridge answers `/ext/events` with 401 and says so in its log, once every 30
+  seconds: the extension retries every 3 s, so a tokenless extension would
+  otherwise be a silent loop that only shows up as `extensions: 0`.
 
 ### `content.js` — ISOLATED world
 
@@ -705,6 +710,13 @@ All read in `bridge/server.mjs`.
   `webRequest` permissions are not requested.
 - The bridge and CLIs speak only to `127.0.0.1`. Nothing is written to disk by
   the bridge.
+- **The bridge requires a bearer token** (`~/.aipass/.token`, minted once).
+  Every route except `/status` and `/health` refuses a request without it, the
+  comparison is constant-time, and `AIPASS_REQUIRE_AUTH=0` is the documented
+  escape hatch for a foreground `aipass dev` — it warns at every boot.
+- **The clients attach that token to loopback and nowhere else.** The question
+  is about the host, not about a string prefix: a remote `--bridge` gets no
+  `Authorization` header, so the token cannot be shipped off the machine.
 - `page.js` cannot be turned into a general request forwarder — `runLoader`
   hard-refuses non-`/loaders/` paths and the tool set is fixed at
   `{ chat, loader, create }`.
@@ -715,9 +727,13 @@ All read in `bridge/server.mjs`.
 
 **Be aware:**
 
-- **`Access-Control-Allow-Origin: *`.** While `npm run dev` is running, *any*
-  site open in the browser can `POST` to `localhost:8787` and send a message on
-  your account (burning credits, creating history). Stop the bridge when idle.
+- **CORS is off by default.** The bridge answers no `Access-Control-Allow-Origin`
+  unless `AIPASS_CORS_ORIGIN` names a caller, so a browser page cannot *read*
+  anything from `localhost:8787`. It can still *send*: a "simple" cross-origin
+  request (`text/plain`, no preflight) reaches the bridge, and the bearer token
+  is what stops it — which is why the token is on by default and why a bridge
+  left running with `AIPASS_REQUIRE_AUTH=0` is a hole with the lid off. Stop
+  the bridge when idle.
 - Every message goes through the real product and appears in the account's chat
   history.
 - `npm run agent --allow-run` gives the model a shell inside `--root`. Don't

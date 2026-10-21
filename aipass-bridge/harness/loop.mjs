@@ -15,12 +15,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { outbound } from './waf.mjs';
+import { parseSources } from './web-sources.mjs';
 import {
   REMINDER, REMINDER_HEAD, REMINDER_TAIL, prose, parse, parseTodo, mergeTodo, READING, attemptedMarker,
   preamble as buildPreamble,
 } from './protocol.mjs';
 import { resilientSay, decode, recoverWaits, sendRecoverable, waitLabel } from './bridge.mjs';
-import { classify, isGitCommit } from './permissions.mjs';
+import { classify, classifyPlugin, isGitCommit } from './permissions.mjs';
 import { posix } from './overlay.mjs';
 import { thaiRatio } from './lang.mjs';
 import { PATHY, pathVariants, beYearNote } from './argguard.mjs';
@@ -100,6 +101,36 @@ export async function bootstrapSnapshot(tools, root) {
   } catch { /* no package.json — the snapshot skips it */ }
   const text = parts.join('\n');
   return text.length > 1500 ? `${text.slice(0, 1500)}…` : text;
+}
+
+/**
+ * The length of the cycle a window of step signatures closes, or 0.
+ *
+ * A run that cannot move has a shape. The same step again and again is one;
+ * two steps trading places is another (the old oscillation); and a run can
+ * also go round a longer circle — read file A, edit file B, run the test,
+ * read file A again, edit file B again — where every single step looks new
+ * and the whole round trip goes nowhere. The two-state case is left where it
+ * was; this finds the longer ones.
+ *
+ * A cycle of length p is the last p+1 signatures where the first and the
+ * last are the same and the p in between are all different from each other —
+ * a round, not a palindrome. The signatures carry the results, so the states
+ * that repeat are the ones that returned the same answer.
+ *
+ * @param {string[]} window the step signatures, oldest first, the current one last
+ * @param {number} [minPeriod] the shortest cycle to look for
+ * @returns {number} the period, or 0 when the window closes no cycle
+ */
+export function cycleLength(window, minPeriod = 3) {
+  const sigs = Array.isArray(window) ? window : [];
+  const n = sigs.length;
+  for (let p = minPeriod; p < n; p++) {
+    if (sigs[n - 1] !== sigs[n - 1 - p]) continue;
+    const states = sigs.slice(n - 1 - p, n - 1);
+    if (new Set(states).size === states.length) return p; // every state different
+  }
+  return 0;
 }
 
 /**
@@ -285,10 +316,12 @@ export async function runTask(taskText, ctx = {}) {
     session?.append('assistant', { text: res.text, reasoning: res.reasoning });
     return res.text;
   };
+  // The run's first message carries the protocol, so it is never shortened:
+  // a protocol with its middle cut out is worse than a message that waited.
   const saySafe = (text, parts = null) => resilientSay(say, text, (_level, t) => {
     firewallNotes++;
     events?.emit('firewall_note', { text: t });
-  }, parts, 0, { encode: waf, firewall: waf });
+  }, parts, 0, { encode: waf, firewall: waf, shrink: sends > 0 });
 
   let listing = '';
   try { listing = waf ? outbound(tools.list('.')) : tools.list('.'); } catch { /* ignore */ }
@@ -373,6 +406,9 @@ export async function runTask(taskText, ctx = {}) {
   let lastStepSig = null;
   let prevSigs = [];         // (R1) recent step signatures, for oscillation
   let oscillate = 0;         // consecutive A/B swings with identical results
+  let circleStrikes = 0;     // laps of a longer round (A, B, C, A …)
+  let circleLen = 0;         // how many states that round has
+  let circleStates = new Set(); // the states of the round being counted
   let verifyPrompts = 0;     // (R4) one "prove it" nudge per run
   let verifySent = false;
   let codeTouched = false;   // a code file was staged this run
@@ -1003,8 +1039,12 @@ export async function runTask(taskText, ctx = {}) {
       if (refused) stat.fail += 1;
       toolStats.set(call.kind, stat);
       const isLast = i === work.length - 1 && !done;
-      events?.emit('tool', { kind: call.kind, arg: label, ok: !refused, head: head.slice(0, 70), lines: refused ? rest : [], isLast });
-      session?.append('tool', { kind: call.kind, arg: label, out: text.slice(0, 20_000), ok: !refused });
+      // (web links) A search brings its sources with it: the window shows them
+      // as links under the Web row, so the reader can open the article the
+      // answer came from instead of trusting a line of prose about it.
+      const sources = call.kind === 'web' ? parseSources(text) : [];
+      events?.emit('tool', { kind: call.kind, arg: label, ok: !refused, head: head.slice(0, 70), lines: refused ? rest : [], sources, isLast });
+      session?.append('tool', { kind: call.kind, arg: label, out: text.slice(0, 20_000), ok: !refused, sources });
       // (Thai pack) Evidence novelty: a result already seen this run is what a
       // loop smells like in the stats, before anyone reads the transcript.
       const seenKey = text.slice(0, 600);
@@ -1098,15 +1138,19 @@ export async function runTask(taskText, ctx = {}) {
       next = `${results.join('\n\n')}\n\n${reminder}`;
     }
 
-    // (H7/R1) Stagnation guard. Two shapes of a run that cannot move:
+    // (H7/R1) Stagnation guard. Three shapes of a run that cannot move:
     //   - the same step over and over (identical calls, identical results)
     //   - two steps trading places (A, B, A, B …) — every step looks new,
     //     the pair goes nowhere
+    //   - a longer round (A, B, C, A, B, C …) — the same circle, wider
     // One strike earns a correction; the next stops the run instead of
     // burning the rest of the budget on calls that change nothing.
     const stepSig = work.map((c, i) => JSON.stringify([c.kind, String(c.arg ?? ''), String(results[i] ?? '').slice(0, 2000)])).join('\n');
     const prevSig = prevSigs.at(-1) ?? null;
     const prev2Sig = prevSigs.at(-2) ?? null;
+    // The window the circle detector reads: the last few signatures, the
+    // current one last.
+    const window = [...prevSigs.slice(-6), stepSig];
     prevSigs.push(stepSig);
     if (prevSigs.length > 6) prevSigs.shift();
 
@@ -1114,23 +1158,53 @@ export async function runTask(taskText, ctx = {}) {
     if (stepSig === prevSig) oscillate = 0;
     else if (prev2Sig !== null && stepSig === prev2Sig) oscillate += 1;
     else oscillate = 0;
+    // The longer circle: three states or more, going round. It is counted
+    // apart from the two-state swing above, because the correction it earns
+    // says something different — the pair moving is not the same failure as
+    // a round trip that never leaves the same three steps.
+    //
+    // The counter counts LAPS, not detections: in a three-state round only
+    // every third step closes the loop, so a counter that reset in between
+    // would never see two. A step that is not one of the round's states ends
+    // the round, and the next one starts a new count.
+    const circle = cycleLength(window, 3);
+    if (circle) {
+      const states = new Set(window.slice(window.length - 1 - circle, window.length - 1));
+      const same = circleStates.size === states.size && [...states].every((s) => circleStates.has(s));
+      circleLen = circle;
+      if (same) circleStrikes += 1; else { circleStates = states; circleStrikes = 1; }
+    } else if (circleStates.size && !circleStates.has(stepSig)) {
+      circleStates = new Set();
+      circleStrikes = 0;
+    }
 
-    if (stagnantStep >= 3 || oscillate >= 2) {
-      const pattern = stagnantStep >= 3 ? 'repeat' : 'oscillation';
-      const n = pattern === 'repeat' ? stagnantStep : oscillate;
-      session?.append('note', { text: `stagnation guard: ${pattern === 'repeat' ? `the same step ran ${n} times` : 'two steps kept trading places'} with identical results — stopping the run` });
-      events?.emit('stagnation', { repeats: n, action: 'stop', pattern });
+    // The evidence side of the same question: a run whose answers keep coming
+    // back the same is not moving, whatever its calls look like. Once most of
+    // the results are repeats, the guard stops on the first strike instead of
+    // spending a correction on a run that has already shown it is stuck.
+    const heard = novelResults + repeatedResults;
+    const echoed = heard >= 4 && repeatedResults >= 2 && repeatedResults / heard >= 0.5;
+    const repeatStop = echoed ? 2 : 3;
+    const circleStop = echoed ? 1 : 2;
+
+    if (stagnantStep >= repeatStop || oscillate >= 2 || circleStrikes >= circleStop) {
+      const pattern = circleStrikes >= circleStop ? 'circle' : (stagnantStep >= repeatStop ? 'repeat' : 'oscillation');
+      const n = pattern === 'repeat' ? stagnantStep : (pattern === 'circle' ? circleStrikes : oscillate);
+      session?.append('note', { text: `stagnation guard: ${pattern === 'repeat' ? `the same step ran ${n} times` : (pattern === 'circle' ? `${circleLen} steps went round in a circle` : 'two steps kept trading places')} with identical results — stopping the run` });
+      events?.emit('stagnation', { repeats: n, action: 'stop', pattern, cycle: circleLen });
       stopReason = 'stagnation';
       break;
     }
-    if (stagnantStep === 2 || oscillate === 1) {
-      const pattern = stagnantStep === 2 ? 'repeat' : 'oscillation';
+    if (stagnantStep === 2 || oscillate === 1 || circleStrikes === 1) {
+      const pattern = circleStrikes === 1 ? 'circle' : (stagnantStep === 2 ? 'repeat' : 'oscillation');
       stagnationWarns += 1;
-      session?.append('note', { text: `stagnation guard: ${pattern === 'repeat' ? 'the step repeated exactly' : 'the calls are trading places'} — asking for a different move` });
-      events?.emit('stagnation', { repeats: pattern === 'repeat' ? stagnantStep : oscillate, action: 'warn', pattern });
+      session?.append('note', { text: `stagnation guard: ${pattern === 'repeat' ? 'the step repeated exactly' : (pattern === 'circle' ? `the same ${circleLen} steps went round in a circle` : 'the calls are trading places')} — asking for a different move` });
+      events?.emit('stagnation', { repeats: pattern === 'repeat' ? stagnantStep : (pattern === 'circle' ? circleStrikes : oscillate), action: 'warn', pattern, cycle: circleLen });
       next += pattern === 'repeat'
         ? `\n\nThat was the same call with the same result as the step before, so repeating it moves nothing. Do something different — open other files, change the call — or say DONE and tell me what is still open.`
-        : `\n\nThe calls are going back and forth between the same two moves with identical results, so the pair moves nothing. Do something different — open something new, change the call — or say DONE and tell me what is still open.`;
+        : (pattern === 'circle'
+          ? `\n\nThe last few steps went round in a circle through the same ${circleLen} moves, and the answers came back the same every time, so the circle moves nothing. Do something different — open something new, change the call — or say DONE and tell me what is still open.`
+          : `\n\nThe calls are going back and forth between the same two moves with identical results, so the pair moves nothing. Do something different — open something new, change the call — or say DONE and tell me what is still open.`);
     }
 
     // (R4) Verification before DONE, the soft form: once a run has staged
@@ -1368,22 +1442,48 @@ async function execute(call, ctx) {
     return lines.join('\n');
   }
 
-  // A marker a plugin registered. It is the plugin's own code, so it is also
-  // the plugin's own responsibility: the result is a string, or an error
-  // string, and nothing here interprets it. A plugin tool that declared a
-  // `risk` at registration rides the same permission gate a built-in of that
-  // kind would; an undeclared tool keeps the trust the plugin model states —
-  // it runs, and its side effects are the plugin's to own.
+  // A marker a plugin registered. It is the plugin's own code, so the result
+  // is a string, or an error string, and nothing here interprets it. But the
+  // marker still rides the permission gate a built-in rides: the risk is the
+  // plugin's own word when it declared one, and without a declaration the
+  // marker is classified like a write — a plugin's code runs in this process
+  // with the harness's access, so "nobody said" is not "it only reads". A
+  // model that asks for a plugin marker by accident, or a file it read that
+  // told it to, is stopped by the same question a built-in would be.
   if (call.kind === 'plugin') {
     if (!runPluginTool) return `err: no plugin tool named ${call.name} is installed`;
-    const declaredRisk = (options.pluginTools ?? []).find((t) => t?.marker === call.name)?.risk ?? null;
-    if (permissions && declaredRisk && declaredRisk !== 'read') {
-      const verdict = permissions.evaluate({ kind: 'plugin', arg: call.name, body: call.body, risk: declaredRisk });
+    const declared = (options.pluginTools ?? []).find((t) => t?.marker === call.name);
+    const risk = classifyPlugin(declared?.risk ?? null);
+    // The kinds the rules may name to match this call: the marker's own, and
+    // the one it behaves as — so the safety floor and the user's path rules
+    // reach a plugin exactly as they reach a built-in write.
+    const ruleKinds = risk === 'read' ? ['plugin'] : ['plugin', risk === 'shell' ? 'run' : 'write'];
+    // What the person watching is shown: the marker's name, and the payload
+    // it was asked to work on. The marker's own name is the grant key, so an
+    // "always" answer covers the marker rather than one argument of it.
+    const shown = [call.arg, previewOf(call)].filter(Boolean).join('\n');
+    if (permissions) {
+      const verdict = permissions.evaluate({
+        kind: 'plugin', arg: call.name, body: call.body, risk, paths: [call.arg], ruleKinds,
+        secretText: call.body,
+      });
       if (verdict.decision !== 'allow') {
+        if (verdict.decision === 'deny') {
+          // The floor refused it before anybody was asked — say which one, so
+          // the refusal is a fact and not a shrug.
+          return `err: plugin marker ${call.name} was refused${verdict.reason ? ` — ${verdict.reason}` : ''}`.slice(0, 300);
+        }
         const decision = await permissions.request({
-          kind: 'plugin', arg: call.name, preview: previewOf(call), body: call.body, risk: declaredRisk,
+          kind: 'plugin', arg: call.name, preview: shown, body: call.body, risk,
+          paths: [call.arg], ruleKinds, secretText: call.body,
         });
-        if (decision === 'deny') return `err: the person watching declined plugin marker ${call.name}`;
+        if (decision === 'deny') {
+          // The reason rides along: a marker refused by the secret floor and
+          // a marker the person turned down are different events, and the
+          // model is told which one it was.
+          const why = verdict.reason ? ` — ${verdict.reason}` : '';
+          return `err: the person watching declined plugin marker ${call.name}${why}`;
+        }
         if (decision === 'always') permissions.grant('plugin', call.name);
       }
     }

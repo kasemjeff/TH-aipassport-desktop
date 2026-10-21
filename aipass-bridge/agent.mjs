@@ -101,6 +101,11 @@ const SKILLS_DIR = flag('skills', null) ?? process.env.AIPASS_SKILLS_DIR;
 const SEARCH_I = has('search-i');
 // Teach the model the ATTACH marker, for files `read` refuses (images, PDFs).
 const ATTACH = has('attach');
+// Let the model fetch a URL it chose. Off by default: the destination is the
+// model's own, so a page the agent read can talk it into posting the
+// project's contents to a third party, and this terminal has no window to ask
+// in. The flag is the consent, the way `--allow-run` is.
+const ALLOW_FETCH = has('allow-fetch');
 // Run WEB lookups in a throwaway scratch conversation, so the search Q&A never
 // occupies the working conversation's context.
 const WEB_SCRATCH = has('web-scratch');
@@ -146,6 +151,7 @@ if (!task || HELP) {
   --temperature N sampling temperature: a number 0..2      (default: the site's per-model default)
   --apply         write without asking               (default: ask after the diff)
   --allow-run     let the agent run shell commands   (default: off)
+  --allow-fetch   let the agent fetch a URL it chose  (default: off)
   --max N         cap this run's steps (0 = none)     (default: none)
   --max-result N  truncate each tool result          (default: 3000 bytes)
   --read-lines N  max lines per read page            (default: 250)
@@ -378,7 +384,14 @@ const harness = new Harness({
     thinking: THINKING,
     temperature: TEMPERATURE,
     allowRun: ALLOW_RUN,
-    mode: 'auto',
+    allowFetch: ALLOW_FETCH,
+    // `auto` asks about a shell command — it is the mode that lets WRITES
+    // through, not the one that lets the shell run unattended. The CLI has no
+    // window to ask in, so a question would be a question nobody can answer
+    // and the command would be refused. `--allow-run` is the old
+    // `--apply --allow-run`, and the old `--allow-run` was the old yolo: the
+    // person typed the flag, so the flag is the consent.
+    mode: ALLOW_RUN ? 'yolo' : 'auto',
     slim: SLIM || Boolean(ASSISTANT),
     snapshot: SNAPSHOT,
     verifyCommand: VERIFY_COMMAND,

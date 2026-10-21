@@ -14,12 +14,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { SKIP, binaryKind, posix, stripGutter } from './overlay.mjs';
-import { createSandbox, materializeTree, restorePaths, sharedDirs } from './sandbox.mjs';
+import { SKIP, binaryKind, posix, stripGutter, realPath } from './overlay.mjs';
+import { createSandbox, materializeTree, removeSandbox, restorePaths, sharedDirs } from './sandbox.mjs';
 import { outbound, inbound } from './waf.mjs';
+import { withResolvedSources } from './web-sources.mjs';
 import { secretHit, scrubSecretDiff } from './permissions.mjs';
 import { scrubOutput } from './output-scrub.mjs';
-import { isPrivateHost, hostResolvesPrivate } from '../bridge/private-hosts.mjs';
+import { isPrivateHost, pinnedGet, resolveVetted } from '../bridge/private-hosts.mjs';
 import { loadGitignore } from './gitignore.mjs';
 import { stripInvisibles } from './lang.mjs';
 import { extractSymbols, indexProject, listSymbols, findDefinition, findReferences, formatSymbols, formatDefs, formatRefs } from './symbols.mjs';
@@ -28,6 +29,12 @@ import { MAX_ATTACHMENT_BYTES, mimeOf, isAllowedAttachment } from '../bridge/att
 // A file past this size is data, not source: SEARCH used to read 500 MB logs
 // line by line, synchronously, in the backend's process.
 const MAX_SEARCH_FILE = 1_000_000;
+// The same ceiling for `read`, which used to have none at all: a multi-GB
+// file answers with an out-of-memory crash, not with a page. A spill file
+// (this tool's own copy of a result) is allowed more, because it carries
+// the line gutter of a file that already passed the cap.
+const MAX_READ_FILE = 1_000_000;
+const MAX_SPILL_READ = 2 * MAX_READ_FILE;
 
 /**
  * A tool result longer than the inline cap is not thrown away.
@@ -109,7 +116,129 @@ function spill(text, cap, root, tailShare = 0) {
 // ablations — structured tools carrying validation — this is the cheapest
 // check there is: a syntax error is either there or it is not, and catching
 // it inside the run costs one round trip instead of a broken apply later.
+//
+// The same argument holds for JSON, at a fraction of the price: `JSON.parse`
+// needs no process and no toolchain, and a staged `package.json` with a
+// missing comma breaks every tool in the project the moment it lands.
 const JS_FILE = /\.(mjs|cjs|js)$/i;
+const JSON_FILE = /\.jsonc?$/i;
+// A JSON file big enough that parsing it is not free (a lockfile is), and one
+// whose reader accepts more than JSON.parse does.
+const JSON_CAP = 4 * 1024 * 1024;
+
+/**
+ * Is this JSON file one whose own reader accepts comments and trailing
+ * commas?
+ *
+ * `tsconfig*.json` and `*.jsonc` are JSON with comments — TypeScript reads
+ * both, and a check that called them broken would send the model "fixing" a
+ * file that was right. Every other `.json` is read as JSON, strictly: npm
+ * reads `package.json` that way, and a trailing comma in it is a real bug.
+ */
+function jsoncName(rel) {
+  const base = path.basename(String(rel ?? '')).toLowerCase();
+  // `tsconfig.json`, `tsconfig.base.json`, `tsconfig.app.json`, `*.jsonc`.
+  return base.endsWith('.jsonc') || /^tsconfig(\..+)?\.json$/.test(base);
+}
+
+/** The JSON text with its comments taken out — strings are left alone. */
+function stripJsonComments(text) {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  let inLine = false;
+  let inBlock = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inLine) {
+      if (ch === '\n') { inLine = false; out += ch; }
+      continue;
+    }
+    if (inBlock) {
+      if (ch === '*' && text[i + 1] === '/') { inBlock = false; i++; }
+      continue;
+    }
+    if (inString) {
+      out += ch;
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; out += ch; continue; }
+    if (ch === '/' && text[i + 1] === '/') { inLine = true; i++; continue; }
+    if (ch === '/' && text[i + 1] === '*') { inBlock = true; i++; continue; }
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * The JSON text with its trailing commas taken out — strings are left alone.
+ *
+ * The scan is string-aware on purpose: a comma inside a string that happens to
+ * be followed by a bracket (`{"a": "x,}"}`) is content, not punctuation, and
+ * a blind replace would edit the value and report a file that was fine.
+ */
+function stripTrailingCommas(text) {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      out += ch;
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; out += ch; continue; }
+    if (ch === ',') {
+      let j = i + 1;
+      while (j < text.length && /\s/.test(text[j])) j++;
+      if (text[j] === '}' || text[j] === ']') continue; // the last comma of a block
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** Where in the text a JSON error sits: the line and the column. */
+function jsonErrorPlace(message, text) {
+  const msg = String(message ?? '');
+  // Newer runtimes name the place themselves ("… at position 12 (line 3
+  // column 1)"); saying it twice would only make the note longer.
+  if (/\(line \d+ column \d+\)/.test(msg)) return '';
+  const at = /position (\d+)/.exec(msg);
+  if (!at) return '';
+  const pos = Math.min(Number(at[1]), text.length);
+  const before = text.slice(0, pos);
+  const line = before.split('\n').length;
+  const column = pos - before.lastIndexOf('\n');
+  return ` (line ${line}, column ${column})`;
+}
+
+/**
+ * The JSON verdict, in the same shape as the JavaScript one.
+ *
+ * An empty file is left alone — an empty body is sometimes deliberate — and
+ * so is a file past the cap: a lockfile is big, and its verdict is worth
+ * less than the round trip it would cost to read it.
+ */
+function jsonNote(rel, text) {
+  if (text.length > JSON_CAP || !text.trim()) return '';
+  // A byte-order mark is not JSON, but every editor that writes one means it.
+  const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  const source = jsoncName(rel) ? stripTrailingCommas(stripJsonComments(body)) : body;
+  try {
+    JSON.parse(source);
+    return 'syntax check ok';
+  } catch (err) {
+    const where = jsonErrorPlace(err?.message, source);
+    return `syntax check failed — the staged content is not valid JSON${where}:\n${String(err?.message ?? err)}`;
+  }
+}
 
 /** Run a child to completion, never throwing on a non-zero exit. */
 function runChild(cmd, args, timeoutMs) {
@@ -211,6 +340,9 @@ function killTree(child) {
 // Awaited, not spawnSync: this runs in the backend's process, and a blocked
 // event loop there freezes the window's stream for the length of the check.
 async function syntaxNote(rel, text) {
+  // JSON first: its check is in-process and free, and the file families are
+  // disjoint, so the order only decides which branch reads the name.
+  if (JSON_FILE.test(rel)) return jsonNote(rel, text);
   if (!JS_FILE.test(rel) || text.length > 512 * 1024) return '';
   // The extension decides the grammar: .mjs is a module, .cjs a script. A
   // project .js file is whichever its package.json says, so sniff the one
@@ -297,26 +429,52 @@ export function splitLines(text) {
   if (s.endsWith('\n')) lines.pop();
   return lines;
 }
+// Brace expansion recurses once per brace group, so the depth of the
+// recursion is the number of groups in the pattern: a pattern with 20,000
+// `{` blew the stack (RangeError: Maximum call stack size exceeded), and a
+// wide one asked for a combinatorial number of patterns. Both are bounded
+// here, and the bound is REPORTED rather than thrown — the caller answers
+// the model with the refusal.
+const MAX_BRACE_DEPTH = 8;
+const MAX_BRACE_PATTERNS = 32;
+
+/**
+ * The patterns a brace pattern stands for.
+ *
+ * @param {string} pattern
+ * @returns {{ patterns: string[], error: string|null }}
+ */
 export function expandBraces(pattern) {
   const out = [];
-  const walk = (p) => {
-    if (out.length >= 32) return;
+  let tooDeep = 0;
+  let tooWide = false;
+  const walk = (p, depth) => {
+    if (out.length >= MAX_BRACE_PATTERNS) { tooWide = true; return; }
+    if (depth > MAX_BRACE_DEPTH) { tooDeep = depth; return; }
     const open = p.indexOf('{');
     if (open === -1) { out.push(p); return; }
-    let depth = 0;
+    let nest = 0;
     let close = -1;
     for (let i = open; i < p.length; i++) {
-      if (p[i] === '{') depth++;
-      else if (p[i] === '}') { depth--; if (depth === 0) { close = i; break; } }
+      if (p[i] === '{') nest++;
+      else if (p[i] === '}') { nest--; if (nest === 0) { close = i; break; } }
     }
     if (close === -1) { out.push(p); return; } // unbalanced: literal, as before
     const head = p.slice(0, open);
     const body = p.slice(open + 1, close);
     const tail = p.slice(close + 1);
-    for (const alt of splitTopCommas(body)) walk(head + alt + tail);
+    for (const alt of splitTopCommas(body)) walk(head + alt + tail, depth + 1);
   };
-  walk(pattern);
-  return out.length ? out : [pattern];
+  walk(pattern, 0);
+  if (tooDeep) {
+    return { patterns: [], error: `err: the pattern nests braces ${tooDeep} deep — the cap is ${MAX_BRACE_DEPTH}. Use a flatter pattern.` };
+  }
+  if (tooWide) {
+    // Silently dropping the alternatives would hide files from the model and
+    // let it believe the tree is emptier than it is.
+    return { patterns: [], error: `err: the pattern expands to more than ${MAX_BRACE_PATTERNS} alternatives — narrow it.` };
+  }
+  return { patterns: out.length ? out : [pattern], error: null };
 }
 
 export function createTools(ctx) {
@@ -339,6 +497,10 @@ export function createTools(ctx) {
     // (stop) The run's stop switch. A RUN in flight when the person pressed
     // stop is killed with its tree instead of running to its own timeout.
     signal = null,
+    // The request the FETCH tool makes. It is a parameter so the guard can be
+    // driven without a network in a test; the default is the pinned request
+    // from private-hosts.mjs, which connects to the address that was vetted.
+    fetchTransport = pinnedGet,
   } = ctx;
 
   // A result past the inline cap is spilled to disk rather than truncated: the
@@ -350,8 +512,21 @@ export function createTools(ctx) {
   // diagnosis; the first are where it went wrong first.
   const clipRun = (s) => (s.length > maxResult ? spill(s, maxResult, root, 0.6) : s);
   const safe = (p) => overlay.safe(p);
+  const trySafe = (p) => overlay.trySafe(p);
   const existsAt = (abs) => overlay.existsAt(abs);
   const readAt = (abs) => overlay.readAt(abs);
+
+  // The file a link really is. A link inside the project can name a file
+  // outside it, and the secret screen has to see the TARGET: a link called
+  // "notes.txt" that points at ~/.ssh/id_rsa must be screened as id_rsa, not
+  // as notes.txt. The target is named relative to the project as it really
+  // is (a project reached through a junction has two names, and only the
+  // real one is worth comparing against).
+  const linkTarget = (abs) => {
+    const real = realPath(abs);
+    if (!real) return '';
+    return posix(path.relative(overlay.realRoot ?? root, real));
+  };
 
   // ATTACH queues parts here; the loop drains the queue into the very next
   // message it sends. A tool cannot send anything itself — the message is the
@@ -435,6 +610,17 @@ export function createTools(ctx) {
       if (fs.existsSync(abs) && fs.statSync(abs).isDirectory()) {
         return `${TOOLS.list(rel)}\n(${rel} is a directory, so here is its listing — NEED dir lists a folder, NEED file reads one file.)`;
       }
+      // A file past the cap is refused, not read. `read` had no ceiling at
+      // all, so a multi-GB log answered with an out-of-memory crash instead
+      // of with a page. The cap is the one SEARCH uses, so the two tools
+      // agree on what a file may be.
+      const isSpill = /^\.aipass\/spill\//i.test(String(rel).replace(/\\/g, '/').replace(/^\.\//, ''));
+      const cap = isSpill ? MAX_SPILL_READ : MAX_READ_FILE;
+      let size = 0;
+      try { size = fs.statSync(abs).size; } catch { size = 0; } // a staged file is not on disk yet
+      if (size > cap) {
+        return `err: ${rel} is ${Math.round(size / 1024 / 1024)} MB — the read cap is ${Math.round(cap / 1024 / 1024)} MB. Search it with SEARCH, or cut it with a shell command (RUN).`;
+      }
       const kind = binaryKind(abs, (p) => overlay.has(p));
       if (kind) {
         return `err: ${rel} is ${kind === 'binary' ? 'a binary file' : `a ${kind} file`}, not text.\n`
@@ -476,7 +662,7 @@ export function createTools(ctx) {
       // again would spill the spill — a chain the model fell into once per
       // level. The asked-for range comes back verbatim instead; a range too
       // large to ride a message is cut here, never re-spilled.
-      if (/^\.aipass\/spill\//i.test(String(rel).replace(/\\/g, '/').replace(/^\.\//, ''))) {
+      if (isSpill) {
         const text = page.join('\n');
         if (text.length <= 30_000) return text + note;
         return `${text.slice(0, 30_000)}\n… the range was cut at 30000 chars — a spill read is never spilled again; ask for a smaller range, e.g. ${start}-${Math.min(end, start + 200)}.${note}`;
@@ -598,6 +784,15 @@ export function createTools(ctx) {
           if (matches >= MAX) return;
           if (ign.ignored(rel, false)) continue;
           if (secretHit(rel)) continue; // a secret file is not a search result
+          // A link is not a file of this project: it can point anywhere, and
+          // the file it names can be a secret on this machine. The
+          // containment check follows it — a link out of the project is a
+          // link out of the root — and the secret screen sees the TARGET,
+          // not the name the link borrows.
+          if (e.isSymbolicLink()) {
+            if (!trySafe(full)) continue;
+            if (secretHit(linkTarget(full))) continue;
+          }
           let size = 0;
           try { size = (await fs.promises.stat(full)).size; } catch { /* overlay-only or vanished: read it anyway */ }
           if (size > MAX_SEARCH_FILE) continue;
@@ -661,7 +856,7 @@ export function createTools(ctx) {
           sandbox = createSandbox(root);
           await materializeTree(root, overlay, sandbox, { signal, onSkip: (rel, bytes) => tooBig.push(`${rel} (${Math.round(bytes / 1024 / 1024)} MB)`) });
         } catch (err) {
-          if (sandbox) { try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* left under .aipass */ } }
+          if (sandbox) removeSandbox(sandbox);
           // A stop during the projection ends the run: the copy is the longest
           // wait a RUN has, and it used to finish while the window said the
           // run was stopping.
@@ -701,16 +896,32 @@ export function createTools(ctx) {
         }
         return clipRun(scrubSecretDiff(scrub(scrubOutput(`err: exit ${err.code ?? err.signal ?? '?'}\n${String(err.stdout ?? '')}${String(err.stderr ?? '')}`))));
       } finally {
-        if (sandbox) { try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* left under .aipass */ } }
+        if (sandbox) removeSandbox(sandbox);
       }
     },
     async glob(pattern) {
       if (!pattern) return 'err: give me a glob pattern, e.g. **/*.ts';
+      const raw = String(pattern);
+      // A `**` spans any number of path segments, and the matcher below
+      // tries every way of splitting the path for each one: a pattern with
+      // 32 of them costs 2^32 attempts per file, which is seconds per file
+      // on a real tree. The cap keeps the walk fast, and a model that needs
+      // a deeper glob is told to narrow it.
+      const MAX_GLOB_STARS = 8;
+      const stars = (p) => p.split('/').filter((s) => s === '**').length;
+      if (stars(raw) > MAX_GLOB_STARS) {
+        return `err: the pattern has ${stars(raw)} "**" segments — the cap is ${MAX_GLOB_STARS}. Narrow it (a path with fewer wildcards).`;
+      }
       // Models commonly write brace alternation (public/**/*.{js,css,html});
       // the old code escaped the braces and answered "no files matched" for a
       // tree full of them. Expand here, before matching: a file is a hit when
       // any of the expanded patterns matches.
-      const patterns = expandBraces(String(pattern));
+      const { patterns, error } = expandBraces(raw);
+      if (error) return error;
+      const deep = patterns.find((p) => stars(p) > MAX_GLOB_STARS);
+      if (deep) {
+        return `err: the pattern has ${stars(deep)} "**" segments — the cap is ${MAX_GLOB_STARS}. Narrow it (a path with fewer wildcards).`;
+      }
       const patPartsList = patterns.map((p) => p.split('/').filter(Boolean));
       // Segment-wise: every pattern part matches one path segment, except `**`
       // which spans any number of them. Matching only the last part when `**`
@@ -746,6 +957,15 @@ export function createTools(ctx) {
           const full = path.join(dir, e.name);
           const rel = posix(path.relative(root, full));
           if (ign.ignored(rel, e.isDirectory())) continue;
+          // A link is not a file of this project: it can point anywhere. The
+          // containment check follows it — a link out of the project is a
+          // link out of the root — and the secret screen sees the TARGET,
+          // not the name the link borrows. Same two rules the search walk
+          // uses, so the two tools cannot drift.
+          if (e.isSymbolicLink()) {
+            if (!trySafe(full)) continue;
+            if (secretHit(linkTarget(full))) continue;
+          }
           if (!e.isDirectory() && patPartsList.some((parts) => matchFrom(rel.split('/'), parts))) {
             hits.push(rel);
             if (hits.length >= MAX) return;
@@ -806,6 +1026,9 @@ export function createTools(ctx) {
       const allowPrivate = process.env.AIPASS_FETCH_ALLOW_PRIVATE === '1';
       const REDIRECTS = new Set([301, 302, 303, 307, 308]);
       const isLiteralIP = (h) => /^(\d{1,3}\.){3}\d{1,3}$/.test(h) || h.includes(':');
+      // Body reads are capped: a giant response would otherwise ride whole
+      // into the next message, and the message is the only channel there is.
+      const MAX_BYTES = Number(process.env.AIPASS_FETCH_MAX_BYTES ?? 2_000_000);
       let current = new URL(u);
       let res = null;
       for (let hop = 0; ; hop++) {
@@ -813,6 +1036,7 @@ export function createTools(ctx) {
           return `err: unsupported protocol: ${current.protocol}`;
         }
         const host = current.hostname;
+        let addresses = null;
         if (!allowPrivate) {
           if (isPrivateHost(host)) {
             return `err: refusing to fetch ${host} — private and internal addresses are blocked. Fetch a public URL instead.`;
@@ -820,18 +1044,36 @@ export function createTools(ctx) {
           // A bare domain can rebind to a private address on any hop — the
           // bridge attachment path checks the same way, and the redirect loop
           // below re-checks every hop rather than trusting the first URL.
-          if (!isLiteralIP(host) && await hostResolvesPrivate(host)) {
-            return `err: refusing to fetch ${host} — it resolves to a private/internal address. Fetch a public URL instead.`;
+          //
+          // The name is resolved ONCE and the connection is pinned to the
+          // answer that was vetted: resolving twice (once for the check, once
+          // for the request) is the hole, because a name with a TTL of zero
+          // answers public for the check and private for the request.
+          if (!isLiteralIP(host)) {
+            let vetted;
+            try {
+              vetted = await resolveVetted(host);
+            } catch {
+              // No answer, no verdict: a name that cannot be resolved cannot
+              // be vetted, and an unvetted name is not fetched.
+              return `err: refusing to fetch ${host} — it could not be resolved, and an unresolvable name cannot be vetted.`;
+            }
+            if (vetted.private) {
+              return `err: refusing to fetch ${host} — it resolves to a private/internal address. Fetch a public URL instead.`;
+            }
+            addresses = vetted.addresses;
           }
         }
         try {
-          res = await globalThis.fetch(current, {
-            redirect: 'manual',
-            headers: { 'user-agent': 'aipass-agent/1.0', 'accept': 'text/plain,text/html,*/*' },
-            // The fetch's own ceiling and the run's stop switch, together: a
-            // fetch the person stopped does not keep the run waiting for its
-            // twenty seconds.
-            signal: signal ? AbortSignal.any([AbortSignal.timeout(20_000), signal]) : AbortSignal.timeout(20_000),
+          res = await fetchTransport(current, {
+            addresses,
+            maxBytes: MAX_BYTES,
+            timeoutMs: 20_000,
+            // The request's own ceiling and the run's stop switch, together:
+            // a fetch the person stopped does not keep the run waiting for
+            // its twenty seconds.
+            signal,
+            headers: { 'user-agent': 'aipass-agent/1.0', accept: 'text/plain,text/html,*/*' },
           });
         } catch (err) {
           return `err: fetch error: ${err.message}`;
@@ -844,29 +1086,15 @@ export function createTools(ctx) {
         current = new URL(location, current);
       }
 
-      // Body reads are capped: a giant response would otherwise ride whole
-      // into the next message, and the message is the only channel there is.
-      const MAX_BYTES = Number(process.env.AIPASS_FETCH_MAX_BYTES ?? 2_000_000);
       try {
         if (!res.ok) return `err: HTTP ${res.status} ${res.statusText} from ${current}`;
-        let size = 0;
-        const parts = [];
-        if (res.body) {
-          const reader = res.body.getReader();
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            size += value.byteLength;
-            if (size > MAX_BYTES) { reader.cancel().catch(() => {}); break; }
-            parts.push(Buffer.from(value));
-          }
-        } else {
-          const buf = Buffer.from(await res.arrayBuffer());
-          size = buf.byteLength;
-          parts.push(buf);
-        }
-        let text = Buffer.concat(parts).toString('utf8');
-        if (size > MAX_BYTES) text += '\n… truncated at the byte cap; fetch a more specific URL for the rest.';
+        // The transport already cut the body at the cap; the cut is repeated
+        // here so a transport that does not (a test's, a future one) cannot
+        // ride a giant body into the message either.
+        const bytes = Buffer.from(await res.arrayBuffer());
+        const cut = bytes.subarray(0, MAX_BYTES);
+        let text = cut.toString('utf8');
+        if (res.truncated || bytes.length > MAX_BYTES) text += '\n… truncated at the byte cap; fetch a more specific URL for the rest.';
         text = text.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<script[\s\S]*?<\/script>/gi, '');
         text = text.replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ');
         text = text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
@@ -915,7 +1143,7 @@ export function createTools(ctx) {
     // hand the model something `read` refuses (a binary). A file the run wrote
     // itself attaches from the overlay as text; everything else comes off the
     // disk, capped at the same 20 MB the bridge enforces.
-    attach(arg) {
+    async attach(arg) {
       const rel = String(arg).trim();
       if (!rel) return 'err: give me a file path to attach.';
       if (rel.split('/').some((s) => SKIP.has(s))) {
@@ -928,10 +1156,23 @@ export function createTools(ctx) {
         bytes = Buffer.from(readAt(abs), 'utf8');
       } else {
         if (!fs.existsSync(abs)) return `err: no such file: ${rel}`;
-        bytes = fs.readFileSync(abs);
+        // The size is checked BEFORE the read. The cap is there to keep a
+        // 2 GB file out of memory, and reading it whole to measure it
+        // afterwards is how the cap used to be no cap at all.
+        let size = 0;
+        try { size = (await fs.promises.stat(abs)).size; } catch { size = 0; }
+        if (size > MAX_ATTACHMENT_BYTES) {
+          return `err: ${rel} is ${Math.round(size / 1024 / 1024)} MB — the cap is ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB.`;
+        }
+        // Async, not sync: this runs in the backend's process, and a
+        // synchronous read of a 20 MB file freezes every window call for the
+        // length of the read (rule 9).
+        bytes = await fs.promises.readFile(abs);
         // A NUL byte is the cheap binary tell; the extension then names the type.
         mime = bytes.includes(0) ? mimeOf(rel) : 'text/plain';
       }
+      // Belt and braces: the file may have grown between the stat and the
+      // read.
       if (bytes.length > MAX_ATTACHMENT_BYTES) {
         return `err: ${rel} is ${Math.round(bytes.length / 1024 / 1024)} MB — the cap is ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB.`;
       }
@@ -974,7 +1215,12 @@ export function createTools(ctx) {
       const { text, reasoning } = res;
       if (reasoning && (reasoning.includes('http') || reasoning.includes('sources:'))) sources = '\n' + reasoning;
       const result = (text + (sources ? `\n\n${sources}` : '')).trim();
-      return clip(outbound(`${WEB_UNTRUSTED}\n\n${result || 'no results found'}`));
+      // (web links) The search edge answers with opaque redirect links — a long
+      // token on a search host that only becomes an article when it is opened.
+      // The reader wants the article's own address, and the model quotes what
+      // it is given, so the block is resolved before it goes back.
+      const linked = await withResolvedSources(result, { signal });
+      return clip(outbound(`${WEB_UNTRUSTED}\n\n${linked || 'no results found'}`));
     },
     // Code navigation (LSP-ish, zero deps, regex-based). SYMBOLS lists what a
     // file (or the whole project) declares; DEF finds where a name is defined;

@@ -42,6 +42,28 @@ export const MAX_TREE_BYTES = 8 * 1024 * 1024;
 const FULL_SHA = /^[0-9a-f]{40}$/i;
 
 /**
+ * The transports a git source may use.
+ *
+ * `https://` and `ssh://` are the two a person can actually reach, and
+ * `file://` is the local mirror the tests clone. `http://` is not on the
+ * list: a plain link can be rewritten in transit, and git would follow the
+ * rewrite without asking. The refusal says so, because the message used to
+ * name a set the code did not enforce.
+ */
+const GIT_TRANSPORTS = /^(https|ssh|file):\/\//i;
+
+/**
+ * Keys that are not names.
+ *
+ * `registry.plugins[name] = …` with one of these does not add a record: it
+ * replaces the registry object's prototype, and the record that was meant to
+ * be written is dropped by the next `JSON.stringify`. The plugin would be
+ * live with no provenance row — `plugin update` would refuse it and
+ * `plugin remove` would call it somebody's hand-dropped file.
+ */
+const RESERVED_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
  * A failure that knows the step it happened in.
  *
  * The window shows the step, so a refusal says which door closed — the fetch
@@ -83,6 +105,18 @@ export function nameProblem(name) {
   return null;
 }
 
+/**
+ * The name a plugin may not use.
+ *
+ * The folder rules, plus the three keys that are not names at all: they
+ * are the ones that change an object's shape instead of adding to it.
+ */
+export function reservedNameProblem(name) {
+  const s = String(name ?? '').trim();
+  if (RESERVED_NAMES.has(s)) return `"${s}" is reserved — a plugin may not take that name`;
+  return nameProblem(s);
+}
+
 /** The plugins directory a home owns. One definition, four callers. */
 export const pluginsDirFor = (home = aipassHome()) => path.join(home, 'plugins');
 
@@ -90,6 +124,29 @@ const stagingDirFor = (pluginsDir) => path.join(pluginsDir, '.staging');
 const trashDirFor = (pluginsDir) => path.join(pluginsDir, '.trash');
 
 const isLoopbackHost = (hostname) => ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(String(hostname).toLowerCase());
+
+/**
+ * The transports a download may use.
+ *
+ * https everywhere, with one deliberate exception: plain http for a
+ * loopback host, so a test (or a server on this machine) can serve a
+ * fixture. The exception is named in the refusal it does not get, not in a
+ * comment somewhere else.
+ *
+ * The check lives in one function because it has to hold on every hop: a
+ * link that was https:// can point at http://, and the download would
+ * follow it over cleartext. A plain link can be rewritten in transit, so
+ * the policy has to be checked after the redirect too, not only before it.
+ */
+function assertUrlPolicy(url) {
+  if (url.protocol === 'http:') {
+    if (!isLoopbackHost(url.hostname)) throw stageError('plan', 'http:// is refused (a plain link can be rewritten in transit) — use https://, or http on 127.0.0.1/localhost for a local test host');
+    return;
+  }
+  if (url.protocol !== 'https:') {
+    throw stageError('plan', `unsupported scheme ${url.protocol}// — use https:// or a local path`);
+  }
+}
 
 const sha256 = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 
@@ -114,8 +171,8 @@ function parseGitSource(raw) {
     url = repo;
     // file:// is a local repository — a mirror on this machine, and what the
     // tests clone. The rest are the transports a person can actually reach.
-    if (!/^(https?|ssh|git|file):\/\//i.test(url)) {
-      throw stageError('plan', `not a git source: ${raw} — expected git+https://… or git+ssh://…`);
+    if (!GIT_TRANSPORTS.test(url)) {
+      throw stageError('plan', `not a git source: ${raw} — expected git+https://…, git+ssh://… or git+file://… (git+http:// is refused: a plain link can be rewritten in transit)`);
     }
   }
   return { url, rev: rev || null, subdir: subPart || null };
@@ -158,11 +215,7 @@ export function planInstall(source, { base = process.cwd() } = {}) {
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
     let url;
     try { url = new URL(raw); } catch { throw stageError('plan', `not a URL: ${raw}`); }
-    if (url.protocol === 'http:') {
-      if (!isLoopbackHost(url.hostname)) throw stageError('plan', 'http:// is refused (a plain link can be rewritten in transit) — use https://, or http on 127.0.0.1/localhost for a local test host');
-    } else if (url.protocol !== 'https:') {
-      throw stageError('plan', `unsupported scheme ${url.protocol}// — use https:// or a local path`);
-    }
+    assertUrlPolicy(url);
     return { kind: 'url', ref: url.href };
   }
 
@@ -170,18 +223,83 @@ export function planInstall(source, { base = process.cwd() } = {}) {
   return { kind: 'path', ref: path.resolve(base, expanded) };
 }
 
+/** How many redirects a download may follow before it is refused. */
+const MAX_REDIRECTS = 5;
+
+/** The statuses that carry a `location` to the next hop. */
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Read a response body, stopping the moment it is over the cap.
+ *
+ * The body is read chunk by chunk and the running total is checked as it
+ * grows: a server that sends no `content-length` (a chunked response) could
+ * otherwise push an unbounded body into the heap before the cap fired. The
+ * reader is cancelled on the way out, so the rest of the body is never
+ * fetched.
+ */
+async function readCapped(res) {
+  const body = res.body;
+  // A response without a stream (an injected fetch): read it whole and
+  // check the size after — the old behaviour, kept for the callers that
+  // hand in their own fetch.
+  if (!body || typeof body.getReader !== 'function') {
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (bytes.length > MAX_URL_BYTES) {
+      throw stageError('fetch', `the file is ${Math.round(bytes.length / 1024)} KB — over the ${MAX_URL_BYTES / 1024} KB single-file cap`);
+    }
+    return bytes;
+  }
+  const chunks = [];
+  let total = 0;
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value?.length ?? 0;
+      if (total > MAX_URL_BYTES) {
+        throw stageError('fetch', `the file is ${Math.round(total / 1024)} KB — over the ${MAX_URL_BYTES / 1024} KB single-file cap`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } catch (e) {
+    // Cancel the transfer: the rest of the body is not wanted, and the
+    // connection is closed rather than left to fill the heap.
+    try { await reader.cancel(); } catch { /* the stream is going away anyway */ }
+    throw e;
+  }
+  return Buffer.concat(chunks, total);
+}
+
+/**
+ * Fetch a file, following redirects by hand and stopping at the cap.
+ *
+ * The redirects are followed here rather than by the fetch itself because
+ * the transport policy has to hold on every hop: `redirect: 'follow'` would
+ * take an `https://` link to an `http://` one without a second look, and a
+ * plain link can be rewritten in transit. Each hop is checked the way the
+ * first one is.
+ */
 async function fetchBytes(ref, fetchImpl) {
-  const res = await fetchImpl(ref, { redirect: 'follow' });
-  if (!res.ok) throw stageError('fetch', `download failed: HTTP ${res.status}`);
-  const declared = Number(res.headers?.get?.('content-length') ?? NaN);
-  if (Number.isFinite(declared) && declared > MAX_URL_BYTES) {
-    throw stageError('fetch', `the file is ${Math.round(declared / 1024)} KB — over the ${MAX_URL_BYTES / 1024} KB single-file cap`);
+  let target = new URL(ref);
+  for (let hop = 0; ; hop++) {
+    const res = await fetchImpl(target.href, { redirect: 'manual' });
+    const location = res.headers?.get?.('location');
+    if (REDIRECT_STATUS.has(res.status) && location) {
+      if (hop >= MAX_REDIRECTS) throw stageError('fetch', `the download took more than ${MAX_REDIRECTS} redirects`);
+      const next = new URL(location, target);
+      assertUrlPolicy(next);
+      target = next;
+      continue;
+    }
+    if (!res.ok) throw stageError('fetch', `download failed: HTTP ${res.status}`);
+    const declared = Number(res.headers?.get?.('content-length') ?? NaN);
+    if (Number.isFinite(declared) && declared > MAX_URL_BYTES) {
+      throw stageError('fetch', `the file is ${Math.round(declared / 1024)} KB — over the ${MAX_URL_BYTES / 1024} KB single-file cap`);
+    }
+    return await readCapped(res);
   }
-  const bytes = Buffer.from(await res.arrayBuffer());
-  if (bytes.length > MAX_URL_BYTES) {
-    throw stageError('fetch', `the file is ${Math.round(bytes.length / 1024)} KB — over the ${MAX_URL_BYTES / 1024} KB single-file cap`);
-  }
-  return bytes;
 }
 
 /** Every file under `dir`, for the folder-size figure inspect reports. */
@@ -294,28 +412,92 @@ async function npmPackageName(dir) {
 }
 
 /**
+ * Copy a tree, counting its bytes as they go, and stop at the cap.
+ *
+ * The cap used to be checked after the whole tree was on the disk, which is
+ * the wrong order: a repository holding gigabytes filled the disk before
+ * anyone was told. Now the running total is checked per file and the copy
+ * stops the moment it is over.
+ *
+ * A link is followed only as far as it stays inside the tree being copied.
+ * `dereference: true` used to resolve every link, so a link to `C:\` copied
+ * the whole drive into the plugins folder; a link that points out of the
+ * tree is refused instead, and one that points back into it is copied as
+ * the files it stands for — the final home holds real files.
+ *
+ * Exported for the tests: the cap is the promise, and the promise is worth
+ * a test that does not need a network or a package registry.
+ */
+export async function copyTreeBounded(src, dest, {
+  maxBytes = MAX_TREE_BYTES,
+  label = 'the fetched plugin',
+  boundary = src,
+  counter = { total: 0 },
+} = {}) {
+  const seen = new Set();
+  const copyInto = async (from, to) => {
+    const st = await fs.promises.lstat(from);
+    if (st.isSymbolicLink()) {
+      const real = await fs.promises.realpath(from);
+      const rel = path.relative(boundary, real);
+      if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        throw stageError('fetch', `refusing to copy ${path.basename(from)} — it points outside the fetched source (${real})`);
+      }
+      if (seen.has(real)) return; // a link back into the tree: already copied
+      seen.add(real);
+      await copyInto(real, to);
+      return;
+    }
+    if (st.isDirectory()) {
+      await fs.promises.mkdir(to, { recursive: true });
+      for (const entry of await fs.promises.readdir(from)) {
+        await copyInto(path.join(from, entry), path.join(to, entry));
+      }
+      return;
+    }
+    if (!st.isFile()) return; // a socket or a fifo: nothing to copy
+    counter.total += st.size;
+    if (counter.total > maxBytes) {
+      throw stageError('fetch', `${label} is ${Math.round(counter.total / 1024)} KB — over the ${Math.round(maxBytes / 1024)} KB cap for a fetched source`);
+    }
+    await fs.promises.copyFile(from, to);
+  };
+  try {
+    await copyInto(src, dest);
+  } catch (e) {
+    // A half-copied plugin is worse than no plugin: the refusal takes the
+    // partial tree with it.
+    try { await fs.promises.rm(dest, { recursive: true, force: true }); } catch { /* best effort */ }
+    throw e;
+  }
+  return counter.total;
+}
+
+/**
  * Copy a package's dependencies beside the plugin.
  *
  * The package's own entry is left out: npm links a local folder rather than
  * copying it, and a link in the plugins directory would point back to
- * wherever it was written. Links inside the dependencies are followed, so the
- * final home holds real files.
+ * wherever it was written. The links inside the dependencies are followed
+ * only as far as they stay inside the package, so the final home holds real
+ * files and never a whole drive.
  */
-async function copyDependencies(modules, target, name) {
+async function copyDependencies(modules, target, name, { maxBytes = MAX_TREE_BYTES, counter = { total: 0 } } = {}) {
   await fs.promises.mkdir(target, { recursive: true });
   const scope = name.includes('/') ? name.split('/')[0] : null;
   const leaf = scope ? name.split('/')[1] : null;
+  const copy = (from, to) => copyTreeBounded(from, to, { maxBytes, counter, boundary: modules });
   for (const entry of await fs.promises.readdir(modules, { withFileTypes: true })) {
     if (!scope && entry.name === name) continue;
     if (scope && entry.name === scope) {
       const scopeDir = path.join(modules, scope);
       for (const inner of await fs.promises.readdir(scopeDir, { withFileTypes: true })) {
         if (inner.name === leaf) continue;
-        await fs.promises.cp(path.join(scopeDir, inner.name), path.join(target, scope, inner.name), { recursive: true, dereference: true });
+        await copy(path.join(scopeDir, inner.name), path.join(target, scope, inner.name));
       }
       continue;
     }
-    await fs.promises.cp(path.join(modules, entry.name), path.join(target, entry.name), { recursive: true, dereference: true });
+    await copy(path.join(modules, entry.name), path.join(target, entry.name));
   }
 }
 
@@ -324,16 +506,18 @@ async function copyDependencies(modules, target, name) {
  *
  * `dest` ends up holding the plugin's own files — and, for npm, the
  * dependencies installed beside it — so validation loads the same shape
- * production will.
+ * production will. The copy is bounded: the cap is checked while the tree
+ * is written, not after it is on the disk.
  */
 async function fetchSource(plan, dest, scratch) {
+  const counter = { total: 0 };
   if (plan.kind === 'git') {
     const clone = path.join(scratch, 'clone');
     await fs.promises.mkdir(scratch, { recursive: true });
     await fetchGit(plan, clone);
     const root = plan.subdir ? path.join(clone, ...plan.subdir.split('/')) : clone;
     if (!fs.existsSync(root)) throw stageError('fetch', `the repository has no ${plan.subdir} folder`);
-    await fs.promises.cp(root, dest, { recursive: true });
+    await copyTreeBounded(root, dest, { counter, boundary: clone });
   } else {
     const prefix = path.join(scratch, 'npm');
     await fs.promises.mkdir(prefix, { recursive: true });
@@ -342,15 +526,12 @@ async function fetchSource(plan, dest, scratch) {
     // npm links a local folder rather than copying it; the plugin's final
     // home holds real files, not a link back to wherever it was written.
     const real = await fs.promises.realpath(pkgDir);
-    await fs.promises.cp(real, dest, { recursive: true });
+    const modules = path.join(prefix, 'node_modules');
+    await copyTreeBounded(real, dest, { counter, boundary: modules });
     // The dependencies go beside the plugin so an import inside it resolves
-    // from its final home.
-    await copyDependencies(path.join(prefix, 'node_modules'), path.join(dest, 'node_modules'), name);
-  }
-  const files = await walkFiles(dest);
-  const size = await treeBytes(files);
-  if (size > MAX_TREE_BYTES) {
-    throw stageError('fetch', `the fetched plugin is ${Math.round(size / 1024)} KB — over the ${Math.round(MAX_TREE_BYTES / 1024)} KB cap for a fetched source`);
+    // from its final home. They share the cap with the plugin itself: the
+    // budget is for the whole fetched source.
+    await copyDependencies(modules, path.join(dest, 'node_modules'), name, { counter });
   }
   return dest;
 }
@@ -419,10 +600,29 @@ export function readRegistry(pluginsDir) {
   try {
     const data = JSON.parse(fs.readFileSync(path.join(pluginsDir, '.registry.json'), 'utf8'));
     if (data && typeof data === 'object' && data.plugins && typeof data.plugins === 'object') {
-      return { version: 1, plugins: { ...data.plugins } };
+      const plugins = {};
+      for (const [key, value] of Object.entries(data.plugins)) {
+        // A registry file is data, not a place to keep a prototype: a
+        // `__proto__` key in it is not a plugin.
+        if (RESERVED_NAMES.has(key)) continue;
+        plugins[key] = value;
+      }
+      return { version: 1, plugins };
     }
   } catch { /* missing or malformed reads as empty — provenance is advisory */ }
   return { version: 1, plugins: {} };
+}
+
+/**
+ * A record by name — own properties only.
+ *
+ * `plugins['toString']` on a plain object finds `Object.prototype.toString`,
+ * and a plugin named that would look like it was already installed by
+ * aipass. The registry's keys are data, so they are read as data.
+ */
+function registryRecord(plugins, name) {
+  if (!plugins || typeof plugins !== 'object') return null;
+  return Object.hasOwn(plugins, name) ? plugins[name] : null;
 }
 
 /** Atomic, like settings.json: a crash mid-write never leaves half a registry. */
@@ -440,7 +640,7 @@ export function decorateDetails(details, registry) {
   return {
     ...details,
     loaded: details.loaded.map((p) => {
-      const rec = known[p.name] ?? null;
+      const rec = registryRecord(known, p.name);
       return { ...p, installed: rec, hashChanged: Boolean(rec?.sha256 && rec.sha256 !== p.sha256) };
     }),
   };
@@ -484,7 +684,7 @@ export function stripFromEnabled(currentList, name) {
  * would be worse than saying so.
  */
 export function updateSourceFor(registry, name) {
-  const record = registry?.plugins?.[name];
+  const record = registryRecord(registry?.plugins, name);
   if (!record) {
     throw new Error(`no recorded source for ${name} — it was not installed by aipass; install it explicitly with a source`);
   }
@@ -612,15 +812,24 @@ export async function installSource(source, {
     const found = details.loaded[0];
 
     // 3. Where it lands. The declared name is the folder, because the enabled
-    //    list, the window and the registry all speak that name.
+    //    list, the window and the registry all speak that name — and it is
+    //    the registry's key, so it is checked before it is used as one. A
+    //    plugin that calls itself `__proto__` would set the registry
+    //    object's prototype instead of adding a record: the plugin would be
+    //    live with no provenance row, and `plugin update` would refuse it
+    //    while `plugin remove` called it somebody's hand-dropped file.
+    const declaredProblem = reservedNameProblem(found.name);
+    if (declaredProblem) throw stageError('name', `the plugin declares an unusable name — ${declaredProblem}`);
     const folder = (name ?? found.name)?.trim();
-    const problem = nameProblem(folder);
+    const problem = reservedNameProblem(folder);
     if (problem) throw stageError('name', `the plugin declares an unusable name — ${problem} (pass --name to choose one)`);
     const finalDir = path.join(pluginsDir, folder);
     if (path.dirname(finalDir) !== pluginsDir) throw stageError('name', `refusing to install outside ${pluginsDir}`);
 
     const registry = readRegistry(pluginsDir);
-    const record = registry.plugins[found.name] ?? Object.values(registry.plugins).find((r) => r?.folder === folder) ?? null;
+    const record = registryRecord(registry.plugins, found.name)
+      ?? Object.values(registry.plugins).find((r) => r?.folder === folder)
+      ?? null;
     let trashPath = null;
     if (fs.existsSync(finalDir)) {
       // Unmanaged (hand-dropped, or never recorded) is someone's own work:
@@ -682,9 +891,9 @@ export async function finalizeInstall(result, manager) {
  */
 export function removePlugin(name, { home = aipassHome(), pluginsDir = pluginsDirFor(home), force = false } = {}) {
   const registry = readRegistry(pluginsDir);
-  const record = registry.plugins[name] ?? Object.values(registry.plugins).find((r) => r?.folder === name) ?? null;
+  const record = registryRecord(registry.plugins, name) ?? Object.values(registry.plugins).find((r) => r?.folder === name) ?? null;
   const folderName = record?.folder ?? name;
-  const problem = nameProblem(folderName);
+  const problem = reservedNameProblem(folderName);
   if (problem) throw new Error(`not a usable plugin name — ${problem}`);
 
   const asFolder = path.join(pluginsDir, folderName);

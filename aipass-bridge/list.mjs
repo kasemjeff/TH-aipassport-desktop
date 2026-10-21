@@ -3,12 +3,14 @@
 // liners in package.json, which is a code-execution shape that upstream
 // filters reject when the agent reads its own package.json back.
 import fs from 'node:fs';
-import { authHeaders } from './harness/authtoken.mjs';
+import { authHeaders, isLoopbackUrl } from './harness/authtoken.mjs';
 
 const BRIDGE = (process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787').replace(/\/+$/, '');
 // Bridge-bound requests carry the loopback bearer token (see authtoken.mjs).
+// The test is about the HOST: a string prefix would be true by construction
+// and would ship the token to a remote bridge.
 const bridgeFetch = (url, opts = {}) => (
-  String(url).startsWith(BRIDGE)
+  isLoopbackUrl(url)
     ? fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers ?? {}) } })
     : fetch(url, opts)
 );

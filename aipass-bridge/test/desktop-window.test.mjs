@@ -7,8 +7,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startBridge, FakeExtension, scripted, tempDir, freePort } from './harness.mjs';
-import { createRpc } from '../harness/rpc.mjs';
+import { startBridge, FakeExtension, scripted, tempDir, startRpcServer } from './harness.mjs';
+
 import { Settings } from '../harness/settings.mjs';
 import { SessionStore } from '../harness/session.mjs';
 
@@ -37,9 +37,7 @@ after(() => { ext.disconnect(); bridge.stop(); fs.rmSync(HOME, { recursive: true
 async function startRpc({ files = {}, replies, rpcOptions = {}, ...rest } = {}) {
   const root = rest.root ? path.resolve(rest.root) : tempDir(files);
   onChat = scripted(replies);
-  const port = await freePort();
-  const rpc = createRpc({
-    port,
+  const rpc = await startRpcServer({
     root,
     bridgeURL: bridge.base,
     // The suite runs its own bridge; the backend must not start a second one.
@@ -51,6 +49,7 @@ async function startRpc({ files = {}, replies, rpcOptions = {}, ...rest } = {}) 
     ...rest,
     ...rpcOptions,
   });
+  const port = rpc.port;
   const seen = [];
   rpc.harness.events.on('*', (type, payload) => seen.push({ type, payload }));
   return {
@@ -473,6 +472,23 @@ test('the window only reaches for elements that exist', async (t) => {  // A typ
   const createdAtRuntime = [...new Set([...js.matchAll(/\.id = '([a-z0-9-]+)'/g)].map((m) => m[1]))];
   const missing = referenced.filter((id) => !createdAtRuntime.includes(id) && !html.includes(`id="${id}"`));
   assert.deepEqual(missing, [], `app.js references ids the html does not have: ${missing.join(', ')}`);
+});
+
+test('the window says what it is to a screen reader', async (t) => {
+  // The window is a page, and some of it is only ever read by a screen
+  // reader: the sheet is a dialog, the transcript is a live region, the
+  // palette is a listbox, and the composer has a name. None of it is
+  // visible, and all of it is what a person who cannot see the window
+  // navigates by.
+  const uiDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'desktop', 'ui');
+  const html = fs.readFileSync(path.join(uiDir, 'index.html'), 'utf8');
+  assert.match(html, /id="modal"[^>]*role="dialog"/, 'the sheet is a dialog');
+  assert.match(html, /id="modal"[^>]*aria-modal="true"/, 'and it is modal');
+  assert.match(html, /id="modal"[^>]*aria-labelledby="modal-title"/, 'and it is labelled by its own title');
+  assert.match(html, /id="log"[^>]*role="log"/, 'the transcript is a live region');
+  assert.match(html, /id="log"[^>]*aria-live="polite"/, 'and it announces politely');
+  assert.match(html, /id="slash-list"[^>]*role="listbox"/, 'the palette is a listbox');
+  assert.match(html, /id="task"[^>]*aria-label=/, 'the composer has a name');
 });
 
 test('reading helpers: file listing, file text, and the playbook library', async (t) => {

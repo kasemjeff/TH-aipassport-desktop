@@ -24,6 +24,12 @@ services:
       - DISPLAY=:99
       - AIPASS_PORT=8787
       - AIPASS_HOST=0.0.0.0
+      # The bridge refuses to bind anything but loopback unless this is set —
+      # the bind guard is the fail-closed half of the auth story, and the
+      # container is the one place the bridge is meant to be reachable from
+      # outside the box. Without it the container exits at boot and supervisord
+      # restarts it forever.
+      - AIPASS_ALLOW_REMOTE=1
       - AIPASS_MODEL=gemini-3.1-flash-lite
       # The container-management routes (/restart, /logs, /browser/restart,
       # /ext/reload, /tab/reload) exist only here, not in a local run.
