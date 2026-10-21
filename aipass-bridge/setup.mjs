@@ -15,6 +15,10 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { homedir, platform } from 'node:os';
 import { loadOrMintToken, tokenPath } from './harness/authtoken.mjs';
+// One rule for opening a URL, shared with the backend and the desktop
+// launcher: Chrome first, because the extension (a Chrome MV3 extension) is
+// loaded there and nowhere else.
+import { openCommandFor } from './harness/open-command.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
@@ -182,20 +186,21 @@ if (!noOpen) {
   info(`extension folder: ${EXT_DIR}`);
   function openUrl(url) {
     try {
-      if (platform() === 'win32') execFileSync('cmd', ['/c', 'start', '', url], { stdio: 'ignore' });
-      else if (platform() === 'darwin') execFileSync('open', [url], { stdio: 'ignore' });
-      else execFileSync('xdg-open', [url], { stdio: 'ignore' });
+      // Chrome, when it is installed: the chat page has to be in the browser
+      // the extension answers from, and the extensions page is a Chrome URL
+      // that no other browser even understands.
+      const [cmd, args] = openCommandFor(platform(), url);
+      // Spawned, not waited for: Chrome IS the window, so a synchronous
+      // spawn would sit here until the person closed the browser.
+      const child = spawn(cmd, args, { stdio: 'ignore', detached: true, windowsHide: true });
+      child.on('error', () => warn(`could not open ${url} — open it by hand`));
+      child.unref();
       return true;
     } catch { return false; }
   }
   if (openUrl('https://de.aipass.net/chat')) ok('opened https://de.aipass.net/chat — log in and leave the tab open');
   else info('open manually: https://de.aipass.net/chat');
-  let openedExt = false;
-  try {
-    if (platform() === 'win32') { execFileSync('cmd', ['/c', 'start', '', 'chrome://extensions'], { stdio: 'ignore' }); openedExt = true; }
-    else if (platform() === 'darwin') { execFileSync('open', ['-a', 'Google Chrome', 'chrome://extensions'], { stdio: 'ignore' }); openedExt = true; }
-    else { execFileSync('xdg-open', ['chrome://extensions'], { stdio: 'ignore' }); openedExt = true; }
-  } catch { /* best effort */ }
+  const openedExt = openUrl('chrome://extensions');
   if (openedExt) ok('opened chrome://extensions — Developer mode -> Load unpacked -> select the folder above');
   else info('open manually: chrome://extensions -> Developer mode -> Load unpacked -> select the folder above');
 }

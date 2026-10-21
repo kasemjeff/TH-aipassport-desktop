@@ -17,6 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { restoreTable } from '../harness/waf.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const APP_BASE = pathToFileURL(path.join(repo, 'desktop', 'ui', 'app.js')).href;
@@ -44,8 +45,13 @@ class El {
   }
   set textContent(v) { this._text = String(v); this.children = []; }
   get textContent() { return `${this._text ?? ''}${this.children.map((c) => c.textContent ?? '').join('')}`; }
-  set innerHTML(v) { this._html = String(v); }
+  set innerHTML(v) { this._html = String(v); this.htmlWrites = (this.htmlWrites ?? 0) + 1; }
   get innerHTML() { return this._html; }
+  /** The DOM appends markup without re-parsing what is already there. */
+  insertAdjacentHTML(_pos, html) {
+    this._html = `${this._html ?? ''}${html}`;
+    this.insertions = (this.insertions ?? 0) + 1;
+  }
   // append() takes nodes and strings alike, exactly like the DOM — and moves a
   // node that already lives somewhere, exactly like the DOM.
   append(...kids) {
@@ -68,6 +74,7 @@ class El {
   }
   addEventListener(type, fn) { (this.handlers[type] ??= []).push(fn); }
   setAttribute(k, v) { this.attrs[k] = String(v); }
+  removeAttribute(k) { delete this.attrs[k]; }
   focus() {}
   remove() { if (this._parent) this._parent.children = this._parent.children.filter((c) => c !== this); }
   /** Enough of Element.closest for the settings sheet to find its container. */
@@ -96,12 +103,32 @@ class El {
   }
   /** Type into it the way the browser would: run the handler for that event. */
   dispatch(type, ev = {}) {
-    const merged = { ...ev, value: this.value, currentTarget: this, preventDefault() {} };
-    for (const fn of this.handlers[type] ?? []) fn(merged);
-    // `.onX = fn` is a property assignment, not a registration — the browser
-    // fires both, and so does this.
-    const inline = this[`on${type}`];
-    if (typeof inline === 'function') inline(merged);
+    // `target` is the element the event happened on and it stays that one
+    // while the event bubbles; `currentTarget` is whoever is handling it.
+    const merged = {
+      ...ev,
+      value: this.value,
+      currentTarget: this,
+      target: this,
+      defaultPrevented: false,
+      preventDefault() { merged.defaultPrevented = true; },
+      stopPropagation() { merged.stopped = true; },
+    };
+    this.lastEvent = merged;
+    const fire = (node) => {
+      for (const fn of node.handlers[type] ?? []) fn(merged);
+      // `.onX = fn` is a property assignment, not a registration — the browser
+      // fires both, and so does this.
+      const inline = node[`on${type}`];
+      if (typeof inline === 'function') inline(merged);
+    };
+    fire(this);
+    // The DOM bubbles: the event walks up the tree until something stops it.
+    if (merged.stopped) return;
+    for (let node = this._parent; node; node = node._parent) {
+      fire(node);
+      if (merged.stopped) return;
+    }
   }
   /** Enough of CSSStyleDeclaration for the meter bar to size itself. */
   setProperty(name, value) { (this.style ??= {})[name.replace(/^--/, '')] = value; }
@@ -127,6 +154,12 @@ const bubbleHtml = (msg) => (msg?.children?.[0]?.children ?? [])
   .filter(Boolean)
   .join('\n');
 
+/** Past the filter's debounce: the list is rebuilt a moment after the last key. */
+const settle = async () => {
+  await new Promise((r) => setTimeout(r, 260));
+  await new Promise((r) => setTimeout(r, 5));
+};
+
 let boots = 0;
 
 /**
@@ -138,7 +171,7 @@ let boots = 0;
  * settings, sessions, plugins — must land in this test's scratch directory, not
  * in the real ~/.aipass of whoever is running the suite.
  */
-async function bootApp(backend, { token = null } = {}) {
+async function bootApp(backend, { token = null, unauthorizedOnce = false } = {}) {
   process.env.AIPASS_HOME = fs.mkdtempSync(path.join(tmpdir(), 'aipass-ui-'));
 
   const nodes = new Map();
@@ -157,8 +190,19 @@ async function bootApp(backend, { token = null } = {}) {
     /** Fire a document-level event the way the browser would (paste, drop). */
     dispatch: (type, ev = {}) => { for (const fn of docHandlers[type] ?? []) fn(ev); },
     querySelectorAll: () => [],
+    activeElement: null,
   };
-  globalThis.window = { prompt: () => null };
+  // The system theme, and the listeners the window registers on it. A window
+  // whose theme is "auto" has to follow the machine when it changes its mind.
+  const media = { light: false, listeners: new Set() };
+  globalThis.window = {
+    prompt: () => null,
+    matchMedia: (query) => ({
+      get matches() { return query.includes('light') ? media.light : !media.light; },
+      addEventListener: (_type, fn) => media.listeners.add(fn),
+      removeEventListener: (_type, fn) => media.listeners.delete(fn),
+    }),
+  };
   globalThis.EventSource = class {
   constructor(url) { this.url = url; this.readyState = 1; this.handlers = {}; this.onerror = null; globalThis.__stream = this; }
   addEventListener(type, fn) { (this.handlers[type] ??= []).push(fn); }
@@ -170,16 +214,34 @@ async function bootApp(backend, { token = null } = {}) {
   }
   close() {}
 };
-  globalThis.setInterval = () => 0; // the header refresher must not keep the process alive
+  // The intervals are recorded but never scheduled: the header refresher must
+  // not keep the process alive. A test can still see that one was cleared —
+  // which is the difference between a timer that dies with its sheet and one
+  // that polls the backend forever.
+  const intervals = new Map();
+  let intervalId = 0;
+  globalThis.setInterval = (fn) => { const id = ++intervalId; intervals.set(id, fn); return id; };
+  globalThis.clearInterval = (id) => { intervals.delete(id); };
   const shots = []; // { url, headers } — what the token wiring rides on
+  // A backend that answers the first call with a 401, the way one does when
+  // the token on disk is not the one it minted: the window fetches the token
+  // again and retries.
+  let unauthorizedLeft = unauthorizedOnce;
+  let tokenFetches = 0;
   globalThis.fetch = async (_url, init = {}) => {
     if (String(_url).endsWith('/token')) {
-      return token ? { ok: true, json: async () => ({ ok: true, token }) } : { json: async () => ({}) };
+      tokenFetches += 1;
+      const value = tokenFetches > 1 ? 'tok-new' : token;
+      return value ? { ok: true, json: async () => ({ ok: true, token: value }) } : { json: async () => ({}) };
     }
     const { method, params } = JSON.parse(init.body ?? '{}');
     calls.push(method);
     sent.push({ method, params });
     shots.push({ url: String(_url), headers: { ...(init.headers ?? {}) } });
+    if (unauthorizedLeft) {
+      unauthorizedLeft = false;
+      return { status: 401, json: async () => ({ ok: false, error: 'unauthorized' }) };
+    }
     try {
       const result = backend[method]?.(params) ?? { ok: true };
       return { json: async () => ({ ok: true, result }) };
@@ -201,6 +263,19 @@ async function bootApp(backend, { token = null } = {}) {
     shots,
     streamUrl: () => globalThis.__stream?.url,
     tick,
+    /** The intervals the window is holding right now. */
+    timers: intervals,
+    /** The system's idea of light or dark, and a way to change its mind. */
+    system: {
+      get light() { return media.light; },
+      set light(v) {
+        media.light = v;
+        // The DOM snapshots the listener list when it dispatches, so a
+        // listener that re-registers itself is not called again by the same
+        // event.
+        for (const fn of [...media.listeners]) fn({ matches: v });
+      },
+    },
     dispatch: (type, ev) => globalThis.document.dispatch(type, ev),
     /** The built screen, for everything app.js creates with an id at runtime. */
     screen: (id) => findById(node('log'), id) ?? node(id),
@@ -250,6 +325,9 @@ const BACKEND = {
   }),
   credits: () => ({ available: 42, limit: 100 }),
   'session.fork': () => ({ id: 's4', title: 'forked' }),
+  // The restore table the window asks for at boot: the rules that put the
+  // wire spellings back, so a URL the model wrote is a URL the reader sees.
+  'waf.table': () => ({ pairs: restoreTable() }),
 };
 
 /* -------------------------------------------------------------------- tests */
@@ -280,6 +358,19 @@ test('the window carries the loopback token on both transports', async () => {
     shots.some((s) => s.url.endsWith('/rpc') && s.headers.authorization === 'Bearer tok-123'),
     'rpc carries the bearer'
   );
+});
+
+test('a 401 refreshes the token, and the retry carries the new one', async () => {
+  // The boot fetch can lose a race, or the backend can restart between page
+  // load and now: the window fetches the token again and retries. The retry
+  // has to carry the NEW token — a header built once, before the refresh, sent
+  // the old one and the retry failed with the same 401.
+  const { shots, tick } = await bootApp(BACKEND, { token: 'tok-old', unauthorizedOnce: true });
+  await tick(); await tick(); await tick();
+  const rpcs = shots.filter((s) => s.url.endsWith('/rpc'));
+  assert.ok(rpcs.length >= 2, `the call was made and retried (${rpcs.length} calls)`);
+  assert.equal(rpcs[0].headers.authorization, 'Bearer tok-old', 'the first try carries the token it had');
+  assert.equal(rpcs[1].headers.authorization, 'Bearer tok-new', 'and the retry carries the refreshed one');
 });
 
 test('a slash that matches nothing says so instead of vanishing', async () => {
@@ -832,6 +923,52 @@ test('reasoning arrives by appending text, not by rewriting the fold each frame'
   assert.equal(pre.children.length, 2, 'only the new stretch is a new node');
 });
 
+test("a search's sources are shown as links, with the address the reader can open", async () => {
+  // A web search is the one tool whose result IS a set of addresses, and the
+  // row used to keep them to itself: the reader saw prose about the web and
+  // no way to reach any of it. The addresses are shown under the row — and
+  // the wire spelling is put back, so the link is a real one.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('tool', {
+    kind: 'web',
+    arg: 'ai research',
+    ok: true,
+    head: 'note: this came from the open web',
+    sources: [{ label: 'medium.com', url: 'HTTPS-URLmedium.com/@a/post' }],
+  });
+  await tick();
+  const row = node('log').children.find((c) => c.tagName === 'DETAILS' && /(^|\s)tool(\s|$)/.test(c.className ?? ''));
+  assert.ok(row, 'the search has its row');
+  const box = row.children.find((c) => c.className === 'sources');
+  assert.ok(box, 'the row carries the sources');
+  const link = box.children[0];
+  assert.equal(link.href, 'https://medium.com/@a/post', 'the address is a real one');
+  assert.equal(link.textContent, 'https://medium.com/@a/post', 'and it is what the reader sees');
+  assert.equal(row.open, true, 'the links are the point of the row, so it opens');
+});
+
+test('a link in the chat opens in the browser, not in the window', async () => {
+  // The window is a webview on the app's own page: a link that navigated it
+  // would take the app away. The click goes to the backend, which opens the
+  // address in the browser.
+  const { node, tick, sent } = await bootApp(BACKEND);
+  globalThis.__stream.emit('tool', {
+    kind: 'web',
+    arg: 'ai research',
+    ok: true,
+    sources: [{ label: 'medium.com', url: 'https://medium.com/@a/post' }],
+  });
+  await tick();
+  const row = node('log').children.find((c) => c.tagName === 'DETAILS' && /(^|\s)tool(\s|$)/.test(c.className ?? ''));
+  const link = row.children.find((c) => c.className === 'sources').children[0];
+  link.dispatch('click');
+  await tick();
+  assert.ok(
+    sent.some((c) => c.method === 'browser.open' && c.params.url === 'https://medium.com/@a/post'),
+    `the click opened the address in the browser:\n${JSON.stringify(sent.filter((c) => c.method === 'browser.open'))}`,
+  );
+});
+
 test('a finished run folds its working trail and leaves the result open', async () => {
   // The run used to leave every step on screen — the answer sat at the bottom
   // of a wall of rows. On done/ask the trail folds under one line and the
@@ -957,6 +1094,49 @@ test('the apply panel carries the run’s check verdict', async () => {
   assert.equal(badge.classList.contains('hidden'), true, 'nothing pending, nothing to say');
 });
 
+test('/symbols answers from the window, not from a run', async () => {
+  // The command used to be a pointer to the markers: it printed "use SYMBOLS in
+  // an agent run" and nothing else, so the palette promised a listing it did
+  // not have. It asks the backend for the same index the markers use.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'symbols.list': () => ({ file: 'src/app.mjs', symbols: [{ name: 'greet', kind: 'function', line: 3 }] }),
+    'symbols.def': () => ({ name: 'greet', definitions: [] }),
+    'symbols.refs': () => ({ name: 'greet', references: [] }),
+  });
+  await tick(); await tick();
+
+  const task = node('task');
+  task.value = '/symbols src/app.mjs';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick(); await tick();
+  const out = node('log').textContent;
+  assert.match(out, /src\/app\.mjs/, 'the file is named');
+  assert.match(out, /greet/, 'and what it declares');
+});
+
+test('the palette says what is selected, and the composer says it is open', async () => {
+  // A screen reader reads "1 of 29" only if the rows are options and the
+  // composer points at the one on it. It used to be a colour.
+  const { node, tick } = await bootApp(BACKEND);
+  const task = node('task');
+  task.value = '/mo';
+  task.dispatch('keydown', { key: 'm' });
+  await tick(); await tick();
+
+  assert.equal(task.attrs['aria-expanded'], 'true', 'the composer says the palette is open');
+  assert.equal(task.attrs['aria-controls'], 'slash-list', 'and which list it is');
+  const rows = node('slash-list').children;
+  assert.ok(rows.length >= 1, 'the palette has rows');
+  assert.equal(rows[0].attrs.role, 'option', 'and a row is an option');
+  assert.equal(rows[0].attrs['aria-selected'], 'true', 'the one on it is the selected one');
+  assert.ok(task.attrs['aria-activedescendant'], 'and the composer names it');
+
+  task.dispatch('keydown', { key: 'Escape' });
+  await tick();
+  assert.equal(task.attrs['aria-expanded'], 'false', 'and closing it says so');
+});
+
 test('a typed draft survives a reload', async () => {
   // The composer keeps what you typed in the window's own storage, so a stray
   // reload does not cost the paragraph.
@@ -988,13 +1168,13 @@ test('the session list filters as you type', async () => {
   assert.equal(node('sessions').children.length, 3, 'every session is listed');
   node('session-filter').value = 'UI';
   node('session-filter').dispatch('input');
-  await tick(); await tick();
+  await settle();
   assert.equal(node('sessions').children.length, 1, 'the filter narrows it');
   assert.match(node('sessions').children[0].textContent, /UI/);
 
   node('session-filter').value = 'ไม่มีอะไรตรง';
   node('session-filter').dispatch('input');
-  await tick(); await tick();
+  await settle();
   assert.match(node('sessions').textContent, /ไม่พบบทสนทนา/, 'and says so when nothing matches');
 });
 
@@ -1091,6 +1271,40 @@ test('an apply refreshes the file panel, so the new file is on screen', async ()
   globalThis.__stream.emit('applied', { written: 1, deleted: 0, files: ['overview.md'] });
   await tick(); await tick(); await tick();
   assert.ok(node('files').children.some((li) => li.textContent.includes('overview.md')), 'and it is listed right after the apply');
+});
+
+test('a file the human unticked stays unticked when the panel is rebuilt', async () => {
+  // The panel is rebuilt on every diff frame and again when the run ends. It
+  // used to re-tick everything it drew, so a file the human had said no to
+  // came back ticked — and the Apply button writes what is ticked.
+  const changes = [
+    { file: 'keep.mjs', added: 1, removed: 0, deleted: false, isNew: false },
+    { file: 'skip.mjs', added: 1, removed: 0, deleted: false, isNew: false },
+  ];
+  const { node, tick } = await bootApp({ ...BACKEND, pending: () => changes });
+  globalThis.__stream.emit('diff_update', { changes });
+  await tick(); await tick(); await tick();
+
+  const boxes = node('pending-list').children.map((li) => li.children[0]);
+  assert.equal(boxes.length, 2, 'both files are on the panel');
+  const skip = boxes.find((b) => b._parent.textContent.includes('skip.mjs'));
+  assert.ok(skip, 'the file the human objects to is there');
+  assert.equal(skip.checked, true, 'it starts ticked');
+
+  // The human says no to that one.
+  skip.checked = false;
+  skip.dispatch('change');
+  assert.equal(skip.checked, false, 'and the box is now unticked');
+
+  // The run stages one more file: the panel is drawn again.
+  globalThis.__stream.emit('diff_update', { changes: [...changes, { file: 'new.mjs', added: 1, removed: 0, deleted: false, isNew: true }] });
+  await tick(); await tick(); await tick();
+
+  const after = node('pending-list').children.map((li) => ({ text: li.textContent, box: li.children[0] }));
+  const skipAfter = after.find((row) => row.text.includes('skip.mjs'));
+  assert.equal(skipAfter.box.checked, false, 'the unticked file is still unticked');
+  const newRow = after.find((row) => row.text.includes('new.mjs'));
+  assert.equal(newRow.box.checked, true, 'a file that is new comes in ticked');
 });
 
 test('the saved theme is applied when the window boots', async () => {
@@ -1210,6 +1424,29 @@ test('a plan gate opens the approve modal, and both answers reach the backend', 
   node('modal-actions').children[0].dispatch('click'); // decline
   await tick();
   assert.deepEqual(sent.at(-1), { method: 'plan.answer', params: { ok: false } }, 'decline goes too');
+});
+
+test('a plugin marker asks in its own words, and shows what it was handed', async () => {
+  // A plugin marker is neither a file nor a command, so the question cannot
+  // say "change this file?" over a marker name: the person would be asked
+  // about the wrong thing. The payload matters too — the marker is the code
+  // that runs, and the argument is what it is handed.
+  const { node, sent, tick } = await bootApp(BACKEND);
+  await tick();
+
+  globalThis.__stream.emit('permission_request', {
+    id: 'abc', kind: 'plugin', arg: 'NOTE', risk: 'write', preview: 'hello',
+  });
+  await tick();
+  assert.equal(node('modal-title').textContent, 'run this plugin marker?');
+  assert.match(node('modal-body').textContent, /NOTE/, 'the marker is named');
+  assert.match(node('modal-body').textContent, /hello/, 'and what it was handed');
+  assert.equal(node('modal').classList.contains('hidden'), false, 'the question is on screen');
+
+  node('modal-actions').children[2].dispatch('click'); // allow
+  await tick();
+  assert.deepEqual(sent.at(-1), { method: 'permission.answer', params: { id: 'abc', decision: 'allow' } },
+    'the answer goes to the backend');
 });
 
 test('/plan turns plan mode on together with the approval gate', async () => {
@@ -1671,6 +1908,99 @@ test('a long answer paints its settled paragraphs once and repaints only the tai
   assert.match(body.children[1].innerHTML, /para three/, 'and the new paragraph is the tail');
 });
 
+test('the settled layer is appended to, never rewritten', async () => {
+  // The settled layer used to have its innerHTML reassigned every time a
+  // paragraph closed: the browser re-parsed every paragraph already on screen,
+  // so the cost of a frame grew with the answer. It is appended to now, and
+  // the string it holds is the same one it always showed.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('assistant_delta', { text: 'para one\n\npara two' });
+  await tick();
+  globalThis.__stream.emit('assistant_delta', { text: '\n\npara three' });
+  await tick();
+  const bubble = node('log').children.find((c) => c.className.includes('assistant'));
+  const settled = bubble.children[0].children[0];
+  assert.equal(settled.htmlWrites ?? 0, 0, 'the settled layer is never reassigned');
+  assert.ok(settled.insertions >= 2, `it is appended to (${settled.insertions} appends)`);
+  assert.match(settled.innerHTML, /para one/, 'and it still holds everything');
+  assert.match(settled.innerHTML, /para two/, 'including the paragraph that just closed');
+});
+
+test('the attach button is a button, and a key on it is its own business', async () => {
+  // A file row is a button, and the แนบ button inside it is a button too. The
+  // row's key handler used to swallow the key and cancel the inner button's
+  // own activation, so Enter on แนบ opened the file instead of attaching it —
+  // and a keyboard user could not attach a file at all.
+  const { node, calls, tick } = await bootApp({
+    ...BACKEND,
+    'fs.list': () => [{ name: 'guide.md', dir: false }],
+    'fs.read': () => ({ file: 'guide.md', text: 'hello' }),
+    'attachment.stage': () => ({ id: 'att1', name: 'guide.md', bytes: 12, mime: 'text/markdown' }),
+  });
+  await tick(); await tick(); await tick();
+  const file = node('files').children.find((li) => li.textContent.includes('guide.md'));
+  const attach = file.children.find((c) => c.tagName === 'BUTTON' && c.textContent === 'แนบ');
+  assert.ok(attach, 'the row carries an attach button');
+
+  attach.dispatch('keydown', { key: 'Enter' });
+  assert.equal(attach.lastEvent.defaultPrevented, false,
+    'the row did not cancel the key — the button may act on it');
+  await tick(); await tick();
+  assert.ok(!calls.includes('fs.read'), 'and the file did not open instead');
+});
+
+test('the settings sheet stops its meter when it closes', async () => {
+  // The meter's timer used to be written into the modal's dataset and never
+  // read, so every "คืนค่าเดิม" — which closes the sheet and opens it again —
+  // left another one polling the backend forever.
+  const { node, tick, timers } = await bootApp(BACKEND);
+  const before = timers.size;
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  assert.ok(timers.size > before, 'the sheet started its meter');
+
+  // Close it the way the window does.
+  const close = node('modal-actions').children.find((c) => c.textContent === 'ปิด');
+  close.dispatch('click');
+  await tick(); await tick();
+  assert.equal(timers.size, before, 'and closing it stopped the timer');
+});
+
+test('the auto theme follows the system when the system changes its mind', async () => {
+  // "auto" means the system's choice, and the system's choice changes while
+  // the window is open — a machine that goes to bed at sunset. The theme
+  // used to be read once and then go stale until the window was reloaded.
+  const { node, tick, system } = await bootApp({
+    ...BACKEND,
+    'settings.get': () => ({ ...BACKEND['settings.get'](), theme: 'auto' }),
+  });
+  await tick(); await tick();
+  assert.equal(globalThis.document.documentElement.dataset.theme, 'dark', 'the system is dark for now');
+
+  system.light = true;
+  await tick(); await tick();
+  assert.equal(globalThis.document.documentElement.dataset.theme, 'light', 'and the window followed it');
+});
+
+test('a failed action says so instead of doing nothing', async () => {
+  // The button paths had no error handling: a rejected call was an unhandled
+  // rejection in the console and nothing at all on screen — the person
+  // pressed Apply and the app went quiet.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'apply': () => { throw new Error('the disk is full'); },
+  });
+  await tick(); await tick(); await tick();
+  globalThis.__stream.emit('diff_update', { changes: [{ file: 'a.mjs', added: 1, removed: 0, deleted: false, isNew: false }] });
+  await tick(); await tick();
+  const box = node('pending-list').children[0].children[0];
+  assert.equal(box.checked, true, 'the change is on the panel');
+
+  node('apply').dispatch('click');
+  await tick(); await tick();
+  assert.match(node('log').textContent, /เขียนไฟล์ไม่ได้/, 'and the window says what went wrong');
+});
+
 test('the paint cache counts hits and misses, and /paint answers with them', async () => {
   // The counters behind the settled layer: a frame that appends to it is a
   // hit, a frame that has to reset it is a miss, and a frame with nothing
@@ -1735,16 +2065,25 @@ test('a status payload with cache counters prints the cache line', async () => {
 test('repainting a plugin panel replaces its body instead of stacking copies', async () => {
   // The finished event repaints every panel after every run. The old repaint
   // appended one more body each time — the scratchpad grew a second copy of
-  // its history in the sidebar per run.
+  // its history in the sidebar per run. The panels live in the settings sheet
+  // now, next to the plugin that draws them.
   let note = 'note one';
   const { node, tick } = await bootApp({
     ...BACKEND,
     'plugins.list': () => ({ dir: '', loaded: [], failed: [], tools: [], panels: [{ id: 'notes', title: 'scratchpad' }] }),
     'panel.render': () => ({ html: `<ul><li>${note}</li></ul>` }),
   });
-  const holder = node('plugin-panels');
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  const shell = node('modal-body').children.find((c) => /settings/.test(c.className));
+  const rail = shell.children.find((c) => /settings-nav/.test(c.className));
+  rail.children.find((b) => /ปลั๊กอิน/.test(b.textContent)).dispatch('click');
+  await tick();
+  const pages = shell.children.find((c) => /settings-pages/.test(c.className));
+  const page = pages.children.find((p) => p.dataset.page === 'plugins');
+  const holder = page.children.find((c) => /plugin-panels/.test(c.className));
   const box = holder.children.find((c) => c.dataset.panel === 'notes');
-  assert.ok(box, 'the panel is in the sidebar');
+  assert.ok(box, 'the panel is in the sheet');
   assert.equal(box.children.length, 2, 'one title row and one rendered body');
   assert.match(box.children[1].innerHTML, /note one/);
 
@@ -1793,27 +2132,58 @@ test('the rail starts a session, and the foot opens the rest of the app', async 
   assert.match(node('modal-title').textContent, /วิธีใช้/);
 });
 
-test('the rail only shows sections that have something in them', async () => {
-  // An empty section is a row that leads nowhere: the playbooks row used to
-  // sit there forever on a machine with no playbooks, and the plugins row sat
-  // there with an empty box under it. A section appears when it has content.
-  const { node, tick } = await bootApp({
-    ...BACKEND,
-    'skills.list': () => [],
-    'plugins.list': () => ({ dir: '/tmp/plugins', loaded: [], failed: [], tools: [], panels: [] }),
-  });
-  await tick(); await tick(); await tick();
-  assert.equal(node('skills-group').hidden, true, 'no playbooks, no row');
-  assert.equal(node('plugins-group').hidden, true, 'no plugin panels, no row');
+test('the rail carries no playbook row and no plugin row — the settings sheet has both', async () => {
+  // Two folded headings used to sit in the rail: "คู่มือ" and "ปลั๊กอิน".
+  // Clicking one opened a box you had to guess at, in a column whose job is the
+  // work. Both moved into the settings sheet, next to what configures them.
+  const html = fs.readFileSync(path.join(repo, 'desktop', 'ui', 'index.html'), 'utf8');
+  assert.ok(!html.includes('id="skills-group"'), 'the rail has no playbook row');
+  assert.ok(!html.includes('id="plugins-group"'), 'and no plugin row');
 
-  const withPanels = await bootApp({
+  const { node, tick } = await bootApp({
     ...BACKEND,
     'skills.list': () => [{ name: 'writing', file: 'skills/writing.md' }],
     'plugins.list': () => ({ dir: '/tmp/plugins', loaded: [{ name: 'notes' }], failed: [], tools: [], panels: [{ id: 'notes', title: 'scratchpad' }] }),
   });
-  await withPanels.tick(); await withPanels.tick(); await withPanels.tick();
-  assert.equal(withPanels.node('skills-group').hidden, false, 'a playbook shows the row');
-  assert.equal(withPanels.node('plugins-group').hidden, false, 'a plugin panel shows the row');
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  const shell = node('modal-body').children.find((c) => /settings/.test(c.className));
+  const pages = shell.children.find((c) => /settings-pages/.test(c.className));
+
+  const skillPage = pages.children.find((p) => p.dataset.page === 'skills');
+  assert.ok(skillPage, 'the sheet has a playbook page');
+  assert.match(skillPage.textContent, /writing/, 'and it lists the playbooks on disk');
+
+  const pluginPage = pages.children.find((p) => p.dataset.page === 'plugins');
+  assert.ok(pluginPage, 'the sheet has a plugins page');
+  assert.match(pluginPage.textContent, /scratchpad/, 'and the panels the plugins draw');
+});
+
+test('a playbook opens in place, under its own row', async () => {
+  // A second modal on top of the settings sheet would take the settings away
+  // while you read — so the playbook opens where it is listed.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'skills.list': () => [{ name: 'writing', file: 'skills/writing.md' }],
+    'skills.load': () => ({ text: 'step one\nstep two' }),
+  });
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  const shell = node('modal-body').children.find((c) => /settings/.test(c.className));
+  const pages = shell.children.find((c) => /settings-pages/.test(c.className));
+  const skillPage = pages.children.find((p) => p.dataset.page === 'skills');
+  const row = skillPage.children.find((c) => /skill-list/.test(c.className)).children[0];
+  const body = row.children.find((c) => /skill-body/.test(c.className));
+  assert.equal(body.hidden, true, 'the playbook is closed to begin with');
+
+  row.dispatch('click');
+  await tick(); await tick();
+  assert.equal(body.hidden, false, 'clicking the row opens it');
+  assert.match(body.textContent, /step one/, 'and the playbook is there');
+
+  row.dispatch('click');
+  await tick(); await tick();
+  assert.equal(body.hidden, true, 'clicking it again puts it away');
 });
 
 test('the search field is a field, and it counts the history it filters', async () => {
@@ -1826,7 +2196,7 @@ test('the search field is a field, and it counts the history it filters', async 
 
   node('session-filter').value = 'one';
   node('session-filter').dispatch('input');
-  await tick(); await tick();
+  await settle();
   const titles = node('sessions').children.map((li) => li.textContent);
   assert.equal(titles.length, 1, 'the list is filtered');
   assert.match(titles[0], /one/);

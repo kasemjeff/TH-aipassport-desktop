@@ -51,16 +51,18 @@ test('FETCH refuses private and internal addresses in every spelling', async () 
 
 test('FETCH truncates at the byte cap instead of riding a giant body upstream', async () => {
   process.env.AIPASS_FETCH_MAX_BYTES = '100';
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response('x'.repeat(10_000), { status: 200 });
+  // The request is injected: the tool resolves the name, vets the answers and
+  // hands the vetted address to the transport, so a test can drive the guard
+  // without a network. A literal address skips the resolve, which is what
+  // keeps this test offline.
+  const transport = async () => new Response('x'.repeat(10_000), { status: 200 });
   try {
-    const tools = toolsIn(mkTracked({}));
-    const out = await tools.fetch('http://example.com/big');
+    const tools = toolsIn(mkTracked({}), { fetchTransport: transport });
+    const out = await tools.fetch('http://93.184.216.34/big');
     assert.match(out, /truncated at the byte cap/);
     assert.match(out, /untrusted input/, 'web content arrives marked as untrusted');
     assert.ok(out.length < 2_000, 'the result is bounded, not the whole body');
   } finally {
-    globalThis.fetch = realFetch;
     delete process.env.AIPASS_FETCH_MAX_BYTES;
   }
 });
@@ -217,7 +219,7 @@ test('SEARCH skips files over the 1 MB cap instead of reading them line by line'
   assert.doesNotMatch(hits, /big\.txt/);
 });
 
-test('ATTACH queues a part the loop can send, and refuses what cannot ride a chat', () => {
+test('ATTACH queues a part the loop can send, and refuses what cannot ride a chat', async () => {
   const dir = mkTracked({
     // NUL byte marks it binary, so the extension names the type: image/png
     'shot.png': '\x89PNG\r\n\x1a\n\x00\x01\x02\x03',
@@ -225,30 +227,43 @@ test('ATTACH queues a part the loop can send, and refuses what cannot ride a cha
     'prog.exe': '\x00\x01binary',
   });
   const tools = toolsIn(dir);
-  assert.match(tools.attach('shot.png'), /queued shot\.png \(image\/png/);
+  assert.match(await tools.attach('shot.png'), /queued shot\.png \(image\/png/);
   assert.equal(tools.pendingParts.length, 1);
   assert.equal(tools.pendingParts[0].type, 'image_url');
   assert.match(tools.pendingParts[0].image_url.url, /^data:image\/png;base64,/);
   tools.pendingParts.splice(0);
 
-  assert.match(tools.attach('notes.md'), /queued notes\.md \(text\/plain/);
+  assert.match(await tools.attach('notes.md'), /queued notes\.md \(text\/plain/);
   assert.equal(tools.pendingParts[0].type, 'file');
   assert.equal(tools.pendingParts[0].file.filename, 'notes.md');
   assert.match(tools.pendingParts[0].file.file_data, /^data:text\/plain;base64,/);
   tools.pendingParts.splice(0);
 
-  assert.match(tools.attach('missing.png'), /^err: no such file/);
-  assert.match(tools.attach('node_modules/x.png'), /^err: .*skipped/);
-  assert.match(tools.attach('prog.exe'), /^err: .*not an attachable type/);
-  assert.match(tools.attach(''), /^err: give me a file path/);
+  assert.match(await tools.attach('missing.png'), /^err: no such file/);
+  assert.match(await tools.attach('node_modules/x.png'), /^err: .*skipped/);
+  assert.match(await tools.attach('prog.exe'), /^err: .*not an attachable type/);
+  assert.match(await tools.attach(''), /^err: give me a file path/);
   assert.equal(tools.pendingParts.length, 0);
+});
+
+test('ATTACH refuses an oversized file on its size, before it is read', async () => {
+  const dir = mkTracked({});
+  // A sparse file: the size is what the guard reads, and a real 21 MB of
+  // zeroes would make the test slow for no reason.
+  const fd = fs.openSync(path.join(dir, 'big.bin'), 'w');
+  fs.ftruncateSync(fd, 21 * 1024 * 1024);
+  fs.closeSync(fd);
+  const tools = toolsIn(dir);
+  const out = await tools.attach('big.bin');
+  assert.match(out, /^err: big\.bin is 21 MB — the cap is 20 MB/);
+  assert.equal(tools.pendingParts.length, 0, 'nothing was queued');
 });
 
 test('ATTACH serves a file the run wrote itself, from the overlay', async () => {
   const dir = mkTracked({});
   const tools = toolsIn(dir);
   await tools.write('made.txt', 'freshly written\n');
-  assert.match(tools.attach('made.txt'), /queued made\.txt/);
+  assert.match(await tools.attach('made.txt'), /queued made\.txt/);
   assert.equal(tools.pendingParts[0].type, 'file');
   assert.match(tools.pendingParts[0].file.file_data, /^data:text\/plain;base64,/);
 });
@@ -284,4 +299,95 @@ test('a missed FIND answers with the closest line, a repeated one with its place
   assert.match(missed, /closest line in the file: 1: "const total = price \* qty;"/);
   const twice = await tools.replace('a.txt', ['const ', 'let ']);
   assert.match(twice, /appears 2 times in a\.txt \(lines 1, 2\)/);
+});
+
+// A `**` spans any number of path segments, and the matcher tries every way
+// of splitting the path for each one: 32 of them cost 2^32 attempts per
+// file, which is seconds per file on a real tree.
+test('a glob with too many ** segments is refused at once', async () => {
+  const dir = mkTracked({ 'a.ts': 'a\n' });
+  const tools = toolsIn(dir);
+  const pattern = Array.from({ length: 32 }, () => '**').join('/');
+  const started = Date.now();
+  const out = await tools.glob(pattern);
+  assert.match(out, /^err: the pattern has 32 "\*\*" segments — the cap is 8/);
+  assert.ok(Date.now() - started < 2_000, 'and it is refused before the walk, not after it');
+});
+
+// Brace expansion recurses once per brace group, so a pattern with 20,000
+// braces used to end the run with a RangeError.
+test('a deeply nested brace pattern is refused, not a stack overflow', async () => {
+  const dir = mkTracked({ 'a.ts': 'a\n' });
+  const tools = toolsIn(dir);
+  const pattern = `${'{'.repeat(20_000)}a${'}'.repeat(20_000)}`;
+  const out = await tools.glob(pattern);
+  assert.match(out, /^err: the pattern nests braces \d+ deep — the cap is 8/);
+});
+
+test('a brace pattern that expands too wide is refused, not silently cut', async () => {
+  const dir = mkTracked({ 'a.ts': 'a\n' });
+  const tools = toolsIn(dir);
+  const out = await tools.glob('{a,b}{c,d}{e,f}{g,h}{i,j}{k,l}');
+  assert.match(out, /^err: the pattern expands to more than 32 alternatives/);
+});
+
+// `read` had no ceiling at all: a multi-GB file answered with an
+// out-of-memory crash instead of with a page.
+test('read refuses a file past the cap instead of loading it', () => {
+  const dir = mkTracked({});
+  // A sparse file: the size is what the guard reads.
+  const fd = fs.openSync(path.join(dir, 'huge.txt'), 'w');
+  fs.ftruncateSync(fd, 2 * 1024 * 1024);
+  fs.closeSync(fd);
+  const tools = toolsIn(dir);
+  const out = tools.read('huge.txt');
+  assert.match(out, /^err: huge\.txt is 2 MB — the read cap is 1 MB/);
+  assert.match(out, /Search it with SEARCH/, 'and the way out is named');
+});
+
+// A link out of the project is a link out of the root: the walks follow it
+// only to find that it leaves.
+test('SEARCH and GLOB do not walk into a link out of the project', async (t) => {
+  const dir = mkTracked({ 'inside.txt': 'needle inside\n' });
+  const outside = mkTracked({ 'secret.txt': 'needle outside\n' });
+  try {
+    fs.symlinkSync(outside, path.join(dir, 'away'), 'junction');
+  } catch (err) {
+    return t.skip(`links cannot be made here: ${err.code}`);
+  }
+  const tools = toolsIn(dir);
+  const hits = await tools.search('needle');
+  assert.match(hits, /inside\.txt/);
+  assert.doesNotMatch(hits, /away/, 'the link out of the project is not searched');
+  const listed = await tools.glob('**');
+  assert.doesNotMatch(listed, /^away$/m, 'and it is not listed as a file of the project');
+});
+
+// The secret screen has to see the file a link really is: a link called
+// "notes.txt" that points at a secret is the secret, whatever the link is
+// named.
+test('the secret screen sees the target of a link, not the name it borrows', async (t) => {
+  const dir = mkTracked({ 'secrets.json': '{"token":"nope"}\n' });
+  try {
+    fs.symlinkSync(path.join(dir, 'secrets.json'), path.join(dir, 'notes.txt'), 'file');
+  } catch (err) {
+    return t.skip(`file links cannot be made here: ${err.code}`);
+  }
+  const tools = toolsIn(dir);
+  const hits = await tools.search('nope');
+  assert.doesNotMatch(hits, /notes\.txt/, 'the secret behind the link is not a search result');
+});
+
+test('FETCH refuses a name that resolves private, and one it cannot resolve', async () => {
+  const transport = async () => new Response('never fetched', { status: 200 });
+  const tools = toolsIn(mkTracked({}), { fetchTransport: transport });
+  // `localhost.` is the same name to the resolver and a different one to the
+  // literal check — the split the DNS pass exists to close.
+  const priv = await tools.fetch('http://localhost./x');
+  assert.match(priv, /^err: refusing to fetch localhost\./);
+  assert.match(priv, /resolves to a private\/internal address/);
+  // RFC 2606 reserves .invalid: it never resolves, so it cannot be vetted.
+  const unknown = await tools.fetch('http://public.invalid/x');
+  assert.match(unknown, /^err: refusing to fetch public\.invalid/);
+  assert.match(unknown, /could not be resolved/);
 });

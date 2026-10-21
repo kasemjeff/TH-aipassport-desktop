@@ -5,6 +5,7 @@
 /target/
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/
+/dist/
 /desktop/sidecar/*.exe
 /desktop/sidecar/*.dll
 /desktop/sidecar/node
@@ -22,7 +23,11 @@
 # Evals run artifacts: one JSONL per run, machine-local like sessions. The
 # directory itself ships (its .gitkeep) so `npm run evals` has somewhere to
 # write; a run worth keeping can be added deliberately with git add -f.
+# A run may also write a directory of per-case JSONL files, so the directories
+# are ignored too - the rule above only reaches the files directly inside.
 /evals/results/*.jsonl
+/evals/results/*
+!/evals/results/.gitkeep
 
 node_modules/
 *.log

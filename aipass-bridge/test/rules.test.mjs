@@ -15,8 +15,8 @@ import { fileURLToPath } from 'node:url';
 import { PermissionEngine, globMatch } from '../harness/permissions.mjs';
 import { Settings } from '../harness/settings.mjs';
 import { RulesStore } from '../harness/rules.mjs';
-import { createRpc } from '../harness/rpc.mjs';
-import { freePort, tempDir } from './harness.mjs';
+
+import { freePort, tempDir, startRpcServer } from './harness.mjs';
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-rules-'));
 process.env.AIPASS_HOME = HOME;
@@ -100,16 +100,15 @@ test('settings drop rules that would never fire', () => {
 
 /** A backend with its own bridge and port; no run is started, only policy. */
 async function startBackend() {
-  const port = await freePort();
   const settings = new Settings(tempDir(), 'settings.json');
-  const rpc = createRpc({
-    port,
+  const rpc = await startRpcServer({
     root: tempDir(),
     bridgeURL: `http://127.0.0.1:${await freePort()}`,
     autostartBridge: false,
     store: tempDir(),
     settings,
   });
+  const port = rpc.port;
   const call = async (method, params = {}) => {
     const res = await fetch(`http://127.0.0.1:${port}/rpc`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -202,15 +201,25 @@ test('a rules save that cannot complete leaves the previous rules intact', () =>
   const before = fs.readFileSync(file, 'utf8');
   assert.match(before, /a\.txt/);
 
-  // A directory where the temp file would go: the write fails before the
-  // swap, the way a full disk or a dead handle would. The old rules — every
-  // project's, not just this one's — must be exactly as they were: the direct
-  // overwrite this replaces could lose the whole file to one bad moment.
-  fs.mkdirSync(file + '.tmp');
-  assert.throws(() => store.addGrant(root, 'shell', 'rm -rf /'));
+  // The save has to fail before the swap, the way a full disk or a dead handle
+  // would. The temp file's name is unique per write now, so it cannot be
+  // blocked by planting something at a known path — the DESTINATION is what
+  // the swap cannot take away: read-only on Windows, a read-only parent
+  // directory on POSIX. The old rules — every project's, not just this one's
+  // — must be exactly as they were: the direct overwrite this replaces could
+  // lose the whole file to one bad moment.
+  if (process.platform === 'win32') {
+    fs.chmodSync(file, 0o444);
+    assert.throws(() => store.addGrant(root, 'shell', 'rm -rf /'));
+    fs.chmodSync(file, 0o600);
+  } else {
+    const dir = path.dirname(file);
+    fs.chmodSync(dir, 0o555);
+    assert.throws(() => store.addGrant(root, 'shell', 'rm -rf /'));
+    fs.chmodSync(dir, 0o755);
+  }
   assert.equal(fs.readFileSync(file, 'utf8'), before, 'a failed save changes nothing');
 
-  fs.rmSync(file + '.tmp', { recursive: true, force: true });
   store.addGrant(root, 'shell', 'rm -rf /');
   assert.deepEqual(store.forRoot(root).grants.map((g) => g.kind).sort(), ['shell', 'write'], 'and the next save lands');
 });

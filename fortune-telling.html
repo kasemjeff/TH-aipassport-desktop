@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>เว็บดูดวง - ทำนายชะตาชีวิต</title>
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="fortune-styles.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        /* แบบสไตล์ทำนาย */
+        :root {
+            --fortune-primary: #8a6d3b;
+            --fortune-secondary: #d4b483;
+            --fortune-accent: #e74c3c;
+            --fortune-bg: #1a1510;
+            --fortune-card: #2c241b;
+        }
+        
+        .fortune-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .fortune-header {
+            text-align: center;
+            margin-bottom: 40px;
+            padding: 20px;
+            background: linear-gradient(135deg, var(--fortune-card), #3a2e22);
+            border-radius: 20px;
+            border: 1px solid var(--fortune-secondary);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+        
+        .fortune-title {
+            color: var(--fortune-secondary);
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 0 2px 10px rgba(212, 180, 131, 0.3);
+        }
+        
+        .fortune-subtitle {
+            color: var(--dim);
+            font-size: 1.2rem;
+        }
+        
+        .fortune-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 25px;
+            margin-bottom: 40px;
+        }
+        
+        .fortune-card {
+            background: var(--fortune-card);
+            border-radius: 15px;
+            padding: 25px;
+            border: 1px solid var(--line);
+            transition: all 0.3s ease;
+        }
+        
+        .fortune-card:hover {
+            transform: translateY(-5px);
+            border-color: var(--fortune-secondary);
+            box-shadow: 0 10px 25px rgba(212, 180, 131, 0.2);
+        }
+        
+        .fortune-card-title {
+            color: var(--fortune-secondary);
+            font-size: 1.4rem;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .fortune-card-title i {
+            color: var(--fortune-accent);
+        }
+        
+        .fortune-input-group {
+            margin-bottom: 15px;
+        }
+        
+        .fortune-input-group label {
+            display: block;
+            color: var(--dim);
+            margin-bottom: 8px;
+        }
+        
+        .fortune-input-group select,
+        .fortune-input-group input {
+            width: 100%;
+            padding: 12px;
+            background: var(--input);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            color: var(--fg);
+            font-size: 1rem;
+        }
+        
+        .fortune-button {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, var(--fortune-primary), #6b4f2a);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-top: 10px;
+        }
+        
+        .fortune-button:hover {
+            background: linear-gradient(135deg, #9b7a45, #7d5f34);
+            transform: scale(1.02);
+        }
+        
+        .fortune-result {
+            background: var(--stage);
+            border-radius: 15px;
+            padding: 30px;
+            margin-top: 40px;
+            border: 1px solid var(--fortune-secondary);
+            display: none;
+        }
+        
+        .fortune-result.show {
+            display: block;
+            animation: fadeIn 0.5s ease;
+        }
+        
+        .fortune-result-title {
+            color: var(--fortune-secondary);
+            font-size: 1.8rem;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        
+        .fortune-prediction {
+            background: var(--fortune-card);
+            padding: 20px;
+            border-radius: 10px;
+            border-left: 5px solid var(--fortune-accent);
+            margin-bottom: 20px;
+        }
+        
+        .fortune-prediction p {
+            color: var(--fg);
+            line-height: 1.6;
+            margin-bottom: 10px;
+        }
+        
+        .fortune-zodiac-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        
+        .zodiac-item {
+            text-align: center;
+            padding: 15px;
+            background: var(--fortune-card);
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .zodiac-item:hover {
+            background: var(--fortune-primary);
+            transform: scale(1.05);
+        }
+        
+        .zodiac-icon {
+            font-size: 2rem;
+            margin-bottom: 10px;
+            color: var(--fortune-secondary);
+        }
+        
+        .zodiac-name {
+            color: var(--fg);
+            font-weight: bold;
+        }
+        
+        .fortune-credit {
+            text-align: center;
+            color: var(--dim);
+            font-size: 0.9rem;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid var(--line);
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        @media (max-width: 768px) {
+            .fortune-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .fortune-title {
+                font-size: 2rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="fortune-container">
+        <header class="fortune-header">
+            <h1 class="fortune-title"><i class="fas fa-crystal-ball"></i> เว็บดูดวงทำนายชะตา</h1>
+            <p class="fortune-subtitle">ทำนายดวงชะตา โหราศาสตร์ไทย พร้อมคำแนะนำชีวิตตามหลักโหราศาสตร์และฮวงจุ้ย</p>
+        </header>
+        
+        <div class="fortune-grid">
+            <div class="fortune-card">
+                <h3 class="fortune-card-title"><i class="fas fa-birthday-cake"></i> ทำนายดวงชะตาโดยวันเกิด</h3>
+                <div class="fortune-input-group">
+                    <label for="birthDate">วันเกิด (วัน/เดือน/ปี)</label>
+                    <input type="date" id="birthDate" max="2026-10-17">
+                </div>
+                <div class="fortune-input-group">
+                    <label for="birthTime">เวลาเกิด (ถ้าทราบ)</label>
+                    <input type="time" id="birthTime">
+                </div>
+                <div class="fortune-input-group">
+                    <label for="gender">เพศ</label>
+                    <select id="gender">
+                        <option value="">เลือกเพศ</option>
+                        <option value="male">ชาย</option>
+                        <option value="female">หญิง</option>
+                    </select>
+                </div>
+                <button class="fortune-button" onclick="calculateFortune()">
+                    <i class="fas fa-magic"></i> ทำนายดวงชะตา
+                </button>
+            </div>
+            
+            <div class="fortune-card">
+                <h3 class="fortune-card-title"><i class="fas fa-star"></i> ดูดวงตามราศี</h3>
+                <div class="fortune-input-group">
+                    <label for="zodiac">ราศีเกิด</label>
+                    <select id="zodiac">
+                        <option value="">เลือกราศี</option>
+                        <option value="aries">ราศีเมษ (มีนาคม 21 - เมษายน 19)</option>
+                        <option value="taurus">ราศีพฤษภ (เมษายน 20 - พฤษภาคม 20)</option>
+                        <option value="gemini">ราศีมิถุน (พฤษภาคม 21 - มิถุนายน 20)</option>
+                        <option value="cancer">ราศีกรกฎ (มิถุนายน 21 - กรกฎาคม 22)</option>
+                        <option value="leo">ราศีสิงห์ (กรกฎาคม 23 - สิงหาคม 22)</option>
+                        <option value="virgo">ราศีกันย์ (สิงหาคม 23 - กันยายน 22)</option>
+                        <option value="libra">ราศีตุลย์ (กันยายน 23 - ตุลาคม 22)</option>
+                        <option value="scorpio">ราศีพิจิก (ตุลาคม 23 - พฤศจิกายน 21)</option>
+                        <option value="sagittarius">ราศีธนู (พฤศจิกายน 22 - ธันวาคม 21)</option>
+                        <option value="capricorn">ราศีมังกร (ธันวาคม 22 - มกราคม 19)</option>
+                        <option value="aquarius">ราศีกุมภ์ (มกราคม 20 - กุมภาพันธ์ 18)</option>
+                        <option value="pisces">ราศีมีน (กุมภาพันธ์ 19 - มีนาคม 20)</option>
+                    </select>
+                </div>
+                <div class="fortune-input-group">
+                    <label for="fortuneType">ประเภทการทำนาย</label>
+                    <select id="fortuneType">
+                        <option value="daily">ดวงวันนี้</option>
+                        <option value="weekly">ดวงประจำสัปดาห์</option>
+                        <option value="monthly">ดวงประจำเดือน</option>
+                        <option value="yearly">ดวงประจำปี</option>
+                        <option value="love">ดวงความรัก</option>
+                        <option value="career">ดวงการงาน</option>
+                        <option value="money">ดวงการเงิน</option>
+                        <option value="health">ดวงสุขภาพ</option>
+                    </select>
+                </div>
+                <button class="fortune-button" onclick="calculateZodiacFortune()">
+                    <i class="fas fa-star-and-crescent"></i> ดูดวงราศี
+                </button>
+            </div>
+            
+            <div class="fortune-card">
+                <h3 class="fortune-card-title"><i class="fas fa-calendar-alt"></i> ดูดวงเลขศาสตร์</h3>
+                <div class="fortune-input-group">
+                    <label for="luckyNumber">เลขนำโชคของคุณ</label>
+                    <input type="number" id="luckyNumber" min="0" max="999" placeholder="เช่น 7, 13, 99">
+                </div>
+                <div class="fortune-input-group">
+                    <label for="name">ชื่อเล่นหรือชื่อจริง</label>
+                    <input type="text" id="name" placeholder="กรอกชื่อของคุณ">
+                </div>
+                <button class="fortune-button" onclick="calculateNumerology()">
+                    <i class="fas fa-calculator"></i> คำนวณเลขศาสตร์
+                </button>
+            </div>
+        </div>
+        
+        <div class="zodiac-section">
+            <h3 class="fortune-card-title"><i class="fas fa-zodiac"></i> เลือกราศีของคุณ</h3>
+            <div class="fortune-zodiac-grid">
+                <!-- ราศีทั้ง 12 -->
+                <div class="zodiac-item" onclick="selectZodiac('aries')">
+                    <div class="zodiac-icon">♈</div>
+                    <div class="zodiac-name">ราศีเมษ</div>
+                </div>
+                <div class="zodiac-item" onclick="selectZodiac('taurus')">
+                    <div class="zodiac-icon">♉</div>
+                    <div class="zodiac-name">ราศีพฤษภ</div>
+                </div>
+                <div class="zodiac-item" onclick="selectZodiac('gemini')">
+                    <div class="zodiac-icon">♊</div>
+                    <div class="zodiac-name">ราศีมิถุน</div>
+                </div>
+                <div class="zodiac-item" onclick="selectZodiac('cancer')">
+                    <div class="zodiac-icon">♋</div>
+                    <div class="zodiac-name">ราศีกรกฎ</div>
+                </div>
+                <div class="zodiac-item" onclick="selectZodiac('leo')">
+                    <div class="zodiac-icon">♌</div>
+                    <div class="zodiac-name">ราศีสิงห์</div>
+                </div>
+                <div class="zodiac-item" onclick="selectZodiac('virgo')">
+                    <div class="zodiac-icon">♍</div>
+                    <div class="zodiac-name">ราศีกันย์</div>
+                </div>
+                <div class="zodiac-item" onclick="selectZodiac('libra')">
+                    <div class="zodiac-icon">♎</div>
+                    <div class="zodiac-name">ราศีตุลย์</div>
+                </div>
+                <div class="zodiac-item" onclick="selectZodiac('scorpio')">
+                    <div class="zodiac-icon">♏</div>
+                    <div class="zodiac-name">ราศีพิจิก</div>
+                </div>
+                <div class="zodiac-item" onclick="selectZodiac('sagittarius')">
+                    <div class="zodiac-icon">♐</div>
+                    <div class="zodiac-name">ราศีธนู</div>
+                </div>
+                <div class="zodiac-item" onclick="selectZodiac('capricorn')">
+                    <div class="zodiac-icon">♑</div>
+                    <div class="zodiac-name">ราศีมังกร</div>
+                </div>
+                <div class="zodiac-item" onclick="selectZodiac('aquarius')">
+                    <div class="zodiac-icon">♒</div>
+                    <div class="zodiac-name">ราศีกุมภ์</div>
+                </div>
+                <div class="zodiac-item" onclick="selectZodiac('pisces')">
+                    <div class="zodiac-icon">♓</div>
+                    <div class="zodiac-name">ราศีมีน</div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="fortuneResult" class="fortune-result">
+            <h3 class="fortune-result-title"><i class="fas fa-crystal-ball"></i> ผลการทำนาย</h3>
+            <div id="predictionContent" class="fortune-prediction">
+                <!-- ผลการทำนายจะแสดงที่นี่ -->
+            </div>
+            <div class="fortune-credit">
+                <p>ผลการทำนายนี้เป็นเพียงความบันเทิง โปรดใช้วิจารณญาณในการดำเนินชีวิต</p>
+                <p>ระบบทำนายดวงชะตาพัฒนาโดยใช้หลักโหราศาสตร์ไทยและเลขศาสตร์ © 2026</p>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // ข้อมูลทำนายตามราศี
+        const zodiacPredictions = {
+            aries: {
+                daily: "วันนี้ดาวอังคารส่งพลังงานที่ดี ให้คุณกล้าแสดงออกมากขึ้น โอกาสใหม่ๆ จะเข้ามา ระวังการพูดจาแบบหุนหันพลันแล่น",
+                weekly: "สัปดาห์นี้เหมาะสำหรับการเริ่มต้นโครงการใหม่ ด้านการงานมีโอกาสก้าวหน้า ด้านความรักอาจมีคนสนใจคุณ",
+                monthly: "เดือนนี้เป็นช่วงเวลาที่ดีสำหรับการพัฒนาทักษะใหม่ๆ การเงินเริ่มมั่นคงขึ้น ด้านสุขภาพควรออกกำลังกายสม่ำเสมอ",
+                love: "ดาวศุกร์ส่งผลดีต่อความรัก คนโสดอาจพบคนพิเศษ คนมีคู่ควรใช้เวลาคุณภาพร่วมกัน",
+                career: "โอกาสก้าวหน้าในการทำงานมีสูง อาจได้รับมอบหมายงานสำคัญ ควรเตรียมตัวให้พร้อม",
+                money: "การเงินเริ่มดีขึ้น แต่ยังต้องระวังการใช้ง่ายฟุ่มเฟือย โอกาสทางการลงทุนมีพอสมควร",
+                health: "สุขภาพโดยรวมดี แต่อาจมีอาการปวดหัวเป็นครั้งคราว ควรพักผ่อนให้เพียงพอ"
+            },
+            // ... (เพิ่มข้อมูลราศีอื่นๆ)
+        };
+        
+        // ข้อมูลเลขมงคล
+        const luckyNumbers = {
+            0: "เลข 0 เป็นเลขแห่งความเป็นนิรันดร์ การเริ่มต้นใหม่ และความว่างเปล่าที่พร้อมจะเติมเต็ม",
+            1: "เลข 1 เป็นเลขแห่งผู้นำ การเริ่มต้น ความเป็นเอกเทศ และความสำเร็จในชีวิต",
+            2: "เลข 2 เป็นเลขแห่งความสมดุล ความร่วมมือ ความรัก และความสัมพันธ์",
+            3: "เลข 3 เป็นเลขแห่งความคิดสร้างสรรค์ การสื่อสาร และความสนุกสนาน",
+            4: "เลข 4 เป็นเลขแห่งความมั่นคง ความปลอดภัย และการวางรากฐานที่แข็งแรง",
+            5: "เลข 5 เป็นเลขแห่งการเปลี่ยนแปลง ความอิสระ และการผจญภัย",
+            6: "เลข 6 เป็นเลขแห่งความรับผิดชอบ ความอบอุ่นในครอบครัว และการดูแลผู้อื่น",
+            7: "เลข 7 เป็นเลขแห่งความรู้แจ้ง ความลึกลับ และการพัฒนาจิตวิญญาณ",
+            8: "เลข 8 เป็นเลขแห่งความมั่งคั่ง การเงิน และความสำเร็จทางธุรกิจ",
+            9: "เลข 9 เป็นเลขแห่งความสมบูรณ์ การให้ และการสิ้นสุดวงจรหนึ่ง"
+        };
+        
+        function calculateFortune() {
+            const birthDate = document.getElementById('birthDate').value;
+            const birthTime = document.getElementById('birthTime').value;
+            const gender = document.getElementById('gender').value;
+            
+            if (!birthDate) {
+                alert('กรุณากรอกวันเกิด');
+                return;
+            }
+            
+            const date = new Date(birthDate);
+            const day = date.getDate();
+            const month = date.getMonth() + 1;
+            const year = date.getFullYear();
+            
+            // คำนวณเลขแห่งชีวิต
+            const lifePathNumber = calculateLifePathNumber(day, month, year);
+            
+            // คำนวณราศี
+            const zodiac = calculateZodiac(day, month);
+            
+            // สร้างคำทำนาย
+            const prediction = generatePrediction(lifePathNumber, zodiac, gender, birthTime);
+            
+            // แสดงผล
+            showResult(prediction, `การทำนายดวงชะตาจากวันเกิด ${day}/${month}/${year}`);
+        }
+        
+        function calculateZodiacFortune() {
+            const zodiac = document.getElementById('zodiac').value;
+            const fortuneType = document.getElementById('fortuneType').value;
+            
+            if (!zodiac) {
+                alert('กรุณาเลือกราศี');
+                return;
+            }
+            
+            const zodiacNames = {
+                aries: "ราศีเมษ",
+                taurus: "ราศีพฤษภ",
+                gemini: "ราศีมิถุน",
+                cancer: "ราศีกรกฎ",
+                leo: "ราศีสิงห์",
+                virgo: "ราศีกันย์",
+                libra: "ราศีตุลย์",
+                scorpio: "ราศีพิจิก",
+                sagittarius: "ราศีธนู",
+                capricorn: "ราศีมังกร",
+                aquarius: "ราศีกุมภ์",
+                pisces: "ราศีมีน"
+            };
+            
+            const typeNames = {
+                daily: "ดวงวันนี้",
+                weekly: "ดวงประจำสัปดาห์",
+                monthly: "ดวงประจำเดือน",
+                yearly: "ดวงประจำปี",
+                love: "ดวงความรัก",
+                career: "ดวงการงาน",
+                money: "ดวงการเงิน",
+                health: "ดวงสุขภาพ"
+            };
+            
+            const prediction = zodiacPredictions[zodiac]?.[fortuneType] || "ดาวเคราะห์ส่งผลดีในทุกด้าน โปรดใช้ชีวิตอย่างมีสติและมีความสุข";
+            
+            const result = `
+                <h4><i class="fas fa-star"></i> ทำนาย${typeNames[fortuneType]} สำหรับ ${zodiacNames[zodiac]}</h4>
+                <p>${prediction}</p>
+                <p><strong>คำแนะนำ:</strong> ควรสวมเสื้อผ้าสีทองหรือสีแดงเพื่อเสริมดวงในวันนี้</p>
+                <p><strong>เลขนำโชค:</strong> ${getLuckyNumbers(zodiac)}</p>
+                <p><strong>ทิศทางเสริมดวง:</strong> ทิศตะวันออกเฉียงเหนือ</p>
+            `;
+            
+            showResult(result, `การทำนาย${typeNames[fortuneType]} สำหรับ ${zodiacNames[zodiac]}`);
+        }
+        
+        function calculateNumerology() {
+            const luckyNumber = parseInt(document.getElementById('luckyNumber').value);
+            const name = document.getElementById('name').value;
+            
+            let numberValue = luckyNumber;
+            if (isNaN(numberValue)) {
+                numberValue = calculateNameNumber(name);
+            }
+            
+            const singleDigit = reduceToSingleDigit(numberValue);
+            const prediction = luckyNumbers[singleDigit] || "เลขนี้เป็นเลขพิเศษที่ส่งพลังงานดีในทุกด้าน";
+            
+            const result = `
+                <h4><i class="fas fa-calculator"></i> ผลการคำนวณเลขศาสตร์</h4>
+                <p><strong>เลขที่คุณให้มา:</strong> ${numberValue}</p>
+                <p><strong>เลขหลักเดียว:</strong> ${singleDigit}</p>
+                <p><strong>คำทำนาย:</strong> ${prediction}</p>
+                <p><strong>เลขมงคลอื่นๆ:</strong> ${getRelatedLuckyNumbers(singleDigit)}</p>
+                <p><strong>ช่วงเวลาดี:</strong> เวลา 09:00-11:00 น. และ 15:00-17:00 น.</p>
+            `;
+            
+            showResult(result, "ผลการคำนวณเลขศาสตร์");
+        }
+        
+        function selectZodiac(zodiacSign) {
+            document.getElementById('zodiac').value = zodiacSign;
+            calculateZodiacFortune();
+        }
+        
+        function calculateLifePathNumber(day, month, year) {
+            let sum = day + month + year;
+            while (sum > 9 && sum !== 11 && sum !== 22 && sum !== 33) {
+                sum = sum.toString().split('').reduce((a, b) => parseInt(a) + parseInt(b), 0);
+            }
+            return sum;
+        }
+        
+        function calculateZodiac(day, month) {
+            if ((month == 3 && day >= 21) || (month == 4 && day <= 19)) return "aries";
+            if ((month == 4 && day >= 20) || (month == 5 && day <= 20)) return "taurus";
+            if ((month == 5 && day >= 21) || (month == 6 && day <= 20)) return "gemini";
+            if ((month == 6 && day >= 21) || (month == 7 && day <= 22)) return "cancer";
+            if ((month == 7 && day >= 23) || (month == 8 && day <= 22)) return "leo";
+            if ((month == 8 && day >= 23) || (month == 9 && day <= 22)) return "virgo";
+            if ((month == 9 && day >= 23) || (month == 10 && day <= 22)) return "libra";
+            if ((month == 10 && day >= 23) || (month == 11 && day <= 21)) return "scorpio";
+            if ((month == 11 && day >= 22) || (month == 12 && day <= 21)) return "sagittarius";
+            if ((month == 12 && day >= 22) || (month == 1 && day <= 19)) return "capricorn";
+            if ((month == 1 && day >= 20) || (month == 2 && day <= 18)) return "aquarius";
+            return "pisces";
+        }
+        
+        function generatePrediction(lifePathNumber, zodiac, gender, birthTime) {
+            const timeOfDay = birthTime ? getTimeOfDay(birthTime) : "ไม่ทราบ";
+            const genderText = gender === "male" ? "ท่านชาย" : gender === "female" ? "ท่านหญิง" : "";
+            
+            return `
+                <h4><i class="fas fa-user"></i> ข้อมูลพื้นฐาน</h4>
+                <p><strong>เลขแห่งชีวิต:</strong> ${lifePathNumber} (${getLifePathMeaning(lifePathNumber)})</p>
+                <p><strong>ราศี:</strong> ${getZodiacThaiName(zodiac)}</p>
+                <p><strong>เพศ:</strong> ${genderText}</p>
+                <p><strong>เวลาเกิด:</strong> ${timeOfDay}</p>
+                
+                <h4><i class="fas fa-crystal-ball"></i> คำทำนายดวงชะตา</h4>
+                <p>${getGeneralPrediction(lifePathNumber, zodiac)}</p>
+                
+                <h4><i class="fas fa-heart"></i> ด้านความรัก</h4>
+                <p>${getLovePrediction(zodiac, lifePathNumber)}</p>
+                
+                <h4><i class="fas fa-briefcase"></i> ด้านการงาน</h4>
+                <p>${getCareerPrediction(lifePathNumber)}</p>
+                
+                <h4><i class="fas fa-money-bill-wave"></i> ด้านการเงิน</h4>
+                <p>${getMoneyPrediction(lifePathNumber)}</p>
+                
+                <h4><i class="fas fa-heartbeat"></i> ด้านสุขภาพ</h4>
+                <p>${getHealthPrediction(zodiac)}</p>
+                
+                <h4><i class="fas fa-lightbulb"></i> คำแนะนำ</h4>
+                <p>${getAdvice(lifePathNumber)}</p>
+            `;
+        }
+        
+        function getTimeOfDay(time) {
+            const hour = parseInt(time.split(':')[0]);
+            if (hour >= 5 && hour < 12) return "เช้า (05:00-11:59 น.)";
+            if (hour >= 12 && hour < 18) return "บ่าย (12:00-17:59 น.)";
+            if (hour >= 18 && hour < 22) return "เย็น (18:00-21:59 น.)";
+            return "กลางคืน (22:00-04:59 น.)";
+        }
+        
+        function getLifePathMeaning(number) {
+            const meanings = {
+                1: "ผู้นำ ผู้บุกเบิก",
+                2: "นักสันติภาพ ผู้ร่วมมือ",
+                3: "นักสร้างสรรค์ นักสื่อสาร",
+                4: "นักสร้างรากฐาน ผู้ปฏิบัติ",
+                5: "นักผจญภัย ผู้เปลี่ยนแปลง",
+                6: "ผู้ดูแล ครอบครัว",
+                7: "นักปราชญ์ ผู้แสวงหา",
+                8: "นักธุรกิจ ผู้มั่งคั่ง",
+                9: "ผู้ให้ มนุษยธรรม",
+                11: "ผู้มีญาณทิพย์",
+                22: "ผู้สร้างสรรค์ระดับมาสเตอร์",
+                33: "อาจารย์ผู้ยิ่งใหญ่"
+            };
+            return meanings[number] || "พิเศษ";
+        }
+        
+        function getZodiacThaiName(zodiac) {
+            const names = {
+                aries: "ราศีเมษ",
+                taurus: "ราศีพฤษภ",
+                gemini: "ราศีมิถุน",
+                cancer: "ราศีกรกฎ",
+                leo: "ราศีสิงห์",
+                virgo: "ราศีกันย์",
+                libra: "ราศีตุลย์",
+                scorpio: "ราศีพิจิก",
+                sagittarius: "ราศีธนู",
+                capricorn: "ราศีมังกร",
+                aquarius: "ราศีกุมภ์",
+                pisces: "ราศีมีน"
+            };
+            return names[zodiac] || zodiac;
+        }
+        
+        function getGeneralPrediction(lifePathNumber, zodiac) {
+            return `ดวงชะตาของคุณในปีนี้มีแนวโน้มที่ดี โดยเฉพาะในช่วงไตรมาสที่ 2 และ 3 ดาวพฤหัสส่งผลดีด้านโอกาสใหม่ๆ`;
+        }
+        
+        function getLovePrediction(zodiac, lifePathNumber) {
+            const lovePredictions = [
+                "ด้านความรักมีโอกาสพบคนพิเศษในช่วง 3 เดือนข้างหน้า",
+                "ความสัมพันธ์ปัจจุบันมีแนวโน้มพัฒนาไปในทางที่ดี",
+                "ควรเปิดใจรับรู้ความรู้สึกของตนเองและผู้อื่นมากขึ้น"
+            ];
+            return lovePredictions[lifePathNumber % lovePredictions.length];
+        }
+        
+        function getCareerPrediction(lifePathNumber) {
+            const careerPredictions = [
+                "การงานมีโอกาสก้าวหน้า โดยเฉพาะโครงการใหม่ๆ",
+                "อาจได้รับมอบหมายงานสำคัญที่ท้าทายความสามารถ",
+                "ควรมุ่งมั่นพัฒนาทักษะเพื่อเตรียมพร้อมสำหรับโอกาสที่เข้ามา"
+            ];
+            return careerPredictions[lifePathNumber % careerPredictions.length];
+        }
+        
+        function getMoneyPrediction(lifePathNumber) {
+            const moneyPredictions = [
+                "การเงินเริ่มมั่นคงขึ้น แต่ยังต้องระวังการใช้ง่าย",
+                "มีโอกาสได้รับรายได้เพิ่มจากแหล่งที่ไม่คาดคิด",
+                "ควรวางแผนการออมและลงทุนสำหรับอนาคต"
+            ];
+            return moneyPredictions[lifePathNumber % moneyPredictions.length];
+        }
+        
+        function getHealthPrediction(zodiac) {
+            const healthPredictions = {
+                aries: "สุขภาพแข็งแรง แต่ควรระวังอาการปวดหัวและความเครียด",
+                taurus: "ระบบย่อยอาหารควรได้รับการดูแลเป็นพิเศษ",
+                gemini: "สุขภาพปอดและระบบหายใจควรใส่ใจ",
+                cancer: "สุขภาพทางอารมณ์มีความสำคัญต่อร่างกาย",
+                leo: "สุขภาพหัวใจและหลังควรดูแลเป็นพิเศษ",
+                virgo: "ระบบย่อยอาหารและระบบประสาทควรได้รับการดูแล",
+                libra: "สุขภาพไตและระบบขับถ่ายควรใส่ใจ",
+                scorpio: "สุขภาพระบบสืบพันธุ์ควรได้รับการดูแล",
+                sagittarius: "สุขภาพตับและระบบเผาผลาญควรใส่ใจ",
+                capricorn: "สุขภาพกระดูกและข้อควรดูแลเป็นพิเศษ",
+                aquarius: "สุขภาพระบบไหลเวียนเลือดควรใส่ใจ",
+                pisces: "สุขภาพเท้าและระบบน้ำเหลืองควรได้รับการดูแล"
+            };
+            return healthPredictions[zodiac] || "สุขภาพโดยรวมดี ควรออกกำลังกายสม่ำเสมอและพักผ่อนให้เพียงพอ";
+        }
+        
+        function getAdvice(lifePathNumber) {
+            const advices = [
+                "ควรสวมเสื้อผ้าสีแดงหรือทองเพื่อเสริมดวง",
+                "ปลูกต้นไม้สีเขียวในบ้านเพื่อเสริมความเป็นสิริมงคล",
+                "ทำบุญปล่อยสัตว์หรือตักบาตรในวันพระ",
+                "หมั่นพูดคำดีๆ และคิดบวกอยู่เสมอ",
+                "วางเครื่องรางของขลังทางทิศตะวันออกของบ้าน"
+            ];
+            return advices[lifePathNumber % advices.length];
+        }
+        
+        function calculateNameNumber(name) {
+            if (!name) return Math.floor(Math.random() * 9) + 1;
+            
+            const thaiToNumber = {
+                'ก': 1, 'ข': 2, 'ค': 3, 'ฆ': 4, 'ง': 5,
+                'จ': 6, 'ฉ': 7, 'ช': 8, 'ซ': 9, 'ฌ': 1,
+                'ญ': 2, 'ฎ': 3, 'ฏ': 4, 'ฐ': 5, 'ฑ': 6,
+                'ฒ': 7, 'ณ': 8, 'ด': 9, 'ต': 1, 'ถ': 2,
+                'ท': 3, 'ธ': 4, 'น': 5, 'บ': 6, 'ป': 7,
+                'ผ': 8, 'ฝ': 9, 'พ': 1, 'ฟ': 2, 'ภ': 3,
+                'ม': 4, 'ย': 5, 'ร': 6, 'ล': 7, 'ว': 8,
+                'ศ': 9, 'ษ': 1, 'ส': 2, 'ห': 3, 'ฬ': 4,
+                'อ': 5, 'ฮ': 6
+            };
+            
+            let sum = 0;
+            for (let char of name.toLowerCase()) {
+                if (thaiToNumber[char]) {
+                    sum += thaiToNumber[char];
+                }
+            }
+            
+            return sum || Math.floor(Math.random() * 9) + 1;
+        }
+        
+        function reduceToSingleDigit(num) {
+            let result = num;
+            while (result > 9) {
+                result = result.toString().split('').reduce((a, b) => parseInt(a) + parseInt(b), 0);
+            }
+            return result;
+        }
+        
+        function getLuckyNumbers(zodiac) {
+            const numbers = {
+                aries: "1, 9, 19, 28",
+                taurus: "2, 6, 15, 24",
+                gemini: "3, 7, 12, 21",
+                cancer: "4, 8, 13, 22",
+                leo: "1, 5, 14, 23",
+                virgo: "2, 6, 15, 24",
+                libra: "3, 7, 16, 25",
+                scorpio: "4, 8, 17, 26",
+                sagittarius: "5, 9, 18, 27",
+                capricorn: "1, 4, 10, 19",
+                aquarius: "2, 5, 11, 20",
+                pisces: "3, 6, 12, 21"
+            };
+            return numbers[zodiac] || "7, 14, 21, 28";
+        }
+        
+        function getRelatedLuckyNumbers(digit) {
+            const related = {
+                1: "1, 10, 19, 28, 37, 46",
+                2: "2, 11, 20, 29, 38, 47",
+                3: "3, 12, 21, 30, 39, 48",
+                4: "4, 13, 22, 31, 40, 49",
+                5: "5, 14, 23, 32, 41, 50",
+                6: "6, 15, 24, 33, 42, 51",
+                7: "7, 16, 25, 34, 43, 52",
+                8: "8, 17, 26, 35, 44, 53",
+                9: "9, 18, 27, 36, 45, 54"
+            };
+            return related[digit] || "7, 14, 21, 28";
+        }
+        
+        function showResult(content, title) {
+            document.getElementById('predictionContent').innerHTML = content;
+            document.getElementById('fortuneResult').classList.add('show');
+            document.getElementById('fortuneResult').scrollIntoView({ behavior: 'smooth' });
+            
+            // อัพเดท title
+            const resultTitle = document.querySelector('.fortune-result-title');
+            if (resultTitle) {
+                resultTitle.innerHTML = `<i class="fas fa-crystal-ball"></i> ${title}`;
+            }
+        }
+        
+        // ตั้งค่า default สำหรับ input date
+        document.addEventListener('DOMContentLoaded', function() {
+            const today = new Date().toISOString().split('T')[0];
+            document.getElementById('birthDate').max = today;
+            
+            // ตั้งค่าข้อมูลทำนายสำหรับราศีอื่นๆ
+            for (const zodiac in zodiacPredictions) {
+                if (!zodiacPredictions[zodiac]) {
+                    zodiacPredictions[zodiac] = {};
+                }
+                
+                const predictions = zodiacPredictions[zodiac];
+                if (!predictions.daily) predictions.daily = "ดาวเคราะห์ส่งผลดีในทุกด้าน วันนี้เหมาะสำหรับการเริ่มต้นสิ่งใหม่ๆ";
+                if (!predictions.weekly) predictions.weekly = "สัปดาห์นี้มีพลังงานดีจากดาวพฤหัส ด้านการงานและความรักมีโอกาสพัฒนาอย่างต่อเนื่อง";
+                if (!predictions.monthly) predictions.monthly = "เดือนนี้เป็นช่วงเวลาที่ดีสำหรับการวางแผนระยะยาว ดาวเสาร์ส่งผลให้คุณมีความรับผิดชอบมากขึ้น";
+                if (!predictions.love) predictions.love = "ด้านความรักมีโอกาสพบคนพิเศษหรือพัฒนาความสัมพันธ์ปัจจุบันให้ดีขึ้น";
+                if (!predictions.career) predictions.career = "การงานมีโอกาสก้าวหน้า โดยเฉพาะงานที่เกี่ยวข้องกับการสื่อสารและการวางแผน";
+                if (!predictions.money) predictions.money = "การเงินเริ่มมั่นคงขึ้น มีโอกาสได้รับรายได้เพิ่มจากแหล่งที่ไม่คาดคิด";
+                if (!predictions.health) predictions.health = "สุขภาพโดยรวมดี ควรออกกำลังกายสม่ำเสมอและพักผ่อนให้เพียงพอ";
+            }
+        });
+    </script>
+</body>
+</html>

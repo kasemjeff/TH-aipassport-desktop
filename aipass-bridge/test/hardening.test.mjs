@@ -19,8 +19,8 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { freePort, tempDir } from './harness.mjs';
-import { createRpc } from '../harness/rpc.mjs';
+import { freePort, tempDir, startRpcServer } from './harness.mjs';
+import { WINDOW_CSP } from '../harness/rpc.mjs';
 import { Harness } from '../harness/harness.mjs';
 import { SessionStore } from '../harness/session.mjs';
 import { Settings } from '../harness/settings.mjs';
@@ -34,15 +34,14 @@ after(() => fs.rmSync(HOME, { recursive: true, force: true }));
  *  autostart: these tests do not need a bridge, and a run that does must
  *  start its own. */
 async function startBackend({ root } = {}) {
-  const port = await freePort();
-  const rpc = createRpc({
-    port,
+  const rpc = await startRpcServer({
     root: root ?? tempDir(),
     bridgeURL: `http://127.0.0.1:${await freePort()}`,
     autostartBridge: false,
     store: tempDir(),
     settings: new Settings(tempDir(), 'settings.json'),
   });
+  const port = rpc.port;
   return {
     port,
     rpc,
@@ -300,6 +299,73 @@ test('the desktop config keeps its CSP and ships no test suite', (t) => {
   assert.ok(!shipped.includes('aipass-bridge/test'), 'the test suite must not ride along in the installer');
 });
 
+// `npm run tauri:dev` runs Tauri from the repo root, and Tauri runs the
+// beforeDevCommand in that same directory. The command has to name the
+// launcher the way the repo root sees it — `node main.mjs` names a file that
+// is not there, and the dev app never starts (the error says so, but the
+// person is left guessing which directory it wanted).
+test('the dev command starts the backend from the repo root', (t) => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const repo = path.join(here, '..', '..');
+  const confPath = path.join(repo, 'desktop', 'src-tauri', 'tauri.conf.json');
+  if (!fs.existsSync(confPath)) return t.skip('desktop/ is not part of this checkout');
+  const conf = JSON.parse(fs.readFileSync(confPath, 'utf8'));
+  const before = String(conf?.build?.beforeDevCommand ?? '');
+  assert.ok(before, 'the dev command exists');
+
+  // `npm run <script>` runs in the package root whatever directory it was
+  // typed in; a bare `node <script>` runs where it was typed — the repo
+  // root, for `npm run tauri:dev`. Either way the script it names has to
+  // exist from the repo root.
+  const viaScript = /^npm run (\S+)$/.exec(before.trim());
+  const pkg = JSON.parse(fs.readFileSync(path.join(repo, 'package.json'), 'utf8'));
+  const command = viaScript ? String(pkg.scripts?.[viaScript[1]] ?? '') : before;
+  const script = command.split(/\s+/).find((part) => part.endsWith('.mjs'));
+  assert.ok(script, `the dev command names a script: ${before}`);
+  assert.ok(
+    fs.existsSync(path.join(repo, script)),
+    `the dev command runs a script that exists from the repo root: ${script}`
+  );
+});
+
+// The shell declares a policy and the backend serves one. The window is
+// loaded FROM the backend, so the served header is the one that binds — the
+// declaration covers the asset protocol, which this window does not use. Two
+// policies that can drift are one policy too many, so they have to be the
+// same policy, key for key.
+test('the policy the backend serves is the policy the shell declares', (t) => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const confPath = path.join(here, '..', '..', 'desktop', 'src-tauri', 'tauri.conf.json');
+  if (!fs.existsSync(confPath)) return t.skip('desktop/ is not part of this checkout');
+  const conf = JSON.parse(fs.readFileSync(confPath, 'utf8'));
+  assert.deepEqual(conf?.app?.security?.csp, WINDOW_CSP,
+    'the shell declares exactly the policy the backend serves');
+});
+
+// The window's page uses no Tauri API at all: the Rust side owns the window,
+// the tray and the sidecar. `core:default` handed the page the tray, the
+// menu, path resolution and the devtools toggle on top of that, and
+// `withGlobalTauri` put the whole API on `window.__TAURI__` in a document
+// loaded over plain HTTP.
+test('the shell grants the page no more than it uses', (t) => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const confPath = path.join(here, '..', '..', 'desktop', 'src-tauri', 'tauri.conf.json');
+  const capsPath = path.join(here, '..', '..', 'desktop', 'src-tauri', 'capabilities', 'default.json');
+  if (!fs.existsSync(confPath) || !fs.existsSync(capsPath)) return t.skip('desktop/ is not part of this checkout');
+  const conf = JSON.parse(fs.readFileSync(confPath, 'utf8'));
+  const caps = JSON.parse(fs.readFileSync(capsPath, 'utf8'));
+
+  assert.equal(conf?.app?.withGlobalTauri, false,
+    'the page gets no window.__TAURI__ — it uses no Tauri API');
+  const granted = caps?.permissions ?? [];
+  assert.ok(!granted.includes('core:default'),
+    'the blanket permission set is not granted: it carries the tray, the menu and the devtools');
+  for (const p of granted) {
+    assert.match(String(p), /^core:(window|event):/,
+      `only the window and the event commands may be granted, not ${p}`);
+  }
+});
+
 /* 7 — the extension ----------------------------------------------------------- */
 
 // Least privilege: host access is the aipass origin and the loopback bridge,
@@ -332,4 +398,33 @@ test('the backend fatal line can name the crash it was called for', () => {
     'the fatal handler must call the formatter it is supposed to print through');
   assert.match(src, /import \{ formatLogLine \} from '\.\/log-line\.mjs'/,
     'the formatter must actually be imported — otherwise the handler throws a ReferenceError and the real error is lost');
+});
+
+/* 9 — the suite's state is scratch space, never the developer's home ------- */
+
+// A store that resolved its directory when its module loaded wrote into the
+// developer's real ~/.aipass/memory — one file per throw-away temp root, every
+// run — and the residue sat there with the test fixtures in it. The fix
+// resolves the directory when it is USED; the guard below is what keeps it
+// that way. A suite that writes into the real home is a bug in the harness,
+// and it has to fail loudly rather than quietly litter.
+test('the suite state home is scratch space, never the real ~/.aipass', () => {
+  const real = path.join(os.homedir(), '.aipass');
+  assert.ok(process.env.AIPASS_HOME?.trim(), 'the suite names a state home');
+  assert.notEqual(path.resolve(process.env.AIPASS_HOME), path.resolve(real),
+    "the suite must not write into the developer's own state directory");
+});
+
+test('a memory save lands in the suite home, not in the real one', async () => {
+  const { saveMemory } = await import('../harness/memory-store.mjs');
+  const realMemory = path.join(os.homedir(), '.aipass', 'memory');
+  const before = new Set(fs.existsSync(realMemory) ? fs.readdirSync(realMemory) : []);
+  const root = tempDir();
+  saveMemory(root, ['constraint: the suite fixture']);
+  const after = new Set(fs.existsSync(realMemory) ? fs.readdirSync(realMemory) : []);
+  for (const name of after) {
+    assert.ok(before.has(name), `the real memory store gained ${name} — the suite wrote into the developer's home`);
+  }
+  assert.ok(fs.existsSync(path.join(process.env.AIPASS_HOME, 'memory')),
+    'the memory landed in the suite home instead');
 });

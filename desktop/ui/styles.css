@@ -353,21 +353,6 @@ button.nav-item:hover { border-color: transparent; }
 .nav-ico { width: 18px; flex: none; display: grid; place-items: center; color: inherit; }
 .nav-ico svg { width: 15px; height: 15px; display: block; }
 
-summary.nav-item { list-style: none; position: relative; padding-right: 26px; }
-summary.nav-item::-webkit-details-marker { display: none; }
-summary.nav-item::after {
-  content: "";
-  width: 6px; height: 6px;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: rotate(-45deg);
-  margin-left: auto;
-  opacity: .55;
-  transition: transform .15s ease;
-}
-.nav-group[open] > summary.nav-item::after { transform: rotate(45deg); }
-
-.nav-body { display: flex; flex-direction: column; gap: 3px; padding: 2px 0 6px 6px; }
 .side-h {
   font-size: 10.5px;
   letter-spacing: .06em;
@@ -454,6 +439,9 @@ summary.nav-item::after {
 /* A file row carries its own attach button; it only shows when you mean to. */
 #files li > button { opacity: 0; flex: none; }
 #files li:hover > button { opacity: 1; }
+/* And for a keyboard user it shows when it is FOCUSED: a button at opacity 0
+   with a focus ring around it is a button nobody can find. */
+#files li > button:focus-visible { opacity: 1; }
 .list.dim li { color: var(--dim); }
 /* The one-click archive sits above the history when there is more history
    than the list shows. Its button is the whole point of the bar, so it stays
@@ -655,6 +643,25 @@ summary.nav-item::after {
   max-height: 320px;
   overflow: auto;
 }
+/* The addresses a search brought back, under the Web row. The link's text IS
+   the address: the reader can open it, and can copy it into another window. */
+.sources {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 8px;
+  padding-left: 12px;
+  max-width: 860px;
+}
+.sources a.md-link {
+  color: var(--accent);
+  font: 12px/1.5 var(--mono);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sources a.md-link:hover { text-decoration: underline; }
 .note { color: var(--dim); font-size: 12px; padding: 1px 0 1px 12px; max-width: 860px; }
 .needs-tab {
   background: var(--warn-soft);
@@ -1104,7 +1111,13 @@ details.run > *:not(summary) { margin-left: 2px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; }
+  /* The animations stop too, not only the transitions: an infinite pulse is
+     the very thing a person who asked for less motion cannot sit through. */
+  *, *::before, *::after {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* --------------------------------------------------- the settings sheet */
@@ -1156,10 +1169,25 @@ details.run > *:not(summary) { margin-left: 2px; }
 }
 .memory-list li .fact { min-width: 0; white-space: normal; overflow: visible; text-overflow: clip; }
 .memory-list li:hover { background: none; }
+/* The playbooks in the settings sheet: a row you click opens the text under
+   it, in place — a second modal on top of the sheet would take the settings
+   away while you read. */
+.skill-list { display: flex; flex-direction: column; gap: 2px; margin: 6px 0 12px; padding-left: 0 !important; }
+.skill-list li { display: block; white-space: normal; overflow: visible; text-overflow: clip; }
+.skill-list li .name { display: block; font-weight: 600; color: var(--fg); }
+.skill-body {
+  margin: 6px 0 4px;
+  font: 12px/1.5 var(--mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 40vh;
+  overflow: auto;
+}
 .set-row { display: grid; grid-template-columns: minmax(0, 1fr) 208px; gap: 14px; align-items: center; }
 .set-row.stack { grid-template-columns: minmax(0, 1fr); }
 .set-info { min-width: 0; }
 .set-title { font-size: 12.5px; font-weight: 600; }
+.set-title.heading { margin: 16px 0 0; }
 .set-note { font-size: 11.5px; color: var(--dim); margin-top: 2px; line-height: 1.45; }
 .set-control { min-width: 0; }
 .set-control select, .set-control input, .set-control textarea { width: 100%; }

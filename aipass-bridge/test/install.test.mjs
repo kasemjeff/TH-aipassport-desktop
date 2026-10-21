@@ -17,6 +17,7 @@ import { tempDir } from './harness.mjs';
 import {
   planInstall, inspectSource, installSource, finalizeInstall, removePlugin,
   readRegistry, decorateDetails, materializeEnabledList, stripFromEnabled, knownNames, NONE_NAME, updateSourceFor,
+  copyTreeBounded,
 } from '../harness/install.mjs';
 import { PluginManager } from '../harness/plugins.mjs';
 
@@ -26,6 +27,16 @@ export default {
   version: '1.0.0',
   description: 'installed in a test',
   setup(ctx) { ctx.tools.register('${name.toUpperCase().replace(/[^A-Z0-9_-]/g, '_')}_TOOL', () => 'ok'); ${extra} },
+};
+`;
+
+/** A plugin that registers no marker — for names a marker cannot spell. */
+const namedPlugin = (name) => `
+export default {
+  name: '${name}',
+  version: '1.0.0',
+  description: 'a plugin whose name is the point',
+  setup(ctx) { ctx.log('loaded'); },
 };
 `;
 
@@ -42,6 +53,52 @@ async function serve(t, initial = '') {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   t.after(() => server.close());
   return { state, url: `http://127.0.0.1:${server.address().port}/plugin.mjs` };
+}
+
+/**
+ * A host that streams a body in chunks and declares no length.
+ *
+ * The cap has to hold while the body streams: a server that omits
+ * `content-length` could otherwise push an unbounded body into the heap
+ * before anything noticed. `state.sent` counts the bytes handed to the
+ * socket, so the test can see that the transfer stopped early.
+ */
+async function serveStreamed(t, { chunk = 256 * 1024, count = 32, gapMs = 20 } = {}) {
+  const state = { sent: 0, declared: null, stopped: false };
+  const server = http.createServer((_req, res) => {
+    res.on('error', () => { state.stopped = true; });
+    res.writeHead(200, { 'content-type': 'text/javascript' });
+    state.declared = res.getHeader('content-length') ?? null;
+    const body = 'x'.repeat(chunk);
+    let n = 0;
+    const write = () => {
+      if (state.stopped || res.destroyed) return;
+      if (n++ >= count) { res.end(); return; }
+      state.sent += chunk;
+      res.write(body);
+      setTimeout(write, gapMs);
+    };
+    write();
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  return { state, url: `http://127.0.0.1:${server.address().port}/plugin.mjs` };
+}
+
+/** A host that answers one path with a redirect to another. */
+async function serveRedirect(t, from, to) {
+  const server = http.createServer((req, res) => {
+    if (req.url === from) {
+      res.writeHead(302, { location: to });
+      res.end();
+      return;
+    }
+    res.setHeader('content-type', 'text/javascript');
+    res.end(pluginFile('redirected'));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  return `http://127.0.0.1:${server.address().port}${from}`;
 }
 
 test('plan names what it refuses, and touches nothing doing it', () => {
@@ -93,6 +150,19 @@ test('a git or npm source is named, not refused', () => {
   assert.throws(() => planInstall('github:noowner'), /not a github source/);
 });
 
+test('a git source that would travel over cleartext is refused', () => {
+  // The message used to name a set the code did not enforce: `git+http://`
+  // was accepted by the pattern while the message said https or ssh. A
+  // plain link can be rewritten in transit, and git would follow it.
+  assert.throws(() => planInstall('git+http://example.com/x.git'), /not a git source/);
+  assert.throws(() => planInstall('git+http://example.com/x.git'), /git\+http:\/\/ is refused/);
+  assert.throws(() => planInstall('git+git://example.com/x.git'), /not a git source/);
+
+  // The documented set still works.
+  assert.equal(planInstall('git+https://example.com/x.git').url, 'https://example.com/x.git');
+  assert.equal(planInstall('git+ssh://git@example.com/x.git').url, 'ssh://git@example.com/x.git');
+});
+
 test('inspect knows only size and hash, and runs nothing', async (t) => {
   const dir = tempDir();
   const canary = path.join(dir, 'EXECUTED');
@@ -117,6 +187,29 @@ test('inspect knows only size and hash, and runs nothing', async (t) => {
   // A folder without plugin.mjs is named, not guessed at.
   const empty = tempDir();
   await assert.rejects(inspectSource(empty), /has no plugin\.mjs/);
+});
+
+test('a download over the cap is refused while it streams, not after it lands', async (t) => {
+  const { state, url } = await serveStreamed(t);
+  await assert.rejects(inspectSource(url), /over the 1024 KB single-file cap/);
+  assert.equal(state.declared, null, 'the host declared no length, so the cap had to hold while it streamed');
+  // The transfer stopped near the cap: the rest of the body was never read.
+  await new Promise((r) => setTimeout(r, 250));
+  assert.ok(state.sent < 32 * 256 * 1024, `the whole body was not fetched (${state.sent} bytes sent)`);
+  assert.ok(state.sent <= 8 * 256 * 1024, `the download stopped near the cap (${state.sent} bytes sent)`);
+});
+
+test('a redirect cannot take a download off https', async (t) => {
+  // The transport policy used to hold only for the first url: the fetch
+  // followed redirects itself, so an https link could hand the download to
+  // an http one over cleartext.
+  const off = await serveRedirect(t, '/start.mjs', 'http://example.com/plugin.mjs');
+  await assert.rejects(inspectSource(off), /http:\/\/ is refused/);
+
+  // A redirect that stays inside the policy is still followed.
+  const inside = await serveRedirect(t, '/start.mjs', '/final.mjs');
+  const info = await inspectSource(inside);
+  assert.equal(info.sha256.length, 64, 'the redirect was followed and the body read');
 });
 
 test('an install stages, validates, then swaps — a plugin that throws in setup leaves the old version live', async () => {
@@ -295,6 +388,23 @@ test('an install refuses names that would leave the plugins directory or break W
   })();
 });
 
+test('a plugin cannot name itself __proto__ — the registry is not a place to keep a prototype', async () => {
+  const home = tempDir({ 'settings.json': '{}' });
+  const dir = tempDir();
+  for (const name of ['__proto__', 'constructor', 'prototype']) {
+    const source = path.join(dir, `${name}.mjs`);
+    fs.writeFileSync(source, namedPlugin(name));
+    // The declared name is the registry's key: `plugins['__proto__'] = …`
+    // sets the prototype instead of adding a record, and the plugin would
+    // be live with no provenance row at all.
+    await assert.rejects(installSource(source, { home }), /unusable name/);
+    assert.equal(fs.existsSync(path.join(home, 'plugins', name)), false, `${name} was not installed`);
+  }
+  const plugins = readRegistry(path.join(home, 'plugins')).plugins;
+  assert.deepEqual(Object.keys(plugins), [], 'the registry holds no record');
+  assert.equal(Object.getPrototypeOf(plugins), Object.prototype, 'and its prototype is still its own');
+});
+
 test('update re-fetches the recorded source, and refuses a name it never installed', async () => {
   const home = tempDir({ 'settings.json': '{}' });
   const dir = tempDir();
@@ -333,6 +443,36 @@ test('the trash keeps one previous copy per name — a third install prunes the 
   await finalizeInstall(await installSource(write('three'), { home }), manager);
   assert.equal(copies().length, 1, 'still one copy per name');
   assert.match(trashedBody(), /\/\/ two\n/, 'the newest previous version is the one kept');
+});
+
+/* --------------------------------------------------------- fetched trees */
+
+test('a tree over the cap is refused while it is copied, and the partial copy is gone', async () => {
+  // The cap used to be checked after the whole tree was on the disk, which
+  // is the wrong order: the refusal came after the disk was full.
+  const src = tempDir({ 'a.txt': 'x'.repeat(60 * 1024), 'b.txt': 'y'.repeat(60 * 1024) });
+  const dest = path.join(tempDir(), 'copy');
+  await assert.rejects(copyTreeBounded(src, dest, { maxBytes: 100 * 1024 }), /over the 100 KB cap for a fetched source/);
+  assert.equal(fs.existsSync(dest), false, 'the half-copied tree was taken with it');
+});
+
+test('a tree inside the cap is copied, file for file', async () => {
+  const src = tempDir({ 'plugin.mjs': 'export default {};', 'lib/a.txt': 'hello' });
+  const dest = path.join(tempDir(), 'copy');
+  await copyTreeBounded(src, dest, { maxBytes: 1024 * 1024 });
+  assert.equal(fs.readFileSync(path.join(dest, 'plugin.mjs'), 'utf8'), 'export default {};');
+  assert.equal(fs.readFileSync(path.join(dest, 'lib', 'a.txt'), 'utf8'), 'hello');
+});
+
+test('a link that points out of the fetched tree is refused, not followed', async () => {
+  // `dereference: true` resolved every link, so a link to C:\\ copied the
+  // whole drive into the plugins folder.
+  const outside = tempDir({ 'secret.txt': 'not yours' });
+  const src = tempDir({ 'plugin.mjs': 'export default {};' });
+  fs.symlinkSync(outside, path.join(src, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+  const dest = path.join(tempDir(), 'copy');
+  await assert.rejects(copyTreeBounded(src, dest, {}), /points outside the fetched source/);
+  assert.equal(fs.existsSync(dest), false, 'and nothing was left behind');
 });
 
 /* ------------------------------------------------------------------- git */

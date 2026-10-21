@@ -8,9 +8,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createRpc } from '../harness/rpc.mjs';
+
 import { Settings } from '../harness/settings.mjs';
-import { startBridge, FakeExtension, freePort, tempDir } from './harness.mjs';
+import { startBridge, FakeExtension, tempDir, startRpcServer } from './harness.mjs';
 import { liveVerdict } from '../../scripts/live-check.mjs';
 
 let bridge;
@@ -24,16 +24,15 @@ after(() => fs.rmSync(HOME, { recursive: true, force: true }));
 
 async function startRpc() {
   const root = tempDir({ 'note.txt': 'hello' });
-  const port = await freePort();
   const settingsDir = tempDir();
-  const rpc = createRpc({
-    port,
+  const rpc = await startRpcServer({
     root,
     bridgeURL: bridge.base,
     autostartBridge: false,
     store: tempDir(),
     settings: new Settings(settingsDir, 'settings.json'),
   });
+  const port = rpc.port;
   const call = async (method, params = {}) => {
     const res = await fetch(`http://127.0.0.1:${port}/rpc`, {
       method: 'POST',

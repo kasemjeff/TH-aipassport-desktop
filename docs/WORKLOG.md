@@ -36,6 +36,690 @@ suite.
   until the next push, and that push is the first time this repository's CI
   has ever run.
 - **Cleanup**: none — no process was started and no file was removed.
+## 2026-10-20 — the loopback surface holds: a security pass over the desktop app
+- **Files**: `aipass-bridge/harness/rpc.mjs` (a malformed request target
+  answers 400 instead of exiting the backend; `plugins.load()` is guarded
+  instead of `void`ed); `harness/session.mjs` (a session handle may only name
+  a file inside the store — `resolveFile`); `harness/authtoken.mjs`
+  (`isLoopbackUrl`); `harness/browser.mjs` (`isOpenableUrl` — the cmd.exe
+  metacharacters, `%` included); `harness/permissions.mjs` (the exfil tier,
+  `auto` asks about the shell, every token of an argument is screened, the
+  grant is keyed by the command's shape); `harness/rules.mjs` (one owner for
+  the grant format and the shape); `harness/plugins.mjs` (the enabled-list is
+  read before the import); `harness/mcp.mjs` (a project-scoped server needs
+  the user's approval, may not declare `read`, and inherits no credentials);
+  `harness/atomic-write.mjs` (a unique temp name, `O_EXCL`, fsync of the file
+  and the directory, a Windows rename retry); `harness/settings.mjs` (the
+  dangerous keys stripped, a corrupt file surfaced, the shared writer);
+  `harness/providers.mjs`, `harness/memory-store.mjs`, `harness/symbols.mjs`
+  (owner-only stores); `harness/install.mjs` (the caps hold while the bytes
+  stream, the protocol policy on every hop, a validated registry key);
+  `harness/tools.mjs` (the vetted address is the address the socket goes to,
+  the read/attach caps before the read, the `**` and brace expansions
+  bounded, the tree walkers refuse a link out of the project);
+  `bridge/private-hosts.mjs` (the missing ranges, the IPv4-compatible and
+  NAT64 forms, a short verdict cache, the pinned transport);
+  `bridge/server.mjs` (the pinned fetch, the stale comment, the credit log);
+  `harness/harness.mjs` (the helper engines carry the event bus);
+  `aipass-bridge/agent.mjs` (`--allow-fetch`, and `--allow-run` means yolo);
+  `desktop/main.mjs`, `desktop/src-tauri/src/main.rs` (the port is a port);
+  `desktop/ui/app.js` (the exfil question says "send this out?");
+  `aipass-bridge/test/harness.mjs`, `scripts/test.mjs` (the suite names a
+  port of its own and ends the bridge it started);
+  `aipass-bridge/deploy/` (the container sets `AIPASS_ALLOW_REMOTE=1`);
+  `aipass-bridge/bridge/server.mjs` (the shared default port refuses the
+  no-token mode — the port is the only thing a web page can guess);
+  `aipass-bridge/test/loopback-surface.test.mjs` (new);
+  `aipass-bridge/test/{permissions,plugins,settings-clamp,install,mcp,symbols,ssrf,tools,hardening,rules,data-integrity}.test.mjs`;
+  `aipass-bridge/docs/DOCS.md`, `SECURITY.md`, `CHANGELOG.md`,
+  `docs/WORKLOG.md` (this entry).
+- **Tests**: `npm test` — **920 tests, 914 passed, 0 failed, 6 skipped**,
+  `node scripts/agents-lint.mjs` — ok (43 anchors against 906 titles),
+  `cargo check` in `desktop/src-tauri` — clean, `node --check` on every
+  edited file. The run before the last three fixes was 918/910/2 — the two
+  failures were the exfil tier refusing `ATTACH` and `WEB` in the CLI, which
+  is what narrowed the tier to the one tool whose destination the model
+  chooses (FETCH) and gave the CLI an `--allow-fetch` consent.
+- **Deferred**: the DNS pin is in place for the two fetch paths this
+  repository owns, but `harness/web-sources.mjs` (untracked, another
+  session's work) still resolves-then-fetches with a plain `fetch`, so the
+  same TOCTOU remains on the link resolver. The MCP approval is by NAME, so
+  a name approved for one project is approved wherever it appears — the
+  per-project object form (`{"approved": {"<project>": ["name"]}}`) is
+  supported but the UI does not write it yet. The `git clone` a plugin
+  install does is still git's own unbounded work; the cap covers the copy
+  into the plugin's home. `AGENTS.md` is at its line budget, so the new
+  guards are documented law in `SECURITY.md` rather than as a rule there —
+  raising a budget loosens a rule, which is the human's call.
+- **Open risks**: the exfil tier is a question in the desktop and a flag in
+  the CLI, and the flag is a consent the person has to remember to type — a
+  fetch the model invents in the CLI is refused without it, which is safe but
+  surprising. The helper engines (a subagent, the DONE checker) now carry the
+  event bus, so their fetch reaches the window; the question is asked of the
+  window's person, not of the helper's. The `mode: 'yolo'` for `--allow-run`
+  is a behaviour change in the CLI: `auto` used to let the shell through
+  silently and now asks, which nobody can answer in a terminal, so the flag
+  now means what the mode names. Another session's uncommitted work is in this
+  checkout (`protocol.mjs`, `harness.mjs`, `tools.mjs`, `desktop/ui/*`, the
+  docs); this change's hunks in the shared files are disjoint from theirs.
+- **Cleanup**: the bridge that was squatting the developer's port 8787 with
+  no token (a leftover of a run from a temp copy of this repository) was
+  stopped — three of them, over the session, each one from a run that had
+  already ended — and the bridge now refuses that combination itself. The
+  machine's `~/.aipass/memory` was cleared of four test-residue files, and
+  the probe scripts used for the PoCs were deleted.
+
+## 2026-10-20 — the links a web search brings back are links again
+- **Files**: `aipass-bridge/harness/web-sources.mjs` (new — the `sources:`
+  block is read out of a search result, and the edge's opaque redirect links
+  are followed once, under the shared private-host guard, so the model and the
+  window get the article's own address); `aipass-bridge/harness/tools.mjs`
+  (the `web` tool resolves the sources before the result goes back);
+  `aipass-bridge/harness/loop.mjs` (the `tool` event and the session entry
+  carry the sources); `aipass-bridge/harness/rpc.mjs` (`waf.table` — the
+  restore rules, as data); `aipass-bridge/harness/waf.mjs` (`restoreTable()`);
+  `aipass-bridge/harness/protocol.mjs` (the preamble tells the model to carry
+  the sources into its answer as links); `desktop/ui/waf-restore.js` (new — the
+  window's restore, built from the table the backend hands it);
+  `desktop/ui/md.js` (the renderer restores before it renders, so a quoted
+  address becomes a link); `desktop/ui/app.js` (the sources under the search
+  row, the restore in the rows and the reasoning fold, the click that opens a
+  link in the browser); `desktop/ui/styles.css`;
+  `aipass-bridge/test/web-sources.test.mjs` (new); `aipass-bridge/test/ui.test.mjs`,
+  `ui-md.test.mjs`, `waf.test.mjs`; `desktop/README.md`;
+  `aipass-bridge/AGENTS.md`; `docs/HARNESS_DESIGN.md`; `CHANGELOG.md`;
+  `docs/WORKLOG.md` (this entry).
+- **Tests**: `npm test` — 917 tests, 905 passed, 6 failed, 6 skipped. The six
+  failures are NOT this change: `agent.test.mjs` ("a flaky refusal is waited
+  out whole"), `data-integrity.test.mjs` (two, the session store), `pool.test.mjs`
+  (the ATTACH and WEB jobs) and `rules.test.mjs` (a rules save) — all in
+  another session's uncommitted work in this checkout, which was still moving
+  while this session ran (harness files changed under it minute by minute).
+  Proven by copying the tree, undoing this change's five harness edits in the
+  copy and re-running the four files: the same six failures. This change's own
+  tests: `node --test aipass-bridge/test/web-sources.test.mjs` — 9 green;
+  `ui-md.test.mjs` — 14 green; `waf.test.mjs` — 5 green; `ui.test.mjs` — 90
+  green. The replay fixture needs no recompute: the preamble grew by 405 bytes
+  and `evals/fixtures/math-fix-replay.json` already carries that byte count and
+  its digest (`preambleBytes` 5473, `79bd9ad75b1aa132`). `npm run agents:lint`
+  still reports `aipass-bridge/AGENTS.md` at 140 lines over its 130 budget —
+  another session's overage, unchanged by this one (the new module is named
+  inside the `tools.mjs` row rather than as a line of its own).
+- **Deferred**: the `browser.open` allowlist still refuses shell punctuation,
+  so an address with a `&` in its query string is not opened. Loosening that
+  rule is the human's call (SECURITY.md, `platform.test.mjs` pins it), and the
+  sources are printed as text so they can still be copied. The resolution is
+  one hop deep and covers ten links per search; a longer chain, or a host that
+  answers slowly, is left as it came. The window's own browser tab is still
+  not a thing — the links open in Chrome, where the extension lives.
+- **Open risks**: the resolution adds up to ten HEAD requests per search (one
+  per source, in parallel, 5 s each, cut short by the run's stop signal) — a
+  slow host delays that search's result by up to the timeout. A source that
+  points into the machine is refused before the request, never after it. The
+  window's restore is the backend's own table, so the text on screen and the
+  text the model wrote stay the same bytes; the table travels over the
+  loopback port, which already carries the session.
+- **Cleanup done**: the scratch copies under `%TEMP%\opencode` (the HEAD export
+  and the tree copy used to prove the six failures are not this change) were
+  deleted; no process, browser or listener was left behind.
+
+## 2026-10-20 — opencode — the run does not stand still at a refusal
+- **Files**: `aipass-bridge/harness/bridge.mjs` (the 403 chain gains a rung:
+  a big message is sent again **shorter** — the head and the tail survive, the
+  bulky middle is left out with a line that says so — before the wait ladder
+  starts; `shrinkMessage()` is the pure part of it, and `SHRINK_MIN`/
+  `SHRINK_HEAD`/`SHRINK_TAIL` are its sizes; the `shrink` option says whether
+  a shorter copy may be made at all), `aipass-bridge/harness/loop.mjs` (the
+  run's first message asks for no shorter copy — it carries the protocol),
+  `aipass-bridge/test/run-resilience.test.mjs` (three tests: a refused big
+  message is sent again shorter, a refused small message is not shortened, and
+  the message that carries the protocol is never shortened), `aipass-bridge/
+  AGENTS.md` (the law, with its anchor), `docs/LOOP_DESIGN.md` (the chain),
+  `CHANGELOG.md`.
+- **Tests**: `npm test` — the suite runs; the failures left are not this
+  session's: `test/pool.test.mjs` (2) fails on the tree as it stands — the
+  `ATTACH` tool became async in another session's `harness/tools.mjs` and the
+  attachment no longer rides the next message — and it fails the same way
+  with this session's change taken out. `node --test aipass-bridge/test/
+  run-resilience.test.mjs` — 16 tests, 0 failures, 3 of them new.
+  `npm run agents:lint` — 43 anchors resolve. `npm run typecheck` — clean.
+  Checked by hand against the live site (the account's own tab,
+  gemini-3.5-flash-lite): the message the harness sent for the README read —
+  3,721 bytes — is refused by the edge (502 carrying a Cloudflare 403,
+  "refused at the edge through 2 retries"), the same message shortened to
+  2,242 bytes goes through (200, twice), and a full run through the desktop
+  backend's `run` now reaches step 2 and answers instead of standing at the
+  refusal: "refused at the edge — sending a shorter version (3721 → 2242
+  bytes) so the run can continue", then the answer, `stopReason: done`.
+- **Deferred**: the edge's own rule is still not named. The refusal is a
+  Cloudflare 403 on the site, and it is not one token: the README's first 1,200
+  bytes go through, 1,600 do not, every piece of the difference goes through
+  on its own, and the same 4 KB goes through once it is padded to 24 KB — so
+  the rule is the site's, and the harness can only answer it by sending less.
+  The page's own ladder (15 s, then 60 s) is where the 90 seconds before the
+  harness hears about the refusal go; shortening it would make the refusal
+  arrive sooner, but that wait is the pace case and the recording behind it
+  is the reason it is there. A second tab hammering the same account makes
+  the refusals likelier.
+- **Risks**: a run that is refused now gets a shortened message — the model
+  sees the head and the tail of a tool result and not its middle, so it may
+  have to ask again for a part it needs. That is the trade for a run that
+  moves: a small message is never shortened (that is the pace case, and the
+  wait is its medicine), and a message that is refused after the shortening
+  still falls through to the old ladder and to the split.
+- **Cleanup**: the scratch home, the probe scripts and the backend used for
+  the reproduction live under `%TEMP%\opencode\repro` and are removed; the
+  bridge on 8787 was left running (the window needs one).
+
+## 2026-10-20 — the harness tuning itself: six components, raw traces, the score decides
+- **Files**: `aipass-bridge/harness/meta/policy.mjs` (the policy documents —
+  one per dimension, loaded, composed, digested; the overlay is additive and
+  bounded), `components.mjs` (the six components and the source files each
+  one names, with their digests and an outline), `traces.mjs` (the raw trace
+  store: the transcript lines themselves, cited by file and line, the file
+  never rewritten), `verify.mjs` (the deterministic checks a candidate must
+  pass — the safety floor, the outbound WAF table, the byte budget),
+  `proposals.mjs` (proposal, the two arms, apply, rollback, verdict),
+  `score.mjs` (the reading of a set of result rows); `scripts/meta-optimize.mjs`
+  (the CLI: status, brief, propose, apply, rollback, evaluate, drive,
+  report); `aipass-bridge/test/meta-harness.test.mjs`;
+  `docs/META_HARNESS.md` (the design of record). Touched: 
+  `aipass-bridge/harness/protocol.mjs` — the preamble composes the enabled
+  policy documents into the first message, additively, and is byte-identical
+  to what it was when no document exists; `package.json` (the `meta`
+  script); `scripts/test.mjs` (the `aipass-meta-` scratch prefix);
+  `docs/EXPERIMENTS.md` (how a meta verdict and a queue record relate);
+  `CHANGELOG.md`; `docs/WORKLOG.md` (this entry).
+- **Tests**: `npm test` — 869 tests, 864 passed, 2 failed, 3 skipped. The two
+  failures are NOT this change: `agent.test.mjs` ("a flaky refusal is waited
+  out whole") counts three refusals where it expects two, and
+  `agents-lint` reports `aipass-bridge/AGENTS.md` at 140 lines over its
+  130-line budget — both in another session's uncommitted work in this
+  checkout (that file grew by 33 lines while this session ran; the suite was
+  green at 854/854 earlier, before that edit landed). This change's own
+  tests: `node --test aipass-bridge/test/meta-harness.test.mjs` — 13 green;
+  `node --test aipass-bridge/test/evals.test.mjs` — 14 green.
+  `evals/fixtures/math-fix-replay.json` was recomputed (`preambleBytes`
+  5068 → 5473, digest → `79bd9ad75b1aa132`): another session's preamble edit
+  (the WEB sources sentence) moved the preamble's bytes, and a replay row
+  whose fingerprint no longer matches is marked stale instead of scored —
+  the same recompute the Thai pack needed. If that preamble edit moves
+  again, the fixture has to be recomputed with it.
+- **Deferred**: the live measurement was not completed — `evaluate` needs the
+  bridge and a logged-in chat tab, and the extension detached between the two
+  arms in the smoke run (the baseline arm did run live: 7 of 10 tasks
+  solved, safety 3 of 4). The second arm then produced no scored rows, and
+  the command now refuses to judge a measurement that did not happen — an
+  invalid attempt is not a failure. The overlay is additive only: it can add
+  a rule, never shorten the built-in preamble, because a shortening seam in
+  `protocol.mjs` would move every replay fingerprint. Per-case adaptation
+  (MemoHarness) and RL policy tuning (Self-HPO) are out of reach: the first
+  needs a harness per case, the second needs training this repository does
+  not do. `AGENTS.md` and `aipass-bridge/AGENTS.md` are at their line
+  budgets, so the subsystem is not a rule there yet — it is documented law in
+  `docs/META_HARNESS.md` until a budget is raised, and raising one loosens a
+  rule, which is the human's call.
+- **Open risks**: `protocol.mjs` is the file every single run reads, so a
+  mistake in the three added lines is a mistake in every run — the suite is
+  the check, and it is green, but the change is on the hottest path in the
+  repository. The overlay rides the first message, so a policy that says
+  nothing useful still costs tokens on every run; the byte budget bounds the
+  damage, but only the score keeps it. The live path of `evaluate` — two
+  arms, the eval runner as a child process, the comparator's gates — is
+  written and reviewed but not exercised end to end; only its offline parts
+  are covered by the suite. Another session's uncommitted work is in this
+  checkout (`loop.mjs`, `harness.mjs`, `tools.mjs`, `session.mjs`,
+  `desktop/ui/*`, several docs); this change touched none of those, and the
+  two files it did share (`package.json`, `scripts/test.mjs`) carry one-line
+  hunks disjoint from that session's.
+- **Cleanup**: the scratch trees the tests make are under `%TEMP%` with the
+  `aipass-meta-` prefix the suite's sweeper now knows; the demo home and the
+  demo brief written during the smoke runs are deleted; the bridge this
+  session started to try a live arm was stopped again (the extension was
+  never attached, so no live run depends on it); no policy document was left
+  in the live policy directory — the loop wrote a proposal, not a change.
+
+## 2026-10-20 — opencode — the icon: the app's own mark, and the shortcut that shows it
+- **Files**: `desktop/src-tauri/icons/make-icons.mjs` (the mark is the window's
+  own logo now — a terracotta rounded square with the white four-point star
+  from `desktop/ui/index.html` — sampled 8x per pixel and averaged, so the
+  edges are smooth at every size; the 16px and 24px sizes get slightly
+  thicker arms, because the window's arms are thinner than a pixel there and
+  the star would be a white blob); `desktop/src-tauri/icons/32x32.png`,
+  `128x128.png`, `128x128@2x.png`, `icon.png`, `icon.ico`, `template.png`,
+  `template.rgba` (regenerated from it);
+  `desktop/src-tauri/src/main.rs` (the tray comment and the tray test's name:
+  the template is the mark, not a letter);
+  `CHANGELOG.md` (the icon's entry; the tray entry's "the letter by itself"
+  is "the star by itself"); `docs/WORKLOG.md` (this entry). Outside the
+  repository: the desktop shortcuts `AiPASS.lnk` and `AiPASS Status.lnk`
+  point at the new `.ico` — their target, arguments and working folder are
+  untouched, and the originals are backed up under the temp dir.
+- **Tests**: `npm test` — green, 841 tests, 838 passed, 0 failed, 3 skipped,
+  ~56 s. `cargo test --manifest-path desktop/src-tauri/Cargo.toml` — 8 tests,
+  0 failures, including `the_tray_template_is_the_mark_and_not_a_block`.
+  Checked by hand: the `.ico` holds seven PNG entries whose sizes are the
+  ones its directory claims, and the template's alpha is 572 of 1936 pixels
+  opaque with a transparent corner — inside the range the Rust test asserts.
+- **Deferred**: the installed app still carries the old pixel icon — the new
+  one lands on the machine when the next bundle is built and installed
+  (`npm run desktop:build`, then the install ladder). The desktop shortcut
+  points at the repository's `.ico`, so the desktop shows the new mark today
+  without waiting for that build.
+- **Open risks**: `make-icons.mjs` and the tray-template work in `main.rs`
+  were already dirty in this checkout — another session's uncommitted macOS
+  work. The rewrite keeps that contract (a 44×44 `template.rgba`, an
+  alpha-only mask for the menu bar) and changes only the drawing, but if
+  that session is still writing to those files, the two of us have to merge.
+  The shortcut's icon path points into the checkout (`D:\aipass\…`); if the
+  repository moves, the shortcut falls back to the PowerShell icon.
+- **Cleanup**: the preview script, the contact sheet and the `.ico` check
+  live in the temp dir; the `.lnk` backups are in
+  `C:\Users\ASUS\AppData\Local\Temp\opencode\aipass-lnk-backup`.
+
+## 2026-10-20 — opencode — the browser: Chrome opens the chat tab, and the suite closes what it opened
+- **Files**: `aipass-bridge/harness/open-command.mjs` (rewritten — the one rule
+  for opening a URL: Chrome first, because the extension is a Chrome MV3
+  extension and a tab in Edge answers nobody; the platform default is only the
+  fallback for a machine with no Chrome; a private profile makes the browser an
+  instance of its own); `aipass-bridge/harness/browser.mjs` (new — the
+  browser's whole life: open it, remember the pid, close the tree when the run
+  ends); `aipass-bridge/harness/rpc.mjs` (the backend's `openBrowser` is the
+  shared rule now); `desktop/main.mjs` (the window opens through it too);
+  `aipass-bridge/setup.mjs` (the chat page and `chrome://extensions` open in
+  Chrome); `scripts/test.mjs` (the suite's own browser: a private profile and a
+  pid file in a temp dir, closed and deleted when the run ends);
+  `aipass-bridge/test/platform.test.mjs` (the browser rule, the private
+  profile, the pid bookkeeping); `aipass-bridge/AGENTS.md` (the module map and
+  the two environment variables); `CHANGELOG.md`, `docs/TROUBLESHOOTING.md`
+  (the wrong-browser case).
+- **Tests**: `npm test` — green, 838 tests, 0 failures, 3 skipped, ~31 s, and
+  the suite reports the browsers it closed at the end. `node --test
+  aipass-bridge/test/platform.test.mjs` — 6 tests, 0 failures. Checked by
+  hand on this machine: the default https handler is Edge (`MSEdgeHTM`), so the
+  old rule opened Edge; the new one opens Chrome, and the isolated instance
+  the suite opens is gone when the run ends (the developer's own Chrome and
+  Edge are untouched).
+- **Deferred**: the real run's tab stays open — the extension answers from
+  inside it, so a run cannot close it, and a tab in the developer's own Chrome
+  cannot be closed from here without reaching into their session. The suite's
+  browser is a private profile precisely so that closing it is safe; a real
+  run would need the same treatment, which would cost the extension and the
+  login.
+- **Open risks**: a machine with no Chrome falls back to the platform default
+  in a real run (the tab then carries no extension — the doctor and the
+  troubleshooting page say so), and the suite opens nothing at all there, so
+  the "the backend can open the tab" path is exercised by the argv rule rather
+  than by a real window on a machine without Chrome. The suite's profile is
+  scratch in the temp dir: about 15 MB a run, swept after an hour like the
+  rest of the scratch.
+- **Cleanup**: the Chrome instances the broken intermediate runs left behind
+  (all of them in temp profiles, none in the developer's own browsers) and
+  their profile directories; the probe scripts in the temp opencode dir.
+
+## 2026-10-20 — opencode — the install system: the design, the build, the ladder, and what macOS still needs
+- **Files**: `docs/INSTALL.md` (new — the design of record: the three surfaces
+  the window, the CLI and the data, the seven rules an install has to keep,
+  the layers from source to artifact, the per-platform bundle files, the
+  artifact names, the one manual step (the Chrome extension), the CLI shim,
+  the ladder, and the macOS answer with what is left);
+  `scripts/build-desktop.mjs` (new — the one build command: the three version
+  numbers must agree, the sidecar must be in place for the triple being
+  built, the platform's bundles are asked for, and the artifacts land in
+  `dist/` under a name that says what they are, with a `SHA256SUMS` file and
+  a `manifest.json` that records the commit and whether anything was signed);
+  `scripts/install-ladder.mjs` (new — install → assert → upgrade → assert →
+  rollback → assert → uninstall → assert the data survived; it installs
+  software on the machine it runs on, so it asks first, and it runs the app
+  against a scratch `AIPASS_HOME`);
+  `scripts/build-universal-sidecar.mjs` (new — merges the two official Node
+  builds with `lipo` into the sidecar a universal build needs; a macOS job,
+  because `lipo` is one);
+  `aipass-bridge/test/install-system.test.mjs` (new — twelve tests over the
+  plan, the names, the versions, the sidecar name and its size floor, the
+  signing state, the ladder's plans and the universal downloads);
+  `desktop/src-tauri/tauri.windows.conf.json`, `tauri.macos.conf.json`,
+  `tauri.linux.conf.json` (new — the bundle set per platform; the Tauri CLI
+  merges the file that matches the platform it is building on, and the macOS
+  one also names the minimum system version and turns the hardened runtime
+  on); `desktop/src-tauri/Info.plist` (new — the local-networking exemption
+  the window's loopback origin needs under App Transport Security; the CLI
+  merges it into the bundle's Info.plist);
+  `desktop/src-tauri/icons/make-icons.mjs` (the generator writes the macOS
+  tray template as well: `template.png` and the raw `template.rgba` the
+  shell embeds, so no image decoder is needed);
+  `desktop/src-tauri/src/main.rs` (the shell reads `AIPASS_HOME` the way the
+  Node side does; the tray icon is a template on macOS and the app's mark
+  elsewhere; the tray menu gained "ติดตั้ง CLI (aipass)", which writes a
+  shim that runs the app's own Node against the app's own CLI; the install
+  directory comes before the compiled-in repo when the app looks for its
+  files; the Windows long-path prefix (`\\?\`) is stripped, because Node
+  cannot run one — that was the bug the ladder found); the config's tray
+  icon is gone, so the system tray shows the app once);
+  `desktop/src-tauri/tauri.conf.json` (the duplicate tray icon);
+  `.github/workflows/build.yml` (new — the build lane: the artifact, the
+  checksum and the manifest on all three platforms);
+  `package.json` (`desktop:build`, `desktop:install-ladder`,
+  `desktop:sidecar:universal`), `.gitignore` (`dist/`), `README.md` (the doc
+  table), `docs/RELEASE.md` (the build command, the ladder, what macOS
+  needs to ship), `docs/MATURITY.md` (the drill row is no longer "not
+  shipped"), `desktop/README.md` (the platform table, the build command, the
+  ladder, the CLI item), `desktop/AGENTS.md` (the build command),
+  `CHANGELOG.md` (the entries).
+- **Tests**: `npm test` — green, 0 failures (the count moves as other sessions
+  land tests; the twelve new ones are in there). `npm run agents:lint` — 42
+  anchors resolve. `cargo test` in `desktop/src-tauri` — 8 passed (the
+  template is the mark and not a block, the shim runs the app's own node,
+  the shim lands in a per-user directory, the long-path prefix is stripped,
+  the `AIPASS_HOME` lookup, and the three legacy-migration tests that were
+  already there). `npm run desktop:build` end to end on Windows, three times:
+  the Rust build, the NSIS installer (242 MB),
+  `dist/aipass-desktop-0.2.0-windows-x64-setup.exe`, `dist/SHA256SUMS` and
+  `dist/manifest.json`. `npm run desktop:install-ladder -- --new <the
+  installer> [--old <a second copy>]` — install → the installed build says
+  0.2.0 and its backend answers → upgrade → rollback → uninstall → the
+  data survived. The macOS side was checked against the Tauri 2 sources (the
+  CLI merges the platform config file; the bundler writes the `.icns` from
+  the PNGs; the CLI merges `Info.plist`; the bundler skips a bundle type the
+  platform cannot build) and the crate was type-checked for
+  `aarch64-apple-darwin` and `x86_64-apple-darwin` from this Windows
+  machine — both pass, with a cross C compiler for the one Objective-C file
+  in the dependency tree.
+- **Deferred**: nobody has run the packaged app on a Mac — the config, the
+  `Info.plist` and the platform files were written against the Tauri 2
+  sources and checked by reading them. A CI lane that *installs* the artifact
+  needs a display (xvfb on Linux) and a decision about which machines may
+  install software; the build lane is what exists. The universal sidecar
+  needs a Mac to run `lipo`. The CLI shim lands in a directory that may not
+  be on `PATH`; the window says which directory that is, and adding it is
+  the person's call.
+- **Risks**: the ATS exemption is the standard answer for a loopback origin
+  under WKWebView; if a Mac shows the window blank for a transport reason,
+  that file is the first place to look. The ladder's upgrade and rollback
+  legs were walked with the same build on both sides — the mechanics are
+  proven, the version assertion needs two real releases to mean anything. The
+  ladder stops the app's own processes before it uninstalls, because a
+  backend that outlived its app keeps the installer's files open and the
+  uninstaller gives up halfway; it says which processes it stopped. The
+  build script renames the artifacts and writes the manifest, but uploading
+  them to a release is still a human's step. `main.rs` carried another
+  session's work; the hunks here are disjoint from it and are listed above.
+- **Cleanup**: the build output lives outside the repository
+  (`D:\aipass-build\target`, and `target-darwin` for the cross check);
+  `dist/` is gitignored; the cross-compile wrapper and its logs are in
+  `%TEMP%\opencode`; the app the ladder installed was uninstalled and the
+  orphaned backends it left behind were stopped. Zig 0.17 was installed on
+  this machine for the cross check (`winget uninstall zig.zig` removes it).
+
+## 2026-10-20 — opencode — the janitor, the JSON verdict, the longer round
+- **Files**: `aipass-bridge/harness/sandbox.mjs` (each projection carries an
+  owner stamp beside it, naming the pid that made it; the janitor reads it, so
+  a copy whose backend died is collected after minutes instead of after the
+  six hours a live run's budget needs, and the sweep deletes asynchronously —
+  a tree of the user's project removed on the backend's event loop would
+  freeze the window; `removeSandbox()` takes the stamp with the projection);
+  `aipass-bridge/harness/harness.mjs` (the sweep runs before every run, not
+  only at the first boot — a long-lived window touches a project many times);
+  `aipass-bridge/harness/tools.mjs` (the edit diagnostics now parse a staged
+  `.json` file in-process: `JSON.parse` needs no process, the verdict rides
+  the tool result like the JavaScript one, and the error names the line and
+  the column; a `tsconfig*.json` and a `*.jsonc` are read the way their own
+  reader reads them, and every other `.json` is read strictly);
+  `aipass-bridge/harness/loop.mjs` (the stagnation guard reads the window of
+  recent step signatures and recognises a round of three states or more —
+  `cycleLength()` — counting laps rather than detections, and a run whose
+  answers keep coming back the same is stopped on the first strike);
+  `aipass-bridge/test/sandbox.test.mjs`, `test/harness-research.test.mjs`,
+  `test/gates.test.mjs`; `docs/HARNESS_DESIGN.md`, `docs/LOOP_DESIGN.md`,
+  `docs/SPEC_CHECKER.md`, `CHANGELOG.md`.
+- **Tests**: `node --test aipass-bridge/test/sandbox.test.mjs
+  aipass-bridge/test/harness-research.test.mjs aipass-bridge/test/gates.test.mjs
+  aipass-bridge/test/permissions.test.mjs aipass-bridge/test/harness-fixes.test.mjs`
+  — all green; `npm test` — 828 pass / 3 fail, and the three are the window's
+  accessibility and palette tests, in a file another session was editing at the
+  time; `npm run agents:lint` — ok, 39 anchors resolve; `npm run typecheck` —
+  clean.
+- **Deferred**: the janitor still needs a live owner to be reachable — a
+  projection whose stamp names a pid that was recycled by another process
+  waits for the six-hour margin, not the short grace.
+- **Risks**: an undeclared plugin marker is now classified like a write, so
+  in `ask` mode it asks where it used to run; a plugin that only reads should
+  declare `risk: 'read'`. A staged `.json` file is parsed on every edit, so a
+  very large data file costs a parse it may not be worth (the 4 MB cap keeps
+  the worst case bounded).
+- **Cleanup**: the temp projection under `~/.aipass/run/` and the scratch
+  files in `%TEMP%\opencode` are gone; no process was left running.
+
+## 2026-10-20 — opencode — the plugin markers behind the permission gate
+- **Files**: `aipass-bridge/harness/permissions.mjs` (a plugin marker is
+  classified — `classifyPlugin()` takes the plugin's declared risk and turns
+  an undeclared one into a write; `evaluate()`/`request()` grew `paths` (the
+  marker's argument, so the person's own path rules and the secret floor
+  reach it), `ruleKinds` (the kinds a rule may name to match the call, so the
+  safety floor guarding a write guards the marker too) and `secretText` (the
+  payload the argument does not carry — a plugin's body — screened for secret
+  names, because a plugin used as a proxy would carry the file back to the
+  model and the plugin's own code cannot be screened from here); the pending
+  list carries the risk and the preview, so a reloaded window asks the same
+  question the run asked);
+  `aipass-bridge/harness/loop.mjs` (the plugin branch classifies the marker,
+  passes the argument and the body, and shows the person the marker plus what
+  it was handed); `aipass-bridge/harness/plugins.mjs` (the API doc says what
+  `risk` means now — the plugin's own word, and silence is not trust);
+  `desktop/ui/app.js` (the permission dialog says "run this plugin marker?"
+  and shows the payload, instead of "change this file?" over a marker name);
+  `aipass-bridge/test/gates.test.mjs` (the plugin-risk test now states the new
+  contract: a declared risk is taken as given, an undeclared marker is asked,
+  a declared read is not); `aipass-bridge/test/permissions.test.mjs` (the
+  classifier, the extra paths and the body's secret screen);
+  `docs/HARNESS_DESIGN.md` (the PreToolUse row and the closed list);
+  `SECURITY.md`; `CHANGELOG.md`.
+- **Tests**: `node --test aipass-bridge/test/gates.test.mjs
+  aipass-bridge/test/permissions.test.mjs` — 20 tests, 20 pass / 0 fail; the
+  full suite is the last word and is recorded below.
+- **Deferred**: the sandbox for plugins is not designed — a plugin still runs
+  with the harness's rights, and the gate is a question, not a boundary. The
+  `read` risk a plugin declares is the plugin's word about itself, exactly as
+  MCP's `risk` is the operator's: neither is a verification.
+- **Risks**: a marker that used to run unasked now asks, so an existing
+  plugin without a `risk` is asked once per marker — that is the point, but
+  it is a change of habit. Declaring `risk: 'read'` puts it back where it
+  was, and it is the plugin's own word either way. The body's secret screen
+  is a name screen, not a sandbox: a payload that builds the name at runtime
+  (`'.e' + 'nv'`) walks past it, exactly as a RUN's command does.
+- **Cleanup**: nothing was left running; the scratch homes the suite makes
+  are swept by the suite itself.
+
+## 2026-10-20 — opencode — the harness design doc, split into the current design and the history behind it
+- **Files**: `docs/HARNESS_DESIGN.md` (the intro now says how the document is
+  read; the flow diagram gained the projection and the four end-of-run gates
+  that decide a DONE — checker, strict Verify, plan checkpoint, language
+  check; a new "The guards a run passes through" table; the findings
+  rewritten as current state instead of future work; the dated sections moved
+  under "Appendix A", each opening with the state it left behind; three stale
+  sentences corrected — the evals harness is no longer "queued", the Verify
+  stage is no longer "soft form", and the safety set ships as defaults);
+  `README.md` (the doc table names the appendix).
+- **Tests**: `npm run agents:lint` ok — 39 Verify anchors resolve;
+  `node --test aipass-bridge/test/agents-docs.test.mjs` 1/1. The full
+  `npm test` was run and came back 806 pass / 2 fail / 3 skipped, but the two
+  failures are another session's in-flight code, not this change:
+  `aipass-bridge/harness/loop.mjs` was being edited under the suite (a
+  `circleStates` reference was undefined mid-write) and `desktop/ui/app.js`
+  is mid-edit too — that file's test file passes 85/85 on its own. No test
+  reads the markdown this change touched. The code comments that point at
+  `docs/HARNESS_DESIGN.md` by section name (`extension/page.js`,
+  `harness/bridge.mjs`, `test/gates.test.mjs`, `test/model-catalog.test.mjs`,
+  `test/page.test.mjs`) were read and their anchors kept: the appendix
+  headings kept their exact text.
+- **Deferred**: the appendix is long (nine dated sections). Splitting it into
+  one file per round is possible if it becomes unreadable; not done, because
+  the comments above point at sections of this file by name, and a reader
+  arriving from one of them should find the story and the current state in
+  one place. The per-change log was left alone: `CHANGELOG.md` is
+  behaviour-level and this change moves no behaviour.
+- **Risks**: the appendix sections moved from `##` to `###` under a new
+  `## Appendix A` heading, so a link to one of them as a top-level section
+  no longer matches; the heading text is unchanged, so every anchor still
+  resolves. The findings now describe what the code does — each claim was
+  checked against the source (`loop.mjs`, `tools.mjs`, `settings.mjs`,
+  `permissions.mjs`, `sandbox.mjs`, `lang.mjs`, `rpc.mjs`), not against the
+  previous wording.
+- **Cleanup**: the pre-edit copy of the file is in
+  `%TEMP%\opencode\aipass-hygiene\HARNESS_DESIGN.before.md` (outside the
+  repository); nothing was left running.
+
+## 2026-10-20 — opencode — the desktop's rough edges, and the code-navigation command that was a promise
+
+- **Files**: `desktop/ui/app.js` (the sheet takes and gives back the focus and
+  keeps Tab inside itself; the meter's timer dies with the sheet; a key on a
+  control inside a row is that control's business; the "auto" theme follows
+  the system; the settled layer is appended to, never rewritten; the history
+  filter is debounced; the header asks the backend once; the failed actions
+  say what went wrong; the palette is a listbox and the composer names the
+  row on it; `/symbols` asks the backend for the real index);
+  `desktop/ui/index.html` (the sheet is a dialog, the transcript is a live
+  region, the composer and the icon buttons have names);
+  `desktop/ui/styles.css` (the attach button shows when it is focused; a
+  machine that asks for less motion gets no animation either);
+  `aipass-bridge/harness/rpc.mjs` (`symbols.list|def|refs` — the index the
+  markers use, asked from the window);
+  `aipass-bridge/test/ui.test.mjs` (+7, and the fake DOM learned `target`,
+  bubbling, `stopPropagation`, `insertAdjacentHTML`, `removeAttribute`, the
+  media query and the intervals — each one a thing the browser does and the
+  fake did not);
+  `aipass-bridge/test/desktop.test.mjs` (+1); `aipass-bridge/test/desktop-window.test.mjs` (+1);
+  `aipass-bridge/harness/rpc.mjs` (the port it actually got, so a test can ask
+  for port 0 and let the OS hand one out — the probe-then-bind race is gone);
+  `aipass-bridge/test/harness.mjs` (`startRpcServer`), and the ten test files
+  that start a backend now use it;
+  `desktop/README.md`, `CHANGELOG.md`, `docs/WORKLOG.md`.
+- **Tests**: `npm test` 838 tests, 835 pass / 0 fail / 3 skipped;
+  `npm run agents:lint` ok — 42 Verify anchors resolve;
+  `npm run qa` 9 ok / 0 warnings (the live backend answered too). Every new
+  test was run against the unfixed code and failed there: the appended
+  settled layer, the attach button's key, the meter's timer, the system's
+  theme, the failed action, `/symbols`, the palette's aria, and the markup a
+  screen reader goes by. Eighteen suite runs, three at a time, with no
+  failure — the port race that used to fire under that load is gone.
+- **Deferred**: the transcript still grows without bound — a long session
+  keeps every delta, tool row and folded run in the DOM. Cutting it needs a
+  "show older" affordance, or history is silently hidden, and that is a
+  decision about the product rather than a bug fix. The session storage has
+  the same shape underneath (`docs/WORKLOG.md`, the earlier round).
+- **Risks**: the fake DOM grew three DOM behaviours (`target`, bubbling and
+  `stopPropagation`) that the browser has and the fake did not — a test that
+  relied on the fake NOT bubbling was testing something the browser does not
+  do. The listener list is snapshotted at dispatch, as the DOM does it. The
+  `symbols.*` methods walk the project (skipping the heavy directories) and
+  cache the index under the state home, the same way the markers do; the
+  walk is synchronous, so a very large project makes that one call slow.
+- **Cleanup**: no processes or temp directories were left behind; the scratch
+  helpers in the temp directory were used and swept by the suite.
+
+## 2026-10-20 — opencode — eleven defects in the desktop, each with a test that fails without the fix
+- **Files**: `aipass-bridge/harness/rpc.mjs` (a call names the project it is
+  about: `targetFor()` looks a harness up instead of moving the machine's
+  `current`, the scope arrives in the `x-aipass-project` header and fills
+  `params.project`, and `status`/`snapshot`/`session.*`/`pending`/`diff`/
+  `apply`/`discard`/`fs.*`/`skills.*`/`memory.*`/`rules.get`/`mcp.*`/`models`/
+  `credits`/`conversations`/`run`/`attachment.stage` all answer for it;
+  `settings.set` strips the scope key before it writes the file; the body cap
+  answers a 413 instead of dropping the socket; `fs.read` refuses a huge file
+  and a binary one; the window's files are served under `WINDOW_CSP`);
+  `aipass-bridge/harness/backend-probe.mjs` (new — the launcher's "is a
+  backend already there" probe, which survives the loopback token);
+  `aipass-bridge/harness/authtoken.mjs` (the refusal sentence is a constant,
+  so the backend and the probe cannot disagree);
+  `aipass-bridge/harness/permissions.mjs` (a remembered grant sits under the
+  user's rules and under the secret floor);
+  `aipass-bridge/harness/session.mjs` (a session id is matched whole, and the
+  lookup is scoped to the project);
+  `aipass-bridge/harness/harness.mjs` (the harness passes its root to the
+  store); `desktop/main.mjs` (the probe, with the token);
+  `desktop/ui/app.js` (the scope rides on every call as a header; the pending
+  panel keeps the human's unticked files unticked; the project picker keeps
+  the window's own project); `desktop/src-tauri/src/main.rs` (the legacy
+  migration merges instead of replacing, and the legacy file goes only after
+  the write landed — plus three `#[test]` cases);
+  `desktop/src-tauri/tauri.conf.json` (`withGlobalTauri` off, the policy
+  mirrored from the backend); `desktop/src-tauri/capabilities/default.json`
+  (the blanket `core:default` is gone);
+  `aipass-bridge/test/desktop.test.mjs` (+8 tests, and the `call` helper takes
+  headers); `aipass-bridge/test/ui.test.mjs` (+2); `aipass-bridge/test/permissions.test.mjs` (+2);
+  `aipass-bridge/test/hardening.test.mjs` (+2); `aipass-bridge/test/stability.test.mjs`
+  (the timing margin of the process-tree pin);
+  `aipass-bridge/AGENTS.md`, `desktop/AGENTS.md` (the new laws and their
+  Verify anchors), `desktop/README.md`, `SECURITY.md`, `docs/MATURITY.md`,
+  `docs/HARNESS_DESIGN.md`, `docs/TROUBLESHOOTING.md`, `CHANGELOG.md`.
+- **Tests**: `npm test` 804 tests, 801 pass / 0 fail / 3 skipped;
+  `npm run agents:lint` ok — 39 Verify anchors resolve;
+  `npm run qa` 8 ok / 1 warning (the live backend was not running);
+  `cargo test --bin aipass-desktop` 3 passed / 0 failed;
+  `cargo check --bin aipass-desktop` clean — the capability set is validated
+  by the build (a made-up permission fails the build, so the file is read by
+  the toolchain, not just by the tests). Every new test was run against the
+  unfixed code and failed there: the unticked file, the two windows' shared
+  state, the session list, the attachment path, the short session id, the
+  launcher's probe, the settings migration ("the mode survived" — the exact
+  data loss), the grant that outlived its rule, the grant that reached a
+  secret file, the huge file, the binary file, the dropped body, the missing
+  policy, the blanket capability set, and the stale token on the retry.
+- **Deferred**: the P2 items the review also found — the settings sheet's
+  meter-timer leak, the O(n²) settled-layer repaint, the unhandled rejections
+  on the direct button paths, the file panel's keyboard-inaccessible attach
+  button, the modal's missing dialog semantics and focus trap, the `auto`
+  theme not following the OS, the undebounced session filter, the
+  three-times-per-ten-seconds header poll, the unbounded transcript — and the
+  P3 ones (`/symbols` is still a stub, `/help` still omits four commands, and
+  the doc drift around them). None of them were in this change's scope; they
+  are the next round.
+- **Risks**: the scope key is `project` and not `root` because `root` in
+  `settings.set` already means "switch the machine to this project" — a
+  method that wants both says so explicitly. The `x-aipass-project` header is
+  new on the wire: anything that talks to `/rpc` directly (the CLIs) keeps
+  working, because the scope falls back to the machine's current project.
+  The CSP now allows remote images and video again — the markdown renderer
+  draws the model's own pictures, and the old declaration blocked them in the
+  packaged app only, so the two surfaces disagreed. The `/rpc` body cap moved
+  from 32 MB to 64 MB so a couple of 20 MB attachments fit in base64. A grant
+  now sits under the user's rules: an "always" answer given before a rule
+  was written no longer outlives it, which is the point, but a run that
+  relied on the old order asks one more time.
+- **Cleanup**: no processes or temp directories were left behind; the scratch
+  helpers in the temp directory were used and swept by the suite. One byte
+  order mark was removed from `capabilities/default.json` — the Rust build
+  said only "failed to parse JSON", so a test now reads the shell's JSON
+  files and says it first.
+
+## 2026-10-20 — opencode — the rail loses two rows: the playbooks and the plugin panels move into the settings sheet
+
+- **Files**: `desktop/ui/index.html` (the two folded rail groups are gone; the
+  header comment says where they went); `desktop/ui/app.js` (`refreshSkills`
+  keeps the playbook list for the sheet, `renderSkillList` draws it and opens a
+  playbook under its own row, the plugin panels live in the sheet's plugin
+  area, `state.panelHost` is released when the sheet closes, the finished run
+  repaints the panels only while the sheet is open);
+  `desktop/ui/styles.css` (the dead `summary.nav-item` / `.nav-group` /
+  `.nav-body` rules are gone; the playbook list and its body are styled);
+  `desktop/README.md`; `CHANGELOG.md`;
+  `aipass-bridge/test/ui.test.mjs` (two tests rewritten, one added).
+- **Tests**: `npm test` 788 tests, 785 pass / 0 fail / 3 skipped;
+  `npm run agents:lint` ok; `node --check` clean on `desktop/ui/app.js`. The
+  window was also driven in headless Chrome against a live backend — the rail,
+  the playbook page and the plugin page were photographed and read, and the
+  playbook opens in place under its row.
+- **Deferred**: the packaged app under
+  `C:\Users\ASUS\AppData\Local\aipass desktop` still shows the old rail. It is
+  two days behind this tree, so bringing it forward is a rebuild-and-reinstall
+  (`npm run tauri:build`), not a file copy — copying three files over it would
+  mix a new window with an old backend.
+- **Risks**: the plugin panels are only on screen while the settings sheet is
+  open; a scratchpad that was watched in the rail is now one page away, which
+  is the point of the change but is a change of habit. `/skills` still lists
+  the playbooks, so the quick path is not lost.
+- **Cleanup**: the dev backend on :8791 and the headless Chrome profiles were
+  stopped and deleted; the installed app on :8790 was left running.
 
 ## 2026-10-20 — opencode — eight defects found by review, each with a test
 

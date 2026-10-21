@@ -161,6 +161,51 @@ export function edgeWaits(raw = process.env.AIPASS_EDGE_WAITS_MS) {
   return waits;
 }
 
+// A message the edge refuses whole, and keeps refusing, is not going to pass
+// by waiting longer. The run's next step needs what the message carries, so
+// the answer is a SMALLER one: the head and the tail, the bulky middle left
+// out, and a line that says what was left out. The model can ask again for
+// the part it needs — a file read can be asked for by range, and a spilled
+// read carries the locator of the rest.
+//
+// This is what keeps a run moving. The ladder below waits 60 s and then
+// 180 s before it reaches the split, and a run that is waiting there is a
+// run the person sees as stopped: the session ends after the last tool call,
+// with no answer and no run_stats, because the window was closed while it
+// waited. A shorter copy is one request, and the run continues.
+//
+// The cut is the middle, never the ends: the head is what the message is
+// about, and the tail is the reminder that says how to finish (DONE, and the
+// wire spellings). Cutting either end turns a shorter message into a broken
+// one.
+//
+// A small message has nothing to give up, so it is never shrunk — that is
+// the pace case (the recording: a 214-byte tool result refused and then
+// accepted unchanged), and it is waited out instead.
+export const SHRINK_MIN = 2000;  // under this a message has little to lose
+export const SHRINK_HEAD = 1000;
+export const SHRINK_TAIL = 1000;
+
+/**
+ * A shorter copy of a message the edge refused, or null when there is
+ * nothing to take off it.
+ *
+ * @param {string} text
+ * @param {{min?: number, head?: number, tail?: number}} [opts]
+ * @returns {string|null}
+ */
+export function shrinkMessage(text, { min = SHRINK_MIN, head = SHRINK_HEAD, tail = SHRINK_TAIL } = {}) {
+  const s = String(text ?? '');
+  if (s.length <= min) return null;
+  const dropped = s.length - head - tail;
+  if (dropped < 200) return null;
+  return [
+    s.slice(0, head),
+    `… [${dropped} characters were left out of this message: the upstream firewall refused the whole of it. Ask again for the part you need — a file read can be asked for by range, and a spilled read carries the locator of the rest.]`,
+    s.slice(-tail),
+  ].join('\n\n');
+}
+
 // The last layer of send patience, and the one the run itself pays: a failure
 // that delivered nothing and heals by waiting gets the same message again
 // after a pause (loop.mjs drives these; resilientSay's chain is the rewrite
@@ -555,10 +600,13 @@ export class BridgeClient {
  * redact/split chain below, which is the same story: a 403 from a plain API is
  * a permission error, and rewriting the payload to get past it would only
  * lose the message. The 429 wait is neither: a rate limit is a rate limit
- * everywhere, so that chain always runs.
+ * everywhere, so that chain always runs. `shrink` is the shorter copy of a
+ * refused message, and the caller turns it off for the run's FIRST message:
+ * that one carries the protocol, and a protocol with its middle cut out is
+ * worse than a message that waited.
  */
 export async function resilientSay(say, text, log = () => {}, parts = null, depth = 0, opts = {}) {
-  const { encode = true, firewall = true } = opts;
+  const { encode = true, firewall = true, shrink = true } = opts;
   if (depth === 0 && encode) text = outbound(text); // encode the whole message once
   try {
     return await say(text, parts);
@@ -595,6 +643,21 @@ export async function resilientSay(say, text, log = () => {}, parts = null, dept
     if (dropped && redTxt !== text) {
       log('note', `rejected at ${Buffer.byteLength(text)} bytes — omitting ${dropped} line(s) that cannot be sent`);
       try { return await say(redTxt, parts); } catch (err2) {
+        if (!/\b40[39]\b/.test(err2.message)) throw err2;
+      }
+    }
+
+    // A big message the edge refuses whole is a payload the filter does not
+    // want, and waiting longer does not make it smaller. The run's next step
+    // needs this message, so a shorter copy goes out now: the head and the
+    // tail, the middle left out with a line that says so. One request, and
+    // the run continues instead of standing still for the four minutes the
+    // waits below add up to. A small message is never shrunk — it is the
+    // pace case, and the waits are its medicine.
+    const shrunk = shrink ? shrinkMessage(text) : null;
+    if (shrunk) {
+      log('note', `refused at the edge — sending a shorter version (${Buffer.byteLength(text)} → ${Buffer.byteLength(shrunk)} bytes) so the run can continue`);
+      try { return await say(shrunk, parts); } catch (err2) {
         if (!/\b40[39]\b/.test(err2.message)) throw err2;
       }
     }

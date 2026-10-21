@@ -87,6 +87,11 @@ export class Harness {
       maxWallClockMs: DEFAULT_MAX_WALL_CLOCK_MS,
       maxCredits: 0,
       allowRun: false,
+      // A fetch the model invented is a question, not a read. Off by default:
+      // the surface has to say yes on purpose (`--allow-fetch`), because a
+      // page the agent read can talk it into posting the project's contents
+      // somewhere the person never saw.
+      allowFetch: false,
       mode: 'ask',
       plan: false,
       subagent: false,
@@ -152,6 +157,10 @@ export class Harness {
     this.permissions = new PermissionEngine({
       mode: this.options.mode,
       allowRun: this.options.allowRun,
+      // A fetch the model invented is a question the person sees — unless the
+      // surface has no window to ask in and has said yes on the command line
+      // (`--allow-fetch`), the way `--allow-run` says yes to the shell.
+      allowExfil: Boolean(this.options.allowFetch),
       rules: [...(opts.rules ?? []), ...persisted.rules],
       events: this.events,
       // How long an unanswered permission question waits before it resolves
@@ -185,8 +194,9 @@ export class Harness {
     // (janitor) A backend that was killed mid-RUN leaves the whole projection
     // behind, and nothing else ever collected it. This harness is the first
     // thing that touches this project again, so it sweeps what no run can
-    // still own.
-    try { sweepSandboxes(this.root); } catch { /* best effort */ }
+    // still own. Fire and forget: the sweep deletes trees, and a deletion
+    // that blocked the backend's event loop would freeze the window.
+    void sweepSandboxes(this.root).catch(() => {});
   }
 
   /**
@@ -266,7 +276,7 @@ export class Harness {
     this.#pendingResumeBoundary = null;
     if (!this.store) { this.session = null; return null; }
     const prevSessionId = this.session?.id ?? null;
-    this.session = sessionId ? this.store.load(sessionId) : null;
+    this.session = sessionId ? this.store.load(sessionId, { root: this.root }) : null;
     if (!this.session) {
       this.session = this.store.create({ root: this.root, model: this.bridge.model, title });
     }
@@ -380,9 +390,12 @@ export class Harness {
    * have to move together, or a mode switch from the window would change what
    * the UI reports and not what the loop does.
    */
-  setPolicy({ mode = null, allowRun = null } = {}) {
+  setPolicy({ mode = null, allowRun = null, allowFetch = null } = {}) {
     if (mode) { this.options.mode = mode; this.permissions.mode = mode; }
     if (allowRun != null) { this.options.allowRun = Boolean(allowRun); this.permissions.allowRun = Boolean(allowRun); }
+    // The exfil tier travels with the policy: a fetch the model chose is a
+    // question, and the machine may have been told to stop asking.
+    if (allowFetch != null) { this.options.allowFetch = Boolean(allowFetch); this.permissions.allowExfil = Boolean(allowFetch); }
     return this.options;
   }
 
@@ -652,6 +665,12 @@ export class Harness {
     // must not both squeeze past the check while `startSession` is pending.
     if (this.running) throw new Error('a run is already in flight - cancel it first (/stop)');
     this.running = true;
+    // (janitor) The same sweep, before every run and not only at boot: a
+    // long-lived backend (the window) touches a project many times over, and a
+    // projection a killed backend left behind should not wait for the next
+    // restart to go. Async: the sweep deletes trees, and that must not block
+    // the event loop the window's stream runs on.
+    void sweepSandboxes(this.root).catch(() => {});
     // A resume seed's boundary and the conversations this run may make are
     // facts about THIS run; nothing from an earlier one may leak into it.
     this.#pendingResumeBoundary = null;
@@ -920,7 +939,10 @@ export class Harness {
       // about the project (`.env*  deny`), not about which run is editing, so
       // a rule-free engine here would make every one of them a lie the moment
       // the model handed the work to a helper.
-      const childPermissions = new PermissionEngine({ mode: 'yolo', allowRun: canRun, rules: this.permissions.rules });
+      // The event bus travels too: a helper that fetches a URL or attaches a
+      // file asks a question, and a question with nobody to answer it is a
+      // refusal — the parent's window is where that question belongs.
+      const childPermissions = new PermissionEngine({ mode: 'yolo', allowRun: canRun, rules: this.permissions.rules, events: this.events });
       // The helper borrows its own conversation (P2-B) instead of moving the
       // bridge's current one and restoring it afterwards — the old dance left
       // the parent pointing at the child's conversation if anything died
@@ -1057,8 +1079,10 @@ export class Harness {
       }
       // The parent's path rules travel, as they do to a helper. The engine is
       // permissive because the readOnly tools are the real gate: the checker
-      // cannot write even where a rule would have allowed it.
-      const childPermissions = new PermissionEngine({ mode: 'yolo', allowRun: true, rules: this.permissions.rules });
+      // cannot write even where a rule would have allowed it. The event bus
+      // travels too — the checker fetches the project's own sources, and a
+      // question with nobody to answer it is a refusal.
+      const childPermissions = new PermissionEngine({ mode: 'yolo', allowRun: true, rules: this.permissions.rules, events: this.events });
       const prompt = [
         `You are the checker: a read-only pass over work that is already staged for this project.`,
         taskText ? `The run was working on: ${String(taskText).slice(0, 500)}` : '',

@@ -26,16 +26,32 @@ const { createRpc, resolveBridgeURL } = await import(pathToFileURL(path.join(REP
 const { aipassHome } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'settings.mjs')));
 // Size-capped log files, the same helper the backend uses for bridge.log.
 const { openLogFile } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'log-file.mjs')));
-// One platform→argv rule, shared with the backend's browser.open.
-const { openCommandFor } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'open-command.mjs')));
-// The loopback token, the same one the window and the CLIs present. The
-// backend refuses every /rpc call without it, so a probe that goes in
-// bare is answered "unauthorized" — which is not the same as "not running".
+// One rule for opening a URL, shared with the backend's browser.open: which
+// browser (Chrome — the extension lives there) and which argv.
+const { openBrowser } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'browser.mjs')));
+// The loopback token, so the probe is a real call and not a guess.
 const { authHeaders } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'authtoken.mjs')));
+// The probe itself, in one place: the launcher and the tests must agree on
+// what "a backend is already running" looks like.
+const { backendIsUp } = await import(pathToFileURL(path.join(REPO, 'aipass-bridge', 'harness', 'backend-probe.mjs')));
 // One resolver for the probe and the harness client alike: AIPASS_BRIDGE
 // (http(s)://host:port, host:port or a bare port) or the loopback default.
 const BRIDGE_URL = resolveBridgeURL();
-const PORT = Number(process.env.AIPASS_DESKTOP_PORT ?? 8790);
+// The port has to be a PORT. `0` means "any free port" to Node and "nothing"
+// to the Tauri shell, which opens http://127.0.0.1:0/ — a window with nothing
+// behind it. An empty value was worse: `Number('')` is 0, so the shell read
+// 8790 and this side bound a random port, and the two never met. A value
+// that is not a number at all reaches `listen()` as NaN and throws there.
+// The shell refuses the same values (src-tauri/src/main.rs), so the two agree.
+const PORT = (() => {
+  const raw = (process.env.AIPASS_DESKTOP_PORT ?? '').trim();
+  if (!raw) return 8790;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    throw new Error(`AIPASS_DESKTOP_PORT is not a port: ${raw}`);
+  }
+  return n;
+})();
 
 const arg = (name, fallback = null) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -47,31 +63,20 @@ const bridgeUp = () => fetch(`${BRIDGE_URL}/status`, { signal: AbortSignal.timeo
   .then((r) => r.ok)
   .catch(() => false);
 
-const backendUp = () => fetch(`http://127.0.0.1:${PORT}/rpc`, {
-  method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() },
-  body: JSON.stringify({ method: 'status' }), signal: AbortSignal.timeout(1200),
-}).then((r) => r.ok).catch(() => false);
+const backendUp = () => backendIsUp(PORT, { headers: authHeaders() });
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Open the window in the default browser, unless told not to. */
+/** Open the window in Chrome — the browser the extension lives in — unless told not to. */
 const openWindow = async (url) => {
   if (process.env.AIPASS_DESKTOP_NO_OPEN) return;
-  const target = String(url ?? '');
-  if (!/^https?:\/\//i.test(target)) return;
-  try {
-    // argv, not a shell string — openCommandFor owns the per-platform shape
-    // (the same rule the backend's browser.open uses). The old
-    // `cmd /c start "" "${url}"` interpolated, and its `default` from
-    // node:child_process is a module object, not a callable, so the throw was
-    // swallowed and no window ever opened.
-    const { execFile } = await import('node:child_process');
-    const [cmd, args] = openCommandFor(process.platform, target);
-    await new Promise((resolve) => {
-      const child = execFile(cmd, args, { windowsHide: true }, () => resolve());
-      child.on('error', () => resolve());
-    });
-  } catch { /* a headless start is fine too */ }
+  // One rule for both surfaces that open a URL (this launcher and the
+  // backend's browser.open): which browser, which argv, and the bookkeeping
+  // that lets a test close what it opened. The old `cmd /c start "" "${url}"`
+  // interpolated, and its `default` from node:child_process is a module
+  // object, not a callable, so the throw was swallowed and no window ever
+  // opened.
+  await openBrowser(url);
 };
 
 // `--detach` starts the backend and exits. That is what `tauri dev` needs: it

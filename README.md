@@ -408,7 +408,7 @@ The design and operations docs live in [`docs/`](./docs/):
 
 | Doc | What it holds |
 |---|---|
-| [`docs/HARNESS_DESIGN.md`](./docs/HARNESS_DESIGN.md) | the harness end to end: loop, tools, protocol, permissions, WAF — and how it sits on the bridge and the window |
+| [`docs/HARNESS_DESIGN.md`](./docs/HARNESS_DESIGN.md) | the harness end to end: loop, tools, protocol, permissions, WAF — and how it sits on the bridge and the window; the research rounds and the incident log behind that shape are its Appendix A |
 | [`docs/LOOP_DESIGN.md`](./docs/LOOP_DESIGN.md) | the agent loop itself: stage map, guards, stop reasons, the event stream |
 | [`docs/PLUGINS_MCP_DESIGN.md`](./docs/PLUGINS_MCP_DESIGN.md) | the two extension channels: installing, enabling, updating and removing local plugins and MCP servers |
 | [`docs/UX.md`](./docs/UX.md) | the user-facing surfaces — the CLI, the window, the extension popup, first-run setup — and the project's voice |
@@ -420,6 +420,7 @@ The design and operations docs live in [`docs/`](./docs/):
 | [`docs/TROUBLESHOOTING.md`](./docs/TROUBLESHOOTING.md) | when something is broken: doctor, the common failures, where the logs are |
 | [`docs/RELIABILITY.md`](./docs/RELIABILITY.md) | what healthy means: the SLIs and their targets, the error budget, degradation modes |
 | [`docs/RELEASE.md`](./docs/RELEASE.md) | versioning, the release checklist, upgrade and rollback, dependency review |
+| [`docs/INSTALL.md`](./docs/INSTALL.md) | the install system: what an install guarantees, what each platform ships, what macOS needs |
 | [`docs/MATURITY.md`](./docs/MATURITY.md) | capability status — production vs experimental, owners, what changes a status |
 | [`docs/TEST_PLAN.md`](./docs/TEST_PLAN.md) | the test design: layers L1–L5, cases, pass criteria, what each layer cannot prove |
 | [`docs/WORKLOG.md`](./docs/WORKLOG.md) | the session handoff log: what each working session touched, tested, deferred and left open |

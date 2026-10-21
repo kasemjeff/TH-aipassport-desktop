@@ -14,9 +14,9 @@
 //   5. the red-test commit gate — a `git commit` RUN is refused until the
 //      declared check (.aipass/check.txt) has passed at the current state,
 //      and any later change re-arms it
-//   6. the plugin risk gate — a marker that declared write/shell at
-//      registration rides the permission engine; an undeclared one keeps the
-//      trust the plugin model states
+//   6. the plugin risk gate — every plugin marker rides the permission
+//      engine: the risk it declared at registration, or a write when it
+//      declared none, and the secret and safety floors reach it too
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -27,14 +27,14 @@ import { promisify } from 'node:util';
 import { Emitter } from '../harness/events.mjs';
 import { PermissionEngine, isGitCommit } from '../harness/permissions.mjs';
 import { Settings } from '../harness/settings.mjs';
-import { createRpc } from '../harness/rpc.mjs';
+
 import { runTask } from '../harness/loop.mjs';
 import { Overlay } from '../harness/overlay.mjs';
 import { SkillLibrary } from '../harness/skills.mjs';
 import { SessionStore } from '../harness/session.mjs';
 import { createTools } from '../harness/tools.mjs';
 import { createSandbox, materializeTree } from '../harness/sandbox.mjs';
-import { freePort, tempDir, waitFor } from './harness.mjs';
+import { freePort, tempDir, waitFor, startRpcServer } from './harness.mjs';
 
 // Same rule as the other suites: nothing here may touch the real ~/.aipass.
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-gates-home-'));
@@ -44,9 +44,7 @@ after(() => fs.rmSync(HOME, { recursive: true, force: true }));
 /** A backend with its own bridge port, settings and sessions. No autostart
  *  and a dead bridgeURL: nothing here starts a run against the network. */
 async function startBackend({ pluginsDir = null } = {}) {
-  const port = await freePort();
-  const rpc = createRpc({
-    port,
+  const rpc = await startRpcServer({
     root: tempDir(),
     bridgeURL: `http://127.0.0.1:${await freePort()}`,
     autostartBridge: false,
@@ -54,6 +52,7 @@ async function startBackend({ pluginsDir = null } = {}) {
     settings: new Settings(tempDir(), 'settings.json'),
     ...(pluginsDir ? { pluginsDir } : {}),
   });
+  const port = rpc.port;
   const call = async (method, params = {}) => {
     const res = await fetch(`http://127.0.0.1:${port}/rpc`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -479,7 +478,12 @@ test('without a declared check the commit gate stays out of the way', async () =
 
 const NOTE_TOOLS = (risk) => [{ marker: 'NOTE', takesBody: false, description: '', plugin: 'note-plugin', risk }];
 
-test('a plugin tool that declared write risk is asked; an undeclared one keeps its trust', async () => {
+test('a plugin marker rides the permission gate — declared risk or not', async () => {
+  // The plugin model says a plugin is code the person chose to install, and
+  // that is true. It is not a reason for the model to run it unchecked: a
+  // marker the model asked for by accident, or one a file it read told it to,
+  // is stopped by the same question a built-in write is stopped by. Silence
+  // is not a declaration — an undeclared marker is classified like a write.
   const dir = tempDir({ 'a.txt': 'x\n' });
   const run = async (risk, answer) => {
     const overlay = new Overlay(dir);
@@ -515,7 +519,58 @@ test('a plugin tool that declared write risk is asked; an undeclared one keeps i
   assert.deepEqual(allowed.calls, ['hello']);
   assert.match(allowed.prompts[1], /plugin ran: hello/);
 
-  // No risk declared: the old trust — nothing is asked at all.
+  // No risk declared: the marker is classified like a write, so it is asked
+  // too — and a person who declines stops it.
   const legacy = await run(null, 'deny');
-  assert.deepEqual(legacy.calls, ['hello'], 'an undeclared tool runs without a question');
+  assert.deepEqual(legacy.calls, [], 'an undeclared tool is asked before it runs');
+  assert.match(legacy.prompts[1], /declined plugin marker NOTE/i);
+
+  // A declared read risk is a read: it runs without a question, exactly like
+  // a built-in read.
+  const read = await run('read', 'deny');
+  assert.deepEqual(read.calls, ['hello'], 'a declared read is not asked about');
+});
+
+test('a plugin marker is screened by the secret floor and the safety floor', async () => {
+  // The reason a plugin marker rides the gate at all: the model can ask for
+  // one by accident, or because a file it read told it to. The floor that
+  // keeps `.env` on this machine has to reach the plugin exactly as it
+  // reaches a built-in write.
+  const dir = tempDir({ 'a.txt': 'x\n' });
+  const run = async (arg, answer) => {
+    const overlay = new Overlay(dir);
+    const replies = [`NOTE ${arg}\n`, 'DONE noted\n'];
+    let turn = 0;
+    const prompts = [];
+    const bridge = {
+      async quota() { return null; },
+      async chat({ message }) {
+        prompts.push(message);
+        return { text: replies[Math.min(turn++, 1)], reasoning: '' };
+      },
+    };
+    const tools = createTools({ root: dir, overlay, skills: new SkillLibrary([]) });
+    const permissions = new PermissionEngine({ mode: 'ask', allowRun: false, askFn: async () => answer, events: new Emitter() });
+    const calls = [];
+    await runTask('note it', {
+      bridge, tools, overlay, permissions,
+      runPluginTool: async (_name, { arg: a }) => { calls.push(a); return `plugin ran: ${a}`; },
+      options: { mode: 'ask', allowRun: false, maxSteps: 4, pluginTools: NOTE_TOOLS('write') },
+      first: true,
+    });
+    return { prompts, calls };
+  };
+
+  const secret = await run('.env', 'allow');
+  assert.deepEqual(secret.calls, [], 'a secret file stays on this machine, plugin or not');
+  assert.match(secret.prompts[1], /secret/i, 'and the refusal says which floor it was');
+
+  // The safety floor asks about a config file — it does not refuse it, and
+  // the answer decides, exactly as it does for a built-in write.
+  const asked = await run('package.json', 'deny');
+  assert.deepEqual(asked.calls, [], 'a declined config file stops the marker');
+  assert.match(asked.prompts[1], /declined plugin marker NOTE/i);
+
+  const allowed = await run('package.json', 'allow');
+  assert.deepEqual(allowed.calls, ['package.json'], 'and an allowed one runs');
 });

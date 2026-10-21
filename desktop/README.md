@@ -61,11 +61,12 @@ Left column: the work. **แชทใหม่** starts a conversation, the sear
 filters the history under it, the history opens a session, and the project's
 files sit below that. The foot of the column holds **ตั้งค่า** and **วิธีใช้** —
 the two doors to the rest of the app, written out instead of left as a 15px
-gear in the header. Sections with nothing in them (no playbooks, no plugin
-panels) are not shown at all: a row that leads nowhere is not a feature.
-Everything that *configures* the app — the model, the rules, the plugins, the
-MCP servers, what the app remembers about you — lives in the settings sheet,
-one click from the foot of this column.
+gear in the header. Everything that *configures* the app — the model, the rules,
+the plugins, the MCP servers, what the app remembers about you — lives in the
+settings sheet, one click from the foot of this column. The playbooks and the
+panels the plugins draw went the same way: they were two folded headings in
+this column, and a heading you have to click to find out what it holds is a
+row that leads nowhere.
 
 Centre: the conversation, read like a harness. Your messages come back as a
 prompt block — `❯` and what you typed. The assistant's prose lands in a bubble
@@ -101,8 +102,10 @@ Typing `/` in the composer opens the palette: arrows move, `Enter`/`Tab` picks,
 | `/models` | list the models that can hold a conversation, with the current one marked |
 | `/mode` `/mode ask\|auto\|yolo` | permission level, with what each one means |
 | `/status` | bridge, extensions, model, credits, pending count |
+| `/paint` | the paint cache's hit/miss counters — how often a frame re-rendered instead of appending |
 | `/conversations` | switch which bridge conversation the model is remembering |
 | `/fresh` | start a fresh conversation on the bridge (its memory is reset) |
+| `/compact` | rotate now: summarise what has been done and seed a fresh conversation with it |
 | `/new` `/resume` `/fork` | window sessions: start, reopen, branch from here (rename and delete live in `/resume`) |
 | `/plan` | plan mode on/off (the plan is approved before the work) |
 | `/attach` | stage an image, document, or video for the next message |
@@ -111,6 +114,8 @@ Typing `/` in the composer opens the palette: arrows move, `Enter`/`Tab` picks,
 | `/open` `/open <path>` | read a file in the project |
 | `/skills` | the playbooks on disk |
 | `/memory` | the facts the app carries between sessions (`/memory clear` forgets them) — the same list as the sheet's page |
+| `/mcp` | the MCP servers and the tools they offer (they are managed in the sheet's 🔌 MCP page) |
+| `/symbols <file>\|<name>` | the code-navigation index: what a file declares, or where a name is defined and used — the same index the `SYMBOLS`/`DEF`/`REFS` markers use, asked from the window |
 | `/diff` `/apply` `/discard` | the pending-change buffer |
 | `/project` | switch or remove a project folder (removing never deletes the folder) |
 | `/settings` | the settings sheet |
@@ -218,14 +223,17 @@ so one long list cannot push the others out of the column.
 - **ไฟล์ในโปรเจกต์** — walks into folders, names the directory it is in, and
   every file row carries a *แนบ* button so a file can be attached without a
   picker. Switching a project returns it to that project's root.
-- **คู่มือ / ปลั๊กอิน** — playbooks from disk, and the panels plugins render.
-  Both are hidden until they have something to show: the plugin row appears
-  when a plugin draws a panel, and opens by itself the first time it does.
-  The playbook list is read from disk on every ask, so a part dropped into a
-  library folder is there the next time the window comes back to the front —
-  no restart, and no prose to edit: a folder's `index.md` is a preamble about
-  what each playbook is *for*, and the list of what is actually on disk is
-  generated and always follows it.
+- **คู่มือ / ปลั๊กอิน** — not rows here any more: both are pages of the settings
+  sheet (**ตั้งค่า → คู่มือ** and **ตั้งค่า → ปลั๊กอิน**). They used to be two
+  folded headings in this column, and clicking one opened a box you had to
+  guess at, in a column whose job is the work. The playbook list is read from
+  disk on every ask, so a part dropped into a library folder is there the next
+  time the sheet opens — no restart, and no prose to edit: a folder's
+  `index.md` is a preamble about what each playbook is *for*, and the list of
+  what is actually on disk is generated and always follows it. Clicking a
+  playbook opens it under its own row; clicking it again puts it away. The
+  panels a plugin draws are on the plugins page, under the plugin that draws
+  them, and a finished run repaints them in place.
 
 ### When a run ends badly
 
@@ -266,6 +274,15 @@ message and answers nothing. Both entry points now find each other by looking fo
 `aipass-bridge/` next to themselves (installed layout) or one level up (repo
 layout), rather than assuming either.
 
+The launcher asks "is a backend already on this port?" before it starts one,
+and the answer has to survive the loopback token: the backend's `/rpc` answers
+a token-less call with a 401, so a probe that only accepts a 200 never sees a
+running backend — it starts a second one, and the window opens on "port 8790
+is busy". The probe sends the token, and a 401 carrying the backend's own
+refusal still counts as *ours* (the running backend minted a different token
+than the file holds). A 401 that is not ours is somebody else's server, and
+the "the port is busy" message still says so.
+
 The numbers that govern a run are clamped where they are written. `maxSteps` is
 the one with a deliberate zero: 0 means no cap — the run goes until DONE, a
 guard stops it, or a per-run budget is spent — and it is stored as written. A
@@ -295,14 +312,28 @@ from a browser. Plain tools send neither and pass untouched.
 
 Methods: `status`, `models`, `credits`, `conversations`, `config.set`,
 `conversations.list`, `conversation.new`, `conversation.pin`,
-`session.list|new|open|entries|fork|rename|delete`, `run`, `cancel`,
+`session.list|new|open|entries|fork|rename|delete|archive`, `run`, `cancel`,
 `permission.answer`, `plan.answer`, `pending`, `diff`, `apply`, `discard`,
-`skills.list|index|load`, `fs.list`, `fs.read`,
+`compact`, `skills.list|index|load`, `fs.list`, `fs.read`,
+`symbols.list|def|refs`,
 `attachment.stage|list|remove`,
 `plugins.list|reload|inspect|install|remove|enable|disable`,
 `mcp.list|reload|add|remove|enable|disable|test`, `panel.render`,
-`projects.list|add|remove|switch`, `settings.get|set`, `rules.get|set`,
-`browser.open`, `snapshot`.
+`projects.list|add|remove|switch`, `providers.list`, `provider.set|save|remove|test`,
+`memory.list|clear`, `settings.get|set|reset`, `rules.get|set`,
+`browser.open`, `waf.table`, `snapshot`.
+
+**The window says which project it is on.** Every call carries an
+`x-aipass-project` header, and the backend answers for *that* project — its
+sessions, its file tree, its pending changes, its context meter. Two windows
+can be open on two projects at once, and without this the one that spoke last
+decided what the other one read; worse, one window's **Apply** button wrote
+the other window's staged edits. The scope is a header and not a parameter
+because `root` in `settings.set` already means "switch the machine to this
+project". A method that names its own project wins over the header: the
+header says *who* is asking, the parameter says *what* the call is about.
+The project is looked up, never switched to — the human's own switch still
+moves the machine, through `projects.switch`.
 
 `snapshot` is the one call that rebuilds a window's view — status, the open
 session and its entries, what is pending, the context meter — which is what a
@@ -330,18 +361,38 @@ Events: `task_start`, `assistant_delta`, `reasoning_delta`, `step`, `thinking`,
 `tool`, `note`, `firewall_note`, `nudge`, `give_up`, `ignore_done`,
 `step_limit`, `error`, `done_line`, `finished`, `todo`, `diff_update`,
 `permission_request`, `plan_request`, `compacted`, `helper_start`,
-`helper_end`, `applied`, `discarded`, `session`, `conversation`.
+`helper_end`, `applied`, `discarded`, `session`, `conversation`, `cancelled`,
+`needs_tab`, `tab_opened`, `stagnation`, `verify_prompt`, `check_start`,
+`check_end`, `budget`, `plugin_call`.
+
+### The links a search brings back
+
+A web search is the one tool whose result *is* a set of addresses, so the
+window shows them: the `tool` event for a search carries its `sources`, and
+the row lists them under itself, each one a link the reader can open. The
+click goes to `browser.open` — the backend checks the address and opens it in
+Chrome — because the window is a webview on the app's own page: a link that
+navigated it would take the app away.
+
+Two things make those addresses real. The search edge answers with opaque
+redirect links (a long token on a search host), so the harness follows each
+one once, under the same private-host guard the `FETCH` tool uses, and the
+model is given the article's own address. And the model writes what it reads
+in the wire spelling (`HTTPS-URL…`), so the window puts the spellings back
+before it shows anything — the rules for that come from the backend
+(`waf.table`), which owns the one table, so the window never keeps a copy.
 
 ### Reloads and reconnects
 
 Every event frame carries a monotonic `seq`, both as `id:` and inside the
-JSON, and the backend keeps the last 500. A window that reconnects — or
-reloads — resumes from where it was: a browser `EventSource` reconnect sends
-`Last-Event-ID`, and the backend replays exactly the frames that listener
-missed, once, in order, before the live stream continues. The session log on
-disk covers the rest, via `snapshot`: a window reloaded mid-run comes back
-holding its conversation instead of a blank page over a run that is still
-going.
+JSON, and the backend keeps the last 5000 frames — bounded by count *and* by
+bytes (4 MB), so a long run cannot grow the buffer without end. A window that
+reconnects — or reloads — resumes from where it was: a browser `EventSource`
+reconnect sends `Last-Event-ID`, and the backend replays exactly the frames
+that listener missed, once, in order, before the live stream continues. The
+session log on disk covers the rest, via `snapshot`: a window reloaded mid-run
+comes back holding its conversation instead of a blank page over a run that is
+still going.
 
 ## Run it by hand
 
@@ -375,6 +426,26 @@ Closing the window hides it — the tray keeps the backend (and a run in
 flight) alive, and the tray menu's **ออก** is what quits for real. A run
 should not die because someone tidied their taskbar by reflex.
 
+**The page is granted nothing it does not use.** The window's page never
+calls Tauri: the Rust side owns the window, the tray and the sidecar, and the
+page talks to one local backend. So `withGlobalTauri` is off — there is no
+`window.__TAURI__` in the document at all — and the capability set is window
+and event commands only. The blanket `core:default` (which carries the tray,
+the menu, path resolution and the devtools toggle) is not granted, and a
+test says so.
+
+**The policy that binds is the one the backend serves.** The window is loaded
+from `http://127.0.0.1:8790/`, so it is an ordinary document on an ordinary
+URL: the `Content-Security-Policy` that governs it is the header the backend
+sends, not the one `tauri.conf.json` declares (that one covers the asset
+protocol, which this window does not use). The two are kept identical — a
+test compares them key for key, so they cannot drift — and the policy is
+`script-src 'self'`, no inline and no eval, `object-src`/`form-action` locked
+down, and `frame-ancestors 'none'`. Remote images and videos are allowed,
+because the markdown renderer draws the model's own pictures and clips; the
+old declaration blocked them, so a picture worked in the browser and vanished
+in the packaged app.
+
 ## Platforms
 
 The bridge, the harness, and the desktop window are the same `.mjs` files on
@@ -383,9 +454,15 @@ every machine; what differs is the shell around them.
 | | Windows | macOS | Linux |
 |---|---|---|---|
 | Backend + bridge | `node` on PATH, or the bundled sidecar | same | same |
-| Packaged window | NSIS (default `tauri:build`) | `npm run tauri:build:mac` (app + dmg) | `npm run tauri:build:linux` (deb + appimage) |
+| Packaged window | NSIS (`tauri.windows.conf.json`) | `.app` + `.dmg` (`tauri.macos.conf.json`) | `deb` + AppImage (`tauri.linux.conf.json`) |
 | Sidecar fetch | `npm run desktop:sidecar` — one script, per-platform name | same | same |
 | Quitting the app | `taskkill /T` the backend it started | `kill -TERM` the child's process group | same as macOS |
+
+One `tauri.conf.json` cannot name the bundles of three platforms, so the
+bundle set lives in a per-platform file next to it — the CLI merges the one
+that matches the platform it is building on. The whole install system (what
+an artifact is called, what a release ships, what macOS needs) is
+[`docs/INSTALL.md`](../docs/INSTALL.md).
 
 macOS and Linux builds are wired and compile per-branch, but the verified end
 to end on this machine is the Windows one: the packaged app has been run and
@@ -401,9 +478,33 @@ cargo target `D:\aipass-build`. The Node sidecar is a copy of the local
 `npm run desktop:sidecar` after a Node upgrade; it is gitignored on purpose.
 
 ```powershell
-npm run tauri:build      # release bundle → D:\aipass-build\target\release\bundle\nsis
-npm run tauri:dev        # the app, with hot reload on the Rust side
+npm run desktop:build     # the release artifact, its checksum and its manifest → dist/
+npm run tauri:dev         # the app, with hot reload on the Rust side
 ```
+
+`desktop:build` is the one command that ships: it checks that the three
+version numbers agree, puts the sidecar in place, asks for the platform's
+bundles and writes `dist/` with `SHA256SUMS` and `manifest.json` beside the
+artifact. The raw bundler is still there (`npm run tauri:build`) for the
+loop that wants it.
+
+The install ladder is the same procedure, scripted:
+`npm run desktop:install-ladder -- --new <installer> [--old <the previous
+release's installer>]` installs the artifact, checks that the installed build
+is the one that shipped and that it actually runs, installs the new build over
+the old one, installs the old build back, uninstalls — and checks that the
+user's data survived. It asks before it installs anything, and it never
+touches the real `~/.aipass`: the app runs with `AIPASS_HOME` pointing at a
+scratch directory.
+
+The tray menu has one more item than it used to: **ติดตั้ง CLI (aipass)**
+writes a shim into a per-user bin directory that runs the app's own Node
+against the app's own CLI, so `aipass` works in a terminal on a machine
+that has no Node installed. It puts that directory on the **user** PATH
+(`HKCU\Environment`, never the machine one) as well: a shim in a directory
+that is not on PATH is a file nobody can run, and editing PATH by hand is
+the step that never happens. A terminal opened before the click keeps the
+old PATH — open a new one.
 
 ## Settings
 
@@ -495,17 +596,20 @@ setup(ctx) {
 Tools the model can call arrive as `MARKER rest-of-line` — or as a block ending
 in `END` when `takesBody` is true — and their result comes back exactly like a
 NEED or SEARCH result. The preamble grows one paragraph listing them while a
-run is in flight. A tool that declares `risk: 'write' | 'shell'` rides the same
-permission gate a built-in of that kind does (asked in `ask`/`auto` modes,
-per the path rules); without it the tool keeps the stated trust and runs
-directly — the choice is the plugin author's, made where the tool is
-registered.
+run is in flight. Every tool rides the same permission gate a built-in of that
+kind does (asked in `ask` mode, per the path rules and the secret floor). The
+`risk` you register says which kind it is: `'read'` stays a read, `'write'`
+and `'shell'` are asked about like a built-in write or run. A tool that
+declares nothing is classified like a **write** — a plugin's code runs in the
+backend process with the app's rights, so silence is not a declaration of
+trust. The choice stays the plugin author's, made where the tool is registered:
+`risk: 'read'` is a promise you can keep, and only you can make it.
 
 Panels are rendered across the process boundary, so a plugin returns markup
 (`render: async () => ({ html })`) rather than DOM nodes. The window draws the
-panel's title (the `title` you register) and the rail's **ปลั๊กอิน** row, so
-the markup you return is the body — return the title again and it is printed
-twice. Plugins run in the backend with the same access the harness has,
+panel's title (the `title` you register) on the settings sheet's **ปลั๊กอิน**
+page, so the markup you return is the body — return the title again and it is
+printed twice. Plugins run in the backend with the same access the harness has,
 including the filesystem — they are code you chose to install, not sandboxed.
 Load only what you have read.
 
@@ -586,10 +690,13 @@ error and never blocks a run.
    tauri build            # release; --debug for the fast loop
    ```
    The installer lands at `D:\aipass-build\target\{debug,release}\bundle\nsis\`.
-2. Session tree view (`/tree`), renaming from the window, export to
-   markdown/HTML.
+2. Session tree view (`/tree`) and export to markdown/HTML. Renaming from the
+   window is shipped (`/resume` → rename, and `session.rename` on the RPC).
 3. ~~Permission path rules from the window instead of code~~ **done** — the
    rules page in the settings sheet, `rules.get|set` on the RPC, and the same
    list honoured by `aipass agent` from the same settings file.
-4. Multiple roots / a project picker: `~/.aipass/desktop.json` already carries
-   the last-used root, so the picker only has to write that file.
+4. ~~Multiple roots / a project picker~~ **done** — the picker in the header,
+   `projects.list|add|remove|switch` on the RPC, and the current root in
+   `settings.json` so the app opens where the last session left off. Two
+   windows can be on two projects at once now, too: the window names its
+   project on every call (see *API* above).

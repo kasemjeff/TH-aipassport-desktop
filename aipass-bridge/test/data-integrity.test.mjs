@@ -28,14 +28,18 @@ const entry = (type, id, parentId, extra = {}) => ({ type, id, parentId, ts: 3, 
 
 test('a torn line is skipped and the rest of the session still loads', () => {
   const dir = tmp();
-  const file = path.join(dir, 'session-torn.jsonl');
+  const store = new SessionStore(path.join(dir, 'store'));
+  // The fixture lives INSIDE the store: a session handle may only name a file
+  // in the store's own directories (an id that carried a separator used to be
+  // taken as a raw path, and `session.delete` deleted whatever it named), and
+  // the torn line — not the path — is what this test is about.
+  const file = path.join(store.dir, 'session-torn.jsonl');
   writeSession(file, [
     header('torn', { entryCount: 2 }),
     entry('user', 'u1', 'torn', { text: 'hello' }),
     '{"type":"assistant","id":"a1","paren', // killed mid-write
   ]);
 
-  const store = new SessionStore(path.join(dir, 'store'));
   const s = store.load(file);
   assert.ok(s, 'a torn tail does not cost the session');
   assert.deepEqual(s.entries.map((e) => e.id), ['u1']);
@@ -384,11 +388,22 @@ test('a memory save that cannot complete leaves the previous facts intact', asyn
     assert.deepEqual(loadMemory(root), ['fact one']);
 
     const before = fs.readFileSync(memoryPath(root), 'utf8');
-    fs.mkdirSync(`${memoryPath(root)}.tmp`); // the swap cannot land
-    saveMemory(root, ['fact two']);          // best effort: never throws
+    // The swap cannot land. The temp file's name is unique per write now, so
+    // it cannot be blocked by planting something at a known path — the
+    // DESTINATION is what the swap cannot take away: read-only on Windows, a
+    // read-only directory on POSIX.
+    const target = memoryPath(root);
+    if (process.platform === 'win32') {
+      fs.chmodSync(target, 0o444);
+      saveMemory(root, ['fact two']);        // best effort: never throws
+      fs.chmodSync(target, 0o600);
+    } else {
+      fs.chmodSync(path.dirname(target), 0o555);
+      saveMemory(root, ['fact two']);        // best effort: never throws
+      fs.chmodSync(path.dirname(target), 0o755);
+    }
     assert.equal(fs.readFileSync(memoryPath(root), 'utf8'), before, 'the old facts survive a failed save');
 
-    fs.rmSync(`${memoryPath(root)}.tmp`, { recursive: true, force: true });
     saveMemory(root, ['fact two']);
     assert.deepEqual(loadMemory(root).sort(), ['fact one', 'fact two'], 'and the next save lands');
   } finally {

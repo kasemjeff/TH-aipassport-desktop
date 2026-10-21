@@ -4,12 +4,15 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startBridge, FakeExtension, scripted, tempDir, freePort } from './harness.mjs';
+import { startBridge, FakeExtension, scripted, tempDir, freePort, startRpcServer } from './harness.mjs';
 import { createRpc, staticFileFor } from '../harness/rpc.mjs';
 import { Settings } from '../harness/settings.mjs';
 import { SessionStore } from '../harness/session.mjs';
+import { backendIsUp } from '../harness/backend-probe.mjs';
+import { UNAUTHORIZED } from '../harness/authtoken.mjs';
 
 let bridge;
 let ext;
@@ -39,9 +42,7 @@ after(() => { ext.disconnect(); bridge.stop(); });
 async function startRpc({ files = {}, replies, rpcOptions = {}, ...rest } = {}) {
   const root = rest.root ? path.resolve(rest.root) : tempDir(files);
   onChat = scripted(replies);
-  const port = await freePort();
-  const rpc = createRpc({
-    port,
+  const rpc = await startRpcServer({
     root,
     bridgeURL: bridge.base,
     store: tempDir(),
@@ -60,10 +61,10 @@ async function startRpc({ files = {}, replies, rpcOptions = {}, ...rest } = {}) 
     ext,
     seen,
     types: (t) => seen.filter((e) => e.type === t).map((e) => e.payload),
-    call: async (method, params = {}) => {
-      const res = await fetch(`http://127.0.0.1:${port}/rpc`, {
+    call: async (method, params = {}, headers = {}) => {
+      const res = await fetch(`http://127.0.0.1:${rpc.port}/rpc`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...headers },
         body: JSON.stringify({ method, params }),
       });
       const body = await res.json();
@@ -416,8 +417,7 @@ test('the event stream pushes frames to a subscriber', async (t) => {
 
 /** createRpc with every store hermetic, and no bridgeURL argument at all. */
 async function startEnvRpc() {
-  return createRpc({
-    port: await freePort(),
+  return startRpcServer({
     root: tempDir({ 'a.txt': 'x' }),
     store: tempDir(),
     settings: new Settings(tempDir(), 'settings.json'),
@@ -707,6 +707,23 @@ test('every top-level aipass-bridge cli is in the packaged resources', async (t)
   assert.deepEqual(missing, [], `packaged resources miss: ${missing.join(', ')} — add them to desktop/src-tauri/tauri.conf.json`);
 });
 
+test('the shell\'s JSON files parse — a byte order mark breaks the Rust build', async (t) => {
+  // A BOM in front of a JSON file is invisible in an editor and fatal to the
+  // build: the Rust build script says "failed to parse JSON" and nothing else.
+  // The suite reads the same files, so it says it first.
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const files = [
+    path.join(repo, 'desktop', 'src-tauri', 'tauri.conf.json'),
+    path.join(repo, 'desktop', 'src-tauri', 'capabilities', 'default.json'),
+  ];
+  for (const file of files) {
+    if (!fs.existsSync(file)) continue;
+    const raw = fs.readFileSync(file);
+    assert.equal(raw[0], 0x7b, `${path.basename(file)} must start with "{" — a byte order mark breaks the build`);
+    assert.doesNotThrow(() => JSON.parse(raw.toString('utf8')), `${path.basename(file)} must parse`);
+  }
+});
+
 test('reading helpers: file listing, file text, and the playbook library', async (t) => {
   const env = await startRpc({
     files: {
@@ -755,4 +772,194 @@ test('a DONE beside a SUBAGENT waits for the helper summary', async (t) => {
   assert.equal(env.types('ignore_done').length, 1, 'the premature DONE was not accepted');
   assert.equal(env.types('done_line').at(-1)?.text, 'the helper summary is in',
     'the run carried on with the summary and ended on the second DONE');
+});
+
+/* ------------------------------------------------------- two windows, two projects */
+
+test('two windows on two projects do not share state, and Apply writes only its own', async (t) => {
+  // The backend holds one harness per project, and the window says which
+  // project it is showing. Without that, the window that spoke last decided
+  // what the other one read — and one window's Apply button wrote the other
+  // window's staged edits.
+  const env = await startRpc({
+    files: { 'notes.md': 'line one\n' },
+    replies: ['EDIT notes.md\nFIND\nline one\nNEW\nline 2\nEND', 'DONE patched the notes'],
+  });
+  t.after(() => env.stop());
+  const other = tempDir({ 'other.md': 'other\n' });
+  await env.call('projects.add', { path: other });
+
+  // A run in the first project stages a change there.
+  await env.call('run', { task: 'patch the notes', mode: 'auto' }, { 'x-aipass-project': env.root });
+  const mine = await env.call('pending', {}, { 'x-aipass-project': env.root });
+  assert.equal(mine.length, 1, 'the change is staged in the first project');
+
+  // The second window, on the other project, sees nothing — and writes nothing.
+  const theirs = await env.call('pending', {}, { 'x-aipass-project': other });
+  assert.equal(theirs.length, 0, 'the other window sees no pending change');
+  const writtenByOther = await env.call('apply', {}, { 'x-aipass-project': other });
+  assert.equal(writtenByOther.written, 0, 'the other window wrote nothing');
+  assert.equal(fs.readFileSync(path.join(env.root, 'notes.md'), 'utf8'), 'line one\n',
+    "the first project's file is untouched");
+
+  // And the first window's own Apply still writes its own change.
+  const applied = await env.call('apply', {}, { 'x-aipass-project': env.root });
+  assert.equal(applied.written, 1, 'the first window applied its own change');
+  assert.equal(fs.readFileSync(path.join(env.root, 'notes.md'), 'utf8'), 'line 2\n');
+});
+
+test('a session list belongs to the project the caller named', async (t) => {
+  const env = await startRpc({ files: { 'a.txt': 'a' }, replies: [] });
+  t.after(() => env.stop());
+  const other = tempDir({ 'b.txt': 'b' });
+  await env.call('projects.add', { path: other });
+
+  const inFirst = await env.call('session.new', { title: 'in the first' }, { 'x-aipass-project': env.root });
+  const inSecond = await env.call('session.new', { title: 'in the second' }, { 'x-aipass-project': other });
+
+  const first = await env.call('session.list', {}, { 'x-aipass-project': env.root });
+  const second = await env.call('session.list', {}, { 'x-aipass-project': other });
+  assert.deepEqual(first.map((s) => s.id), [inFirst.id], 'the first window sees its own session');
+  assert.deepEqual(second.map((s) => s.id), [inSecond.id], 'the second window sees its own session');
+});
+
+test('a relative attachment path is relative to the project, not to the backend', async (t) => {
+  // The window's file panel hands over project-relative paths. They resolved
+  // against the folder the backend started in, so "แนบ" failed for every
+  // project except that one.
+  const env = await startRpc({ files: { 'notes.txt': 'hello' }, replies: [] });
+  t.after(() => env.stop());
+  const other = tempDir({ 'far.txt': 'far away' });
+  await env.call('projects.add', { path: other });
+
+  const staged = await env.call('attachment.stage', { path: 'far.txt' }, { 'x-aipass-project': other });
+  assert.equal(staged.name, 'far.txt', 'the file in the named project was staged');
+  await env.call('attachment.remove', { id: staged.id });
+});
+
+/* ------------------------------------------------------------------ sessions */
+
+test('a short session id does not delete a session', async (t) => {
+  // Every session file is named session-<id>.jsonl, so a substring match made
+  // a one-character id land on whichever session came first. The match has to
+  // be the whole name.
+  const env = await startRpc({ files: {}, replies: [] });
+  t.after(() => env.stop());
+  const s = await env.call('session.new', { title: 'only one' });
+  assert.equal((await env.call('session.list')).length, 1);
+
+  await env.call('session.delete', { id: s.id.slice(0, 1) });
+  const left = await env.call('session.list');
+  assert.equal(left.length, 1, 'the session nobody named is still there');
+});
+
+test('the window cannot be made to read a huge file, or a binary one as text', async (t) => {
+  // The file panel opens a file in the project. It used to read whatever it
+  // was pointed at — a 500 MB log filled the backend's memory and the answer
+  // with it, and a PNG read as UTF-8 is a screenful of mojibake.
+  const env = await startRpc({ files: { 'notes.txt': 'hello' }, replies: [] });
+  t.after(() => env.stop());
+
+  fs.writeFileSync(path.join(env.root, 'big.log'), 'x'.repeat(1_200_000));
+  await assert.rejects(() => env.call('fs.read', { file: 'big.log' }), /too large to open/);
+
+  fs.writeFileSync(path.join(env.root, 'logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  await assert.rejects(() => env.call('fs.read', { file: 'logo.png' }), /PNG file/);
+
+  const read = await env.call('fs.read', { file: 'notes.txt' });
+  assert.equal(read.text, 'hello', 'a text file still opens');
+});
+
+test('a body over the cap is answered, not dropped on the floor', async (t) => {
+  // The old cap destroyed the request without a word, so the client saw a
+  // transport error it could not read — the window's "attach" of a large file
+  // looked like the app had crashed.
+  const env = await startRpc({ files: {}, replies: [], rpcOptions: { maxBody: 2048 } });
+  t.after(() => env.stop());
+
+  const res = await fetch(`http://127.0.0.1:${env.rpc.port}/rpc`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ method: 'status', params: { pad: 'x'.repeat(4096) } }),
+  }).catch((err) => ({ error: String(err) }));
+  assert.equal(res.error, undefined, `the request was answered, not cut: ${res.error ?? ''}`);
+  assert.equal(res.status, 413, 'and the answer says the body was too large');
+  const body = await res.json();
+  assert.equal(body.ok, false);
+  assert.match(body.error, /too large/);
+});
+
+test('the window is served under a policy, not without one', async (t) => {
+  // The window is a page that drives an agent that writes files, and it is
+  // loaded from this backend over plain HTTP. The shell's own declaration
+  // covers the asset protocol, which this window does not use — so the header
+  // the backend sends is the one that binds, and there was none.
+  const env = await startRpc({ files: {}, replies: [] });
+  t.after(() => env.stop());
+
+  const res = await fetch(`${env.rpc.url}/`);
+  assert.equal(res.status, 200);
+  const csp = res.headers.get('content-security-policy');
+  assert.ok(csp, 'the document carries a policy');
+  assert.match(csp, /script-src 'self'/, 'scripts come from the app itself — no inline, no eval');
+  assert.match(csp, /object-src 'none'/);
+  assert.match(csp, /frame-ancestors 'none'/, 'and the window cannot be framed');
+  assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+});
+
+test('the code-navigation index answers for the window', async (t) => {
+  // The SYMBOLS/DEF/REFS markers use this index from inside a run. The window
+  // asks for the same thing from outside one, so a person can find a
+  // declaration without starting a run for it.
+  const env = await startRpc({
+    files: {
+      'src/app.mjs': 'export function greet(name) {\n  return name;\n}\n',
+      'src/other.mjs': 'import { greet } from "./app.mjs";\ngreet("x");\n',
+    },
+    replies: [],
+  });
+  t.after(() => env.stop());
+
+  const list = await env.call('symbols.list', { file: 'src/app.mjs' });
+  assert.ok(list.symbols.some((s) => s.name === 'greet'), 'the file declares it');
+
+  const def = await env.call('symbols.def', { name: 'greet' });
+  assert.ok(def.definitions.length >= 1, 'the name is defined somewhere');
+  assert.ok(def.definitions.some((d) => d.file === 'src/app.mjs'), 'in the file that declares it');
+
+  const refs = await env.call('symbols.refs', { name: 'greet' });
+  assert.ok(refs.references.length >= 1, 'and it is used somewhere');
+
+  // The index is the project's: a path outside it has no symbols, and no way
+  // to reach a file that is not in the project.
+  const outside = await env.call('symbols.list', { file: '../outside.mjs' });
+  assert.deepEqual(outside.symbols, [], 'nothing outside the project answers');
+});
+
+/* ------------------------------------------------------------------- launcher */
+test('the launcher finds a backend that is already running', async (t) => {
+  // The backend's /rpc is behind the loopback token, so a probe without one
+  // gets a 401. A launcher that only accepts 200 never sees the running
+  // backend, starts a second one, and the window opens on "port is busy".
+  const port = await freePort();
+  const ours = http.createServer((_req, res) => {
+    res.writeHead(401, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: UNAUTHORIZED }));
+  });
+  await new Promise((r) => ours.listen(port, '127.0.0.1', r));
+  t.after(() => ours.close());
+  assert.equal(await backendIsUp(port), true, 'our own 401 is still our backend');
+});
+
+test('the launcher does not adopt somebody else\'s server', async (t) => {
+  // A 401 that is not ours means the port belongs to something else. The
+  // launcher has to say "the port is busy", not adopt a stranger.
+  const port = await freePort();
+  const stranger = http.createServer((_req, res) => {
+    res.writeHead(401, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'not our backend' }));
+  });
+  await new Promise((r) => stranger.listen(port, '127.0.0.1', r));
+  t.after(() => stranger.close());
+  assert.equal(await backendIsUp(port), false, 'a foreign server is not our backend');
 });

@@ -13,6 +13,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { aipassHome } from './settings.mjs';
+import { writeFileAtomic } from './atomic-write.mjs';
 
 const EXT_LANG = {
   '.js': 'js', '.mjs': 'js', '.cjs': 'js', '.jsx': 'js',
@@ -142,9 +143,17 @@ function projectHash(root) { return crypto.createHash('sha1').update(path.resolv
 // like every other surface here. AIPASS_HOME can be pointed elsewhere after
 // this module is loaded (a test does exactly that), and a module-level
 // capture would write the index into the real ~/.aipass instead.
+//
+// The index names every source file and every symbol in the project: it is
+// the user's code, spelled out. The folder and the file are owner-only where
+// the OS has modes, like the session store and the credentials file.
 function indexDir() {
   const dir = path.join(aipassHome(), 'symbols');
-  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  try { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch {}
+  // The mode is set on creation and pinned again afterwards: a directory
+  // that was already there keeps the permissions it had. Windows has no
+  // POSIX modes, so the chmod is best effort there.
+  try { fs.chmodSync(dir, 0o700); } catch { /* windows has no POSIX modes */ }
   return dir;
 }
 function indexPath(root) { return path.join(indexDir(), projectHash(root) + '.json'); }
@@ -158,8 +167,11 @@ function loadIndex(root) {
   return { root: path.resolve(root), files: {} };
 }
 
+// The swap is atomic, so a crash cannot leave a half-written index behind:
+// a broken index reads as "nothing indexed" and the project is re-read. The
+// mode is pinned on the new file, so the index is the owner's alone.
 function saveIndex(root, idx) {
-  try { fs.writeFileSync(indexPath(root), JSON.stringify(idx)); } catch {}
+  try { writeFileAtomic(indexPath(root), JSON.stringify(idx), { mode: 0o600 }); } catch {}
 }
 
 const SKIP_DIRS = new Set(['node_modules', '.git', '.aipass', 'dist', 'build', 'coverage', '.next', 'target', 'vendor']);

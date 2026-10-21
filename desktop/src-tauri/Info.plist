@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged into the bundle's Info.plist by the Tauri bundler (it looks for an
+  Info.plist next to tauri.conf.json).
+
+  The window is not a document on the asset protocol: it is loaded from the
+  local backend on http://127.0.0.1:8790. App Transport Security applies to
+  WKWebView loads, so without this key the macOS build shows an empty page
+  where the window should be. NSAllowsLocalNetworking is the one exemption
+  that covers a loopback HTTP origin; nothing else is loosened.
+-->
+<plist version="1.0">
+  <dict>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+      <key>NSAllowsLocalNetworking</key>
+      <true/>
+    </dict>
+  </dict>
+</plist>

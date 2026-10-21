@@ -223,6 +223,95 @@ test('a flaky refusal is waited out with the identical message, never rewritten'
   }
 });
 
+// A big message the edge refuses whole, and keeps refusing, is a payload the
+// filter does not want — waiting longer does not make it smaller. Recorded
+// live, Oct 20 2026: a run in the desktop window read a file, the message
+// carrying the result was refused, and the run stood still for the four
+// minutes the waits add up to; the session ended after the tool call, with no
+// answer and no run_stats, because the window was closed while it waited.
+//
+// So a big message is sent again SHORTER, right away: the head and the tail
+// survive, the middle is left out with a line that says so, and the run's
+// next step happens. A small message is never shortened — that is the pace
+// case, and the waits are its medicine.
+test('a refused big message is sent again, shorter, so the run continues', async () => {
+  const saved = process.env.AIPASS_EDGE_WAITS_MS;
+  process.env.AIPASS_EDGE_WAITS_MS = '0';
+  try {
+    const sent = [];
+    const notes = [];
+    const say = async (t) => {
+      sent.push(t);
+      if (sent.length === 1) throw new Error('aipass returned 403 Forbidden {server=cloudflare}');
+      return 'ok';
+    };
+    const text = `Result of read README.md:\n${'a line of the file that the edge does not want\n'.repeat(60)}\n\nWhat next? Ask for anything else you need, or finish with DONE if you have enough.`;
+    await resilientSay(say, text, (_lvl, t) => notes.push(t));
+
+    assert.equal(sent.length, 2, 'the refusal plus one shorter resend');
+    assert.ok(sent[1].length < sent[0].length, 'the resend was shorter');
+    assert.ok(sent[1].startsWith('Result of read README.md:'), 'it still says what it carries');
+    assert.match(sent[1], /finish with DONE/, 'and it still says how to finish');
+    assert.match(sent[1], /left out of this message/, 'the cut says what was cut');
+    assert.ok(notes.some((t) => /sending a shorter version/.test(t)), 'the shortening is announced');
+  } finally {
+    if (saved === undefined) delete process.env.AIPASS_EDGE_WAITS_MS;
+    else process.env.AIPASS_EDGE_WAITS_MS = saved;
+  }
+});
+
+test('a refused small message is waited out, never shortened', async () => {
+  const saved = process.env.AIPASS_EDGE_WAITS_MS;
+  process.env.AIPASS_EDGE_WAITS_MS = '5,5';
+  try {
+    const sent = [];
+    const notes = [];
+    let calls = 0;
+    const say = async (t) => {
+      sent.push(t);
+      if (++calls === 1) throw new Error('aipass returned 403 Forbidden {server=cloudflare}');
+      return 'ok';
+    };
+    const text = 'a small tool result the edge refused\n'.repeat(20);
+    await resilientSay(say, text, (_lvl, t) => notes.push(t));
+
+    assert.equal(sent.length, 2, 'the refusal plus one resend');
+    assert.equal(sent[1], sent[0], 'the resend was the very same message');
+    assert.ok(!notes.some((t) => /shorter version/.test(t)), 'a small message is not shortened');
+  } finally {
+    if (saved === undefined) delete process.env.AIPASS_EDGE_WAITS_MS;
+    else process.env.AIPASS_EDGE_WAITS_MS = saved;
+  }
+});
+
+// The run's FIRST message carries the protocol — the marker list, the rules —
+// and a protocol with its middle cut out is worse than a message that waited.
+// The loop says so (the first send asks for no shorter copy) and the layer
+// obeys it.
+test('the message that carries the protocol is never shortened', async () => {
+  const saved = process.env.AIPASS_EDGE_WAITS_MS;
+  process.env.AIPASS_EDGE_WAITS_MS = '5,5';
+  try {
+    const sent = [];
+    const notes = [];
+    let calls = 0;
+    const say = async (t) => {
+      sent.push(t);
+      if (++calls === 1) throw new Error('aipass returned 403 Forbidden {server=cloudflare}');
+      return 'ok';
+    };
+    const text = `I am reading through a project with you.\n\nNEED dir .\n${'a marker rule of the protocol\n'.repeat(80)}\nWhat next?`;
+    await resilientSay(say, text, (_lvl, t) => notes.push(t), null, 0, { shrink: false });
+
+    assert.equal(sent.length, 2, 'the refusal plus one resend');
+    assert.equal(sent[1], sent[0], 'the resend was the very same message');
+    assert.ok(!notes.some((t) => /shorter version/.test(t)), 'the instruction was not shortened');
+  } finally {
+    if (saved === undefined) delete process.env.AIPASS_EDGE_WAITS_MS;
+    else process.env.AIPASS_EDGE_WAITS_MS = saved;
+  }
+});
+
 // What survives the waits is content: only then does the split come out. The
 // old chain announced parts at every level, so a fragment that had to be split
 // again carried "Part 1, more follows" stacked on the outer one — the garble

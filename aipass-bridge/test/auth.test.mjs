@@ -8,8 +8,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { startBridge, freePort, tempDir } from './harness.mjs';
-import { createRpc } from '../harness/rpc.mjs';
+import { startBridge, freePort, tempDir, startRpcServer } from './harness.mjs';
+
 import { Settings } from '../harness/settings.mjs';
 import { loadOrMintToken, authorized, tokenPath } from '../harness/authtoken.mjs';
 
@@ -53,6 +53,25 @@ test('bridge: health probes stay open, everything else needs the token', async (
   } finally { bridge.stop(); }
 });
 
+// The extension that never got the token is the quietest failure there is:
+// it retries every three seconds, every retry is a 401, and `/status` says
+// only `extensions: 0`. The bridge has to name the remedy, or the reader
+// cannot tell a missing extension from a missing token.
+test('bridge: a tokenless extension is told what to do', async () => {
+  const home = mkhome();
+  const bridge = await startBridge({ AIPASS_HOME: home, AIPASS_REQUIRE_AUTH: '1' });
+  try {
+    const r = await fetch(`${bridge.base}/ext/events`, { headers: { accept: 'text/event-stream' } });
+    assert.equal(r.status, 401, 'the extension stream stays closed without the token');
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && !/loopback token/.test(bridge.logText())) {
+      await new Promise((r2) => setTimeout(r2, 25));
+    }
+    assert.match(bridge.logText(), /no loopback token/, 'the bridge says why');
+    assert.match(bridge.logText(), /\.aipass\/\.token/, 'and where the token is');
+  } finally { bridge.stop(); }
+});
+
 // File minting: no AIPASS_TOKEN — the token file mints at boot in ~/.aipass/.
 test('bridge: token file mints at boot with owner-only intent', async () => {
   const home = mkhome();
@@ -81,10 +100,11 @@ test('rpc: /rpc gated, /token is same-origin-browser-only', async () => {
   process.env.AIPASS_REQUIRE_AUTH = '1';
   let rpc = null;
   try {
-    rpc = createRpc({
-      port, root: tempDir(), bridgeURL: `http://127.0.0.1:${await freePort()}`,
+    rpc = await startRpcServer({
+      root: tempDir(), bridgeURL: `http://127.0.0.1:${await freePort()}`,
       autostartBridge: false, store: tempDir(), settings: new Settings(tempDir(), 'settings.json'),
     });
+    const port = rpc.port;
     const base = `http://127.0.0.1:${port}`;
     const call = (headers = {}) => fetch(`${base}/rpc`, {
       method: 'POST', headers: { 'content-type': 'application/json', ...headers },
@@ -133,6 +153,30 @@ test('bridge: AIPASS_REQUIRE_AUTH=0 leaves the loopback surface as before', asyn
     const r = await fetch(`${bridge.base}/v1/models`);
     assert.ok(r.status !== 401, `gate must be off under the escape hatch (got ${r.status})`);
   } finally { bridge.stop(); }
+});
+
+// The escape hatch and the SHARED default port are the one combination that
+// leaves the account reachable by any web page: a cross-origin "simple"
+// request needs no preflight, so the browser sends it and the bridge acts on
+// it. The port is the only thing a web page can guess, so a no-token bridge
+// on any other port is fine — and on 8787 it is refused.
+test('bridge: the no-token mode refuses the shared default port', async () => {
+  const { spawn } = await import('node:child_process');
+  const { SERVER } = await import('./harness.mjs');
+  const child = spawn(process.execPath, [SERVER], {
+    env: { ...process.env, AIPASS_REQUIRE_AUTH: '0', AIPASS_PORT: '8787', AIPASS_HOME: mkhome() },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  child.stdout.on('data', (d) => { out += d; });
+  child.stderr.on('data', (d) => { out += d; });
+  const code = await new Promise((resolve) => {
+    child.on('close', resolve);
+    setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } resolve('timeout'); }, 8000);
+  });
+  assert.notEqual(code, 'timeout', 'the bridge did not start');
+  assert.notEqual(code, 0, 'it refused to start');
+  assert.match(out, /refusing to serve 8787/, 'and it said why');
 });
 
 // Revocation, the desktop way: the token file *is* the credential. Deleting

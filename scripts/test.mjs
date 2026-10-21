@@ -18,9 +18,13 @@
 // automatically so contributors never have to remember to register one.
 import { readdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// The browser the suite opened is closed with the suite: one rule, shared
+// with the backend that opened it.
+import { closeOpenedBrowsers } from '../aipass-bridge/harness/browser.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const testDir = path.join(repoRoot, 'aipass-bridge', 'test');
@@ -56,10 +60,10 @@ const SCRATCH_PREFIXES = [
   'aipass-evals-compare-', 'aipass-evals-home-', 'aipass-experiments-',
   'aipass-fixes-home-', 'aipass-gates-home-', 'aipass-hardening-home-',
   'aipass-harness-', 'aipass-integrity-', 'aipass-loadtest-home-',
-  'aipass-loadtest-root-', 'aipass-plan-home-', 'aipass-plugin-',
+  'aipass-loadtest-root-', 'aipass-meta-', 'aipass-plan-home-', 'aipass-plugin-',
   'aipass-qa-home-', 'aipass-rules-', 'aipass-sandbox-home-', 'aipass-sbx-',
   'aipass-secret-', 'aipass-skills-', 'aipass-stability-', 'aipass-stats-',
-  'aipass-stop-', 'aipass-stop-home-', 'aipass-suite-home-',
+  'aipass-stop-', 'aipass-stop-home-', 'aipass-suite-browser-', 'aipass-suite-home-',
   'aipass-symbols-home-', 'aipass-test-', 'aipass-test-home-', 'aipass-tools-',
   'aipass-ui-', 'aipass-verify-', 'difflib-', 'eval-lint-',
 ];
@@ -69,6 +73,23 @@ const SCRATCH_PREFIXES = [
 // parallel session's in-flight run is never that old either, so its scratch
 // stays untouched.
 const STALE_SCRATCH_MS = 60 * 60 * 1000;
+
+/**
+ * A port of the suite's own.
+ *
+ * The OS hands it out atomically when the socket is bound to port 0, so this
+ * is "any free port" and nothing else claims it in between.
+ */
+async function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
 
 function sweepStaleScratch() {
   const tmp = os.tmpdir();
@@ -111,6 +132,26 @@ const nodeArgs = ['--test', ...(coverage ? ['--experimental-test-coverage'] : []
 // A fresh temp home for the run is the floor; a test file that wants its own
 // home still sets AIPASS_HOME for itself, and a caller that named one wins.
 const HOME = mkdtempSync(path.join(os.tmpdir(), 'aipass-suite-home-'));
+// The suite opens a real browser: a run that needs a chat tab asks the
+// backend to open one, and the backend does it for you. That browser is
+// opened in a private profile of the suite's own — its own process tree, its
+// own cookies — so the developer's Chrome is never touched and the window
+// can be closed again when the run ends. Without this the suite opened the
+// platform's default browser (Edge on a Windows machine) and left a tab
+// behind on every run.
+const BROWSER_HOME = mkdtempSync(path.join(os.tmpdir(), 'aipass-suite-browser-'));
+const BROWSER_PROFILE = path.join(BROWSER_HOME, 'profile');
+const BROWSER_PIDS = path.join(BROWSER_HOME, 'pids.txt');
+// The suite must not use the developer's bridge port either. A CLI the suite
+// runs auto-starts a bridge (aipass-bridge/bin/aipass.mjs) and that bridge
+// binds AIPASS_PORT — the real 8787 — with the no-token escape hatch the
+// suite turns on, and it is spawned DETACHED, so it outlives the run. Its pid
+// landed in the suite's scratch home, where `aipass stop` (which reads the
+// developer's real one) could never reach it: an unauthenticated bridge
+// squatting the real port, which any web page could blind-POST to. The floor
+// here names a port of the suite's own, so a CLI that starts a bridge starts
+// it somewhere harmless.
+const BRIDGE_PORT = await freePort();
 const result = spawnSync(process.execPath, nodeArgs, {
   stdio: 'inherit',
   timeout: 10 * 60 * 1000,
@@ -121,9 +162,34 @@ const result = spawnSync(process.execPath, nodeArgs, {
   env: {
     ...process.env,
     AIPASS_HOME: process.env.AIPASS_HOME?.trim() || HOME,
+    AIPASS_PORT: process.env.AIPASS_PORT?.trim() || String(BRIDGE_PORT),
     AIPASS_RATE_BUCKET: process.env.AIPASS_RATE_BUCKET ?? 'off',
+    // The suite's own browser, always: the profile and the pid file are the
+    // suite's business, and a caller that inherited somebody else's would
+    // make the suite close a browser it did not open.
+    AIPASS_BROWSER_PROFILE: BROWSER_PROFILE,
+    AIPASS_BROWSER_PIDFILE: BROWSER_PIDS,
   },
 });
+
+// The browser the suite opened goes with the run: the window is closed (the
+// tree, so the renderers go too) and the profile is deleted. A test run must
+// leave the machine as it found it.
+const closed = await closeOpenedBrowsers({
+  env: { AIPASS_BROWSER_PIDFILE: BROWSER_PIDS },
+});
+if (closed.length) console.log(`closed ${closed.length} browser(s) the suite opened`);
+// The browser may still be letting go of its files, so the removal is
+// retried before it is given up on: a profile left behind is a hundred
+// megabytes of scratch nobody will look at again.
+for (let i = 0; i < 5; i++) {
+  try {
+    rmSync(BROWSER_HOME, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    break;
+  } catch {
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
 
 // The scratch home goes with the run: the suite's own state is not evidence,
 // and a leftover directory is a leftover directory.

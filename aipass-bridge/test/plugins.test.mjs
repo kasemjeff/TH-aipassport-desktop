@@ -1,12 +1,15 @@
 // The plugin filter, pinned.
 //
 // `settings.plugins` is a list of names to load; an empty list means
-// "everything found". A plugin that is not wanted must not load at all: the
-// manager used to run its setup() first and filter the listing afterwards,
-// which left a "disabled" plugin's tools, RPC methods and panels live while
-// the window said it was off.
+// "everything found". A plugin that is not wanted must not RUN at all — and
+// not merely not REGISTER: the import is what runs a plugin's top level, so
+// the file is now never imported. The manager used to import it first and
+// filter the listing afterwards, which left a "disabled" plugin's code running
+// (and its tools, RPC methods and panels live) while the window said it was
+// off.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { tempDir } from './harness.mjs';
 import { PluginManager } from '../harness/plugins.mjs';
@@ -155,6 +158,86 @@ export default {
   assert.equal(byMarker.PLAIN.risk, null, 'undeclared stays null — the old trust, unchanged');
   assert.equal(details.failed.length, 1, 'an unknown risk fails the plugin at load, not mid-run');
   assert.match(details.failed[0].error, /risk must be 'read', 'write', 'shell'/);
+});
+
+test('a plugin that is disabled never runs — not even its top-level code', async () => {
+  // The enabled-list used to be a REGISTRATION filter: the file was imported
+  // first, and the import is what runs a plugin's top level — reading
+  // ~/.ssh, reading process.env, spawning a process, fetching out. The
+  // switch said "disabled" and the code ran anyway.
+  const dir = tempDir({
+    'settings.json': JSON.stringify({ plugins: ['alpha'] }),
+    'plugins/alpha.mjs': pluginFile('alpha', 'ALPHA_TOOL'),
+    'plugins/beta.mjs': `
+import fs from 'node:fs';
+import path from 'node:path';
+// The side effect a disabled plugin must never have: a marker file that
+// only exists if the top level of the plugin ran.
+fs.writeFileSync(path.join(import.meta.dirname, 'beta-ran.txt'), 'ran');
+export default {
+  name: 'beta',
+  version: '1.0.0',
+  setup(ctx) { ctx.tools.register('BETA_TOOL', () => 'ok'); },
+};
+`,
+  });
+  const manager = new PluginManager({ dir: path.join(dir, 'plugins'), settings: new Settings(dir), log: () => {} });
+
+  const details = await manager.load();
+
+  assert.equal(fs.existsSync(path.join(dir, 'plugins', 'beta-ran.txt')), false,
+    'the disabled plugin never executed');
+  assert.deepEqual(details.loaded.map((p) => p.name), ['alpha']);
+  assert.deepEqual(details.tools, ['ALPHA_TOOL'], 'and it registered nothing');
+});
+
+test('two loads in a row pick up an edited plugin', async () => {
+  // The cache-buster was `Date.now()` alone: two loads inside one
+  // millisecond resolved to the same module URL, the ESM cache answered with
+  // the OLD module, and an edited plugin was silently not reloaded. The clock
+  // is frozen here, so the old code would collide every single time.
+  const dir = tempDir({
+    'settings.json': JSON.stringify({ plugins: [] }),
+    'plugins/alpha.mjs': pluginFile('alpha', 'ALPHA_TOOL'),
+  });
+  const manager = new PluginManager({ dir: path.join(dir, 'plugins'), settings: new Settings(dir), log: () => {} });
+  const file = path.join(dir, 'plugins', 'alpha.mjs');
+
+  const realNow = Date.now;
+  Date.now = () => 1700000000000;
+  try {
+    await manager.load();
+    fs.writeFileSync(file, pluginFile('alpha', 'ALPHA_TOOL_EDITED'));
+    await manager.load();
+  } finally {
+    Date.now = realNow;
+  }
+
+  assert.deepEqual(manager.toolTable().map((t) => t.marker), ['ALPHA_TOOL_EDITED'],
+    'the edited plugin is the one that is loaded');
+});
+
+test('a plugin is found by the name it declares, not only by its file name', async () => {
+  // The name has to be known BEFORE the file is imported — that is the whole
+  // point of the filter — and a name can only be read by running the file.
+  // So it is read from the source as text, and a file whose name is computed
+  // at runtime answers to the name it is filed under.
+  const dir = tempDir({
+    'settings.json': JSON.stringify({ plugins: ['scratchpad'] }),
+    'plugins/notes.mjs': `
+export default {
+  name: 'scratchpad',
+  version: '1.0.0',
+  setup(ctx) { ctx.tools.register('NOTE', () => 'ok'); },
+};
+`,
+  });
+  const manager = new PluginManager({ dir: path.join(dir, 'plugins'), settings: new Settings(dir), log: () => {} });
+
+  const details = await manager.load();
+
+  assert.deepEqual(details.loaded.map((p) => p.name), ['scratchpad'], 'the declared name is the one the list holds');
+  assert.deepEqual(details.tools, ['NOTE']);
 });
 
 test("the installer's working areas are not plugins — dot-entries are skipped by name", async () => {

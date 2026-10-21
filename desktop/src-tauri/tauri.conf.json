@@ -6,30 +6,26 @@
   "build": {
     "frontendDist": "../ui",
     "devUrl": "http://127.0.0.1:8790",
-    "beforeDevCommand": "node main.mjs --detach --root ..",
+    "beforeDevCommand": "npm run desktop:backend",
     "beforeBuildCommand": ""
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [],
     "security": {
       "csp": {
-        "default-src": "'self' asset: customprotocol:",
+        "default-src": "'none'",
         "script-src": "'self'",
         "style-src": "'self' 'unsafe-inline'",
-        "img-src": "'self' asset: http://asset.localhost blob: data:",
+        "img-src": "'self' data: blob: https: http:",
+        "media-src": "'self' data: blob: https: http:",
         "font-src": "'self' data:",
-        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:*",
-        "object-src": "'none'",
+        "connect-src": "'self' http://127.0.0.1:* http://localhost:*",
         "base-uri": "'self'",
-        "form-action": "'self'"
+        "form-action": "'none'",
+        "frame-ancestors": "'none'",
+        "object-src": "'none'"
       }
-    },
-    "trayIcon": {
-      "id": "aipass-tray",
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": false,
-      "tooltip": "aipass desktop"
     }
   },
   "bundle": {

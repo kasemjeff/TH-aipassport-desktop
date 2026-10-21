@@ -8,7 +8,7 @@
 // guessing.
 import fs from 'node:fs';
 import path from 'node:path';
-import { authHeaders } from './harness/authtoken.mjs';
+import { authHeaders, isLoopbackUrl } from './harness/authtoken.mjs';
 import { aipassHome, Settings } from './harness/settings.mjs';
 import { PluginManager } from './harness/plugins.mjs';
 import { pluginsDirFor } from './harness/install.mjs';
@@ -38,8 +38,10 @@ Exits 0 when every check passes, 1 otherwise.`);
 
 const BRIDGE = (flag('bridge', process.env.AIPASS_BRIDGE ?? 'http://127.0.0.1:8787')).replace(/\/+$/, '');
 // Bridge-bound requests carry the loopback bearer token (see authtoken.mjs).
+// The test is about the HOST: a string prefix would be true by construction
+// and would ship the token to a remote bridge.
 const bridgeFetch = (url, opts = {}) => (
-  String(url).startsWith(BRIDGE)
+  isLoopbackUrl(url)
     ? fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers ?? {}) } })
     : fetch(url, opts)
 );

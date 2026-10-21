@@ -147,6 +147,17 @@ export const RESTORE = [
 ];
 
 /**
+ * The restore table as data: `[source, flags, replacement]` for every rule.
+ *
+ * The window shows the real text behind the wire spellings, and it must show
+ * the SAME text — so it rebuilds these rules from this table instead of
+ * keeping a copy of them. One table, one owner, whatever surface asks.
+ *
+ * @returns {Array<[string, string, string]>}
+ */
+export const restoreTable = () => RESTORE.map(([re, to]) => [re.source, re.flags, to]);
+
+/**
  * Restores placeholders a previously-wrapped value carries. Null and
  * undefined pass through untouched.
  * @overload

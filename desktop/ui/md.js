@@ -6,6 +6,7 @@
  * images, standalone video URLs, emphasis, links, and code spans. Anything
  * else falls through as a paragraph.
  */
+import { restoreText } from './waf-restore.js';
 
 const escapeHtml = (s) => s
   .replace(/&/g, '&amp;')
@@ -43,13 +44,13 @@ const inline = (s) => {
       // attributes. A video written as an image is a link while inline — only a
       // line of its own can grow a player.
       if (!safeSrc(src)) return whole;
-      if (looksLikeVideo(src, alt)) return stash(`<a href="${src}" target="_blank" rel="noreferrer">${alt || 'video'}</a>`);
+      if (looksLikeVideo(src, alt)) return stash(`<a class="md-link" href="${src}" target="_blank" rel="noreferrer">${alt || 'video'}</a>`);
       return stash(`<img class="md-image md-image-inline" src="${src}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`);
     });
   out = out
     .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(^|[\s(])\*([^*\n]+)\*/g, '$1<em>$2</em>')
-    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a class="md-link" href="$2" target="_blank" rel="noreferrer">$1</a>');
   return out.replace(/\u0000(\d+)\u0000/g, (_, i) => kept[Number(i)]);
 };
 
@@ -183,7 +184,11 @@ export function splitMarkdownStable(src) {
 }
 
 export function renderMarkdown(src) {
-  const text = String(src ?? '').replace(/\r\n/g, '\n');
+  // The wire spellings go back first: a URL the model quoted from a search
+  // arrives as HTTPS-URL…, and a link the reader can click needs the real
+  // scheme. The escape below still runs on the result, so nothing untrusted
+  // becomes markup by being restored.
+  const text = restoreText(String(src ?? '').replace(/\r\n/g, '\n'));
   const lines = text.split('\n');
   const out = [];
   let para = [];

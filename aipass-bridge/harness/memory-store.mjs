@@ -38,7 +38,24 @@ function mergeFacts(prev, fresh) {
 }
 
 function projectHash(root) { return crypto.createHash('sha1').update(path.resolve(root)).digest('hex').slice(0, 12); }
-function storePath(root, dir = defaultDir()) { try { fs.mkdirSync(dir, { recursive: true }); } catch {} return path.join(dir, projectHash(root) + '.json'); }
+
+/**
+ * Where a project's facts live.
+ *
+ * The folder and the file hold what the model learned about the project and
+ * what the user told it — user data, not scratch. They are owner-only where
+ * the OS has modes, like the session store and the credentials file: the
+ * mode is set on creation and pinned again afterwards, because a directory
+ * that was already there keeps the permissions it had.
+ */
+function storePath(root, dir = defaultDir()) {
+  try { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch {}
+  // The mode is set on creation and pinned again afterwards: a directory
+  // that was already there keeps the permissions it had. Windows has no
+  // POSIX modes, so the chmod is best effort there.
+  try { fs.chmodSync(dir, 0o700); } catch { /* windows has no POSIX modes */ }
+  return path.join(dir, projectHash(root) + '.json');
+}
 
 export function loadMemory(root, dir = defaultDir()) {
   try {
@@ -55,7 +72,8 @@ export function saveMemory(root, facts, dir = defaultDir()) {
   // Temp file plus rename: a crash mid-save leaves the previous facts. The
   // direct overwrite this replaces could empty the file, and loadMemory reads
   // a broken file as "no facts" — the loss would look like a fresh project.
-  try { writeFileAtomic(storePath(root, dir), JSON.stringify(merged, null, 2) + '\n'); } catch {}
+  // The mode is pinned on the new file, so the facts are the owner's alone.
+  try { writeFileAtomic(storePath(root, dir), JSON.stringify(merged, null, 2) + '\n', { mode: 0o600 }); } catch {}
   return merged;
 }
 

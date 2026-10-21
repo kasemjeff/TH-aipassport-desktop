@@ -12,12 +12,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { tempDir, freePort } from './harness.mjs';
+import { tempDir, startRpcServer } from './harness.mjs';
 import { ProviderStore, AIPASS_PROVIDER, sanitizeSpec } from '../harness/providers.mjs';
 import { ApiProviderClient, clientFor, endpointsFor } from '../harness/provider-client.mjs';
 import { RATE_REFUSED, resilientSay } from '../harness/bridge.mjs';
 import { Settings } from '../harness/settings.mjs';
-import { createRpc } from '../harness/rpc.mjs';
+
 
 /** A streaming response, as a provider would send one. */
 function sse(frames) {
@@ -201,15 +201,14 @@ test('the provider switch moves every harness and lands in the settings file', a
   store.save({ ...OPENAI_SPEC, apiKeyEnv: 'EXAMPLE_KEY' });
   process.env.EXAMPLE_KEY = 'sk-example';
   const settings = new Settings(home, 'settings.json');
-  const port = await freePort();
-  const rpc = createRpc({
-    port,
+  const rpc = await startRpcServer({
     root: tempDir(),
     store: tempDir(),
     settings,
     providerStore: store,
     autostartBridge: false,
   });
+  const port = rpc.port;
   const call = async (method, params = {}) => {
     const res = await fetch(`http://127.0.0.1:${port}/rpc`, {
       method: 'POST',
@@ -300,15 +299,14 @@ test('a run works end to end on a provider, not only on the bridge', async () =>
   process.env.FAKE_PROVIDER_KEY = 'sk-fake';
   const settings = new Settings(home, 'settings.json');
   settings.set({ defaultProvider: 'fake' });
-  const rpcPort = await freePort();
-  const rpc = createRpc({
-    port: rpcPort,
+  const rpc = await startRpcServer({
     root: tempDir({ 'notes.md': 'line one\nline two\n' }),
     store: tempDir(),
     settings,
     providerStore: store,
     autostartBridge: false,
   });
+  const rpcPort = rpc.port;
   const call = async (method, params = {}) => {
     const res = await fetch(`http://127.0.0.1:${rpcPort}/rpc`, {
       method: 'POST',

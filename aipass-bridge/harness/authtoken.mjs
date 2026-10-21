@@ -19,6 +19,15 @@ import { aipassHome } from './settings.mjs';
 
 export const TOKEN_FILE = '.token';
 
+/**
+ * The refusal a token-less call gets.
+ *
+ * It is a constant because two places have to agree on it: the backend that
+ * answers with it, and the launcher that reads it to tell "a backend is
+ * already on this port" from "somebody else's server is on this port".
+ */
+export const UNAUTHORIZED = 'unauthorized: missing or wrong loopback bearer token';
+
 /** @param {string} [home] @returns {string} */
 export const tokenPath = (home = aipassHome()) => path.join(home, TOKEN_FILE);
 
@@ -69,6 +78,34 @@ export function loadOrMintToken(home = aipassHome()) {
 export function authHeaders(home) {
   if (!authRequired()) return {};
   return { authorization: `Bearer ${loadOrMintToken(home)}` };
+}
+
+/**
+ * Is this URL the loopback the token belongs to?
+ *
+ * The token is a cross-boundary credential: it is what stops another OS user,
+ * a sandboxed app with loopback egress, and a browser page from driving the
+ * account. Attaching it to a host that is not loopback hands all of that
+ * away, so the clients attach it to loopback and to nothing else.
+ *
+ * The old check was "does the URL start with the bridge URL" — and every call
+ * site built its URL as `${BRIDGE}${path}`, so the check was true by
+ * construction and `--bridge https://collector.example` shipped the token to
+ * that host. The question is about the HOST, not about a string prefix.
+ *
+ * @param {string} url @returns {boolean} */
+export function isLoopbackUrl(url) {
+  let host;
+  try {
+    host = new URL(String(url)).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (!host) return false;
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+  return host === 'localhost'
+    || host === '::1'
+    || /^127(\.\d{1,3}){3}$/.test(host);
 }
 
 /** Constant-time bearer check against the active token.

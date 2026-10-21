@@ -13,6 +13,24 @@ use tauri::menu::{Menu, MenuItem};
 
 const MARKER: &str = "aipass-bridge/bridge/server.mjs";
 
+/// The plain form of a path.
+///
+/// Windows hands back the long-path form (`\\?\C:\…`) for anything the
+/// resource resolver produces, and Node cannot run one: it reads the prefix
+/// as a directory and the backend dies with `lstat 'C:'`. The prefix is
+/// Windows' way of saying "this path may be longer than 260 characters", and
+/// the plain form says the same thing to everything else.
+fn plain(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy().to_string();
+    match text.strip_prefix(r"\\?\") {
+        // A UNC path keeps its two leading slashes: `\\?\UNC\server\share`
+        // is `\\server\share`.
+        Some(rest) if rest.starts_with(r"UNC\") => PathBuf::from(format!(r"\\{}", &rest[4..])),
+        Some(rest) => PathBuf::from(rest),
+        None => path,
+    }
+}
+
 /// Where the app finds the files it runs.
 ///
 /// Four layouts, tried in order:
@@ -20,19 +38,33 @@ const MARKER: &str = "aipass-bridge/bridge/server.mjs";
 ///   2. next to the binary                   — some installers relocate these
 ///   3. the repo, walking up                 — `tauri dev` from target/debug
 ///   4. the Tauri dir, two up                — `tauri dev` resource resolution
+///
+/// The installed build always comes first: an app that runs the *repository's*
+/// files when a checkout happens to sit on the same machine is not the build
+/// that was installed, and the difference shows up as a bug that only the
+/// person who made the build can see.
 fn find_root(app: &tauri::App, exe_dir: &std::path::Path) -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
+    // The resource dir is the install dir on Windows and `Contents/Resources`
+    // on macOS; the marker sits three levels under it (aipass-bridge/bridge/
+    // server.mjs), so the root is three parents up.
     if let Ok(res) = app.path().resolve(MARKER, tauri::path::BaseDirectory::Resource) {
-        if let Some(root) = res.parent().and_then(|p| p.parent()) {
+        if let Some(root) = plain(res)
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        {
             candidates.push(root.to_path_buf());
         }
     }
+    // Next to the binary: where the bundler puts a sidecar and, on some
+    // layouts, the resources too.
+    candidates.push(exe_dir.to_path_buf());
     // The repo, from where this crate was compiled — what `tauri dev` needs.
     if let Some(tauri_dir) = PathBuf::from(env!("AIPASS_TAURI_DIR")).parent().and_then(|p| p.parent()) {
         candidates.push(tauri_dir.to_path_buf());
     }
-    candidates.push(exe_dir.to_path_buf());
     let mut up = exe_dir.to_path_buf();
     for _ in 0..6 {
         if let Some(parent) = up.parent() {
@@ -64,14 +96,41 @@ const NODE_SIDECAR_NAMES: &[&str] = &[
     "node",
 ];
 
-fn node_path(exe_dir: &std::path::Path) -> String {
-    for name in NODE_SIDECAR_NAMES {
-        let sidecar = exe_dir.join(name);
-        if sidecar.exists() {
-            return sidecar.to_string_lossy().to_string();
+fn node_path(exe_dir: &std::path::Path, resource_dir: Option<&std::path::Path>) -> String {
+    find_node(exe_dir, resource_dir)
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| "node".to_string())
+}
+
+/// The app's own Node, if the bundle carries it.
+///
+/// Two places to look: next to the binary (where the bundler puts a sidecar
+/// on Windows and macOS) and in the resource directory (where some layouts
+/// put it). A source checkout has neither and finds Node on PATH.
+fn find_node(exe_dir: &std::path::Path, resource_dir: Option<&std::path::Path>) -> Option<PathBuf> {
+    for dir in [Some(exe_dir), resource_dir].into_iter().flatten() {
+        for name in NODE_SIDECAR_NAMES {
+            let sidecar = dir.join(name);
+            if sidecar.exists() {
+                return Some(sidecar);
+            }
         }
     }
-    "node".to_string()
+    None
+}
+
+/// The `.aipass` directory: the override, or `<home>/.aipass`.
+///
+/// The Node side reads `AIPASS_HOME` as the `.aipass` directory itself
+/// (`harness/settings.mjs`), so the shell reads it the same way — one
+/// override, one meaning, on every platform. A run that points it at a
+/// scratch directory (the install ladder does) then keeps the real home
+/// untouched, log included.
+fn aipass_home() -> PathBuf {
+    match std::env::var("AIPASS_HOME") {
+        Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+        _ => home_dir().join(".aipass"),
+    }
 }
 
 /// `~/.aipass/settings.json` → { "root": "C:\\…" } — the same file the window
@@ -80,8 +139,22 @@ fn node_path(exe_dir: &std::path::Path) -> String {
 /// is the only file that names a root, its value is migrated into
 /// settings.json once, so the two files can never disagree again.
 fn last_root() -> Option<PathBuf> {
-    let dir = home_dir();
-    let settings_path = dir.join(".aipass").join("settings.json");
+    match std::env::var("AIPASS_HOME") {
+        Ok(dir) if !dir.trim().is_empty() => last_root_in_aipass(&PathBuf::from(dir)),
+        _ => last_root_in(&home_dir()),
+    }
+}
+
+/// The same lookup, against a named home — so the migration can be tested
+/// without touching the real one.
+fn last_root_in(dir: &std::path::Path) -> Option<PathBuf> {
+    last_root_in_aipass(&dir.join(".aipass"))
+}
+
+/// The same lookup, against the `.aipass` directory itself — the shape the
+/// `AIPASS_HOME` override names.
+fn last_root_in_aipass(dir: &std::path::Path) -> Option<PathBuf> {
+    let settings_path = dir.join("settings.json");
     if let Ok(text) = std::fs::read_to_string(&settings_path) {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
             if let Some(root) = json.get("root").and_then(|v| v.as_str()) {
@@ -94,15 +167,30 @@ fn last_root() -> Option<PathBuf> {
     }
     // One-way migration from the legacy file. A root that no longer exists
     // migrates nowhere — settings.json keeps no dead path.
-    let legacy = dir.join(".aipass").join("desktop.json");
+    let legacy = dir.join("desktop.json");
     if let Ok(text) = std::fs::read_to_string(&legacy) {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
             if let Some(root) = json.get("root").and_then(|v| v.as_str()) {
                 let path = PathBuf::from(root);
                 if path.exists() {
-                    let migrated = serde_json::json!({ "root": root });
-                    let _ = std::fs::write(&settings_path, serde_json::to_string_pretty(&migrated).unwrap_or_default());
-                    let _ = std::fs::remove_file(&legacy);
+                    // The settings file is MERGED, never replaced. It holds the
+                    // mode, the model, the compaction budget, the path rules and
+                    // the project list; a migration that wrote {"root":…} over
+                    // it took all of that with it. Only the root changes here.
+                    let mut merged = std::fs::read_to_string(&settings_path)
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                        .filter(|v| v.is_object())
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    merged["root"] = serde_json::Value::String(root.to_string());
+                    let written =
+                        std::fs::write(&settings_path, serde_json::to_string_pretty(&merged).unwrap_or_default());
+                    // The legacy file goes only after the write landed: a
+                    // failed write must not take the only copy of the root
+                    // with it.
+                    if written.is_ok() {
+                        let _ = std::fs::remove_file(&legacy);
+                    }
                     return Some(path);
                 }
             }
@@ -144,7 +232,7 @@ fn stop_backend(pid: u32) {
 /// has nowhere to land, so a packaged crash used to leave nothing readable
 /// behind. The supervisor redirects the child's output here instead.
 fn backend_log_file() -> Option<std::fs::File> {
-    let dir = home_dir().join(".aipass").join("logs");
+    let dir = aipass_home().join("logs");
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join("desktop-backend.log");
     if let Ok(meta) = std::fs::metadata(&path) {
@@ -280,10 +368,21 @@ impl Backend {
 /// guessed — the window must look at the same port the backend is on.
 fn backend_port() -> Result<u16, Box<dyn std::error::Error>> {
     match std::env::var("AIPASS_DESKTOP_PORT") {
-        Ok(raw) if !raw.trim().is_empty() => raw
-            .trim()
-            .parse::<u16>()
-            .map_err(|_| format!("AIPASS_DESKTOP_PORT is not a port: {raw}").into()),
+        Ok(raw) if !raw.trim().is_empty() => {
+            let port: u16 = raw
+                .trim()
+                .parse()
+                .map_err(|_| format!("AIPASS_DESKTOP_PORT is not a port: {raw}"))?;
+            // Port 0 is a port NUMBER, not a port: the child reads it as "any
+            // free port" and binds one the OS picked, while the window has to
+            // open a URL for it and the readiness probe has to connect to it.
+            // Neither can name a port nobody was told. Refuse it here, and the
+            // Node side refuses it too (desktop/main.mjs) so the two agree.
+            if port == 0 {
+                return Err(format!("AIPASS_DESKTOP_PORT is not a port: {raw}").into());
+            }
+            Ok(port)
+        }
         _ => Ok(8790),
     }
 }
@@ -302,6 +401,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .setup(|app| {
             let exe = std::env::current_exe()?;
             let exe_dir = exe.parent().ok_or("no executable directory")?.to_path_buf();
+            let resource_dir = app.path().resource_dir().ok();
             let root = find_root(app, &exe_dir);
             let entry = root.join("aipass-bridge").join("harness").join("rpc.mjs");
             let project_root = last_root().unwrap_or_else(home_dir);
@@ -314,12 +414,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // beside a custom-port backend adopts it rather than spawning a
             // second one on a port nothing else is using.
             let backend_port = backend_port()?;
+            // What the backend is actually run with — the one line that says
+            // which files the installed build is running, when somebody asks
+            // why the app and the checkout disagree.
+            note(&format!(
+                "backend: node={} entry={} root={}",
+                node_path(&exe_dir, resource_dir.as_deref()),
+                entry.display(),
+                project_root.display()
+            ));
             let backend = Arc::new(Backend {
                 child: Mutex::new(None),
                 quitting: AtomicBool::new(false),
                 fails: Mutex::new(0),
                 next_try: Mutex::new(Instant::now()),
-                node: node_path(&exe_dir),
+                node: node_path(&exe_dir, resource_dir.as_deref()),
                 entry,
                 port: backend_port,
                 cwd: project_root.clone(),
@@ -393,11 +502,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
 
             let show_item = MenuItem::with_id(app, "show", "แสดงหน้าต่าง", true, None::<&str>)?;
+            let cli_item = MenuItem::with_id(app, "install-cli", "ติดตั้ง CLI (aipass)", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "ออก", true, None::<&str>)?;
-            let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let tray_menu = Menu::with_items(app, &[&show_item, &cli_item, &quit_item])?;
 
             let tray = tauri::tray::TrayIconBuilder::new()
-                .icon(app.default_window_icon().cloned().unwrap())
+                .icon(tray_icon(app.handle()))
+                // The menu bar draws a template image as a mask, so macOS
+                // needs the silhouette; the flag is a no-op elsewhere.
+                .icon_as_template(cfg!(target_os = "macos"))
                 .tooltip("aipass desktop")
                 .menu(&tray_menu)
                 .on_menu_event(|app, event| {
@@ -406,6 +519,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.show();
                                 let _ = window.set_focus();
+                            }
+                        }
+                        // The CLI is the same program in a terminal, and the
+                        // bundle already carries it. Writing the shim is a
+                        // change to the machine, so the menu item is the
+                        // consent: nothing is written until somebody asks.
+                        "install-cli" => {
+                            let message = match install_cli_shim(app) {
+                                Ok(path) => {
+                                    // The shim is only a command when its
+                                    // directory is on PATH; the item is the
+                                    // consent to put it there.
+                                    let on_path = path
+                                        .parent()
+                                        .map(|dir| add_to_user_path(dir))
+                                        .unwrap_or_else(|| Err("no directory".to_string()));
+                                    match on_path {
+                                        Ok(()) => format!(
+                                            "ติดตั้งแล้ว — {} (อยู่ใน PATH แล้ว — เปิดเทอร์มินใหม่เพื่อใช้)",
+                                            path.display()
+                                        ),
+                                        Err(err) => format!(
+                                            "ติดตั้งแล้ว — {} (เพิ่มใน PATH ไม่สำเร็จ: {err})",
+                                            path.display()
+                                        ),
+                                    }
+                                }
+                                Err(err) => format!("ติดตั้งไม่สำเร็จ: {err}"),
+                            };
+                            note(&message);
+                            // The window may be in the tray, so the tray says
+                            // it too — and the log keeps it for later.
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.set_title(&format!("aipass desktop — {message}"));
                             }
                         }
                         // Exit runs the same path as the window closing:
@@ -456,22 +603,455 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// the backend that serves settings is not up yet — so read it directly;
 /// "auto" hands the frame back to the system, which is what auto means.
 fn desktop_theme() -> Option<tauri::Theme> {
-    let path = std::env::var("AIPASS_HOME")
-        .map(|home| PathBuf::from(home).join("settings.json"))
+    let path = aipass_home().join("settings.json");
+    let choice = std::fs::read_to_string(path)
         .ok()
-        .or_else(|| {
-            std::env::var("USERPROFILE")
-                .or_else(|_| std::env::var("HOME"))
-                .ok()
-                .map(|home| PathBuf::from(home).join(".aipass").join("settings.json"))
-        });
-    let choice = path
-        .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|json| json.get("theme")?.as_str().map(str::to_owned));
     match choice.as_deref() {
         Some("light") => Some(tauri::Theme::Light),
         Some("auto") => None,
         _ => Some(tauri::Theme::Dark),
+    }
+}
+
+/// The tray icon: the silhouette on macOS, the app's mark everywhere else.
+///
+/// The menu bar draws a template image as a mask — only the alpha channel
+/// matters — so the app's mark (a filled rounded square) would be a solid
+/// blob there, with the star invisible inside it. The template is the
+/// star by itself, written by `icons/make-icons.mjs` next to the PNGs and
+/// embedded raw, so the shell needs no image decoder to use it.
+fn tray_icon<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::image::Image<'static> {
+    #[cfg(target_os = "macos")]
+    {
+        return tauri::image::Image::new_owned(
+            TEMPLATE_RGBA.to_vec(),
+            TEMPLATE_EDGE,
+            TEMPLATE_EDGE,
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        app.default_window_icon()
+            .cloned()
+            .map(|icon| icon.to_owned())
+            .unwrap_or_else(|| {
+                // A build with no icon at all must not take the app down
+                // before the window exists; the tray still works, it is only
+                // blank.
+                tauri::image::Image::new_owned(vec![0u8; 4], 1, 1)
+            })
+    }
+}
+
+/// The template's edge, in pixels — 44 is 22pt at the retina scale the menu
+/// bar uses.
+#[allow(dead_code)]
+const TEMPLATE_EDGE: u32 = 44;
+
+/// The template's raw RGBA, written by `icons/make-icons.mjs` beside the
+/// PNGs. Embedded raw so the shell needs no image decoder to use it.
+#[allow(dead_code)]
+const TEMPLATE_RGBA: &[u8] = include_bytes!("../icons/template.rgba");
+
+/// Where the CLI shim goes: a per-user bin directory, never a system one.
+///
+/// A shim in a directory that is not on PATH is still worth having — the
+/// window says where it is — but the caller is told, so the person can add
+/// the directory or move the file.
+fn cli_shim_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        let base = std::env::var("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home_dir().join("AppData").join("Local"));
+        base.join("aipass").join("bin").join("aipass.cmd")
+    }
+    #[cfg(not(windows))]
+    {
+        home_dir().join(".local").join("bin").join("aipass")
+    }
+}
+
+/// The shim's text: the app's own Node, running the app's own CLI.
+///
+/// The shim does not need Node on PATH — the app ships one — so a machine
+/// without Node still gets a working `aipass`.
+fn cli_shim_script(node: &std::path::Path, cli: &std::path::Path) -> String {
+    #[cfg(windows)]
+    {
+        format!(
+            "@echo off\r\nrem aipass - the CLI of the installed aipass desktop.\r\n\"{}\" \"{}\" %*\r\n",
+            node.display(),
+            cli.display()
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        format!(
+            "#!/bin/sh\n# aipass - the CLI of the installed aipass desktop.\nexec \"{}\" \"{}\" \"$@\"\n",
+            node.display(),
+            cli.display()
+        )
+    }
+}
+
+/// Put the shim's directory on the user's PATH.
+///
+/// A shim in a directory that is not on PATH is a file nobody can run: the
+/// window can say where it is, but the person still has to edit PATH by hand
+/// — the step that never happens, so the CLI the app installed never gets
+/// used. The tray item is already the consent to write to the machine, so the
+/// directory goes on PATH with it.
+///
+/// The user PATH only (`HKCU\Environment`): the machine PATH needs an
+/// administrator and is never touched. `reg.exe` is the registry without a
+/// crate, and it is the one tool that writes a PATH of any length (setx
+/// truncates at 1024 characters).
+fn add_to_user_path(dir: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let dir = dir.to_string_lossy().to_string();
+        // "Path    REG_EXPAND_SZ    C:\one;C:\two" — the value is everything
+        // after the type, and it may contain spaces.
+        let query = Command::new("reg")
+            .args(["query", r"HKCU\Environment", "/v", "Path"])
+            .output()
+            .map_err(|err| format!("reg query failed: {err}"))?;
+        let stdout = String::from_utf8_lossy(&query.stdout);
+        let (kind, value) = match reg_path_value(&stdout) {
+            Some(pair) => pair,
+            // No PATH for this user yet: create one, same type as Windows
+            // writes by default.
+            None => ("REG_EXPAND_SZ".to_string(), String::new()),
+        };
+        let Some(with_dir) = path_with_dir(&value, &dir) else {
+            return Ok(()); // already there
+        };
+        let status = Command::new("reg")
+            .args(["add", r"HKCU\Environment", "/v", "Path", "/t", &kind, "/d", &with_dir, "/f"])
+            .status()
+            .map_err(|err| format!("reg add failed: {err}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("reg add exited with {status}"))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // The shell profile is the user's own file and the way a Unix PATH
+        // grows; the app only says where the shim is, and leaves the profile
+        // alone unless it is already there.
+        let _ = dir;
+        Ok(())
+    }
+}
+
+/// The PATH value and its registry type, read out of `reg query` output.
+///
+/// The value is everything after the type column, so a PATH with spaces in
+/// it survives: `Path    REG_EXPAND_SZ    C:\Program Files\thing` keeps
+/// `C:\Program Files\thing`.
+#[cfg(windows)]
+fn reg_path_value(stdout: &str) -> Option<(String, String)> {
+    let line = stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with("Path"))?;
+    for kind in ["REG_EXPAND_SZ", "REG_SZ"] {
+        if let Some(at) = line.find(kind) {
+            let value = line[at + kind.len()..].trim().to_string();
+            return Some((kind.to_string(), value));
+        }
+    }
+    None
+}
+
+/// The PATH with `dir` in it — `None` when the directory is already there.
+///
+/// The comparison is the same one Windows makes when it reads PATH: the
+/// entries are separated by `;`, a trailing backslash is not a difference,
+/// and the case is not a difference either.
+#[cfg(windows)]
+fn path_with_dir(value: &str, dir: &str) -> Option<String> {
+    let needle = dir.trim().trim_end_matches('\\').to_lowercase();
+    let already = value
+        .split(';')
+        .any(|part| part.trim().trim_end_matches('\\').to_lowercase() == needle);
+    if already {
+        return None;
+    }
+    let trimmed = value.trim().trim_end_matches(';');
+    if trimmed.is_empty() {
+        return Some(dir.to_string());
+    }
+    Some(format!("{trimmed};{dir}"))
+}
+
+/// Write the CLI shim. The tray item is the consent: nothing is written
+/// until somebody asks for it.
+fn install_cli_shim<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+    let exe_dir = exe
+        .parent()
+        .ok_or_else(|| "no executable directory".to_string())?
+        .to_path_buf();
+    let resource_dir = app.path().resource_dir().ok();
+    let node = find_node(&exe_dir, resource_dir.as_deref())
+        .ok_or_else(|| "the app's own Node is not beside it".to_string())?;
+    let cli = app
+        .path()
+        .resolve("aipass-bridge/bin/aipass.mjs", tauri::path::BaseDirectory::Resource)
+        .map(plain)
+        .map_err(|err| format!("the CLI is not in the bundle: {err}"))?;
+    let shim = cli_shim_path();
+    if let Some(parent) = shim.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    std::fs::write(&shim, cli_shim_script(&node, &cli)).map_err(|err| err.to_string())?;
+    #[cfg(not(windows))]
+    make_executable(&shim)?;
+    Ok(shim)
+}
+
+/// A shim nobody can run is not a shim.
+#[cfg(not(windows))]
+fn make_executable(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(path)
+        .map_err(|err| err.to_string())?
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).map_err(|err| err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// A throwaway home: `<temp>/aipass-tauri-<pid>-<n>`, with the `.aipass`
+    /// folder the settings live in.
+    fn scratch_home() -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("aipass-tauri-{}-{}", std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".aipass")).expect("scratch home");
+        dir
+    }
+
+    /// A project folder the migration can point at — it has to exist, or the
+    /// root migrates nowhere.
+    fn scratch_project(home: &std::path::Path) -> PathBuf {
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).expect("scratch project");
+        project
+    }
+
+    #[test]
+    fn the_legacy_migration_keeps_the_settings_it_finds() {
+        // The settings file holds the mode, the model, the compaction budget
+        // and the path rules. The migration writes one key, so it has to merge
+        // — a migration that replaced the file took all of that with it.
+        let home = scratch_home();
+        let project = scratch_project(&home);
+        let settings = home.join(".aipass").join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"mode":"ask","defaultModel":"some-model","compaction":{"contextTokens":24000}}"#,
+        )
+        .expect("settings");
+        let legacy = home.join(".aipass").join("desktop.json");
+        std::fs::write(
+            &legacy,
+            serde_json::to_string(&serde_json::json!({ "root": project.to_string_lossy() })).expect("json"),
+        )
+        .expect("legacy");
+
+        let found = last_root_in(&home);
+        assert_eq!(found.as_deref(), Some(project.as_path()), "the root migrated");
+
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).expect("settings")).expect("json");
+        assert_eq!(after["root"].as_str(), Some(project.to_string_lossy().as_ref()));
+        assert_eq!(after["mode"].as_str(), Some("ask"), "the mode survived");
+        assert_eq!(after["defaultModel"].as_str(), Some("some-model"), "the model survived");
+        assert_eq!(
+            after["compaction"]["contextTokens"].as_u64(),
+            Some(24000),
+            "the compaction budget survived"
+        );
+        assert!(!legacy.exists(), "the legacy file is gone once the root is written");
+    }
+
+    #[test]
+    fn the_legacy_migration_creates_a_settings_file_when_there_is_none() {
+        let home = scratch_home();
+        let project = scratch_project(&home);
+        let legacy = home.join(".aipass").join("desktop.json");
+        std::fs::write(
+            &legacy,
+            serde_json::to_string(&serde_json::json!({ "root": project.to_string_lossy() })).expect("json"),
+        )
+        .expect("legacy");
+
+        let found = last_root_in(&home);
+        assert_eq!(found.as_deref(), Some(project.as_path()));
+        let settings = home.join(".aipass").join("settings.json");
+        assert!(settings.exists(), "the settings file was written");
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).expect("settings")).expect("json");
+        assert_eq!(after["root"].as_str(), Some(project.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn a_settings_file_that_already_names_a_root_is_left_alone() {
+        // The legacy file is only a fallback: a settings file that already
+        // names a live root is the truth, and the migration does not run.
+        let home = scratch_home();
+        let project = scratch_project(&home);
+        let settings = home.join(".aipass").join("settings.json");
+        std::fs::write(
+            &settings,
+            serde_json::to_string(&serde_json::json!({ "root": project.to_string_lossy(), "mode": "ask" })).expect("json"),
+        )
+        .expect("settings");
+        let legacy = home.join(".aipass").join("desktop.json");
+        std::fs::write(
+            &legacy,
+            serde_json::to_string(&serde_json::json!({ "root": home.join("gone").to_string_lossy() })).expect("json"),
+        )
+        .expect("legacy");
+
+        let found = last_root_in(&home);
+        assert_eq!(found.as_deref(), Some(project.as_path()));
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).expect("settings")).expect("json");
+        assert_eq!(after["mode"].as_str(), Some("ask"), "the settings were not rewritten");
+        assert!(legacy.exists(), "the legacy file stays: the settings file was never migrated");
+    }
+
+    #[test]
+    fn the_aipass_home_override_names_the_aipass_directory_itself() {
+        // The Node side reads AIPASS_HOME as the `.aipass` directory, so the
+        // shell reads it the same way: one override, one meaning. The lookup
+        // is split so a test can name a directory without touching the
+        // environment.
+        let home = scratch_home();
+        let project = scratch_project(&home);
+        let aipass = home.join(".aipass");
+        std::fs::write(
+            &aipass.join("settings.json"),
+            serde_json::to_string(&serde_json::json!({ "root": project.to_string_lossy() })).unwrap_or_default(),
+        )
+        .expect("settings");
+        let found = last_root_in_aipass(&aipass);
+        assert_eq!(found.as_deref(), Some(project.as_path()));
+    }
+
+    #[test]
+    fn the_windows_long_path_prefix_is_stripped() {
+        // Node cannot run a `\\?\` path: it reads the prefix as a directory
+        // and the backend dies with `lstat 'C:'`. The installed app hit
+        // exactly that, and the install ladder is what found it.
+        assert_eq!(
+            plain(PathBuf::from(r"\\?\C:\apps\aipass desktop\node.exe")),
+            PathBuf::from(r"C:\apps\aipass desktop\node.exe")
+        );
+        assert_eq!(
+            plain(PathBuf::from(r"\\?\UNC\server\share\aipass")),
+            PathBuf::from(r"\\server\share\aipass")
+        );
+        // A path that is already plain stays exactly as it was.
+        assert_eq!(
+            plain(PathBuf::from(r"C:\apps\aipass")),
+            PathBuf::from(r"C:\apps\aipass")
+        );
+    }
+
+    #[test]
+    fn the_cli_shim_runs_the_apps_own_node() {
+        // The shim must not need Node on PATH — the app ships one — so it
+        // names the node beside the app and the CLI inside the bundle.
+        let script = cli_shim_script(
+            std::path::Path::new("/apps/node"),
+            std::path::Path::new("/apps/aipass-bridge/bin/aipass.mjs"),
+        );
+        assert!(script.contains("/apps/node"), "the node is named: {script}");
+        assert!(
+            script.contains("/apps/aipass-bridge/bin/aipass.mjs"),
+            "the CLI is named: {script}"
+        );
+        #[cfg(windows)]
+        assert!(script.contains("%*"), "the arguments are passed on: {script}");
+        #[cfg(not(windows))]
+        assert!(script.contains("\"$@\""), "the arguments are passed on: {script}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_reg_path_value_keeps_a_path_with_spaces_in_it() {
+        // `reg query` prints the value after the type column, so a PATH with
+        // spaces in it survives the round trip.
+        let out = "\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    C:\\Program Files\\thing;C:\\other\r\n\r\n";
+        let (kind, value) = reg_path_value(out).expect("the value is there");
+        assert_eq!(kind, "REG_EXPAND_SZ");
+        assert_eq!(value, r"C:\Program Files\thing;C:\other");
+        // A PATH that is not there is not invented.
+        assert!(reg_path_value("HKEY_CURRENT_USER\\Environment\r\n    Temp    REG_SZ    C:\\Temp\r\n").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_path_gains_the_directory_once() {
+        let dir = r"C:\Users\me\AppData\Local\aipass\bin";
+        // Already there: nothing to write.
+        assert_eq!(path_with_dir(&format!("C:\\other;{dir}"), dir), None);
+        // A trailing backslash is not a difference, and neither is the case.
+        assert_eq!(path_with_dir(&format!(r"C:\other;{dir}\"), dir), None);
+        assert_eq!(path_with_dir(&format!(r"C:\other;{}\", dir.to_lowercase()), dir), None);
+        // Not there: the directory is appended, and the old value is kept.
+        assert_eq!(
+            path_with_dir(r"C:\other", dir),
+            Some(format!(r"C:\other;{dir}"))
+        );
+        // An empty PATH becomes just the directory.
+        assert_eq!(path_with_dir("", dir), Some(dir.to_string()));
+    }
+
+    #[test]
+    fn the_cli_shim_lands_in_a_per_user_directory() {
+        // A shim in a system directory would need an administrator; a shim in
+        // the user's own directory needs nobody.
+        let path = cli_shim_path();
+        #[cfg(windows)]
+        assert!(path.ends_with("aipass.cmd"), "the shim is a batch file: {path:?}");
+        #[cfg(not(windows))]
+        assert!(path.ends_with("aipass"), "the shim is a shell script: {path:?}");
+        let text = path.to_string_lossy().to_lowercase();
+        for system in ["/usr/", "/bin/", "c:\\windows", "program files"] {
+            assert!(!text.contains(system), "the shim is not in {system}: {path:?}");
+        }
+    }
+
+    #[test]
+    fn the_tray_template_is_the_mark_and_not_a_block() {
+        // The menu bar draws a template image as a mask, so only the alpha
+        // channel matters: the mark is opaque and the rest is transparent.
+        // A filled square would be a solid blob in the menu bar.
+        let total = (TEMPLATE_EDGE * TEMPLATE_EDGE) as usize;
+        assert_eq!(TEMPLATE_RGBA.len(), total * 4, "the template is RGBA");
+        let opaque = TEMPLATE_RGBA
+            .iter()
+            .skip(3)
+            .step_by(4)
+            .filter(|alpha| **alpha > 0)
+            .count();
+        assert!(opaque > total / 10, "the mark is there: {opaque} of {total}");
+        assert!(opaque < total * 4 / 5, "it is the mark, not a filled block: {opaque}");
+        assert_eq!(TEMPLATE_RGBA[3], 0, "the corner is transparent");
     }
 }

@@ -122,10 +122,36 @@ The state P1 started from; the implementations above resolved every row.
 ```
 
   - `enabled` (default `true`) — a disabled server is not spawned, still listed.
-  - `risk` (default `"write"`) — see §7.
+  - `risk` (default `"write"`) — see §7. A PROJECT-scoped server may not
+    declare `"read"`: a repository cannot talk itself into the tier that never
+    asks.
   - `cwd` (default: inherit) — relative to the project root for project-scope.
   - **Dedup fix:** project overrides home, as the comment has always claimed.
   - The file is created `0o600` where the OS has modes, like the token file.
+
+- **The approval list** (`~/.aipass/mcp.json`) — who may run a server that
+  lives in a repository:
+
+```json
+{
+  "approved": ["filesystem"],
+  "approvedByProject": { "D:\\work\\repo": ["git-tools"] }
+}
+```
+
+  - A PROJECT-scoped server (one declared in `<root>/.aipass/mcp.json`) runs
+    only when its name is in the `approved` list of the **home** file — the one
+    file a repository cannot write. A project's own `approved` list is a
+    REQUEST, not a consent: otherwise a repo would approve itself.
+  - A server that is not approved is listed as blocked, with the message
+    naming the file that declares it, the file the approval goes in, and the
+    exact edit that would approve it.
+  - `aipass mcp add --scope project` records the approval — adding a server is
+    the user saying yes.
+  - A project-scoped child inherits only the variables its own config names,
+    plus a small safe set (PATH, HOME, and on Windows SystemRoot/TEMP/…).
+    A HOME-scoped server keeps the full environment: it is the user's own
+    file.
 
 - **Plugins enabled list** (`settings.plugins`). Semantics made precise because
   the install surface starts writing it:
@@ -238,6 +264,12 @@ that silently vanished.
   operator's explicit "this server is read-only, never ask" (an honest trust
   statement, like a path rule — not a verification). The value is per server,
   chosen at add time, editable, and shown on the server row.
+  (2026-10-20: the plugin side of the same hole closed too — a plugin
+  **marker** now rides the gate as well. A declared risk is taken as given,
+  and a marker that declared none is classified like a **write**, because a
+  plugin's code runs in this process with the harness's access
+  (`permissions.mjs#classifyPlugin`). The MCP mapping above is unchanged: a
+  server still says for itself, per server.)
 - **`mcp.list` grows a status row per server**, keeping the flat `tools` array
   for the existing `/mcp` output:
 

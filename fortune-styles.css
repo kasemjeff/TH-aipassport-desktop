@@ -1,0 +1,37 @@
+/* Additional styles for fortune-telling app */
+:root {
+    --fortune-primary: #8a6d3b;
+    --fortune-secondary: #d4b483;
+    --fortune-accent: #e74c3c;
+    --fortune-bg: #1a1510;
+    --fortune-card: #2c241b;
+}
+
+/* Responsive adjustments */
+@media (max-width: 480px) {
+    .fortune-grid {
+        gap: 15px;
+    }
+    
+    .fortune-card {
+        padding: 20px;
+    }
+    
+    .fortune-title {
+        font-size: 1.8rem;
+    }
+}
+
+/* Print styles for fortune readings */
+@media print {
+    .fortune-button,
+    .fortune-input-group,
+    .fortune-card-title i {
+        display: none;
+    }
+    
+    .fortune-result {
+        border: none;
+        box-shadow: none;
+    }
+}

@@ -26,6 +26,7 @@ EXPOSE 6080 8787
 ENV DISPLAY=:99 \
     AIPASS_PORT=8787 \
     AIPASS_HOST=0.0.0.0 \
+    AIPASS_ALLOW_REMOTE=1 \
     AIPASS_MODEL=gemini-3.1-flash-lite
 
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf

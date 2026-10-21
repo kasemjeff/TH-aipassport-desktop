@@ -18,7 +18,7 @@ import { tempDir } from './harness.mjs';
 import { Overlay } from '../harness/overlay.mjs';
 import { SessionStore } from '../harness/session.mjs';
 import { createTools } from '../harness/tools.mjs';
-import { runTask } from '../harness/loop.mjs';
+import { runTask, cycleLength } from '../harness/loop.mjs';
 import { Emitter } from '../harness/events.mjs';
 import { REMINDER, preamble } from '../harness/protocol.mjs';
 
@@ -67,6 +67,37 @@ test('an EDIT that breaks the syntax is reported on the spot (R2)', async () => 
   assert.match(res, /syntax check failed/i);
 });
 
+test('a staged .json write is parsed, and the verdict rides the result (R2)', async () => {
+  // The same argument as the JavaScript check, at a fraction of the price:
+  // JSON.parse needs no process and no toolchain, and a staged package.json
+  // with a missing comma breaks every tool in the project the moment it lands.
+  const { tools } = setup();
+  const bad = await tools.write('package.json', '{ "name": "x", }\n');
+  assert.match(bad, /syntax check failed/i);
+  assert.match(bad, /json/i, 'the verdict says which grammar it checked');
+  const good = await tools.write('package.json', '{ "name": "x" }\n');
+  assert.match(good, /syntax check ok/);
+  const py = await tools.write('conf.py', 'x = (\n');
+  assert.ok(!/syntax check/.test(py), 'a file that is neither JavaScript nor JSON is left alone');
+});
+
+test('a tsconfig may carry comments and trailing commas — its own reader allows them', async () => {
+  // TypeScript reads a tsconfig as JSON with comments. A check that called
+  // that broken would send the model "fixing" a file that was right.
+  const { tools } = setup();
+  const res = await tools.write('tsconfig.json', '{\n  // the compiler options\n  "compilerOptions": {},\n}\n');
+  assert.match(res, /syntax check ok/, 'the lenient reader is used for a tsconfig');
+  const strict = await tools.write('data.json', '{ "a": 1, }\n');
+  assert.match(strict, /syntax check failed/i, 'and every other .json is read as JSON');
+});
+
+test('a JSON error names the place, so the fix is a place and not a hunt', async () => {
+  const { tools } = setup();
+  const res = await tools.write('broken.json', '{\n  "a": 1,\n  "b" 2\n}\n');
+  assert.match(res, /syntax check failed/i);
+  assert.match(res, /line \d+/, 'the line is named');
+});
+
 /* R1 — oscillation, the other no-progress shape --------------------------- */
 
 test('two steps trading places is caught as an oscillation (R1)', async () => {
@@ -85,6 +116,61 @@ test('two steps trading places is caught as an oscillation (R1)', async () => {
   assert.deepEqual(seen.map((p) => p.action), ['warn', 'stop']);
   assert.deepEqual(seen.map((p) => p.pattern), ['oscillation', 'oscillation']);
   assert.ok(session.entries.some((e) => e.type === 'note' && /trading places/.test(e.text)));
+});
+
+test('three steps going round in a circle is caught too (R1)', async () => {
+  // The wider round: read A, edit B, run the test, read A again … Every step
+  // looks new and the trip goes nowhere. The two-state swing cannot see it —
+  // the step three back is the same, not the step two back.
+  const { session, tools, overlay } = setup({ 'a.txt': 'a\n', 'b.txt': 'b\n', 'c.txt': 'c\n' });
+  const events = new Emitter();
+  const seen = [];
+  events.on('stagnation', (p) => seen.push(p));
+
+  const result = await runTask('compare the three files', {
+    bridge: scriptedLoop([
+      'NEED file a.txt', 'NEED file b.txt', 'NEED file c.txt',
+      'NEED file a.txt', 'NEED file b.txt', 'NEED file c.txt', 'NEED file a.txt',
+    ]),
+    tools, overlay, session, events,
+    options: { maxSteps: 10 }, first: true,
+  });
+
+  assert.equal(result.stopReason, 'stagnation', 'the round is stopped');
+  assert.deepEqual(seen.map((p) => p.action), ['warn', 'stop'], 'one correction, then out');
+  assert.deepEqual(seen.map((p) => p.pattern), ['circle', 'circle']);
+  assert.equal(seen[0].cycle, 3, 'and the round is named');
+  assert.ok(session.entries.some((e) => e.type === 'note' && /went round in a circle/.test(e.text)));
+});
+
+test('a run that keeps hearing itself stops on the first strike (R1)', async () => {
+  // The evidence side: the results come back the same, so the guard does not
+  // spend a correction on a run that has already shown it is stuck.
+  const { session, tools, overlay } = setup({ 'a.txt': 'a\n', 'b.txt': 'b\n', 'c.txt': 'c\n' });
+  const events = new Emitter();
+  const seen = [];
+  events.on('stagnation', (p) => seen.push(p));
+
+  const result = await runTask('compare the three files', {
+    bridge: scriptedLoop([
+      'NEED file a.txt', 'NEED file b.txt', 'NEED file c.txt',
+      'NEED file a.txt', 'NEED file b.txt', 'NEED file c.txt', 'NEED file a.txt',
+    ]),
+    tools, overlay, session, events,
+    options: { maxSteps: 10 }, first: true,
+  });
+
+  assert.equal(result.stopReason, 'stagnation');
+  const stat = session.entries.find((e) => e.type === 'run_stats');
+  assert.ok(stat.repeatedResults >= 2, 'the run heard itself repeat');
+});
+
+test('the circle detector reads a window, and only a real round (R1)', () => {
+  assert.equal(cycleLength(['A', 'B', 'C', 'A']), 3, 'three states, one lap');
+  assert.equal(cycleLength(['A', 'B', 'C', 'D', 'A']), 4, 'four states, one lap');
+  assert.equal(cycleLength(['A', 'B', 'A', 'B']), 0, 'the two-state swing is the old guard\'s job');
+  assert.equal(cycleLength(['A', 'A', 'A', 'A']), 0, 'a repeated step is the old guard\'s job');
+  assert.equal(cycleLength(['A', 'B', 'C', 'D']), 0, 'no lap, no round');
 });
 
 /* R3 — tool output is data, not instructions ------------------------------ */

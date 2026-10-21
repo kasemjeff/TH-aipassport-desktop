@@ -1,11 +1,21 @@
 # Harness & tool design
 
-How the agent harness works, the contracts each piece keeps, and what I would
-change next — findings first, then designs. It is a review of
-`aipass-bridge/harness/` as it stands (v0.2), written to be handed to
-whoever picks up the work. For the architecture around it, see
-[`TECH_STACK.md`](TECH_STACK.md); for what the app does, the
+How the agent harness works, the contracts each piece keeps, and the state of
+every finding. It is a review of `aipass-bridge/harness/` as it stands (v0.2),
+written to be handed to whoever picks up the work. For the architecture around
+it, see [`TECH_STACK.md`](TECH_STACK.md); for what the app does, the
 [README](../README.md).
+
+**How this document is read.** The first half is the current design: what one
+run does, what each piece promises, which guard fires when, and what every
+finding (F1–F10, P2-A…P2-D) turned into. It stands on its own — a reader who
+wants to know what the system does today stops at the end of it. The second
+half is **Appendix A**, the research and post-mortem log: the research rounds,
+the live incidents and the bug histories behind that shape, in the order they
+happened, each opening with the state it left behind. Nothing in the appendix
+is a plan; every "queued" in it was either shipped or dropped, and the entry
+says which. The per-change log is [`../CHANGELOG.md`](../CHANGELOG.md); the
+session log is [`WORKLOG.md`](WORKLOG.md).
 
 ## How one run works
 
@@ -20,18 +30,31 @@ run(task)
   ┌──────────────────────────────────────────────────────────────────┐
   │ send ONE user message                                            │
   │   turn 1: preamble + listing + task                              │
-  │   later:  every result of the previous reply, + REMINDER          │
+  │   later:  every result of the previous reply, + REMINDER         │
   │ model answers: prose + markers (NEED, EDIT, PLAN, DONE, …)       │
   │ parse markers        ← the whole reply is scanned                │
   │ execute each, in order, behind the permission gate               │
   │   reads      → run now                                           │
   │   writes     → land in the overlay, never on disk                │
+  │   RUN        → project the overlay into a throwaway copy         │
+  │                (sandbox.mjs): the staged edit is what the        │
+  │                command sees, the real tree stays untouched       │
   │   PLAN       → maybe stop and wait for a human                   │
   │   SUBAGENT   → run a whole child loop on a second conversation   │
   │ paste every result back as the next ONE message                  │
   └──────────────────────────────────────────────────────────────────┘
   │
   ├─ DONE (or prose-only after work, or nudges ×3, or step limit)
+  │  a DONE is a claim, so the loop does not leave on it unchecked:
+  │    finishCheck   → a read-only child runs the project's own check
+  │                   over the staged tree; a fail rides back as a
+  │                   correction instead of ending the run
+  │    requireCheck  → a DONE over a still-failing declared check is
+  │                   refused (done-unverified)
+  │    plan check    → a DONE with open checklist items is asked about
+  │    langCheck     → the closing message's share of Thai letters
+  │                   (thaiRatio) against minThaiRatio; one rewrite is
+  │                   asked for, never blocking
   ▼
 finished: summary, credits spent, pending changes → the window's Apply
 ```
@@ -42,6 +65,14 @@ keeps the history**. So the preamble goes out once and becomes part of the
 server's memory, every later turn is only the results, and "context is full"
 can only be answered by rotating conversations, not trimming messages.
 
+Two more facts the diagram hides, and both are load-bearing. A run **never
+writes to disk**: every write is a proposal in the overlay, and the only thing
+that writes is an explicit apply. A `RUN` therefore cannot see the tree the
+run itself has staged — which is why the projection exists. The staged tree is
+copied into a throwaway directory outside the project, the command runs there,
+and the disk is still untouched. "Stage a fix, run the check, get `PASS`" is
+true inside one run; nothing reaches the real tree until the person applies it.
+
 The step-by-step anatomy of that loop — every stage, guard, stop reason and
 event — is in [`LOOP_DESIGN.md`](LOOP_DESIGN.md).
 
@@ -50,17 +81,22 @@ event — is in [`LOOP_DESIGN.md`](LOOP_DESIGN.md).
 | module | contract | the invariant it protects |
 |---|---|---|
 | `protocol.mjs` | the marker grammar and the preamble, and nothing else | markers are prose — no brackets, no JSON, no key=value; everything structural drew a 403 |
+| `validate.mjs` | one shape check per call, before dispatch | a malformed call answers with one `err:` sentence instead of reaching an implementation that may throw |
 | `waf.mjs` | the one substitution table (`outbound`/`inbound`) + the risky-line drop list | every surface substitutes the same way; bytes on disk are exactly what the file had |
 | `loop.mjs` | send → parse → execute → paste results | results go back as ONE message; writes stop at the overlay; a plan gates the work |
 | `tools.mjs` | string in, string out, one function per marker | no tool ever writes to disk; a read cannot change anything |
 | `overlay.mjs` | a pending-edit filesystem over `Map<abs, string \| DELETED>` | a run that dies halfway leaves the tree untouched; diffs exist before anything changes |
 | `sandbox.mjs` | the overlay projected into a child-visible tree for one `RUN` | a child process sees the staged edit, and the disk is still never written by a run |
+| the checker (in `harness.mjs`) | a read-only child that runs the project's own check over the staged tree | a DONE is backed by a verdict the run cannot write for itself |
 | `permissions.mjs` | classify → rules → mode → ask | path rules outrank the mode — reads included (H9); nobody listening to a question means deny, not hang |
+| `rules.mjs` | one JSON file (`~/.aipass/rules.json`) keyed by project root | "always allow writes under src/" survives a restart |
 | `compact.mjs` | estimate bytes/4 → summarise → rotate → re-seed | summarisation happens in the conversation that still holds the history |
+| `lang.mjs` | `thaiRatio` over a reply, with code, URLs and commands excluded | the closing message is measured, not guessed at — one rewrite asked for, never a block |
 | `harness.mjs` | the facade a CLI, the window and tests all drive | the one-conversation resource is managed nowhere else; helpers propose into the parent overlay |
 | `session.mjs` | JSONL append with a forkable tree | a session opened next week reads as one continuous piece of work |
 | `skills.mjs` | plain markdown, configured → project → user → repo | the library grows without code changes, and one order serves the window and the CLI alike |
 | `plugins.mjs` | `setup(ctx)` in-process: markers, rpc, panels, settings; `apiVersion` checked against `PLUGIN_API` (1) | plugins are code you chose to install — not sandboxed, and it says so |
+| `stats.mjs` | the `run_stats` lines, rolled up | a run's refusals, nudges, stalls and checks are numbers, not an argument |
 
 What is already right and should not be "improved" away: unique-match REPLACE
 (refuses when FIND matches twice), binary detection by magic signature before
@@ -69,11 +105,214 @@ a run is wasted on mojibake, the listing that merges pending writes (issue
 deny when no one is listening, and helpers whose "yolo" is safe because every
 write is only ever a proposal.
 
+## The guards a run passes through
+
+Every one of these is live now, and each names the piece that enforces it. The
+order is roughly the order a step meets them; the four that decide how a run
+*ends* are the checker, the strict gate, the plan checkpoint and the language
+check.
+
+| guard | when it fires | what it does | lives in |
+|---|---|---|---|
+| context budget | against the message about to go out | over budget → summarise → rotate to a fresh conversation → re-seed it with the summary and the memory facts | `compact.mjs` |
+| shape check | every call, before dispatch | an empty `RUN`, a blank `NEED`/`SEARCH` or an uninstalled marker answers with one `err:` sentence | `validate.mjs` |
+| permission gate | every write, shell call and network fetch | classify → rules → mode → ask; path rules outrank the mode, reads included, and no listener means deny | `permissions.mjs` |
+| safety set | a config or lockfile mutation, a destructive `RUN` body | a question in every mode, ahead of grants; a shell-risk command inside the checker denies at once | `permissions.mjs`, `settings.mjs` |
+| projection | every `RUN` with something staged | the staged tree is copied into `~/.aipass/run/<project>/run-*` and the command runs there; heavy dirs are junctioned, the output is scrubbed back to the project root, the copy is deleted afterwards | `sandbox.mjs` |
+| repeat guard | a third identical call with nothing staged in between | refused with an `err:` that says what to change first | `loop.mjs` |
+| stagnation guard | the same step ×3, or two steps trading places | one correction, then the run stops | `loop.mjs` |
+| verify nudge (R4) | after the first staged code change | one soft nudge: run a test, read the file back, or say that nothing can be run here | `loop.mjs` |
+| checker (`finishCheck`) | a DONE over staged code | a read-only child runs the project's own check; a fail rides back as a correction, at most two verdicts a run | `harness.mjs` |
+| strict Verify (`requireCheck`) | a DONE over a still-failing declared check | refused as `done-unverified` — the evidence disagrees with the claim | `loop.mjs` |
+| plan checkpoint | a DONE with open checklist items | one message names them and asks; a second DONE ends the run either way | `loop.mjs` |
+| language check (`langCheck`) | the closing message | the share of Thai letters against `minThaiRatio`; one rewrite asked for, never a block | `lang.mjs` |
+| budgets | between tools, at every step, before a helper fan-out | tool calls, wall clock and credits are checked; a spent budget stops the run and records its reason | `loop.mjs` |
+| edge pacing | every send, from the first | a token bucket paces sends *before* the edge refuses; a refusal arms a wait ladder shared by every sender | `harness/bridge.mjs`, `extension/page.js` |
+
+Those four are the difference between a run that finishes and a run that
+*proves* it finished: the checker answers the DONE with a verdict, the strict
+gate refuses a DONE the verdict contradicts, the plan checkpoint asks about
+what is still open, and the language check makes the closing message say what
+the person asked for. None of them blocks a run twice — one correction each,
+then the run goes on or stops.
+
 ## Findings
 
-Status after the third pass: **F1–F10 and the P2 designs are all implemented.**
-On the way, three more latent bugs surfaced and were fixed with the findings
-that exposed them:
+**Every finding is closed.** F1–F10 and the four P2 designs shipped, and the
+three latent bugs that surfaced on the way shipped with them. Each entry below
+is written as the code stands: what the bug was, and what it is now. The
+pass-by-pass account of how they landed is in the appendix.
+
+### P0 — wrong behaviour, now fixed
+
+**F1. Markers inside fenced code were executed.** `parse()` scanned every
+line with no awareness of ``` fences, so a reply that *quotes* the protocol —
+documentation, an example, this repo's own README being read — had its
+`NEED`/`CREATE`/`EDIT` lines run for real, and a fenced `DONE` ended the run.
+Both `parse()` and `prose()` now toggle on a fence-open line and skip until it
+closes: fenced content stays visible as prose and never runs.
+
+**F2. `GIT` (and `RUN`) blocked the whole backend.** Both used `execSync`,
+which freezes the Node event loop — in the desktop backend that is the same
+process serving `/rpc` and `/events`, so every `git status` on a slow repo
+stopped the UI's heart for up to 15s (120s for RUN in yolo). `GIT` is
+classified read and allowed by default, so this happened in the default mode.
+Both are asynchronous child processes now, with the same timeouts they always
+had (120 s for `RUN`, 15 s for `GIT`): the backend keeps answering while a
+command runs.
+
+**F3. `GLOB` ignored everything before `**`.** With `**` in the pattern, only
+the *last* segment was matched against the file name — `src/**/*.ts` returned
+every `.ts` in the project, not under `src/`, and the model trusted it and
+edited the wrong tree. One segment-wise matcher replaced the two branches;
+`**` consumes one or more directories.
+
+**F4. `FETCH` would go anywhere and read everything.** The URL was
+`inbound()`-ed (restoring `LOOPBACK-IP` and friends) and fetched with no host
+check — so `FETCH HTTP-URL127.0.0.1:8787/...` could talk to the bridge
+itself, and any loopback or LAN service besides; `res.text()` was unbounded
+too. The guard is the shared `bridge/private-hosts.mjs`: loopback, private and
+metadata hosts are denied unless a rule or an env says otherwise, and the body
+is read incrementally under a ~2 MB cap.
+
+### P1 — protocol and context, now fixed
+
+**F5. Refusal detection was regex folklore.** The loop decided a tool call
+failed by matching `/^(no such|error|the text|that text)/` and
+`"is a …, not text."` against the result, so every tool that learned a new
+failure phrase quietly missed. Every tool result now carries a one-word status
+prefix — `err: …` on failure, bare text otherwise — and the loop keys on that
+one word. It is harness-generated text, so the model's side of the protocol
+did not move and the preamble stays byte-identical.
+
+**F6. Compaction was only checked between runs.** A long task inside one
+conversation grew past the budget mid-run; the check happened before the first
+message only. The budget is now re-checked against the message about to be
+sent, and an over-budget message rotates the conversation there (summarise →
+rotate → send summary + current results) in the middle of a run.
+
+**F7. The desktop inherited the CLI's 120s permission timeout.** Unanswered
+permission questions resolved to `deny` — right for a terminal you are
+watching, wrong for a window whose human is reading a diff. `PermissionEngine`
+takes `timeoutMs`, and the desktop passes `0` (wait); the CLI keeps 120s.
+
+**F8. The context budget was one number for every model and every language.**
+`contextTokens: 24_000` regardless of model, `bytes/4` regardless of script —
+Thai runs ~2× the tokens per byte of English, so compaction fired late exactly
+for the users this project is for. The budget is a per-model map now
+(`DEFAULT_MODEL_BUDGETS`), the divisor drops to 3 or 2 as the text becomes
+Thai or another wide script, and `WEB` results are counted by `estimate()`
+too — they were pasted into the server conversation but never measured.
+
+**F9. `SEARCH`/`GLOB` walked everything not in a five-entry hardcode.** No
+`.gitignore`, no file-size cap (`target/`, `vendor/`, `coverage/`, 500 MB
+logs — all read line by line, synchronously). Both read the root `.gitignore`
+now (`harness/gitignore.mjs`), `SKIP` carries the usual suspects, files over
+~1 MB are skipped, and `SEARCH` takes `-i`. `WRITE_KINDS`/`WRITERS` are one
+vocabulary, not two.
+
+**F10. The preamble promised parallel helpers that did not exist.**
+"keep going yourself while it runs" — but `SUBAGENT` awaited the child loop,
+so the parent waited and the model planned around a fiction. Both halves are
+true now: the preamble sentence is honest (a helper normally waits for its
+result, and `background: true` inside the SUBAGENT block is what lets it run
+beside the model), and the real fan-out exists — see P2-B.
+
+### P2 — designs worth having, all four shipped
+
+**A. `ATTACH` — the model gets the image or the document.** The marker
+mirrors the existing opt-in pattern:
+
+```
+ATTACH desktop/shot.png          ← queued, no body
+```
+
+The tool queues a part (exists-check, size cap, not under `SKIP`) and the loop
+attaches the queued parts to the next message it sends, then clears the queue.
+It is classified as read, and that changes nothing about the privacy story:
+every `NEED file` already pastes file contents upstream, so `ATTACH` only
+closes the gap for binary files, which `read` refuses. The preamble line sits
+behind the `--attach` flag, so the CLI's turn-1 bytes stay identical.
+
+**B. A conversation pool — helpers that actually run beside the parent.**
+`/v1/chat/completions` accepts a `conversation` field, and
+`createConversation` can mint one without adopting it: a helper takes its own
+conversation and the save/restore dance is gone. The harness fans the helpers
+of one reply out beside each other when `parallelHelpers` is on — the window
+has it on by default, the CLI keeps the explicit `--parallel-helpers`. A `WEB`
+lookup can run in a throwaway conversation instead of spending the working
+one's context (`--web-scratch` on the CLI). Live proof: two helpers fanned out
+3 ms apart into two temporary conversations, both generations accepted and
+answered concurrently.
+
+**C. "Always" grants and project rules survive a restart.** Both live in one
+JSON file per project (`~/.aipass/rules.json`, the same shape the UI already
+edits), so "always allow writes under src/" is still true after the backend
+dies, and the CLI can add a repeatable `--rule "pattern=decision"` on top. The
+engine does not change — only where `rules` and `grants` are seeded from.
+
+**D. Run metrics, and the reader that rolls them up.** Every run appends one
+`run_stats` line — stop reason, per-tool counts and latency, nudges,
+stagnations, verify prompts, firewall notes, step timings, credits spent — and
+`npm run stats` aggregates them. The counters grew with the harness
+(`repeatBlocks`, `langPrompts`, `novelResults`, `repeatedResults`,
+`checks`/`checkVerdict`, `doneUnverified`, `commitBlocks`), so F10-style
+protocol drift is caught as a number instead of guessed at.
+
+## The tool layer, going forward
+
+The contract every tool keeps — new tools included:
+
+1. **String in, string out.** No JSON, no objects; the model writes prose and
+   reads prose.
+2. **Status prefix.** `err: …` on failure, bare text on success (F5). The
+   loop never regex-guesses again.
+3. **Clip at `maxResult`.** Long output ends with `… truncated` and a hint
+   for paging (`read` already does this perfectly with its range hint).
+4. **WAF at the edge, once.** Tools return real text; `outbound` is applied
+   by the loop when results are assembled — never inside a tool.
+5. **Writes stop at the overlay.** A tool that changes the tree calls
+   `overlay.set`/`markDeleted`, never `fs.write*`.
+6. **Classify honestly.** `write`/`shell` risk means the permission gate can
+   hold it; `read` means it cannot change anything — which is why `FETCH`
+   must actually be true to that claim (F4).
+
+| tool | class | notes |
+|---|---|---|
+| `list`, `read`, `search`, `glob`, `git`, `skill` | read | local; async where it shells out, gitignore- and size-aware where it walks |
+| `fetch`, `web` | read, network | fetch guards private hosts and caps the body; `web` spends the conversation's context and appears in the account's chat history, and its `sources:` block is read out and its redirects resolved (`harness/web-sources.mjs`) so the model is given the article's own address |
+| `write`, `replace`, `delete`, `move` | write | overlay only; `replace` requires a unique FIND match |
+| `run` | shell | disabled unless `allowRun` |
+| `plan`, `todo`, `subagent` | control | handled by the loop, not the gate |
+| plugin markers | plugin's own | registered at runtime, never shadow a built-in |
+| `attach` | read | queues a part for the next message; announced only behind `--attach` |
+
+**Adding a tool — the checklist that keeps the protocol coherent:**
+
+1. one regex branch in `parse()` (prose-shaped, no brackets) and a
+   `MARKER_LINE` entry so `prose()` strips it;
+2. one function in `createTools()` obeying the contract above;
+3. classify it (`permissions.mjs`), not just a new set somewhere;
+4. one line in the preamble — behind an option flag if the CLI's turn-1
+   bytes must not move;
+5. a test that runs it through the loop with the gate in `ask` mode;
+6. a playbook file only if the tool needs technique, not just syntax.
+
+## Appendix A — The research and post-mortem log (Oct 2026)
+
+Everything below is history, in the order it happened: the research rounds
+that proposed a change, the live incidents that forced one, and the bug
+histories behind the shape the first half of this document describes. Each
+entry opens with the state it left behind, so a reader knows what is current
+without reading the story. Nothing here is a plan — the per-change log is
+[`../CHANGELOG.md`](../CHANGELOG.md) and the session log is
+[`WORKLOG.md`](WORKLOG.md).
+
+### The three passes (Oct 2026)
+
+**Now:** all three passes shipped; every finding they carried is closed and
+written up in the findings section above. The three latent bugs that surfaced
+on the way shipped with them:
 
 - The permission timeout path called `resolveOnce`, a function that never
   existed — the "deny after 120s" behaviour had never actually worked (it
@@ -114,158 +353,11 @@ What each pass changed, briefly:
   proof below: two helpers fanned out 3 ms apart into two temporary
   conversations, both generations accepted and answered concurrently).
 
-### P0 — wrong behaviour today
+### Research round (Oct 2026): four deltas, each from a named source
 
-**F1. Markers inside fenced code are executed.** `parse()` scans every line
-with no awareness of ``` fences, so a reply that *quotes* the protocol —
-documentation, an example, this repo's own README being read — has its
-`NEED`/`CREATE`/`EDIT` lines run for real. A fenced `DONE` ends the run.
-Fix is two lines in both `parse()` and `prose()`: toggle on a fence-open
-line, skip until it closes. Fenced content stays visible as prose.
-
-**F2. `GIT` (and `RUN`) block the whole backend.** Both use `execSync`, which
-freezes the Node event loop — in the desktop backend that is the same process
-serving `/rpc` and `/events`, so every `git status` on a slow repo stops the
-UI's heart for up to 15s (120s for RUN in yolo). `GIT` is classified read and
-allowed by default, so this happens in the default mode. The loop already awaits
-tools (`fetch` and `web` are async), so the fix is mechanical: promisified
-`exec` with the same timeouts.
-
-**F3. `GLOB` ignores everything before `**`.** When the pattern contains
-`**`, only the *last* segment is matched against the file name —
-`src/**/*.ts` returns every `.ts` in the project, not under `src/`. The model
-trusts it and edits the wrong tree. Replace the two branches with one
-segment-wise matcher where `**` consumes one or more directories.
-
-**F4. `FETCH` will go anywhere and read everything.** The URL is `inbound()`-ed
-(restoring `LOOPBACK-IP` and friends) and fetched with no host check — so
-`FETCH HTTP-URL127.0.0.1:8787/...` can talk to the bridge itself, and any
-loopback or LAN service besides. `res.text()` is also unbounded. Guard: deny
-loopback/private/metadata hosts unless a rule or env says otherwise, and cap
-the body at ~2 MB by reading the stream incrementally.
-
-### P1 — protocol and context
-
-**F5. Refusal detection is regex folklore.** The loop decides a tool call
-failed by matching `/^(no such|error|the text|that text)/` and
-`"is a …, not text."` against the result. Every tool that learns a new failure
-phrase quietly misses. Give every tool result a one-word status prefix —
-`err: …` / plain text otherwise. It is harness-generated text, so the model's
-side of the protocol does not move and the preamble stays byte-identical.
-
-**F6. Compaction is only checked between runs.** A long task inside one
-conversation grows past the budget mid-run; the check happens before the
-first message only. Re-check when assembling the results message, and rotate
-there (summarise → rotate → send summary + current results) if over.
-
-**F7. The desktop inherits the CLI's 120s permission timeout.** Unanswered
-permission questions resolve to `deny`. Right for a terminal you are watching;
-wrong for a window whose human is reading a diff. `PermissionEngine` already
-takes `timeoutMs` — the desktop should pass `0` (wait), the CLI keeps 120s.
-
-**F8. The context budget is one number for every model and every language.**
-`contextTokens: 24_000` regardless of model, `bytes/4` regardless of script —
-Thai runs ~2× the tokens per byte of English, so compaction fires late
-exactly for the users this project is for. Make the budget a per-model map
-(the bridge knows the model) with conservative defaults, and either use
-`bytes/3` when the session text is mostly non-Latin or just lower the
-default. Note `WEB` results are pasted into the server conversation but never
-counted by `estimate()` — count them too.
-
-**F9. `SEARCH`/`GLOB` walk everything not in a five-entry hardcode.** No
-`.gitignore`, no file-size cap (`target/`, `vendor/`, `coverage/`, 500 MB
-logs — all read line by line, synchronously). Read `.gitignore` when present,
-extend `SKIP` with the usual suspects, skip files over ~1 MB, and offer
-`SEARCH -i`. While there: `WRITE_KINDS`/`WRITERS` are two parallel
-vocabularies for the same idea — keep one.
-
-**F10. The preamble promises parallel helpers that do not exist.**
-"keep going yourself while it runs" — but `SUBAGENT` awaits the child loop;
-the parent waits. The model plans around a fiction. Either fix the sentence
-(the honest version: "it runs to completion and reports back one summary") or
-build the real thing (P2-B).
-
-### P2 — designs worth having
-
-**A. `ATTACH` — hand the model an image or a document.** The chat already
-supports attachments (`parts` on the bridge; the window does it today), but
-the agent cannot. Marker, mirroring the existing opt-in pattern:
-
-```
-ATTACH desktop/shot.png          ← queued, no body
-```
-
-Tool queues a part (exists-check, size cap, not under `SKIP`), the loop
-attaches queued parts to the next message it sends and clears the queue.
-Classify as read — note this changes nothing about the privacy story: every
-`NEED file` already pastes file contents upstream; `ATTACH` only closes the
-gap for binary files, which `read` refuses. Gate the preamble line behind an
-option so the CLI's turn-1 bytes stay identical.
-
-**B. A conversation pool — helpers that actually run beside the parent.**
-The bridge routes every chat to its one current conversation, so nothing can
-overlap. Sketch: `/v1/chat/completions` accepts a `conversation` field; the
-extension maps conversation → tab and spawns tabs up to a small N (same
-Chrome profile, so login state is shared); each tab serialises its own
-generations; the harness gives each helper a conversation id and drops the
-save/restore dance. Payoff beyond helpers: `WEB` runs on a scratch
-conversation instead of spending the working one's context. Cost: extension
-rework and tab lifecycle management. Do it only when helpers or `WEB` show up
-as the bottleneck in real runs.
-
-**C. Persist "always" grants and project rules.** Grants live in a Map that
-dies with the process; rules come from flags only. Persist both per project
-(`~/.aipass/rules.json`, same shape the UI already edits) so "always allow
-writes under src/" survives a restart. The engine does not change — only
-where `rules` and `grants` are seeded from.
-
-**D. Run metrics, already half-collected.** The session records every tool
-call with an `ok` flag, and runs record credits spent. Aggregate per run —
-refusal rate, nudges, 403 splits, per-tool latency — into one `run_stats`
-line and a `npm run stats` reader. This is how F10-style protocol drift gets
-caught instead of guessed at.
-
-## The tool layer, going forward
-
-The contract every tool keeps — new tools included:
-
-1. **String in, string out.** No JSON, no objects; the model writes prose and
-   reads prose.
-2. **Status prefix.** `err: …` on failure, bare text on success (F5). The
-   loop never regex-guesses again.
-3. **Clip at `maxResult`.** Long output ends with `… truncated` and a hint
-   for paging (`read` already does this perfectly with its range hint).
-4. **WAF at the edge, once.** Tools return real text; `outbound` is applied
-   by the loop when results are assembled — never inside a tool.
-5. **Writes stop at the overlay.** A tool that changes the tree calls
-   `overlay.set`/`markDeleted`, never `fs.write*`.
-6. **Classify honestly.** `write`/`shell` risk means the permission gate can
-   hold it; `read` means it cannot change anything — which is why `FETCH`
-   must actually be true to that claim (F4).
-
-| tool | class | notes |
-|---|---|---|
-| `list`, `read`, `search`, `glob`, `git`, `skill` | read | local; async where it shells out, gitignore- and size-aware where it walks |
-| `fetch`, `web` | read, network | fetch guards private hosts and caps the body; `web` spends the conversation's context and appears in the account's chat history |
-| `write`, `replace`, `delete`, `move` | write | overlay only; `replace` requires a unique FIND match |
-| `run` | shell | disabled unless `allowRun` |
-| `plan`, `todo`, `subagent` | control | handled by the loop, not the gate |
-| plugin markers | plugin's own | registered at runtime, never shadow a built-in |
-| `attach` | read | queues a part for the next message; announced only behind `--attach` |
-
-**Adding a tool — the checklist that keeps the protocol coherent:**
-
-1. one regex branch in `parse()` (prose-shaped, no brackets) and a
-   `MARKER_LINE` entry so `prose()` strips it;
-2. one function in `createTools()` obeying the contract above;
-3. classify it (`permissions.mjs`), not just a new set somewhere;
-4. one line in the preamble — behind an option flag if the CLI's turn-1
-   bytes must not move;
-5. a test that runs it through the loop with the gate in `ask` mode;
-6. a playbook file only if the tool needs technique, not just syntax.
-
-
-## Research round (Oct 2026): four deltas, each from a named source
+**Now:** all four shipped — R1, R2, R3 and R4 are in the loop today, and the
+"edge-flagged" items that followed are described at the end of this section.
+The candidates that did not make the cut are still candidates.
 
 The loop was reviewed component by component against recent harness research.
 Four changes made the cut; the rest of the review is noted below as
@@ -277,6 +369,18 @@ plain repetition: every individual step looks new, the pair goes nowhere.
 `loop.mjs` keeps the last step signatures and stops an A/B/A/B run the same
 way it stops an A/A/A one - one correction, then out.
 
+**R1, widened - the longer round.** The two-state swing is not the only circle
+a run can go round: read file A, edit file B, run the test, read file A again
+is a three-state round, and the swing cannot see it (the step three back is
+the same, not the step two back). The guard now reads the window - the last
+p+1 signatures, the first and the last the same and the p in between all
+different - and counts LAPS, because in a three-state round only every third
+step closes the loop. One lap earns the correction, the second stops the run.
+The evidence side rides with it: a run whose answers keep coming back the
+same (`repeatedResults` against `novelResults` in `run_stats`) is stopped on
+the first strike instead of being handed a correction it has already shown it
+does not act on.
+
 **R2 - Edit diagnostics are free here.** Ablations of coding harnesses ("An
 Empirical Study of Harness Design for Coding Agents", arXiv:2609.20804;
 "Beyond the Model", arXiv:2609.32459) put structured tools with validation
@@ -284,6 +388,17 @@ among the few components that pay off consistently. The cheapest hard check
 available is the runtime itself: a staged `.mjs`/`.cjs`/`.js` edit is written
 to a temp file and passed through `node --check`; the verdict rides the tool
 result, so a syntax error costs one round trip instead of a broken apply.
+
+**R2, widened - the other file families.** The same argument, at a fraction of
+the price, reaches JSON: `JSON.parse` needs no process and no toolchain, and a
+staged `package.json` with a missing comma breaks every tool in the project
+the moment it lands. A staged `.json` edit is parsed in-process and the
+verdict rides the result the same way; the error names the line and the
+column, so the fix is a place and not a hunt. Two shapes are read the way
+their own readers read them: a `tsconfig*.json` and a `*.jsonc` may carry
+comments and trailing commas (TypeScript accepts both), and every other
+`.json` is read as JSON, strictly - npm reads `package.json` that way, and a
+trailing comma in it is a real bug.
 
 **R3 - Tool output is data, never instructions.** The prompt-injection design
 patterns paper (arXiv:2506.08837) reduces to one rule this harness can hold
@@ -329,7 +444,15 @@ facts stay in prose — and `AIPASS_MEMORY=off` stops the carrying. The queue
 record `memory-tier-carry` is what measures whether the facts earn their
 place.
 
-## The upstream edge, measured live (Oct 2026)
+### The upstream edge, measured live (Oct 2026)
+
+**Now:** the two refusal families are encoded in `waf.mjs` and round-trip
+byte-exact. The cure for a *pace* refusal is the ladder this section grew:
+the page waits 15s then 60s, the client waits 60s then 180s, both arms the
+tab-wide clock, and only a refusal that survives all of it is treated as
+content and split. The sends themselves are paced before any refusal — the
+token bucket in `harness/bridge.mjs`, four tokens and one more every 45
+seconds.
 
 The first live smoke run of the harness — read `math.mjs` and `check.mjs`, fix
 one operator in the first — died for a reason local tests cannot see: the edge
@@ -507,7 +630,14 @@ follows:
 `page.test.mjs` pins all of it: the envelope gap after a refusal, the floor
 between two sends, the create on the same clock, and the retry header.
 
-## The re-run that passed, and the gap it stepped on (Oct 2026)
+### The re-run that passed, and the gap it stepped on (Oct 2026)
+
+**Now:** the gap is closed. A `RUN` sees the tree the run has staged — the
+projection in `sandbox.mjs` puts the staged edits into a throwaway copy
+outside the project and runs the command there — so "stage a fix, run the
+check, get `PASS`" completes inside one step. The disk is still never written
+by a run. The decision, the reasoning and the two later adjustments are
+below, in the order they happened.
 
 The smoke task ran once more after the block lifted — same task, same project,
 the whole loop live — and the fix proved out end to end. Both reads were
@@ -521,18 +651,18 @@ entry "verify nudge: math.mjs staged and nothing has checked it yet" — and
 arrived mid-run, so `stopReason: error`, and the CLI still wrote the staged
 diff — which is the behaviour it was built to have.
 
-**The gap it stepped on: a run cannot see its own staged edits.** `RUN`
+**The gap it stepped on: a run could not see its own staged edits.** `RUN`
 executes against the tree on disk, and the overlay is invisible to a child
 process by design — so when the model staged its one-line fix and ran
 `node check.mjs` to verify it, it read the *old* file's `FAIL`, concluded the
 save had failed, and spent the rest of the run re-reading and re-editing until
 the 429 closed the door. The smoke's own task — "fix it, then run the check" —
-cannot complete mid-run under these semantics, and a model that trusts its
-tools over its doubts will keep tripping on it. The options, none free:
+could not complete mid-run under these semantics, and a model that trusts its
+tools over its doubts kept tripping on it. The options, none free:
 materialize staged files for the length of a `RUN` (a child-visible temp
 copy); say it in the protocol (a run sees disk until the end); or write
-straight to disk in `auto`/`yolo`, where the person already said yes.
-Deciding this is queued, not guessed.
+straight to disk in `auto`/`yolo`, where the person already said yes. Deciding
+this was queued, not guessed.
 
 **Decided and shipped (2026-10-15): the projection.** The first option was the
 only one that keeps every invariant — the protocol cannot say "a run sees
@@ -556,7 +686,11 @@ and of whatever secrets the project holds, in the folder a `git add -A` walks.
 It lives under `~/.aipass/run/<project>/run-*` now, so it cannot be committed
 by accident and cannot be walked by a tool. Three things changed with it: a
 janitor (`sweepSandboxes`) collects the copies a killed backend left behind —
-nothing did before; a link that points OUTSIDE the project is left out of the
+nothing did before; the janitor knows WHO owns a projection (a stamp beside
+it, carrying the pid), so a copy whose backend died is collected after
+minutes instead of after the six hours a live run's budget needs, and the
+sweep runs at every boot and before every run, not only at the first one; a
+link that points OUTSIDE the project is left out of the
 projection (the tools refuse such a path, so copying the target in would put
 a file where the run could read it); and a file over the size cap
 (`AIPASS_SANDBOX_MAX_FILE_MB`, 64 MB) is left out and named in the command's
@@ -572,7 +706,12 @@ check, `verifyPrompts 0`. Three sends, `stagnations 0`, and the applied tree
 passes on the real disk. The shape of the original smoke now completes in one
 step.
 
-## Research round 2 (Oct 2026): the five-stage spine
+### Research round 2 (Oct 2026): the five-stage spine
+
+**Now:** the spine is adopted and every block of it is shipped except two,
+both named as such below — test-time scaling (nothing runs a task N ways and
+keeps the attempt that passes) and the outer tuning loop, which is still the
+working style rather than an automated harness.
 
 A second research digest — Self-Harness, Meta-Harness, HarnessBridge,
 Harness-Bench, the Claw-SWE-Bench adapter ablation and the AI2/UW
@@ -605,19 +744,23 @@ Block by block, against the code as it stands:
   (`compact.mjs`).
 - **Action validator — done.** Fenced protocol text never executes (F1); a
   malformed marker comes back as `err: …` pointing at the fix (F5); a staged
-  `.mjs`/`.cjs`/`.js` edit passes `node --check` (R2); REPLACE refuses an
+  `.mjs`/`.cjs`/`.js` edit passes `node --check` and a staged `.json` edit
+  passes `JSON.parse` (R2, both widened); REPLACE refuses an
   ambiguous FIND; every write passes the permission engine and everything
   outbound passes the WAF table. Harness-Bench's "format violations are the
   most common failure class" is the failure this layer turns into a
   one-round-trip correction.
-- **Verify — done, soft form (R4).** One nudge after the first staged code
-  change. The digest's stronger reading — *done means a runnable check passed*
-  — was blocked by the RUN-vs-overlay gap; that gap is closed by the
-  projection (above), so a verification run now reads the staged tree and
-  this stage can be hardened next. `verifyPrompts` already tracks how often
-  the nudge fires.
-- **Stop/Recover — done, five exits.** Stagnation (repeat ×3 or oscillation ×2,
-  after one correction), no-marker nudge ×3 → give up, `ignore_done`, the step
+- **Verify — done, in two forms.** The soft form is R4: one nudge after the
+  first staged code change. The digest's stronger reading — *done means a
+  runnable check passed* — was blocked by the RUN-vs-overlay gap; that gap is
+  closed by the projection (above), so a verification run now reads the staged
+  tree, and the checker (2026-10-15) put a verdict behind every DONE: a
+  read-only child runs the project's own check, and `requireCheck` refuses a
+  DONE the verdict contradicts. `verifyPrompts` tracks how often the nudge
+  fires.
+- **Stop/Recover — done, five exits.** Stagnation (repeat ×3, oscillation ×2, or
+  a longer round twice, after one correction), no-marker nudge ×3 → give up,
+  `ignore_done`, the step
   limit, and `resilientSay`'s redact → split → omit chain.
 - **Budget + Trace — done.** Every run appends one `run_stats` line (stop
   reason, per-tool counts, nudges, stagnations, verify prompts, firewall notes,
@@ -630,30 +773,40 @@ Block by block, against the code as it stands:
   answered concurrently — and on by default in the window), but nothing runs a
   task N ways and keeps the attempt that passes. It shares Verify's
   prerequisite.
-- **Offline tuning — manual.** The outer loop already is the working style:
+- **Offline tuning — manual, with an evals harness beside it.** The outer loop
+  already is the working style:
   run_stats and session logs → findings with a reproduction → patch → the suite
   as the regression gate → a live smoke against the real edge (the suite fakes
   the extension; the smoke cannot be faked). Meta-Harness's own held-out caveat
-  is why an automated evals harness is queued, not assumed.
+  is why the automated evals harness was not assumed — it shipped on 2026-10-15
+  (`scripts/evals.mjs`, `npm run evals`; see the queue below).
 
-## The hook points, mapped onto the spine (Oct 2026)
+### The hook points, mapped onto the spine (Oct 2026)
+
+**Now:** every row below is shipped, and the list that followed the table is
+closed - the checker, the safety set, both bugs the review turned up, the
+bootstrap snapshot, the per-tool latency and the plugin markers behind the
+gate all landed. The only two things the review left open are the in-process
+event subscription for plugins and the stronger reading of Verify, and both
+are noted where they belong.
 
 A review brought the Claude-Code-style hook vocabulary to this design: six
 places a harness can intervene, each checked against the code as it stands.
-Four are already the behaviour of a named module, one is deliberately soft, and
-one is the safety set the engine supports but does not yet ship as defaults.
-The map, then what each gap is worth:
+Four were already the behaviour of a named module, one was deliberately soft,
+and one was the safety set the engine supported but did not yet ship as
+defaults — it does now. The map, then what each gap was worth:
 
 | hook | spine stage | mechanism today | status |
 |---|---|---|---|
 | SessionStart — inject a snapshot | Bootstrap | preamble + top-level listing on turn 1; a later turn re-pastes the listing only when it moved — an unchanged one is a single line, and a rotation forgets the memory, so the first follow-up after it pastes the table in full; the bootstrap snapshot (`git status --short` + package scripts) rides the turn-1 listing slot (`loop.mjs#bootstrapSnapshot`, `harness.mjs#listingShown`) | done — the desktop harness ships it on by default; the CLI keeps the opt-in `--snapshot` so its tuned bytes stay identical |
-| PreToolUse — validate the shape, deny with a reason | Action validator | one `validateCall()` before dispatch (`harness/validate.mjs`) checks every built-in, plugin and MCP call for the same shape contract, so an empty `RUN`, a blank `NEED`/`SEARCH` or an uninstalled marker answers with one `err: …` sentence before any implementation sees it; fenced protocol text never executes (F1); `node --check` on staged JS (R2); permission denials carry the rule name; a plugin marker that declared a `risk` rides the permission engine | done — shapes are central; undeclared plugin markers keep the stated trust |
+| PreToolUse — validate the shape, deny with a reason | Action validator | one `validateCall()` before dispatch (`harness/validate.mjs`) checks every built-in, plugin and MCP call for the same shape contract, so an empty `RUN`, a blank `NEED`/`SEARCH` or an uninstalled marker answers with one `err: …` sentence before any implementation sees it; fenced protocol text never executes (F1); `node --check` on staged JS and `JSON.parse` on staged JSON (R2); permission denials carry the rule name; a plugin marker rides the permission engine like a built-in — the risk it declared, or a write when it declared none (`permissions.mjs#classifyPlugin`) — and the person's own path rules and the secret floor reach it through the marker's argument | done — shapes are central, and the gate reaches every marker |
 | PostToolUse — compact an oversized result | Observation compressor | clip at `maxResult` + spill file with a `NEED` locator (`tools.mjs`) — reads keep the head, `RUN` keeps head+tail (ACI round); the summary transcript elides stale bulk (opt-in) and the rotation's seed pins the memory facts; conversation summarise→rotate at the budget (`compact.mjs`) | done, three tiers — clip + spill, elision (opt-in), rotate; the elided middle of a command sits on disk, not lost |
 | Stop — tests fail, keep working | Verify | R4's one soft nudge (`verifyPrompts`); the checker at DONE — a read-only child runs the project's own check, the verdict computed from what it ran, one continuation on fail (`loop.mjs`, `harness.mjs#makeChecker`); `verifyCommand` names that check for a run without `.aipass/check.txt`; `requireCheck` refuses a later DONE over a failing verdict as `done-unverified` | done — advisory by default, strict gate opt-in; `checks`/`checkVerdict`/`checkCommand` and `doneUnverified` recorded |
 | PreToolUse — count calls, log every event | Budget + trace | one `run_stats` line per run + one session JSONL entry per tool call, 20 000-char result and all; `run_stats.tools` carries `{n, fail, ms}` per kind and `stats` prints the mean latency | done — a hard per-run cap is still not recorded (the budget stops a run with its reason instead) |
 | PreToolUse — destructive commands, config files, red-test commits | Safety gates | modes + the H9 rule engine: path rules outrank the mode, reads included; no listener means deny; `classifyRun` asks about hazardous `RUN` bodies in every mode, ahead of grants; `SAFETY_RULES` ask about config/lockfile mutations (`permissions.mjs`, `settings.mjs`); the declared check (`.aipass/check.txt`, or `verifyCommand` when set) arms the red-test commit gate: a `git commit` RUN is refused until it passed at the current tree state, and `run_stats.commitBlocks` counts the refusals | done — the gate names the command and its source (`--verify-command` or `.aipass/check.txt`) |
 
-Worth closing, in roughly the order the table reads:
+Worth closing, in roughly the order the table reads — all of them closed since,
+and each entry says when:
 
 1. **A verdict behind DONE — shipped 2026-10-15** as the checker
    ([`SPEC_CHECKER.md`](SPEC_CHECKER.md), tests `checker.test.mjs`). The
@@ -703,6 +856,21 @@ Worth closing, in roughly the order the table reads:
    aggregated in `stats.mjs` and printed per kind (`stats.test.mjs`). A hard
    per-run cap is still not recorded: the soft budget stops a run with a
    reason, which the recorded end already names.
+6. **The plugin markers behind the gate — shipped 2026-10-20**. A marker a
+   plugin registered used to run whenever the model asked for it: only a
+   marker that *declared* a `risk` at registration rode the permission engine,
+   and an undeclared one was trusted by silence. That is the wrong way round
+   — a plugin's code runs in the backend process with the app's rights, so
+   "nobody said" is not "it only reads". Now every marker is classified
+   (`permissions.mjs#classifyPlugin`): the declared risk is taken as given, and
+   an undeclared marker is classified like a write. The person's own path
+   rules and the secret floor reach it through the marker's argument, and a
+   payload the argument does not carry — the body — is screened for secret
+   names too, because a plugin used as a proxy would carry the file straight
+   back to the model and the plugin's own code cannot be screened from here.
+   The window's question says what it is: a marker, and what it was handed
+   (`desktop/ui/app.js`). Pinned in `gates.test.mjs` and
+   `permissions.test.mjs`.
 
 On the architecture question the vocabulary invites: keep the gate-class checks
 core. Their invariant — "a run cannot be unsafe because a plugin is absent" —
@@ -712,7 +880,7 @@ already rich (every harness event reaches the window over SSE), so the cheap
 win is making that surface subscribable in-process for plugins too — after
 which "hooks" are just events with better names.
 
-The queue, in dependency order:
+The queue, in dependency order — closed, all four:
 
 1. **RUN-vs-overlay — done 2026-10-15** as the projection (`sandbox.mjs`,
    tests in `run-overlay.test.mjs`).
@@ -733,7 +901,11 @@ The queue, in dependency order:
    2026-10-17, keyed off the declared check (`.aipass/check.txt`) the checker
    section names.
 
-## The tool ACI round (Oct 2026): the contracts, tightened
+### The tool ACI round (Oct 2026): the contracts, tightened
+
+**Now:** all five changes shipped, each with a test in `tools-aci.test.mjs`.
+The two items left "not taken" are still candidates, and the list below says
+why they were not taken.
 
 The tool layer — not the loop — audited against the tool-writing literature:
 
@@ -769,7 +941,14 @@ each name is a distinct verb), and per-tool pagination defaults (the spill
 locator already pages). Both stay candidates if the evals ever show tool
 friction.
 
-## The live stall of Oct 2026: a bare `NEED`, and a model that moved
+### The live stall of Oct 2026: a bare `NEED`, and a model that moved
+
+**Now:** both halves of this failure are fixed. A bare `NEED <path>` is
+parsed as the file form (and `NEED list <path>` as the directory form), a
+reply that looks like a mangled marker earns the nudge instead of ending the
+run, the launcher adopts a backend that is already there instead of fighting
+it, and a run whose saved model is not on the live catalog fails before its
+first send by name.
 
 A live desktop run died at step zero, twice, and the session log told the
 whole story: the catalog's `claude-sonnet-5@default` no longer exists upstream
@@ -795,7 +974,14 @@ fixes shipped:
    before starting: a backend that already answers is adopted (open the
    window and step aside; `--detach` prints and exits), and a busy port that
    is *not* a backend now names itself instead of dying with a raw EADDRINUSE
-   stack — that crash was the "the app does not open" report. Static UI files
+   stack — that crash was the "the app does not open" report. The probe has to
+   survive the loopback token to do that: the backend's `/rpc` answers a
+   token-less call with a 401, and a probe that only accepts a 200 never sees
+   the running backend at all — it starts a second one and the window opens on
+   "port 8790 is busy". So the probe sends the token, and a 401 carrying the
+   backend's own refusal still counts as ours (a running backend whose token
+   differs from the file's); a 401 that is not ours is a stranger's port
+   (`harness/backend-probe.mjs`, `desktop/main.mjs`). Static UI files
    carry `cache-control: no-cache` now, so a reload always shows the current
    edit.
 
@@ -808,6 +994,26 @@ fixes shipped:
    stops writing its sessions into the developer's real home. The leftovers
    were removed the same day; the sidebar went from a stalled 7,270-entry
    read to one project's five conversations.
+
+4. **A call names the project it is about.** The sidebar above was scoped to
+   *the* project — the one the backend's `current` pointed at, which is
+   whichever window spoke last. With two windows open on two projects that is
+   not a scoping rule but a coin toss: window A read window B's sessions,
+   file tree and pending diffs, and window A's **Apply** button wrote window
+   B's staged edits to window B's disk while A's header said "project A".
+   Every call now carries an `x-aipass-project` header, and the backend
+   answers for that project — looked up, never switched to, so a call is a
+   target and not a move of the machine's current project (the human's own
+   switch still moves it, through `projects.switch`). The scope is a header
+   and not a parameter because `root` in `settings.set` already means "switch
+   the machine to this project", and one key cannot mean two things; a method
+   that names its own project still wins, because the header says *who* is
+   asking and the parameter says *what* the call is about. The store's own
+   lookups are scoped too: a session id is matched whole (`session-<id>.jsonl`
+   — a substring match made `session.delete {id:"a"}` delete a session nobody
+   named) and within the project the caller named
+   (`harness/rpc.mjs`, `harness/session.mjs`, `desktop/ui/app.js`,
+   `test/desktop.test.mjs`).
 
 **Shipped (the stability pass):** the extension knows the frame now —
 `data-model_switched` arrives as a `note` part (one line per distinct switch),
@@ -824,7 +1030,14 @@ same day) is never judged, nor is a run ever blocked because a list was
 missing. Pinned by `test/page.test.mjs`, `test/run-resilience.test.mjs`,
 `test/bridge.test.mjs` and `test/model-catalog.test.mjs`.
 
-## The four-minute blip (Oct 2026): a run must not die of a reconnect
+### The four-minute blip (Oct 2026): a run must not die of a reconnect
+
+**Now:** the gap is survivable. `BridgeClient` retries the dispatch refusal
+six times, a second apart, while nothing has streamed back yet; the refusal
+feeds the same one-click "open a tab" flow as the tab's own wording; and the
+window's stop button ends a run as `cancelled` — a decision, not a failure —
+and the stop reaches the tools, the command in flight, the projection and the
+web search with it.
 
 The extension holds its SSE connection to the bridge for four minutes at a
 time, then cycles it — deliberately, because Chrome does not promise a longer
@@ -871,7 +1084,14 @@ every listing said it was off. The filter is now read before setup runs, and
 `test/plugins.test.mjs` pins both directions — only the named plugins load,
 and a reload honours a changed list.
 
-## The Thai pack (Oct 2026): language policy, guards, and the stop hook
+### The Thai pack (Oct 2026): language policy, guards, and the stop hook
+
+**Now:** the whole pack is on by default. The preamble states the language
+policy, `langCheck` measures the closing message and asks for one Thai
+rewrite, the repeat guard refuses a third identical call, the argument guard
+normalises a path once and says so, the checker runs at the stalled exit, and
+the marker-attempt guard gives the nudge its turn back. The counters behind
+them are in `run_stats`.
 
 The round that made Thai a first-class working language without letting it
 leak into anything a machine parses. The pure helpers live in `lang.mjs` and
