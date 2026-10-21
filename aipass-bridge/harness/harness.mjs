@@ -67,6 +67,16 @@ export class Harness {
   #madeThisRun = new Set();
   /** The spill warning is said once per harness, not once per run. */
   #warnedSpill = false;
+  /**
+   * A stop that was asked for and has not been answered by a run yet.
+   *
+   * The abort controller belongs to the run that is in flight, so a stop that
+   * lands between two attempts of the same run has no controller to abort. The
+   * request is kept until the next run starts, and that run is stopped at
+   * once — otherwise the retry carried on with the work the person had just
+   * told it to stop.
+   */
+  #stopAsked = false;
 
   /**
    * @param {object} opts
@@ -662,6 +672,15 @@ export class Harness {
     // went on with a fresh, un-aborted one: the stop was simply lost, and the
     // person watched the work carry on after they had told it to stop.
     this.abort = new AbortController();
+    // A stop that landed between two attempts of the same run (the checker is
+    // running, the next attempt has not started) used to be lost too: it
+    // aborted the controller of the attempt that had just ended, and the next
+    // attempt installed a fresh one. So the request is remembered until the
+    // next run starts, and the run that starts after it is stopped at once.
+    if (this.#stopAsked) {
+      this.#stopAsked = false;
+      this.abort.abort();
+    }
     try {
       this.#warnSpillOnce();
       if (!this.session) await this.startSession();
@@ -872,10 +891,23 @@ export class Harness {
     // `running` says whether there was anything to stop: the window shows the
     // difference between "stopped" and "there was no run here".
     const running = this.running;
+    // The request is remembered, not just the abort: a stop that lands
+    // between two attempts of the same run has no controller to abort yet.
+    this.#stopAsked = true;
     this.abort.abort();
     this.answerPlan(false);
     this.permissions.cancelPending();
     this.events.emit('cancelled', { running });
+  }
+
+  /**
+   * Forget a stop that asked for nothing.
+   *
+   * A new message is a new intent: the stop button pressed when no run was in
+   * flight must not stop the run that comes after it.
+   */
+  clearStopRequest() {
+    this.#stopAsked = false;
   }
 
   pendingChanges() {
