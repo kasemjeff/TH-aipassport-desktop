@@ -192,7 +192,15 @@ function run(cmd, args, cwd) {
         shell: true,
       })
     : spawnSync(cmd, args, { cwd, stdio: 'inherit', windowsHide: true });
-  if (out.error) throw out.error;
+  if (out.error) {
+    // ENOENT means the command is not on PATH. For the bundler that is the
+    // Tauri CLI, and the fix is one line - so say it, instead of leaving
+    // "spawnSync tauri ENOENT" as the only word in a CI log.
+    if (out.error.code === 'ENOENT') {
+      throw new Error(`"${cmd}" is not on PATH - the Tauri CLI is needed for the build: cargo install tauri-cli --version "^2"`);
+    }
+    throw out.error;
+  }
   return out.status ?? 1;
 }
 

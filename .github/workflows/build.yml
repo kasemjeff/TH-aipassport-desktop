@@ -68,6 +68,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # The bundler IS the Tauri CLI, and this repository installs no npm
+      # packages (the zero-dependency rule), so the CLI comes from cargo: it
+      # puts `tauri` on PATH, which is what `npm run desktop:build` calls.
+      # Without it the build died on "spawnSync tauri ENOENT".
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
       - name: Cache the cargo build
         uses: actions/cache@v4
         with:
