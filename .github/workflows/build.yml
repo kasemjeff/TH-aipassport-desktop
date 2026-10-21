@@ -10,7 +10,9 @@ name: build
 
 on:
   push:
-    branches: [master]
+    # main, the branch this repository actually uses — the filter said
+    # master, which does not exist here, so the lane never ran at all.
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -67,6 +69,14 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      # The bundler IS the Tauri CLI, and this repository installs no npm
+      # packages (the zero-dependency rule), so nothing puts `tauri` on PATH
+      # and the build died on "spawnSync tauri ENOENT". The CLI comes from
+      # cargo: it puts `tauri` on PATH, which is what `npm run desktop:build`
+      # calls.
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
 
       - name: Cache the cargo build
         uses: actions/cache@v4
