@@ -49,7 +49,7 @@
     "tauri:build:linux": "tauri build --config desktop/src-tauri/tauri.conf.json --bundles deb,appimage"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=20"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

@@ -234,6 +234,48 @@ test('a session file that is too large to open is refused, not loaded', () => {
   assert.ok(store.load(s.id, { root }), 'and it opens again once the ceiling is back');
 });
 
+test('a finished session is flushed to the disk', () => {
+  // The header rewrite fsyncs the file once per batch, so the entries of a
+  // finished run must not sit in the OS's hands: a power cut would take the
+  // end of the conversation with it.
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const root = path.join(dir, 'proj');
+  const s = store.create({ root, title: 'durable' });
+  const real = fs.fsyncSync;
+  let flushed = 0;
+  fs.fsyncSync = function spied(...args) { flushed += 1; return real.apply(this, args); };
+  try {
+    s.append('user', { text: 'one' });
+    // The first append rewrites the header, and the rewrite flushes the file
+    // with it — the entries and the header that counts them land together.
+    const afterFirst = flushed;
+    assert.ok(afterFirst > 0, 'the first append flushes the file it counts');
+    s.append('user', { text: 'two' });
+    assert.equal(flushed, afterFirst, 'an append that does not rewrite the header does not flush');
+    s.flush();
+    assert.ok(flushed > afterFirst, 'but a finished session does');
+  } finally { fs.fsyncSync = real; }
+});
+
+test('the picker sees a renamed session, and a memoized header does not hide it', () => {
+  // The store memoizes the headers it has read, on the file's mtime+size, so
+  // the picker does not open and parse every session on every refresh. A
+  // memo that hid a change would be worse than the cost it saves.
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const root = path.join(dir, 'proj');
+  const s = store.create({ root, title: 'before' });
+  assert.equal(store.list(root)[0].title, 'before', 'the picker shows the name');
+  store.rename(s.id, 'after');
+  assert.equal(store.list(root)[0].title, 'after', 'and the new one after a rename');
+  s.append('user', { text: 'an entry' });
+  const row = store.list(root)[0];
+  assert.equal(typeof row.entries, 'number', 'the row carries a count');
+  assert.ok(row.entries >= 0, 'and it is a number');
+  assert.equal(store.list(root).length, 1, 'the session is still there');
+});
+
 test('wrong-typed data never reaches the picker or the chain', () => {
   const dir = tmp();
   const proj = path.join(dir, 'proj'); // list() scans project directories

@@ -60,7 +60,7 @@ from your laptop), or run the agent on the server itself.
 
 | file | what it is |
 |---|---|
-| `Dockerfile` | node 22 + chromium + Xvfb + x11vnc + noVNC + supervisor |
+| `Dockerfile` | node 20 + chromium + Xvfb + x11vnc + noVNC + supervisor |
 | `docker-compose.yml` | ports (localhost by default) and the `../bridge` / `../extension` mounts |
 | `supervisord.conf` | starts and auto-restarts each process |
 | `start-browser.sh` | launches Chromium with the extension, clears stale profile locks |

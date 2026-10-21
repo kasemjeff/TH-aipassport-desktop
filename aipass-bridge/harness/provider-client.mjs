@@ -31,6 +31,15 @@ const EFFORT = { low: 'low', medium: 'medium', high: 'high', max: 'high' };
 const ANTHROPIC_BUDGET = { low: 1024, medium: 4096, high: 8192, max: 16384 };
 
 /**
+ * How long the provider's catalog may take.
+ *
+ * The catalog is asked for at the start of every run and by the sheet's
+ * one-click check, so a provider that accepts the connection and never
+ * answers must not be able to hang either of them.
+ */
+const MODELS_TIMEOUT_MS = 10_000;
+
+/**
  * The two endpoints of a provider, from its base URL.
  *
  * The OpenAI-compatible shape carries its version in the base (`…/v1`), and a
@@ -207,6 +216,11 @@ export class ApiProviderClient {
     try {
       const res = await fetch(endpointsFor(spec).models, {
         headers: { accept: 'application/json', ...authHeaders(spec, this.key) },
+        // A deadline: a provider that takes the connection and never answers
+        // would otherwise leave this promise pending for ever — and the loop
+        // asks for the catalog at the START of every run, so one silent
+        // endpoint hangs every run in the project before the first message.
+        signal: AbortSignal.timeout(MODELS_TIMEOUT_MS),
       });
       if (!res.ok) throw new Error(`provider returned ${res.status}`);
       const body = await res.json();

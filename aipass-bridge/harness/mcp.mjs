@@ -632,9 +632,20 @@ export class McpManager {
     return this.status();
   }
 
+  /**
+   * Drop every client, and every tool that came with it.
+   *
+   * The tool table belongs to the clients: a table that outlives them tells
+   * the model about tools whose servers are gone (`err: mcp server X not
+   * connected`), and the next load pushes the same tools in a second time —
+   * so the preamble lists every MCP tool once per project switch, and the
+   * table grows for the life of the backend.
+   */
   close() {
     for (const c of this.clients.values()) try { c.close(); } catch {}
     this.clients.clear();
+    this.tools = [];
+    this.statusRows = [];
     this.loaded = false;
   }
 }
