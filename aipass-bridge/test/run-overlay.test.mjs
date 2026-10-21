@@ -76,7 +76,10 @@ test('a staged delete is hidden, and output paths name the project, not the sand
   assert.equal(exists.trim(), 'false', 'the deleted file is not in the projection');
 
   const cwd = await tools.run('', 'node -e "console.log(process.cwd())"');
-  assert.equal(cwd.trim().toLowerCase(), dir.toLowerCase(), 'the child path is put back to the project root');
+  // macOS spells a temporary directory two ways (`/var/folders/...` is a link
+  // to `/private/var/folders/...`); the two names are one directory, so the
+  // comparison is made on the real paths.
+  assert.equal(fs.realpathSync(cwd.trim()), fs.realpathSync(dir), 'the child path is put back to the project root');
   assert.ok(!cwd.toLowerCase().includes('.aipass'), 'no sandbox path leaks to the model');
 });
 
