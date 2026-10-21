@@ -71,10 +71,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       # The bundler IS the Tauri CLI, and this repository installs no npm
-      # packages (the zero-dependency rule), so nothing puts `tauri` on PATH
-      # and the build died on "spawnSync tauri ENOENT". The CLI comes from
-      # cargo: it puts `tauri` on PATH, which is what `npm run desktop:build`
-      # calls.
+      # packages (the zero-dependency rule), so the CLI comes from cargo: the
+      # `tauri-cli` crate installs `cargo-tauri`, so the bundler is called as
+      # `cargo tauri`, which is what `npm run desktop:build` does when the
+      # npm shim is not on PATH. Without it the build died on
+      # "spawnSync tauri ENOENT".
       - name: Install the Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 

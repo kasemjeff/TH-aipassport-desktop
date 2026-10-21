@@ -99,6 +99,19 @@ Each layer has one owner and one way in, so a failure names itself.
 5. **collects the artifacts** into `dist/`, renames them to the canonical
    name, and writes `dist/SHA256SUMS` and `dist/manifest.json`.
 
+The bundler is the Tauri CLI, and it comes in two spellings: the npm shim
+(`tauri`, from `@tauri-apps/cli`) and the cargo one (`cargo tauri` — the
+`tauri-cli` crate installs `cargo-tauri`, *not* `tauri`). This repository
+installs no npm packages, so the CLI comes from cargo:
+
+```
+cargo install tauri-cli --version "^2"
+```
+
+The build script takes whichever the machine has — the shim first, the cargo
+spelling otherwise — and `AIPASS_TAURI_CLI` names the binary to run when
+neither is on PATH.
+
 ### The platform overlays
 
 One `tauri.conf.json` cannot say "NSIS on Windows, a DMG on macOS", so the

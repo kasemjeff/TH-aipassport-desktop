@@ -278,6 +278,14 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **The build lane finds the bundler.** The bundler is the Tauri CLI, and this
+  repository installs no npm packages (the zero-dependency rule), so nothing
+  put `tauri` on PATH and the lane died on every platform with "spawnSync
+  tauri ENOENT". The lane installs the CLI from cargo now, and the script
+  calls it under whichever name the machine has: the npm shim (`tauri`) or the
+  cargo one (`cargo tauri` — the `tauri-cli` crate installs `cargo-tauri`,
+  *not* `tauri`). `AIPASS_TAURI_CLI` still names the binary
+  (`scripts/build-desktop.mjs`, `docs/INSTALL.md`).
 - **Two projects no longer share one session folder.** A project's sessions
   live in a folder named after its path, and the name was the path with
   everything but letters and digits turned into dashes, cut at 60 characters.
