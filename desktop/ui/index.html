@@ -17,9 +17,10 @@
        #bar    thin top row: project · permission · status · context · help ·
                theme · settings.
        #side   264px sidebar: brand, "แชทใหม่", the search field, then the
-               work — history and the project's files. The foot holds the two
+               work — history and the project's files. Both lists fold away — the rail is narrow and two lists want it. The foot holds the two
                doors to the rest of the app (ตั้งค่า / วิธีใช้).
-               Collapses via the ☰ labels (pure CSS, no JS).
+               Collapses via the ☰ buttons (the CSS does the folding; the JS
+               only mirrors it into aria-expanded).
         #chat   one grid, rows stacked: #meta, then the stage (#log), then
                 #pending, #attachments and #composer. The composer carries the
                 model and the effort level — both ride the next message.
@@ -27,6 +28,7 @@
      IDS app.js ALREADY OWNS (kept, same handlers) — do not rename:
        bar, project, add-project, model, thinking, mode, status, context,
        help-btn, settings-btn, side, sessions, session-count, files, files-head,
+       files-count, files-crumbs, files-refresh, file-filter, sessions-fold,
        session-filter, new-session, side-settings, side-help, chat, meta, log,
        pending, pending-count, pending-list, apply, discard, composer, task,
        slash, slash-list, attachments, attachment-list, attach-btn, slash-btn,
@@ -54,27 +56,33 @@
        the search field     #session-filter → filters the history below it
        a history row        → opens that session
        a file row           → opens the file (and แนบ stages it)
+       the file filter      #file-filter   → narrows the folder you are in
+       the trail            #files-crumbs  → the way back to the project root
+       ↻                    #files-refresh → reads the folder again
        ตั้งค่า / วิธีใช้    the settings sheet and the guide
 
      ============================================================================ -->
 
-<!-- Sidebar collapse. A checkbox + two <label for="nav-toggle"> ☰ buttons; the
-     CSS does the rest, so the sidebar folds with no JS to keep in sync. -->
+<!-- Sidebar collapse. The CSS still does the folding — the checkbox is the
+     state holder and `#nav-toggle:checked ~ main` moves the rail away — but the
+     two ☰ controls are real buttons now: a <label> is not a widget, so a
+     screen reader had nothing to announce and the keyboard could not reach it.
+     The JS only mirrors the checkbox into aria-expanded. -->
 <input type="checkbox" id="nav-toggle" class="nav-toggle" aria-hidden="true" tabindex="-1" />
 
 <!-- One slim row. The essentials only: what am I working on, how much may it
      change, and is it even connected. Everything else is /, ?, or the gear. -->
 <header id="bar">
-  <label class="icon-btn burger" for="nav-toggle" title="พับ/ขยายเมนูข้าง">☰</label>
+  <button type="button" class="icon-btn burger" id="side-toggle" aria-controls="side" aria-expanded="true" aria-label="พับ/ขยายเมนูข้าง" title="พับ/ขยายเมนูข้าง">☰</button>
   <div class="brand"><span class="brand-dot" aria-hidden="true"></span>aipass</div>
 
   <label class="field" title="โปรเจกต์ที่ agent แตะได้">
-    <select id="project" title="โปรเจกต์"></select>
+    <select id="project" aria-label="โปรเจกต์" title="โปรเจกต์"></select>
   </label>
   <button id="add-project" class="icon-btn" title="เปิดโฟลเดอร์อื่น" aria-label="เปิดโฟลเดอร์อื่น">+</button>
 
   <label class="field" title="สิทธิ์แก้ไฟล์">
-    <select id="mode" title="โหมด: สิทธิ์แก้ไฟล์ + plan · Shift+Tab วนโหมด">
+    <select id="mode" aria-label="โหมดสิทธิ์แก้ไฟล์" title="โหมด: สิทธิ์แก้ไฟล์ + plan · Shift+Tab วนโหมด">
       <option value="ask" title="ถามก่อนเขียนทุกไฟล์">ask</option>
       <option value="auto" title="เขียนเลยไม่ถาม">auto</option>
       <option value="yolo" title="เขียน+รันคำสั่งได้">yolo</option>
@@ -85,9 +93,9 @@
   <span class="grow"></span>
   <div class="status" id="status"></div>
   <span class="context hidden" id="context" title="context budget"></span>
-  <button id="help-btn" class="icon-btn" title="วิธีใช้"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.4a2.8 2.8 0 0 1 5.5.8c0 1.8-2.8 2-2.8 3.4"/><path d="M12 17.1h.01"/></svg></button>
-  <button id="theme-toggle" class="icon-btn" title="สลับธีมสว่าง/มืด"><svg class="i-moon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20.4 14.6A8.6 8.6 0 0 1 9.4 3.6a8.6 8.6 0 1 0 11 11z"/></svg><svg class="i-sun" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.7"/><path d="M12 2.6v2.2M12 19.2v2.2M4.5 4.5l1.6 1.6M17.9 17.9l1.6 1.6M2.6 12h2.2M19.2 12h2.2M4.5 19.5l1.6-1.6M17.9 6.1l1.6-1.6"/></svg></button>
-  <button id="settings-btn" class="icon-btn" title="ตั้งค่า"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.5a1.7 1.7 0 0 0 .34 1.87l.06.06a2.06 2.06 0 1 1-2.91 2.91l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2.06 2.06 0 0 1-4.12 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2.06 2.06 0 1 1-2.91-2.91l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2.06 2.06 0 0 1 0-4.12h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2.06 2.06 0 1 1 2.91-2.91l.06.06a1.7 1.7 0 0 0 1.87.34h.08a1.7 1.7 0 0 0 1.03-1.56V3a2.06 2.06 0 0 1 4.12 0v.09a1.7 1.7 0 0 0 1.03 1.56h.08a1.7 1.7 0 0 0 1.87-.34l.06-.06a2.06 2.06 0 1 1 2.91 2.91l-.06.06a1.7 1.7 0 0 0-.34 1.87v.08a1.7 1.7 0 0 0 1.56 1.03H21a2.06 2.06 0 0 1 0 4.12h-.09a1.7 1.7 0 0 0-1.51 1.18z"/></svg></button>
+  <button id="help-btn" class="icon-btn" title="วิธีใช้" aria-label="วิธีใช้"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.4a2.8 2.8 0 0 1 5.5.8c0 1.8-2.8 2-2.8 3.4"/><path d="M12 17.1h.01"/></svg></button>
+  <button id="theme-toggle" class="icon-btn" title="สลับเป็นธีมสว่าง" aria-label="ธีม: มืด"><svg class="i-moon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20.4 14.6A8.6 8.6 0 0 1 9.4 3.6a8.6 8.6 0 1 0 11 11z"/></svg><svg class="i-sun" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.7"/><path d="M12 2.6v2.2M12 19.2v2.2M4.5 4.5l1.6 1.6M17.9 17.9l1.6 1.6M2.6 12h2.2M19.2 12h2.2M4.5 19.5l1.6-1.6M17.9 6.1l1.6-1.6"/></svg></button>
+  <button id="settings-btn" class="icon-btn" title="ตั้งค่า" aria-label="ตั้งค่า"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.5a1.7 1.7 0 0 0 .34 1.87l.06.06a2.06 2.06 0 1 1-2.91 2.91l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2.06 2.06 0 0 1-4.12 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2.06 2.06 0 1 1-2.91-2.91l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2.06 2.06 0 0 1 0-4.12h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2.06 2.06 0 1 1 2.91-2.91l.06.06a1.7 1.7 0 0 0 1.87.34h.08a1.7 1.7 0 0 0 1.03-1.56V3a2.06 2.06 0 0 1 4.12 0v.09a1.7 1.7 0 0 0 1.03 1.56h.08a1.7 1.7 0 0 0 1.87-.34l.06-.06a2.06 2.06 0 1 1 2.91 2.91l-.06.06a1.7 1.7 0 0 0-.34 1.87v.08a1.7 1.7 0 0 0 1.56 1.03H21a2.06 2.06 0 0 1 0 4.12h-.09a1.7 1.7 0 0 0-1.51 1.18z"/></svg></button>
 </header>
 
 <main>
@@ -105,7 +113,7 @@
           <path d="M12 5.6l1.9 4.5 4.5 1.9-4.5 1.9L12 18.4l-1.9-4.5L5.6 12l4.5-1.9z" fill="#fff" />
         </svg>
         <span class="wordmark">AiPASS<sup>TM</sup></span>
-        <label class="icon-btn side-burger" for="nav-toggle" title="พับเมนู">☰</label>
+        <button type="button" class="icon-btn side-burger" id="side-toggle-side" aria-controls="side" aria-expanded="true" aria-label="พับเมนู" title="พับเมนู">☰</button>
       </div>
 
       <!-- The one thing you do most: start a conversation. Attach sits beside
@@ -114,7 +122,7 @@
         <button type="button" id="new-session" class="btn-new" title="เริ่มบทสนทนาใหม่">
           <span class="pencil" aria-hidden="true">✎</span>แชทใหม่
         </button>
-        <label class="btn-dashed" id="new-chat-quick" for="file-picker" title="แนบไฟล์ แล้วคุยต่อได้เลย" aria-label="แนบไฟล์">＋</label>
+        <button type="button" class="btn-dashed" id="new-chat-quick" title="แนบไฟล์ แล้วคุยต่อได้เลย" aria-label="แนบไฟล์">＋</button>
       </div>
 
       <!-- The search is a field, not a row that points at one. It used to live
@@ -125,14 +133,52 @@
         <input type="search" id="session-filter" placeholder="ค้นหาบทสนทนา…" aria-label="ค้นหาบทสนทนา" title="ค้นหาบทสนทนา (Ctrl+K)" />
       </div>
 
-      <!-- What the rail is for: the work. -->
-      <section class="side-section">
-        <h3 class="side-h">ประวัติการสนทนา<span class="side-count" id="session-count"></span></h3>
+      <!-- What the rail is for: the work. Each list folds away: the rail is
+           264px and two lists want it, so the reader decides which one wins
+           today and the window remembers the answer. -->
+      <section class="side-section" id="sessions-section">
+        <h3 class="side-h">
+          <button type="button" class="fold" id="sessions-fold" aria-expanded="true" aria-controls="sessions" title="ย่อ/ขยายรายการบทสนทนา" aria-label="ย่อ/ขยายรายการบทสนทนา">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg>
+          </button>
+          <span>ประวัติการสนทนา</span><span class="side-count" id="session-count"></span>
+        </h3>
         <ul id="sessions" class="list"></ul>
       </section>
 
-      <section class="side-section">
-        <h3 class="side-h" id="files-head">ไฟล์ในโปรเจกต์</h3>
+      <!-- The files of this project: a tree you can walk, a filter to narrow
+           it, and the two things you do with a file — read it, or attach it.
+           The head names the folder you are in; the trail under it is the way
+           back out. -->
+      <section class="side-section" id="files-section">
+        <h3 class="side-h">
+          <button type="button" class="fold" id="files-fold" aria-expanded="true" aria-controls="files" title="ย่อ/ขยายรายการไฟล์" aria-label="ย่อ/ขยายรายการไฟล์">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg>
+          </button>
+          <span id="files-head">ไฟล์ในโปรเจกต์</span><span class="side-count" id="files-count"></span>
+          <span class="grow"></span>
+          <button type="button" class="side-h-btn" id="files-refresh" title="โหลดรายการไฟล์ใหม่" aria-label="โหลดรายการไฟล์ใหม่">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.2 12a8.2 8.2 0 1 1-2.5-5.9"/><path d="M20.4 4.2v4.5h-4.5"/></svg>
+          </button>
+        </h3>
+
+        <!-- The trail: where you are in the tree, and the way back to the root. -->
+        <nav class="crumbs" id="files-crumbs" aria-label="ทางเดินของโฟลเดอร์"></nav>
+
+        <!-- The field searches the WHOLE project: a folder with a hundred files
+             is a list nobody scrolls, and a project with a thousand is a tree
+             nobody can walk. Empty, the panel walks the folder you are in.
+             The button at the end says which search is on: by the NAME of a
+             file, or by what is written in it (Ctrl+Shift+F). -->
+        <div class="side-search side-search-sm">
+          <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20.2 20.2 16 16"/></svg></span>
+          <input type="search" id="file-filter" placeholder="ค้นหาไฟล์ในโปรเจกต์…" aria-label="ค้นหาไฟล์ในโปรเจกต์" title="ค้นหาไฟล์ด้วยชื่อ (Ctrl+P)" />
+          <button type="button" id="file-mode" class="mode-btn" aria-pressed="false" title="ค้นหาไฟล์ด้วยชื่อ — กดเพื่อค้นหาคำในเนื้อไฟล์ (Ctrl+Shift+F)" aria-label="เปลี่ยนวิธีค้นหา">
+            <svg class="i-name" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+            <svg class="i-text" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h11M4 18h7"/></svg>
+          </button>
+        </div>
+
         <ul id="files" class="list dim"></ul>
       </section>
 
@@ -161,15 +207,29 @@
     <!-- The stage holds the transcript; the composer below is never covered.
          The log is a live region: a streaming answer is announced as it
          arrives, which is the only way a screen reader knows the model is
-         still thinking. -->
+         still thinking. While a run streams, aria-busy holds the
+         announcements back — the answer is painted frame by frame, and a
+         region that announced every frame read the same sentence over and
+         over. The answer is read once, when the run ends. -->
     <div class="stage">
-      <div id="log" role="log" aria-live="polite" aria-relevant="additions text"></div>
+      <div id="log" role="log" aria-live="polite" aria-relevant="additions text" aria-busy="false"></div>
 
+      <!-- The run's heartbeat. It floats over the foot of the transcript, so
+           it is on screen however far up the reader has scrolled: the question
+           it answers is "is it still working?", and a marker at the bottom of
+           a long answer cannot answer it. It is decoration for the eye — the
+           screen reader gets the same news from the line under the composer,
+           which says it once instead of every second. -->
+      <div id="working" class="working hidden" aria-hidden="true">
+        <span class="working-dots"><i></i><i></i><i></i></span>
+        <span id="working-text">กำลังทำงาน</span>
+        <span id="working-time">0s</span>
+      </div>
     </div>
 
     <div id="pending" class="hidden">
       <div class="pending-head">
-        <strong id="pending-count">0 changes</strong>
+        <strong id="pending-count">0 การเปลี่ยนแปลง</strong>
         <span id="pending-check" class="check-badge hidden"></span>
         <span class="dim">ติ๊กอย่างที่อยากเขียน</span>
         <span class="grow"></span>
@@ -194,13 +254,15 @@
           <button type="button" id="attach-btn" class="round-btn" title="แนบรูป/ไฟล์/วิดีโอ" aria-label="แนบรูป ไฟล์ หรือวิดีโอ">+</button>
           <button type="button" id="slash-btn" class="hint-pill" title="ดูคำสั่งทั้งหมด">/ คำสั่ง</button>
           <span class="model-chip" title="ผู้ให้บริการ — ใครตอบรันนี้ (สลับได้ที่นี่)">
-            <select id="provider" title="ผู้ให้บริการ — AiPASS หรือ API อื่น"></select>
+            <select id="provider" aria-label="ผู้ให้บริการ" title="ผู้ให้บริการ — AiPASS หรือ API อื่น"></select>
           </span>
           <span class="model-chip" title="โมเดลที่ใช้คุย">
-            <select id="model" title="โมเดล"></select>
+            <select id="model" aria-label="โมเดล" title="โมเดล"></select>
+            <button type="button" id="model-refresh" class="chip-btn" title="ดึงรายชื่อโมเดลใหม่จากเว็บ" aria-label="รีเฟรชรายชื่อโมเดล">↻</button>
+            <span id="model-note" class="chip-note" hidden></span>
           </span>
           <span class="model-chip effort-chip" title="effort — ระดับการคิดก่อนตอบ ใช้กับโมเดลที่รองรับ">
-            <select id="thinking" title="effort — ระดับการคิดก่อนตอบ">
+            <select id="thinking" aria-label="ระดับการคิดก่อนตอบ (effort)" title="effort — ระดับการคิดก่อนตอบ">
               <option value="off">effort off</option>
               <option value="low">effort low</option>
               <option value="medium">effort medium</option>
@@ -209,7 +271,7 @@
             </select>
           </span>
           <span class="model-chip effort-chip" title="temperature — ความคิดสร้างสรรค์/การสุ่มของการตอบ (0 นิ่ง … 2 หลากหลาย); default = ค่าเริ่มต้นของโมเดล">
-            <select id="temperature" title="temperature — ความคิดสร้างสรรค์/การสุ่มของการตอบ">
+            <select id="temperature" aria-label="ความสุ่มของคำตอบ (temperature)" title="temperature — ความคิดสร้างสรรค์/การสุ่มของการตอบ">
               <option value="default">temp default</option>
               <option value="0">temp 0</option>
               <option value="0.3">temp 0.3</option>
@@ -246,7 +308,6 @@
   </div>
 </div>
 
-<script type="module" src="/md.js"></script>
 <script type="module" src="/app.js"></script>
 </body>
 </html>

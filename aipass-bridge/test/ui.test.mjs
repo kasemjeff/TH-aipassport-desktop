@@ -74,6 +74,7 @@ class El {
   }
   addEventListener(type, fn) { (this.handlers[type] ??= []).push(fn); }
   setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return this.attrs[k] ?? null; }
   removeAttribute(k) { delete this.attrs[k]; }
   focus() {}
   remove() { if (this._parent) this._parent.children = this._parent.children.filter((c) => c !== this); }
@@ -160,6 +161,14 @@ const settle = async () => {
   await new Promise((r) => setTimeout(r, 5));
 };
 
+/**
+ * The rows of the history, without the group heads between them.
+ *
+ * The list groups its rows by day, and a group head is a label — not a
+ * session. A test that wants "the first session" wants the first ROW.
+ */
+const sessionRows = (list) => list.children.filter((li) => !(li.className ?? '').split(/\s+/).includes('day-head'));
+
 let boots = 0;
 
 /**
@@ -214,6 +223,11 @@ async function bootApp(backend, { token = null, unauthorizedOnce = false } = {})
   }
   close() {}
 };
+  // The page's own address. A window that reloads itself — after an update,
+  // so the new window files are the ones on screen — asks the browser to do
+  // it, and the fake records that it was asked rather than doing it.
+  let reloaded = 0;
+    globalThis.location = { reload: () => { reloaded += 1; } };
   // The intervals are recorded but never scheduled: the header refresher must
   // not keep the process alive. A test can still see that one was cleared —
   // which is the difference between a timer that dies with its sheet and one
@@ -277,6 +291,8 @@ async function bootApp(backend, { token = null, unauthorizedOnce = false } = {})
       },
     },
     dispatch: (type, ev) => globalThis.document.dispatch(type, ev),
+    /** How many times the window asked the browser to reload the page. */
+    get reloaded() { return reloaded; },
     /** The built screen, for everything app.js creates with an id at runtime. */
     screen: (id) => findById(node('log'), id) ?? node(id),
   };
@@ -613,6 +629,170 @@ test('a model the live catalog dropped is marked in the picker', async () => {
   assert.doesNotMatch(kept.textContent, /ไม่มีในรายการของเว็บแล้ว/, 'a list that cannot judge makes no verdict');
 });
 
+/* ------------------------------------------------------- the model catalog */
+
+/** A backend whose catalog carries a stamp the test can move. */
+function catalogBackend({ stamp = { at: 1 }, models } = {}) {
+  let at = stamp.at;
+  const backend = {
+    ...BACKEND,
+    status: () => ({ ...BACKEND.status(), model: 'gemini-3.8-flash', catalog: { source: 'live', at, count: 2, error: null } }),
+    models: () => (models ? models(at) : { source: 'live', at, data: [
+      { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', kind: 'chat' },
+      { id: 'gemini-3.8-pro', name: 'Gemini 3.8 Pro', kind: 'chat' },
+    ] }),
+  };
+  return {
+    backend,
+    /** Move the stamp: the site changed its catalog. */
+    move(to) { at = to; },
+  };
+}
+
+test('the window rebuilds the model list when the bridge says the catalog changed', async () => {
+  // The catalog changes on the bridge's own schedule — the site retires a
+  // model, the tab reattaches — and the status call the window already makes
+  // every ten seconds says when it last changed. Comparing that stamp is how
+  // the list heals itself: the reader does nothing, and the list catches up.
+  const cat = catalogBackend();
+  const { node, sent, tick, timers } = await bootApp(cat.backend);
+  await tick();
+  const select = node('model');
+  assert.deepEqual(select.children.map((c) => c.value), ['gemini-3.8-flash', 'gemini-3.8-pro'], 'the list is there');
+
+  cat.move(2);
+  for (const fn of timers.values()) fn();
+  await tick(); await tick();
+
+  const asked = sent.filter((s) => s.method === 'models');
+  assert.ok(asked.length >= 2, 'the window asked for the list again');
+  assert.deepEqual(asked.at(-1).params, { force: false }, 'and it rode the cache — the bridge already has it');
+});
+
+test('a manual refresh asks the bridge for a fresh catalog', async () => {
+  // The move the reader used to make by reloading the whole window: one
+  // click, one fetch, and the window keeps its place.
+  const cat = catalogBackend();
+  const { node, sent, tick } = await bootApp(cat.backend);
+  await tick();
+  const before = sent.filter((s) => s.method === 'models').length;
+
+  node('model-refresh').dispatch('click');
+  await tick(); await tick();
+
+  const asked = sent.filter((s) => s.method === 'models');
+  assert.equal(asked.length, before + 1, 'the button asks the backend');
+  assert.deepEqual(asked.at(-1).params, { force: true }, 'and it asks for a real fetch');
+});
+
+test('a failed model refresh keeps the list it already had', async () => {
+  // An empty dropdown after a failed refresh is worse than a stale one: the
+  // reader still sees a model they can pick, and the chip says what failed.
+  const cat = catalogBackend();
+  const { node, tick, timers } = await bootApp(cat.backend);
+  await tick();
+  const select = node('model');
+  assert.equal(select.children.length, 2);
+
+  cat.backend.models = () => { throw new Error('the bridge is down'); };
+  cat.move(2);
+  for (const fn of timers.values()) fn();
+  await tick(); await tick();
+
+  assert.equal(select.children.length, 2, 'the list the reader had is still there');
+  assert.equal(select.children[0].value, 'gemini-3.8-flash');
+  assert.match(node('model').title, /ดึงรายการไม่สำเร็จ/, 'and the chip says what failed');
+});
+
+test('a fallback list says why it is a fallback', async () => {
+  // Two models with no explanation read as "the app is broken". The same two
+  // models labelled as the stub, with a banner that names the fix, read as
+  // "the site has not answered yet".
+  const backend = {
+    ...BACKEND,
+    status: () => ({ ...BACKEND.status(), catalog: { source: 'fallback', at: 0, count: 0, error: null } }),
+    models: () => ({ source: 'fallback', at: 0, error: null, data: [
+      { id: 'gemini-3.1-flash-lite', name: 'gemini-3.1-flash-lite', kind: 'chat' },
+      { id: 'claude-sonnet-5@default', name: 'claude-sonnet-5@default', kind: 'chat' },
+    ] }),
+  };
+  const { node, tick } = await bootApp(backend);
+  await tick();
+
+  assert.equal(node('model-note').textContent, 'สำรอง', 'the chip says the list is the stub');
+  assert.equal(node('model-note').hidden, false, 'and shows it');
+
+  const bar = node('log').children.find((c) => (c.className ?? '').includes('needs-tab'));
+  assert.ok(bar, 'a banner says so');
+  assert.match(bar.textContent, /รายการสำรอง/, 'and names what it is');
+  const fix = bar.children.find((c) => c.tagName === 'BUTTON');
+  assert.ok(fix, 'with a way to try again');
+});
+
+test('a refresh keeps the choice the reader had made', async () => {
+  // A poll that lands mid-choice must not yank the dropdown out from under
+  // the reader: the choice is theirs, and the list arriving is not a reason
+  // to take it away.
+  const cat = catalogBackend();
+  const { node, tick, timers } = await bootApp(cat.backend);
+  await tick();
+  const select = node('model');
+  select.value = 'gemini-3.8-pro';
+
+  cat.move(2);
+  for (const fn of timers.values()) fn();
+  await tick(); await tick();
+
+  assert.equal(select.value, 'gemini-3.8-pro', 'the choice survived the refresh');
+});
+
+test('a provider switch rebuilds the list even when a refresh is in flight', async () => {
+  // The list belongs to the provider, so a switch rebuilds it from scratch:
+  // the old options are gone, not merged with the new ones. A refresh that is
+  // in flight when the switch lands is fetching the OLD provider's list —
+  // joining it instead of asking again leaves the previous provider's model in
+  // the dropdown, and the switch then says one thing and shows another.
+  let active = 'aipass';
+  const lists = {
+    aipass: [{ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', kind: 'chat' }],
+    openai: [{ id: 'gpt-4o', name: 'GPT-4o', kind: 'chat' }],
+  };
+  let holdNext = false;
+  let release = null;
+  const backend = {
+    ...BACKEND,
+    status: () => ({ ...BACKEND.status(), model: active === 'aipass' ? 'gemini-3.8-flash' : 'gpt-4o' }),
+    'provider.set': ({ id }) => { active = id; return { ok: true, active: id }; },
+    models: () => new Promise((resolve) => {
+      // The list the answer carries is the one that was asked for: a refresh
+      // that started before the switch must answer with the old provider's.
+      const data = lists[active];
+      const give = () => resolve({ source: 'live', data });
+      if (holdNext) { holdNext = false; release = give; } else setTimeout(give, 0);
+    }),
+  };
+  const { node, tick } = await bootApp(backend);
+  await tick();
+  assert.deepEqual(node('model').children.map((c) => c.value), ['gemini-3.8-flash'], 'the list the provider owns');
+
+  // A refresh, held open: it is in flight while the provider is switched.
+  holdNext = true;
+  node('model-refresh').dispatch('click');
+  await tick();
+  assert.ok(release, 'the refresh is in flight');
+
+  node('provider').value = 'openai';
+  node('provider').dispatch('change');
+  await tick(); await tick();
+
+  release();
+  for (let i = 0; i < 6; i++) await tick();
+
+  const select = node('model');
+  assert.deepEqual(select.children.map((c) => c.value), ['gpt-4o'], "the new provider's models are the list now");
+  assert.equal(select.value, 'gpt-4o', 'and the model in use is the one selected');
+});
+
 test('a run that stops for want of steps offers the next move', async () => {
   // Three dead-end reports used to just say "stopped". A "carry on" button turns
   // the same event into a run.
@@ -763,7 +943,7 @@ test('opening an old session replays its plan card', async () => {
   };
   const { node, tick } = await bootApp(backend);
   await tick();
-  node('sessions').children[0].dispatch('click');
+  sessionRows(node('sessions'))[0].dispatch('click');
   await tick(); await tick();
   const panel = findById(node('chat'), 'todo-panel');
   assert.ok(panel, 'the checklist comes back with the session');
@@ -833,9 +1013,9 @@ test('opening a second session wins over a load still in flight', async () => {
   };
   const { node, tick } = await bootApp(backend);
   await tick();
-  node('sessions').children[0].dispatch('click');
+  sessionRows(node('sessions'))[0].dispatch('click');
   await tick();
-  node('sessions').children[1].dispatch('click');
+  sessionRows(node('sessions'))[1].dispatch('click');
   await new Promise((r) => setTimeout(r, 80));
   assert.match(node('log').textContent, /opened s2/, 'the newest pick is on screen');
   assert.equal(/opened s1/.test(node('log').textContent), false, 'the stale load never painted');
@@ -859,7 +1039,7 @@ test("a live run's frames stay out of another session's view", async () => {
   globalThis.__stream.emit('session', { id: 's2', title: 'the run', file: 'x.jsonl' });
   await tick();
   // Browse s1 while the run is still going.
-  node('sessions').children[0].dispatch('click');
+  sessionRows(node('sessions'))[0].dispatch('click');
   await tick();
   globalThis.__stream.emit('assistant_delta', { text: 'RUN-ONLY', session: 's2' });
   globalThis.__stream.emit('note', { text: 'RUN-NOTE', session: 's2' });
@@ -880,7 +1060,7 @@ test("a live run's frames stay out of another session's view", async () => {
   assert.ok(prose().includes('IN-VIEW'), 'frames of the open session paint');
   assert.ok(notes.includes('GLOBAL-NOTE'), 'untagged backend notes still paint');
   // Back on the run's session, its frames land again.
-  node('sessions').children[1].dispatch('click');
+  sessionRows(node('sessions'))[1].dispatch('click');
   await tick();
   globalThis.__stream.emit('assistant_delta', { text: 'BACK-TAIL', session: 's2' });
   await tick();
@@ -945,6 +1125,50 @@ test("a search's sources are shown as links, with the address the reader can ope
   assert.equal(link.href, 'https://medium.com/@a/post', 'the address is a real one');
   assert.equal(link.textContent, 'https://medium.com/@a/post', 'and it is what the reader sees');
   assert.equal(row.open, true, 'the links are the point of the row, so it opens');
+});
+
+test('the step headline is not said twice — the bubble already holds the prose', async () => {
+  // The step's headline is the first line of the model's reply, and the reply
+  // is in the bubble. The row under the step used to say it again, so a run
+  // read the same sentence twice: once in the bubble, once as the step's
+  // title. A DONE is said once, and so is this.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('assistant_delta', { text: 'Let us start with the project overview.\n' });
+  await tick();
+  globalThis.__stream.emit('step', { step: 1, maxSteps: 0, elapsed: 5.4 });
+  globalThis.__stream.emit('thinking', { text: 'Let us start with the project overview.' });
+  await tick();
+  const heads = node('log').children.filter((c) => /(^|\s)thinking(\s|$)/.test(c.className ?? ''));
+  assert.equal(heads.length, 0, 'the bubble says it once already');
+  // …and the prose is still there: the row was dropped, not the reply.
+  const bubble = node('log').children.find((c) => c.className.includes('assistant'));
+  assert.match(bubbleHtml(bubble), /Let us start with the project overview/);
+});
+
+test('the step headline is not said twice when the bubble carries the wire spelling', async () => {
+  // The bubble is painted from the stream, which carries the wire spelling of
+  // the reply; the headline comes from the reply the harness decoded. Both
+  // sides are put back before they are compared, or a reply with a trigger
+  // token in it would say itself twice.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('assistant_delta', { text: 'CONSOLE-LOG is how it is said\n' });
+  await tick();
+  globalThis.__stream.emit('step', { step: 1, maxSteps: 0, elapsed: 1 });
+  globalThis.__stream.emit('thinking', { text: 'console.log is how it is said' });
+  await tick();
+  const heads = node('log').children.filter((c) => /(^|\s)thinking(\s|$)/.test(c.className ?? ''));
+  assert.equal(heads.length, 0, 'the bubble says it once already');
+});
+
+test('a headline the bubble does not carry still gets its line', async () => {
+  // The row is not decoration: a headline that is not in the bubble (a reply
+  // that never reached it, another session's turn) still deserves a line.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('thinking', { text: 'A line no bubble carries' });
+  await tick();
+  const heads = node('log').children.filter((c) => /(^|\s)thinking(\s|$)/.test(c.className ?? ''));
+  assert.equal(heads.length, 1, 'the row is there');
+  assert.match(heads[0].textContent, /A line no bubble carries/);
 });
 
 test('a link in the chat opens in the browser, not in the window', async () => {
@@ -1165,12 +1389,12 @@ test('the session list filters as you type', async () => {
     ],
   });
   await tick(); await tick();
-  assert.equal(node('sessions').children.length, 3, 'every session is listed');
+  assert.equal(sessionRows(node('sessions')).length, 3, 'every session is listed');
   node('session-filter').value = 'UI';
   node('session-filter').dispatch('input');
   await settle();
-  assert.equal(node('sessions').children.length, 1, 'the filter narrows it');
-  assert.match(node('sessions').children[0].textContent, /UI/);
+  assert.equal(sessionRows(node('sessions')).length, 1, 'the filter narrows it');
+  assert.match(sessionRows(node('sessions'))[0].textContent, /UI/);
 
   node('session-filter').value = 'ไม่มีอะไรตรง';
   node('session-filter').dispatch('input');
@@ -1187,7 +1411,7 @@ test('a session row opens with Enter, not only with the mouse', async () => {
     'session.open': () => [],
   });
   await tick(); await tick();
-  const row = node('sessions').children[0];
+  const row = sessionRows(node('sessions'))[0];
   assert.equal(row.attrs.role, 'button', 'the row announces itself as a button');
   assert.equal(row.tabIndex, 0, 'and can take focus');
   row.dispatch('keydown', { key: 'Enter' });
@@ -1221,6 +1445,190 @@ test('the file panel walks into folders and attaches a file', async () => {
   await tick(); await tick();
   assert.ok(calls.includes('attachment.stage'), 'clicking it stages the file');
   assert.match(node('log').textContent, /แนบแล้ว: guide\.md/);
+});
+
+test('the file field searches the whole project', async () => {
+  // A folder with a hundred files is a list nobody scrolls, and a project with
+  // a thousand is a tree nobody can walk in their head. The field under the
+  // heading searches the project, and every row says which folder it is in.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'fs.list': () => [{ name: 'README.md', dir: false }],
+    'fs.search': (params) => (params.query === 'guide'
+      ? [
+        { path: 'docs/guide.md', name: 'guide.md', dir: false },
+        { path: 'ux/guide.md', name: 'guide.md', dir: false },
+      ]
+      : []),
+  });
+  await tick(); await tick(); await tick();
+  assert.equal(node('files').children.length, 1, 'the folder is listed');
+  assert.equal(node('files-count').textContent, '1', 'and the count says how many there are');
+
+  node('file-filter').value = 'guide';
+  node('file-filter').dispatch('input');
+  await settle();
+  const names = node('files').children.map((li) => li.textContent);
+  assert.equal(names.length, 2, 'the search finds the file in every folder');
+  assert.match(names[0], /guide\.md/);
+  assert.match(names[0], /docs/, 'and the row says which folder it lives in');
+  assert.equal(node('files-count').textContent, '2', 'and the count says how many there are');
+
+  node('file-filter').value = 'ไม่มีอะไรตรง';
+  node('file-filter').dispatch('input');
+  await settle();
+  assert.match(node('files').textContent, /ไม่พบไฟล์/, 'and it says so when nothing matches');
+});
+
+test('the field can search inside the files, not only their names', async () => {
+  // "Where is this?" is two questions: which file, and which line. The
+  // button at the end of the field flips the search from the name of a file
+  // to what is written in it — and the answer says where the word was found.
+  const { node, calls, tick } = await bootApp({
+    ...BACKEND,
+    'fs.list': () => [{ name: 'README.md', dir: false }],
+    'fs.grep': () => [{ path: 'docs/notes.md', line: 12, text: 'the answer is 42', at: 4 }],
+    'fs.read': () => ({ file: 'docs/notes.md', text: 'one\ntwo\nthe answer is 42' }),
+  });
+  await tick(); await tick(); await tick();
+  node('file-mode').dispatch('click');
+  assert.match(node('file-filter').placeholder, /คำในไฟล์/, 'the field says which search it does now');
+
+  node('file-filter').value = 'answer';
+  node('file-filter').dispatch('input');
+  await settle();
+  assert.ok(calls.includes('fs.grep'), 'the search asks for the word inside the files');
+  const row = node('files').children[0];
+  assert.match(row.textContent, /notes\.md/, 'the row names the file');
+  assert.match(row.textContent, /docs:12/, 'and says where in it the word is');
+
+  row.dispatch('click');
+  await tick(); await tick();
+  assert.ok(calls.includes('fs.read'), 'the row opens the file');
+  assert.equal(node('modal-title').textContent, 'docs/notes.md', 'and the sheet says which file it is');
+});
+
+test('the file field opens what it found, with the keyboard alone', async () => {
+  // A field you can type in but not act on is a form, not a tool: Enter opens
+  // the first hit, and the sheet says which file it opened.
+  const { node, calls, tick } = await bootApp({
+    ...BACKEND,
+    'fs.list': () => [{ name: 'README.md', dir: false }],
+    'fs.search': () => [{ path: 'docs/guide.md', name: 'guide.md', dir: false }],
+    'fs.read': () => ({ file: 'docs/guide.md', text: 'the guide' }),
+  });
+  await tick(); await tick(); await tick();
+  node('file-filter').value = 'guide';
+  node('file-filter').dispatch('input');
+  await settle();
+  node('file-filter').dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.ok(calls.includes('fs.read'), 'Enter opens the file the search found');
+  assert.equal(node('modal-title').textContent, 'docs/guide.md', 'and the sheet says which file it is');
+});
+
+test('the history is grouped by day', async () => {
+  // A history of 99 rows with no groups is a wall of clocks. The groups turn
+  // it into a few questions, and they are labels — not sessions.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'session.list': () => [
+      { id: 'aaa', title: 'one', updated: Date.now() },
+      { id: 'bbb', title: 'two', updated: Date.now() - 86_400_000 * 3 },
+    ],
+  });
+  await tick(); await tick();
+  const heads = node('sessions').children.filter((li) => li.className === 'day-head');
+  assert.equal(heads.length, 2, 'two days, two group heads');
+  assert.match(heads[0].textContent, /วันนี้/, 'the newest day is named');
+  assert.equal(sessionRows(node('sessions')).length, 2, 'and both sessions are still there');
+});
+
+test('the file trail walks back to the root of the project', async () => {
+  // A deep folder with no way out is a place you get stuck: the trail under
+  // the list is the way back, and every step of it is a click.
+  const { node, sent, tick } = await bootApp({
+    ...BACKEND,
+    'fs.list': (params) => (params.dir === '.' ? [{ name: 'docs', dir: true }] : [{ name: 'guide.md', dir: false }]),
+  });
+  await tick(); await tick(); await tick();
+  node('files').children.find((li) => li.textContent.includes('docs/')).dispatch('click');
+  await tick(); await tick();
+  const crumbs = node('files-crumbs');
+  assert.match(crumbs.textContent, /docs/, 'the trail names the folder you are in');
+
+  const root = crumbs.children.find((c) => c.tagName === 'BUTTON');
+  assert.ok(root, 'and the first step is the project itself');
+  root.dispatch('click');
+  await tick(); await tick();
+  const last = sent.filter((s) => s.method === 'fs.list').at(-1);
+  assert.equal(last.params.dir, '.', 'clicking it asks for the root of the tree');
+});
+
+test('a folder with nothing in it says so', async () => {
+  // An empty list and a list that failed to load look the same on screen: a
+  // blank box. The panel says which one it is.
+  const { node, tick } = await bootApp({ ...BACKEND, 'fs.list': () => [] });
+  await tick(); await tick(); await tick();
+  assert.match(node('files').textContent, /ยังไม่มีไฟล์/, 'the empty folder says so');
+});
+
+test('a folder that cannot be read says so, and offers to read it again', async () => {
+  // A refused folder that shows an empty list is a lie: the reader thinks
+  // there is nothing there. The panel says what happened, and the one thing
+  // that can change it is a click away.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'fs.list': () => { throw new Error('outside project root: ../..'); },
+  });
+  await tick(); await tick(); await tick();
+  assert.match(node('files').textContent, /อ่านไฟล์ไม่ได้/, 'the panel says the folder could not be read');
+  assert.match(node('files').textContent, /นอกโปรเจกต์/, 'and says why, in the words the reader reads');
+  assert.ok(node('files').textContent.includes('ลองใหม่'), 'and offers to read it again');
+});
+
+test('a section folds away, and the reader decides which one', async () => {
+  // The rail is 264px and two lists want it. The fold gives the room back,
+  // and the window remembers the answer.
+  const { node, tick } = await bootApp(BACKEND);
+  await tick(); await tick();
+  const section = node('files-section');
+  node('files-fold').dispatch('click');
+  assert.ok(section.classList.contains('folded'), 'the section folds away');
+  assert.equal(node('files-fold').attrs['aria-expanded'], 'false', 'and says so');
+  node('files-fold').dispatch('click');
+  assert.ok(!section.classList.contains('folded'), 'and it opens again');
+});
+
+test('the arrow keys walk the list', async () => {
+  // A list you can only reach with the mouse is half a list. The keys move
+  // from row to row, and they stop at the ends instead of wrapping.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'fs.list': () => [{ name: 'a.md', dir: false }, { name: 'b.md', dir: false }],
+  });
+  await tick(); await tick(); await tick();
+  const rows = node('files').children;
+  rows[0].dispatch('keydown', { key: 'ArrowUp' });
+  assert.equal(rows[0].lastEvent.defaultPrevented, false, 'there is nothing above the first row');
+  rows[0].dispatch('keydown', { key: 'ArrowDown' });
+  assert.equal(rows[0].lastEvent.defaultPrevented, true, 'so the key moves down to the next row');
+  rows[1].dispatch('keydown', { key: 'ArrowDown' });
+  assert.equal(rows[1].lastEvent.defaultPrevented, false, 'and it stops at the last row');
+});
+
+test('a session somebody named shows its name, not only its clock', async () => {
+  // The clock face is the name of a session nobody named. A session with a
+  // title of its own shows the title — the clock is what the day column is
+  // for.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'session.list': () => [{ id: 'aaa', title: '2026-10-10 09:15 สรุป README', updated: Date.UTC(2026, 9, 10) }],
+  });
+  await tick(); await tick();
+  const row = sessionRows(node('sessions'))[0];
+  assert.match(row.textContent, /สรุป README/, 'the name is in the row');
+  assert.doesNotMatch(row.textContent, /09:15/, 'and the clock does not crowd it out');
 });
 
 test('the memory page shows carried facts, and forget-all clears them', async () => {
@@ -1362,6 +1770,30 @@ test('the temperature chip sits beside the effort chip and writes through', asyn
   node('temperature').dispatch('change');
   await tick();
   assert.deepEqual(sent.at(-1), { method: 'settings.set', params: { temperature: null } }, 'default clears it back to null');
+});
+
+test('the saved settings land in the header chips together', async () => {
+  // The mode, the effort and the temperature are ONE apply path: a settings
+  // change lands in all three chips at once, and none of them is left showing
+  // what the machine no longer believes.
+  const saved = { ...BACKEND['settings.get'](), mode: 'auto', requirePlanApproval: true, thinking: 'high', temperature: 0.7 };
+  const backend = { ...BACKEND, 'settings.get': () => saved, 'settings.set': () => saved };
+  const { node, tick } = await bootApp(backend);
+  assert.equal(node('mode').value, 'plan', 'the mode chip shows the plan view');
+  assert.equal(node('thinking').value, 'high', 'the effort chip shows the saved level');
+  assert.equal(node('temperature').value, '0.7', 'the temperature chip shows the saved number');
+
+  // And a save from the sheet moves all three at once, because the sheet
+  // asks the same one path to apply what it just wrote.
+  node('settings-btn').dispatch('click');
+  await tick(); await tick();
+  const save = node('modal-actions').children.find((b) => /save|บันทึก/.test(b.textContent));
+  assert.ok(save, 'a save button exists');
+  save.dispatch('click');
+  await tick(); await tick();
+  assert.equal(node('mode').value, 'plan', 'the mode chip still shows the plan view');
+  assert.equal(node('thinking').value, 'high', 'the effort chip still shows the saved level');
+  assert.equal(node('temperature').value, '0.7', 'the temperature chip still shows the saved number');
 });
 
 test('shift+tab cycles ask, auto and plan — and writes each through', async () => {
@@ -1722,6 +2154,124 @@ test('a spent quota maps to the Thai copy, not the raw English', async () => {
   assert.match(node('log').textContent, /เครดิตหมด/, 'the error reads as the fix');
 });
 
+test('the window says it is working while a run is in flight', async () => {
+  // A run takes minutes, and the question the reader asks it the whole time
+  // is "is it still doing something?". The answer has to be on screen the
+  // whole time — a bar with a clock over the transcript — and it has to stop
+  // when the run stops, or the reader learns not to believe it.
+  const { node, tick } = await bootApp(BACKEND);
+  assert.equal(node('working').classList.contains('hidden'), true, 'an idle window says nothing');
+
+  const task = node('task');
+  task.value = 'a slow task';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+  assert.equal(node('working').classList.contains('hidden'), false, 'the bar is up while the run works');
+  assert.match(node('working-text').textContent, /กำลังทำงาน/, 'and it says what is happening');
+  assert.match(node('working-time').textContent, /^\d+s$/, 'and it carries a clock');
+  assert.equal(node('log').classList.contains('busy'), true, 'the log makes room for the bar');
+  assert.equal(node('send').textContent, 'หยุด', 'and the button is the stop');
+
+  globalThis.__stream.emit('finished', { summary: '', stopReason: 'done', spent: 0 });
+  await tick();
+  assert.equal(node('working').classList.contains('hidden'), true, 'and it goes down with the run');
+  assert.equal(node('log').classList.contains('busy'), false, 'and the log takes its room back');
+});
+
+test('a reloaded window comes back with its conversation, not the welcome card', async () => {
+  // Ctrl+R reloads the window. What came back used to be the welcome card
+  // over an empty screen: the boot paints the card, and the card says
+  // "there is nothing here" — over a run that was still going. The card is
+  // the note for an EMPTY window, and the conversation has to come back
+  // with it.
+  const backend = {
+    ...BACKEND,
+    snapshot: () => ({
+      status: { root: '/tmp/proj', running: true },
+      session: { id: 's1', title: 'one' },
+      entries: [
+        { type: 'task', text: 'the question' },
+        { type: 'assistant', text: 'the answer' },
+      ],
+      pending: [],
+      asks: {},
+    }),
+  };
+  const { node, tick } = await bootApp(backend);
+  assert.ok(node('log').children.some((c) => c.id === 'welcome'), 'the boot paints the welcome card');
+
+  globalThis.__stream.emit('open', {});
+  await tick(); await tick(); await tick();
+
+  const log = node('log');
+  assert.equal(log.children.some((c) => c.id === 'welcome'), false, 'the card is gone');
+  assert.match(log.textContent, /the question/, 'and the conversation is back');
+  assert.equal(node('working').classList.contains('hidden'), false, 'and the window says the run is still working');
+  assert.equal(node('send').textContent, 'หยุด', 'so the stop is one click away');
+});
+
+test('the window hands the extension its token, in one click', async () => {
+  // The bridge knows the extension was refused for a missing token. The
+  // window cannot paste into the extension's popup, but it can put the token
+  // it already holds on the clipboard — so the one step that only the popup
+  // can do is a paste, not a hunt through the home directory.
+  const backend = {
+    ...BACKEND,
+    status: () => ({ ...BACKEND.status(), extensions: 0, extensionToken: 'missing' }),
+  };
+  const written = [];
+  const prevNav = globalThis.navigator;
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { clipboard: { writeText: async (text) => { written.push(text); } } },
+    configurable: true, writable: true,
+  });
+  try {
+    const { node, tick } = await bootApp(backend, { token: 'tok-for-the-extension' });
+    await tick(); await tick();
+    const bar = node('log').children.find((c) => /needs-tab/.test(c.className ?? ''));
+    assert.ok(bar, 'the banner appears');
+    assert.match(bar.textContent, /token/, 'and it names the token');
+    const btn = bar.children.find((c) => c.tagName === 'BUTTON');
+    assert.ok(btn, 'with the fix attached');
+    btn.dispatch('click');
+    await tick(); await tick();
+    assert.deepEqual(written, ['tok-for-the-extension'], 'the token went to the clipboard');
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', { value: prevNav, configurable: true, writable: true });
+  }
+});
+
+test('a token refusal does not send the reader to the extension popup', async () => {
+  // The extension talks to the bridge, not to the window: a token the window
+  // or the harness was refused with says nothing about the extension's
+  // token, and sending the reader to paste one into the popup fixed
+  // nothing. The two sides read the same file.
+  const backend = { ...BACKEND, run: () => { throw new Error('bridge returned 401: unauthorized: missing or wrong loopback bearer token'); } };
+  const { node, tick } = await bootApp(backend);
+  node('task').value = 'do work';
+  node('task').dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  const text = node('log').textContent;
+  assert.doesNotMatch(text, /\.aipass\/\.token/, 'the token file is not the answer any more');
+  assert.match(text, /ปฏิเสธ token/, 'but it is still a token refusal');
+});
+
+test('the window names the extension\'s token when that is what is missing', async () => {
+  // "extensions: 0" hides two jobs: the extension was never loaded, or the
+  // bridge refused it for want of the token. The bridge says which, and the
+  // window repeats it.
+  const backend = {
+    ...BACKEND,
+    status: () => ({ ...BACKEND.status(), extensions: 0, extensionToken: 'missing' }),
+    run: () => { throw new Error('no extension connected'); },
+  };
+  const { node, tick } = await bootApp(backend);
+  node('task').value = 'do work';
+  node('task').dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.match(node('log').textContent, /extension ยังไม่ได้รับ token/, 'the copy names the token, not the extension');
+});
+
 test('every command in the palette has a handler that resolves', async () => {
   const { node, calls, tick } = await bootApp(BACKEND);
   const task = node('task');
@@ -1852,7 +2402,7 @@ test('opening a session replays prose without markers, DONE summary included', a
   };
   const { node, tick } = await bootApp(backend);
   await tick();
-  node('sessions').children[0].dispatch('click');
+  sessionRows(node('sessions'))[0].dispatch('click');
   await tick(); await tick();
   const bodies = node('log').children
     .filter((c) => c.className.includes('assistant'))
@@ -2108,6 +2658,62 @@ test('the theme button flips the window and remembers', async () => {
   assert.equal(globalThis.document.documentElement.dataset.theme, 'dark');
 });
 
+test('the theme button says which theme is on', async () => {
+  // A title is a tooltip, not a name: a screen reader does not read it when
+  // the control takes focus, so the state the button carried was never
+  // announced. The button names the theme that is on now.
+  const { node, tick } = await bootApp(BACKEND);
+  assert.equal(node('theme-toggle').getAttribute('aria-label'), 'ธีม: มืด', 'the saved theme is announced');
+  node('theme-toggle').dispatch('click');
+  await tick();
+  assert.equal(node('theme-toggle').getAttribute('aria-label'), 'ธีม: สว่าง', 'and the name follows the flip');
+});
+
+test('the transcript holds its announcements while a run streams, and releases them when it ends', async () => {
+  // The log is a live region and the answer is painted frame by frame: a
+  // region that announced every frame read the same half-written sentence
+  // again and again. aria-busy says "not yet" — the answer is read once, when
+  // the run ends.
+  const { node, tick } = await bootApp(BACKEND);
+  assert.equal(node('log').getAttribute('aria-busy'), 'false', 'the transcript starts quiet');
+
+  globalThis.__stream.emit('task_start', { task: 'do the thing' });
+  await tick();
+  assert.equal(node('log').getAttribute('aria-busy'), 'true', 'the run holds the announcements');
+
+  globalThis.__stream.emit('finished', { summary: 'เสร็จแล้ว', stopReason: 'done', spent: 0, credits: null });
+  await tick(); await tick();
+  assert.equal(node('log').getAttribute('aria-busy'), 'false', 'and the end of the run releases them');
+});
+
+test('the change count reads in the language of the window around it', async () => {
+  // The pending panel is Thai; the badge was the only English left in it.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    pending: () => [{ file: 'a.mjs', added: 2, removed: 1, deleted: false, isNew: false }],
+  });
+  await tick(); await tick();
+  assert.equal(node('pending-count').textContent, '1 การเปลี่ยนแปลง');
+});
+
+test('the rail folds away and says whether it is open', async () => {
+  // The ☰ controls were <label>s: a label is not a widget, so the keyboard
+  // could not reach them and a screen reader had no name to announce. They
+  // are buttons now, and they say whether the rail is open.
+  const { node, tick } = await bootApp(BACKEND);
+  assert.equal(node('side-toggle').getAttribute('aria-expanded'), 'true', 'the rail starts open');
+
+  node('side-toggle').dispatch('click');
+  await tick();
+  assert.equal(node('nav-toggle').checked, true, 'the ☰ folded the rail');
+  assert.equal(node('side-toggle').getAttribute('aria-expanded'), 'false', 'and the button says so');
+
+  node('side-toggle-side').dispatch('click');
+  await tick();
+  assert.equal(node('nav-toggle').checked, false, 'the second ☰ opens it again');
+  assert.equal(node('side-toggle-side').getAttribute('aria-expanded'), 'true');
+});
+
 test('the rail starts a session, and the foot opens the rest of the app', async () => {
   // The rail used to carry a "New Conversation" line under the history that
   // did the same thing as the button above it, plus two rows that led nowhere
@@ -2197,7 +2803,150 @@ test('the search field is a field, and it counts the history it filters', async 
   node('session-filter').value = 'one';
   node('session-filter').dispatch('input');
   await settle();
-  const titles = node('sessions').children.map((li) => li.textContent);
+  const titles = sessionRows(node('sessions')).map((li) => li.textContent);
   assert.equal(titles.length, 1, 'the list is filtered');
   assert.match(titles[0], /one/);
+});
+
+/* ------------------------------------------------------------------ updates */
+
+test('the update notice is a banner with one button, and the click is the consent', async () => {
+  // The update is OFFERED, never taken: the window shows the version it
+  // found, and the person clicks. The click is the only thing that sends
+  // anything to the backend.
+  const backend = {
+    ...BACKEND,
+    'update.check': () => ({
+      ok: true,
+      checkedAt: Date.now(),
+      fromCache: false,
+      stale: false,
+      reason: null,
+      current: { content: '0.2.0', shell: '0.2.0', source: 'bundle' },
+      available: {
+        content: {
+          version: '0.2.1',
+          file: 'aipass-content-0.2.1.json.gz',
+          bytes: 517784,
+          sha256: 'a'.repeat(64),
+          notes: 'the release notes',
+          minShell: '0.2.0',
+        },
+      },
+    }),
+    'update.apply': () => ({ ok: true, version: '0.2.1', restart: true }),
+  };
+  const window_ = await bootApp(backend);
+  const { node, calls, tick } = window_;
+  await tick(); await tick();
+  const log = node('log').textContent;
+  assert.match(log, /0\.2\.1/, 'the banner names the version it found');
+  assert.equal(calls.includes('update.apply'), false, 'and nothing is applied on its own');
+
+  // The banner's button is the consent.
+  const bar = node('log').children.find((c) => (c.className ?? '').includes('update-bar'));
+  assert.ok(bar, 'the notice is a bar of its own');
+  const install = bar.children.find((c) => c.tagName === 'BUTTON' && /อัปเดต/.test(c.textContent));
+  assert.ok(install, 'with the update button on it');
+  install.dispatch('click');
+  await tick(); await tick();
+  assert.ok(calls.includes('update.apply'), 'the click is what applies it');
+  // The new content needs a new backend and a new window: the page waits for
+  // the backend and reloads, so the window's own files are the new ones.
+  // The wait is a poll, not a fixed pause — the reload lands a beat after
+  // the backend answers, and a beat is not a fixed number of milliseconds.
+  for (let i = 0; i < 50 && window_.reloaded === 0; i += 1) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.equal(window_.reloaded, 1, 'and the window reloads once the backend is back');
+});
+
+test('the shell update says the app will close, and an unsigned installer is refused', async () => {
+  // The binary is replaced by the installer, and the app has to be closed
+  // for it — so the button says that, rather than the app vanishing.
+  const backend = {
+    ...BACKEND,
+    'update.check': () => ({
+      ok: true,
+      checkedAt: Date.now(),
+      fromCache: false,
+      stale: false,
+      reason: null,
+      current: { content: '0.2.1', shell: '0.2.0', source: 'bundle' },
+      available: {
+        shell: {
+          version: '0.2.1',
+          file: 'aipass-desktop-0.2.1-windows-x64-setup.exe',
+          bytes: 242392264,
+          sha256: 'b'.repeat(64),
+          signature: 'unsigned',
+          notes: '',
+        },
+      },
+    }),
+    // What the backend answers for an unsigned installer: the refusal, and
+    // the reason in the app's own words.
+    'update.install': () => ({ ok: false, reason: 'the installer is not signed yet — the app does not replace itself with an unsigned installer' }),
+  };
+  const { node, calls, tick } = await bootApp(backend);
+  await tick(); await tick();
+  const bar = node('log').children.find((c) => (c.className ?? '').includes('update-bar'));
+  assert.ok(bar, 'the notice is a bar of its own');
+  const reinstall = bar.children.find((c) => c.tagName === 'BUTTON' && /ติดตั้งเวอร์ชันนี้/.test(c.textContent));
+  assert.ok(reinstall, 'with the install button on it');
+  assert.match(reinstall.textContent, /ปิดแล้วเปิดใหม่/, 'and it says the app will close');
+
+  reinstall.dispatch('click');
+  await tick(); await tick();
+  assert.ok(calls.includes('update.install'), 'the click asks for the handover');
+  assert.match(
+    node('log').textContent,
+    /ไม่ได้ติดตั้ง|not signed|ไม่สำเร็จ/,
+    'and the refusal is on screen, not swallowed',
+  );
+});
+
+test('the update check does not nag when there is nothing new', async () => {
+  // An app that cries wolf about updates is an app people mute. No release,
+  // no banner.
+  const backend = {
+    ...BACKEND,
+    'update.check': () => ({
+      ok: true,
+      checkedAt: Date.now(),
+      fromCache: false,
+      stale: false,
+      reason: null,
+      current: { content: '0.2.0', shell: '0.2.0', source: 'bundle' },
+      available: {},
+    }),
+  };
+  const { node, tick } = await bootApp(backend);
+  await tick(); await tick();
+  const bar = node('log').children.find((c) => (c.className ?? '').includes('update-bar'));
+  assert.equal(bar, undefined, 'no notice when there is nothing to say');
+});
+
+test('the status line names both halves of the build', async () => {
+  // "Which build is running" has to have an answer, and the build is two
+  // things: the binary and the content. The shell's version and the content's
+  // are both on screen.
+  const backend = {
+    ...BACKEND,
+    status: () => ({
+      ...BACKEND.status(),
+      app: '0.2.1',
+      shell: '0.2.0',
+      source: 'overlay',
+    }),
+  };
+  const { node, tick } = await bootApp(backend);
+  const task = node('task');
+  task.value = '/status';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  const log = node('log').textContent;
+  assert.match(log, /0\.2\.1/, 'the content version is named');
+  assert.match(log, /0\.2\.0/, 'and the shell version');
+  assert.match(log, /อัปเดตที่ติดตั้งไว้/, 'and where the code came from');
 });
