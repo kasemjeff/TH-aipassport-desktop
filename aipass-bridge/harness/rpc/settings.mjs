@@ -79,7 +79,12 @@ export function createSettingsMethods(ctx) {
         } else {
           providers.save({ ...active, defaultModel: params.model });
         }
-        for (const h of harnesses.values()) h.bridge.model = params.model;
+        // Only the AiPASS harnesses take the id: a model means nothing across
+        // providers, and a harness on another provider was handed one it
+        // cannot ask for.
+        for (const h of harnesses.values()) {
+          if (h.providerId === AIPASS_PROVIDER) h.bridge.model = params.model;
+        }
       }
       await ctx.current.bridge.config(Object.fromEntries(Object.entries(params).filter(([k]) => ['model', 'assistant', 'aspectRatio', 'conversation'].includes(k))));
       return { ok: true };
@@ -218,7 +223,10 @@ export function createSettingsMethods(ctx) {
         if (params.subagent != null) h.options.subagent = appSettings.get('subagent');
         if (params.thinking != null) h.options.thinking = appSettings.get('thinking');
         if (params.temperature !== undefined) h.options.temperature = appSettings.get('temperature');
-        if (params.defaultModel != null) h.bridge.model = params.defaultModel;
+        // Only the AiPASS harnesses take the id: a model means nothing across
+        // providers, and a harness on another provider was handed one it
+        // cannot ask for.
+        if (params.defaultModel != null && h.providerId === AIPASS_PROVIDER) h.bridge.model = params.defaultModel;
         // A provider named in the same save is applied here, not only by the
         // dedicated switch: the sheet's provider field and its "use this one"
         // button are the same decision, and a save that wrote one and not the
