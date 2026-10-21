@@ -1453,6 +1453,13 @@ test('the archive is a door both ways', async () => {
   back.dispatch('click');
   await tick(); await tick();
   assert.ok(calls.includes('session.unarchive'), 'and the row puts it back');
+
+  // And the one thing in the store that deletes: it asks first, and then it
+  // prunes only what has been in the archive for months.
+  const prune = bar.children.filter((b) => b.tagName === 'BUTTON')[1];
+  prune.dispatch('click');
+  await tick(); await tick();
+  assert.ok(calls.includes('session.prune'), 'the prune asks the backend to do it');
 });
 
 test('the file panel walks into folders and attaches a file', async () => {
