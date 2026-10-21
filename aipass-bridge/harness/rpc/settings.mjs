@@ -82,11 +82,14 @@ export function createSettingsMethods(ctx) {
         } else {
           providers.save({ ...active, defaultModel: params.model });
         }
-        // Only the AiPASS harnesses take the id: a model means nothing across
-        // providers, and a harness on another provider was handed one it
-        // cannot ask for.
+        // The harness that runs on THAT provider takes the id: a model means
+        // nothing across providers, so a harness on another one must not be
+        // handed it — but the harness on the provider the model belongs to is
+        // exactly the one that has to run it. The window's model list IS the
+        // active provider's list, so a pick there is a pick for it.
+        const owner = active?.id ?? AIPASS_PROVIDER;
         for (const h of harnesses.values()) {
-          if (h.providerId === AIPASS_PROVIDER) h.bridge.model = params.model;
+          if (h.providerId === owner) h.bridge.model = params.model;
         }
       }
       await ctx.current.bridge.config(Object.fromEntries(Object.entries(params).filter(([k]) => ['model', 'assistant', 'aspectRatio', 'conversation'].includes(k))));
