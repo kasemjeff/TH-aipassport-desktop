@@ -220,9 +220,12 @@ export class ApiProviderClient {
       if (!rows.length) throw new Error('the provider returned no models');
       // A model the person wrote down by hand stays in the list even when the
       // provider's own catalog does not name it — some gateways answer with a
-      // subset, and the loop refuses a run whose model it cannot find.
-      for (const id of fallback) {
-        if (!rows.some((r) => r.id === id)) rows.push({ id, name: id });
+      // subset, and the loop refuses a run whose model it cannot find. The
+      // written model is a row like any other: an entry whose id is an object
+      // reaches the window as "[object Object]" and is sent to the provider
+      // as the model to run.
+      for (const row of fallback) {
+        if (!rows.some((r) => r.id === row.id)) rows.push(row);
       }
       return { data: rows, source: 'live' };
     } catch (err) {

@@ -411,13 +411,17 @@ export function createRpc({
    * contract is the whole of the change. The client is NOT rebuilt when the
    * provider did not change — a provider client owns the conversation
    * history, and a settings save must not drop it.
+   *
+   * `force` is for the one case that is not a settings save: the provider's
+   * SPEC changed (a new endpoint, a new model list), so the client that
+   * answers for the old spec is the wrong client and has to go.
    */
-  const applyProviderTo = (h, providerId = activeProviderId()) => {
+  const applyProviderTo = (h, providerId = activeProviderId(), { force = false } = {}) => {
     if (!providers.get(providerId)) return;
     // The same provider: the client stays, and so does everything it owns —
     // a provider client keeps the conversation history, and a settings save
     // must not drop it.
-    if (h.providerId === providerId && h.bridge) return;
+    if (!force && h.providerId === providerId && h.bridge) return;
     const client = clientForProvider(providerId, { model: model ?? modelFor(providerId), events: h.events });
     if (client) h.setProvider(client);
   };

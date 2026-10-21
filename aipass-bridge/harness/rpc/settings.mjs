@@ -16,6 +16,30 @@ import { publicSpec, AIPASS_PROVIDER } from '../providers.mjs';
 import { clientFor } from '../provider-client.mjs';
 
 /**
+ * Did the provider's spec change in a way the client cares about?
+ *
+ * The endpoint, the kind, the key's environment, the model list and the
+ * headers are what a client is built FROM. A save that touched none of them
+ * is a settings save: the client stays, and with it the conversation history
+ * it owns. A save that touched one of them is an EDITED provider, and the
+ * client that answers for the old spec is the wrong client — the window would
+ * keep asking the endpoint the person just changed.
+ *
+ * @param {object|null} before the spec as it was
+ * @param {object} after the spec as it is now
+ * @returns {boolean}
+ */
+function specChanged(before, after) {
+  if (!before || !after) return true;
+  return before.kind !== after.kind
+    || before.baseUrl !== after.baseUrl
+    || before.apiKeyEnv !== after.apiKeyEnv
+    || before.defaultModel !== after.defaultModel
+    || JSON.stringify(before.models ?? []) !== JSON.stringify(after.models ?? [])
+    || JSON.stringify(before.headers ?? {}) !== JSON.stringify(after.headers ?? {});
+}
+
+/**
  * The settings methods of the backend.
  *
  * @param {import('./context.mjs').RpcContext} ctx the shared backend state
@@ -107,12 +131,13 @@ export function createSettingsMethods(ctx) {
      * spec has nowhere to go.
      */
     async 'provider.save'(params = {}) {
+      const before = providers.get(params.id);
       const spec = providers.save(params);
       if (params.key) providers.setKey(spec.id, params.key);
       // A provider whose spec just changed is rebuilt on every harness that
       // runs on it, so the change is live and not only on the next start.
       for (const h of harnesses.values()) {
-        if (h.providerId === spec.id) applyProviderTo(h, spec.id);
+        if (h.providerId === spec.id) applyProviderTo(h, spec.id, { force: specChanged(before, spec) });
       }
       return { ok: true, provider: publicSpec(spec), hasKey: providers.hasKey(spec.id) };
     },

@@ -17,6 +17,7 @@ import { ProviderStore, AIPASS_PROVIDER, sanitizeSpec } from '../harness/provide
 import { ApiProviderClient, clientFor, endpointsFor } from '../harness/provider-client.mjs';
 import { RATE_REFUSED, resilientSay } from '../harness/bridge.mjs';
 import { Settings } from '../harness/settings.mjs';
+import { Harness } from '../harness/harness.mjs';
 
 
 /** A streaming response, as a provider would send one. */
@@ -189,6 +190,22 @@ test('the aipass provider is reached through the local bridge', () => {
   assert.equal(client.providerId, AIPASS_PROVIDER);
 });
 
+test('the harness takes the client it is handed, under one name', () => {
+  // A provider is a client, not a second loop (rule 14): the harness talks to
+  // one contract, so the client it is given may be the bridge's own or a
+  // provider's. ONE option says so — `client` — so a caller cannot hand over
+  // one thing and have the harness talk to another.
+  const bridge = { providerId: AIPASS_PROVIDER, model: 'gemini', async chat() {}, async quota() { return { available: 1 }; } };
+  const h = new Harness({ root: tempDir(), client: bridge, store: 'off' });
+  assert.equal(h.bridge, bridge, 'the client it was handed is the one it talks to');
+  assert.equal(h.providerId, AIPASS_PROVIDER, 'and it says which provider it is');
+
+  const provider = { providerId: 'openai', model: 'gpt-x', async chat() {}, async quota() { return { available: 1 }; } };
+  const h2 = new Harness({ root: tempDir(), client: provider, store: 'off' });
+  assert.equal(h2.bridge, provider, 'a provider client is a client too');
+  assert.equal(h2.providerId, 'openai', 'and the harness says which provider it is');
+});
+
 test('a rate refusal is recognised whoever answers it', () => {
   assert.ok(RATE_REFUSED.test('aipass returned 429 Too Many Requests'), 'the site still counts');
   assert.ok(RATE_REFUSED.test('provider returned 429 Too Many Requests'), 'a provider counts too');
@@ -334,6 +351,249 @@ test('a run works end to end on a provider, not only on the bridge', async () =>
     assert.doesNotMatch(fake.seen[1].messages[2].content, /CONSOLE-LOG/, 'the reminder names no wire spellings a provider never sees');
   } finally {
     rpc.server.close();
+    fake.server.close();
+    delete process.env.FAKE_PROVIDER_KEY;
+  }
+});
+
+/**
+ * A fake upstream that records every path it is asked for and answers with a
+ * model list.
+ *
+ * The AiPASS bridge is one kind of upstream and an added provider is another:
+ * the same recorder stands in for both, and a test that watches it says, in
+ * one line, whether the backend asked the right machine.
+ */
+function recordingUpstream(modelId) {
+  const asked = [];
+  const server = http.createServer((req, res) => {
+    asked.push(req.url);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ data: [{ id: modelId }], source: 'live' }));
+  });
+  return { server, asked };
+}
+
+/** Call the backend the way the window does. */
+async function callAt(port, method, params = {}) {
+  const res = await fetch(`http://127.0.0.1:${port}/rpc`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ method, params }),
+  });
+  const body = await res.json();
+  if (!body.ok) throw new Error(body.error);
+  return body.result;
+}
+
+test('an added provider answers with the models of its own spec', async () => {
+  // The list of an added provider lives in its own spec — the AiPASS bridge
+  // has never heard of it, so a list read from that bridge is a list of the
+  // wrong models. The backend must ask the provider that is in use.
+  const home = tempDir();
+  const store = new ProviderStore(home);
+  store.save({ ...OPENAI_SPEC, models: ['spec-model'] });
+  const bridge = recordingUpstream('bridge-model');
+  await new Promise((resolve) => bridge.server.listen(0, '127.0.0.1', resolve));
+  const settings = new Settings(home, 'settings.json');
+  settings.set({ defaultProvider: 'openai' });
+  const rpc = await startRpcServer({
+    root: tempDir(),
+    store: tempDir(),
+    settings,
+    providerStore: store,
+    autostartBridge: false,
+    bridgeURL: `http://127.0.0.1:${bridge.server.address().port}`,
+  });
+  const port = rpc.port;
+  try {
+    const models = await callAt(port, 'models');
+    assert.deepEqual(models.data.map((m) => m.id), ['spec-model'], 'the list is the provider own');
+    assert.equal(models.source, 'spec', 'and the answer says where the list came from');
+    assert.deepEqual(bridge.asked, [], 'the AiPASS bridge was never asked for it');
+  } finally {
+    rpc.server.close();
+    bridge.server.close();
+  }
+});
+
+test('a model the person wrote down by hand stays in the list, and stays a model', async () => {
+  // A provider's own catalog does not have to name every model the person
+  // wrote down in the spec — a gateway answers with a subset. The written
+  // model stays in the list, and it stays a MODEL: an entry whose id is an
+  // object reaches the window as "[object Object]" and is sent to the
+  // provider as the model to run.
+  const home = tempDir();
+  const store = new ProviderStore(home);
+  const fake = fakeProvider(['DONE']);
+  await new Promise((resolve) => fake.server.listen(0, '127.0.0.1', resolve));
+  store.save({
+    id: 'fake', kind: 'openai', baseUrl: `http://127.0.0.1:${fake.server.address().port}/v1`,
+    apiKeyEnv: 'FAKE_PROVIDER_KEY', models: ['fake-model', 'written-model'],
+  });
+  process.env.FAKE_PROVIDER_KEY = 'sk-fake';
+  const settings = new Settings(home, 'settings.json');
+  settings.set({ defaultProvider: 'fake' });
+  const rpc = await startRpcServer({
+    root: tempDir(),
+    store: tempDir(),
+    settings,
+    providerStore: store,
+    autostartBridge: false,
+  });
+  const port = rpc.port;
+  try {
+    const models = await callAt(port, 'models');
+    const written = models.data.find((m) => m.id === 'written-model');
+    assert.ok(written, 'the model the person wrote down is in the list');
+    assert.equal(typeof written.id, 'string', 'and it is a model, not an object');
+    assert.equal(written.name, 'written-model', 'named the way it was written');
+    for (const m of models.data) {
+      assert.equal(typeof m.id, 'string', `every entry is a model, not an object: ${JSON.stringify(m.id)}`);
+    }
+  } finally {
+    rpc.server.close();
+    fake.server.close();
+    delete process.env.FAKE_PROVIDER_KEY;
+  }
+});
+
+test('an edited provider is live at once — the new endpoint, the new list', async () => {
+  // The person changes the endpoint or the model list of the provider that is
+  // in use. The change must be live, not on the next start: a client that
+  // still holds the old endpoint answers for the old provider, and the list
+  // on screen is the old list.
+  const home = tempDir();
+  const store = new ProviderStore(home);
+  const first = recordingUpstream('first-model');
+  const second = recordingUpstream('second-model');
+  await new Promise((resolve) => first.server.listen(0, '127.0.0.1', resolve));
+  await new Promise((resolve) => second.server.listen(0, '127.0.0.1', resolve));
+  store.save({
+    id: 'fake', kind: 'openai', baseUrl: `http://127.0.0.1:${first.server.address().port}/v1`,
+    apiKeyEnv: 'FAKE_PROVIDER_KEY', models: ['first-model'],
+  });
+  process.env.FAKE_PROVIDER_KEY = 'sk-fake';
+  const settings = new Settings(home, 'settings.json');
+  settings.set({ defaultProvider: 'fake' });
+  const rpc = await startRpcServer({
+    root: tempDir(),
+    store: tempDir(),
+    settings,
+    providerStore: store,
+    autostartBridge: false,
+  });
+  const port = rpc.port;
+  try {
+    const before = await callAt(port, 'models');
+    assert.ok(before.data.some((m) => m.id === 'first-model'), 'the list is the old one to begin with');
+
+    await callAt(port, 'provider.save', {
+      id: 'fake', kind: 'openai', baseUrl: `http://127.0.0.1:${second.server.address().port}/v1`,
+      apiKeyEnv: 'FAKE_PROVIDER_KEY', models: ['second-model'],
+    });
+
+    const after = await callAt(port, 'models');
+    assert.ok(after.data.some((m) => m.id === 'second-model'), 'the list is the new one');
+    assert.equal(after.data.some((m) => m.id === 'first-model'), false, 'the old list is gone');
+    assert.ok(second.asked.length, 'the new endpoint is the one that answered');
+    assert.equal(first.asked.length, 1, 'and the old endpoint was not asked again');
+  } finally {
+    rpc.server.close();
+    first.server.close();
+    second.server.close();
+    delete process.env.FAKE_PROVIDER_KEY;
+  }
+});
+
+test('a model chosen for an added provider is filed with that provider', async () => {
+  // A model id means nothing across providers: `gpt-4o` is not a thing the
+  // AiPASS bridge can be asked for. So a model chosen while an added provider
+  // is in use belongs to THAT provider — and the machine-wide default stays
+  // the AiPASS one, or a later switch back would send the site a model it has
+  // never heard of.
+  const home = tempDir();
+  const store = new ProviderStore(home);
+  store.save({ ...OPENAI_SPEC, apiKeyEnv: 'EXAMPLE_KEY', defaultModel: 'gpt-x' });
+  process.env.EXAMPLE_KEY = 'sk-example';
+  const settings = new Settings(home, 'settings.json');
+  settings.set({ defaultProvider: 'openai' });
+  const rpc = await startRpcServer({
+    root: tempDir(),
+    store: tempDir(),
+    settings,
+    providerStore: store,
+    autostartBridge: false,
+  });
+  const port = rpc.port;
+  try {
+    await callAt(port, 'config.set', { model: 'gpt-4o' });
+    assert.equal(store.get('openai').defaultModel, 'gpt-4o', 'the model is filed with the provider that answers to it');
+    assert.notEqual(settings.get('defaultModel'), 'gpt-4o', 'and the machine-wide default is not taken over by it');
+    assert.equal((await callAt(port, 'status')).model, 'gpt-4o', 'the harness runs on the model that was chosen');
+  } finally {
+    rpc.server.close();
+    delete process.env.EXAMPLE_KEY;
+  }
+});
+
+test('a model chosen on the built-in provider is the machine default', async () => {
+  // The other half of the rule: on AiPASS the model IS the machine-wide
+  // default, so the choice survives a restart and the next backend starts
+  // with it.
+  const home = tempDir();
+  const settings = new Settings(home, 'settings.json');
+  const rpc = await startRpcServer({
+    root: tempDir(),
+    store: tempDir(),
+    settings,
+    providerStore: new ProviderStore(home),
+    autostartBridge: false,
+  });
+  const port = rpc.port;
+  try {
+    await callAt(port, 'config.set', { model: 'gemini-3.8-flash' });
+    assert.equal(settings.get('defaultModel'), 'gemini-3.8-flash', 'the machine default is the model that was chosen');
+  } finally {
+    rpc.server.close();
+  }
+});
+
+test('the bridge is not asked for the models of a provider that has a key', async () => {
+  // The same question with a provider that can answer it: the live list
+  // comes from the provider, and the bridge is still never touched — it is
+  // the other provider, and its models are not this one's.
+  const home = tempDir();
+  const store = new ProviderStore(home);
+  const fake = fakeProvider(['DONE']);
+  await new Promise((resolve) => fake.server.listen(0, '127.0.0.1', resolve));
+  store.save({
+    id: 'fake', kind: 'openai', baseUrl: `http://127.0.0.1:${fake.server.address().port}/v1`,
+    apiKeyEnv: 'FAKE_PROVIDER_KEY', models: ['spec-model'],
+  });
+  process.env.FAKE_PROVIDER_KEY = 'sk-fake';
+  const bridge = recordingUpstream('bridge-model');
+  await new Promise((resolve) => bridge.server.listen(0, '127.0.0.1', resolve));
+  const settings = new Settings(home, 'settings.json');
+  settings.set({ defaultProvider: 'fake' });
+  const rpc = await startRpcServer({
+    root: tempDir(),
+    store: tempDir(),
+    settings,
+    providerStore: store,
+    autostartBridge: false,
+    bridgeURL: `http://127.0.0.1:${bridge.server.address().port}`,
+  });
+  const port = rpc.port;
+  try {
+    const models = await callAt(port, 'models');
+    assert.equal(models.source, 'live', 'the provider own catalog answered');
+    assert.ok(models.data.some((m) => m.id === 'fake-model'), 'the list is the provider own');
+    assert.equal(models.data.some((m) => m.id === 'bridge-model'), false, 'the bridge list is not in it');
+    assert.deepEqual(bridge.asked, [], 'the AiPASS bridge was never asked for it');
+  } finally {
+    rpc.server.close();
+    bridge.server.close();
     fake.server.close();
     delete process.env.FAKE_PROVIDER_KEY;
   }
