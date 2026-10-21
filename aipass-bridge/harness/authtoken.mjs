@@ -108,6 +108,27 @@ export function isLoopbackUrl(url) {
     || /^127(\.\d{1,3}){3}$/.test(host);
 }
 
+/**
+ * The headers a request to `url` carries: the bearer token on loopback, and
+ * nothing anywhere else.
+ *
+ * The bridge gates every route but its health probes, so a client that talks
+ * to it presents the token it minted — chat.mjs and doctor.mjs have always
+ * done this, and the harness's own bridge client did not, so every run the
+ * window started was refused with a 401 that the window blamed on the
+ * extension. One spelling of the rule, so the next client cannot forget it
+ * again.
+ *
+ * The test is about the HOST, not a string prefix: a prefix would be true by
+ * construction and would ship the token to a remote bridge.
+ *
+ * @param {string} url @param {string} [home] @returns {Record<string, string>} */
+export function authHeadersFor(url, home) {
+  if (!authRequired()) return {};
+  if (!isLoopbackUrl(url)) return {};
+  return { authorization: `Bearer ${loadOrMintToken(home)}` };
+}
+
 /** Constant-time bearer check against the active token.
  * @param {import('node:http').IncomingMessage} req @param {string} [home] */
 export function authorized(req, home) {

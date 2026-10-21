@@ -9,6 +9,7 @@
 // refusal that survives the waits is content-shaped, and only that is rewritten
 // (redact → split → drop).
 import { outbound, inbound, RISKY_LINE } from './waf.mjs';
+import { authHeadersFor } from './authtoken.mjs';
 
 export const MIN_SPLIT = 300;
 
@@ -410,6 +411,21 @@ export class BridgeClient {
     this.bucket = bucket ? new TokenBucket(typeof bucket === 'object' ? bucket : {}) : null;
   }
 
+  /**
+   * The headers every call to the bridge carries.
+   *
+   * The bridge gates every route but its health probes, so a client that
+   * forgets the bearer token is refused with a 401 — and the window turned
+   * that refusal into "the extension's token is wrong", which is a different
+   * problem with a different fix. The token rides loopback only: a remote
+   * bridge is another boundary and never sees it.
+   *
+   * @param {Record<string, string>} [extra]
+   * @returns {Record<string, string>} */
+  #headers(extra = {}) {
+    return { ...authHeadersFor(this.base), ...extra };
+  }
+
   /** Wait for the send's token, naming the pause when there is one. */
   async #pace(signal = null) {
     if (!this.bucket) return;
@@ -455,12 +471,19 @@ export class BridgeClient {
     await this.#pace(signal);
     const res = await fetch(`${this.base}/v1/chat/completions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: this.#headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({
         ...(model ?? this.model ? { model: model ?? this.model } : {}),
         ...(conversation ? { conversation, ...(temporary === null ? {} : { temporary: temporary === true }) } : {}),
         ...(thinkingLevel ? { thinking_level: thinkingLevel } : {}),
         ...(typeof temperature === 'number' ? { temperature } : {}),
+        // The client rewrites a message the edge refuses: the chain above
+        // (redact → shorten → halve) is what can actually fix one, and it
+        // lives here, not in the tab. So the extension hands a refusal back
+        // at once instead of re-sending the same bytes and waiting 75 seconds
+        // for a request that would have carried on. The tab's own ladder
+        // stays for the clients that cannot rewrite.
+        rewrite_on_refusal: true,
         stream: true,
         messages: [{ role: 'user', content }],
       }),
@@ -528,7 +551,7 @@ export class BridgeClient {
     return retrySend(async () => {
       await this.#pace();
       const r = await fetch(`${this.base}/conversations/new`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body,
+        method: 'POST', headers: this.#headers({ 'content-type': 'application/json' }), body,
       });
       const made = await r.json().catch(() => null);
       if (!r.ok || made?.ok === false) throw new Error(made?.error ?? `bridge returned ${r.status}`);
@@ -538,31 +561,31 @@ export class BridgeClient {
 
   async config(patch) {
     await fetch(`${this.base}/config`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
+      method: 'POST', headers: this.#headers({ 'content-type': 'application/json' }),
       body: JSON.stringify(patch),
     }).catch(() => {});
   }
 
   async quota(refresh = false) {
-    return fetch(`${this.base}/quota${refresh ? '?refresh=1' : ''}`)
+    return fetch(`${this.base}/quota${refresh ? '?refresh=1' : ''}`, { headers: this.#headers() })
       .then((r) => (r.ok ? r.json() : null))
       .catch(() => null);
   }
 
   async models(refresh = false) {
-    return fetch(`${this.base}/v1/models${refresh ? '?refresh=1' : ''}`)
+    return fetch(`${this.base}/v1/models${refresh ? '?refresh=1' : ''}`, { headers: this.#headers() })
       .then((r) => (r.ok ? r.json() : null))
       .catch(() => null);
   }
 
   async conversations() {
-    return fetch(`${this.base}/conversations`)
+    return fetch(`${this.base}/conversations`, { headers: this.#headers() })
       .then((r) => (r.ok ? r.json() : null))
       .catch(() => null);
   }
 
   async status() {
-    return fetch(`${this.base}/status`)
+    return fetch(`${this.base}/status`, { headers: this.#headers() })
       .then((r) => (r.ok ? r.json() : null))
       .catch(() => null);
   }

@@ -32,6 +32,10 @@ const MAX_LINKS = 10;
 const TIMEOUT_MS = 5000;
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 
+/**
+ * Is the host a literal address rather than a name?
+ * @param {string} h
+ */
 const isLiteralIP = (h) => /^(\d{1,3}\.){3}\d{1,3}$/.test(h) || h.includes(':');
 
 /**
@@ -46,7 +50,10 @@ async function publicHost(host) {
   return true;
 }
 
-/** The host of a link, whatever spelling it carries. */
+/**
+ * The host of a link, whatever spelling it carries.
+ * @param {string} url
+ */
 function hostOf(url) {
   try { return new URL(inbound(String(url ?? '').trim())).hostname; } catch { return ''; }
 }
@@ -96,7 +103,7 @@ export async function resolveUrl(url, { fetchImpl = globalThis.fetch, timeoutMs 
 
   const timer = AbortSignal.timeout(timeoutMs);
   const both = signal ? AbortSignal.any([timer, signal]) : timer;
-  const request = async (method) => {
+  const request = async (/** @type {string} */ method) => {
     try {
       return await fetchImpl(current, {
         redirect: 'manual',

@@ -179,6 +179,47 @@ test('the model list flags the fallback stub as fallback', async (t) => {
   assert.equal(live.source, 'live', 'the catalog answers as live once the extension refreshed it');
 });
 
+test('the bridge publishes the catalog\'s source, its stamp and its last error', async (t) => {
+  // The catalog is fetched by the extension, in the page, from the site — so a
+  // bridge no tab can reach serves a stub. A window has to be able to tell the
+  // two apart without asking for the list again, because asking IS the fetch:
+  // /status carries the answer.
+  const solo = await startBridge();
+  t.after(() => solo.stop());
+  const cold = await (await fetch(`${solo.base}/status`)).json();
+  assert.equal(cold.catalog.source, 'fallback', 'no extension has connected — the list is the stub');
+  assert.equal(cold.catalog.count, 0, 'and the bridge holds no catalog of its own');
+  assert.equal(cold.catalog.error, null, 'and nothing has failed yet');
+
+  const ext = await new FakeExtension(solo.base).connect();
+  t.after(() => ext.disconnect());
+  await waitFor(async () => (await (await fetch(`${solo.base}/v1/models?refresh=1`)).json()).source === 'live');
+  const live = await (await fetch(`${solo.base}/status`)).json();
+  assert.equal(live.catalog.source, 'live', 'the catalog says what it is');
+  assert.ok(live.catalog.at > 0, 'and it carries the stamp of the last change');
+  assert.ok(live.catalog.count > 1, 'and how many models it holds');
+  assert.equal(live.catalog.error, null, 'a catalog that arrived carries no error');
+});
+
+test('a fallback catalog is retried while an extension is attached', async (t) => {
+  // The warm-up at attach time is a one-shot, and it can land before the page
+  // is logged in — and then nothing asked again until a reader reloaded the
+  // whole window. The bridge retries its own stub.
+  const solo = await startBridge({ AIPASS_MODEL_RETRY_MS: '120' });
+  t.after(() => solo.stop());
+  // An extension that answers with no models: the fetch works, the catalog
+  // stays a stub, and the retry has to keep asking on its own.
+  const ext = await new FakeExtension(solo.base, { models: [] }).connect();
+  t.after(() => ext.disconnect());
+  const asked = () => ext.loaders.filter((u) => u.includes('list-models')).length;
+  await waitFor(() => asked() >= 1, { timeout: 5000 });
+  const first = asked();
+  await waitFor(() => asked() > first, { timeout: 5000 });
+  assert.ok(asked() > first, 'the bridge asked again on its own — nobody asked it to');
+  const still = await (await fetch(`${solo.base}/status`)).json();
+  assert.equal(still.catalog.source, 'fallback', 'and a stub is still a stub');
+});
+
 test('AIPASS_MODEL_FILTER=chat restores the text-only list', async (t) => {
   const solo = await startBridge({ AIPASS_MODEL_FILTER: 'chat' });
   t.after(() => solo.stop());

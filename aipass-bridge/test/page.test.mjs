@@ -75,6 +75,38 @@ test('a 403 that outlasts the waits surfaces with its forensics', async () => {
   assert.match(end.message, /server=cloudflare/);
 });
 
+// A client that rewrites a refused message says so, and then this layer stops
+// re-sending the identical bytes: the chain that can actually fix one (drop
+// the risky lines, shorten it, halve it) lives in the client, and the
+// extension's own ladder only put that fix 75 seconds away — the run sat in
+// "[403] refused at the edge" for a minute and a quarter while the one
+// request that carried on was available all along. The refusal goes back at
+// once, and the tab is not paused for it.
+test('a refusal is handed back at once to a client that rewrites the message', async () => {
+  let sends = 0;
+  const page = loadPage({
+    fastTimers: true,
+    onFetch: async (url) => {
+      if (url.includes('/actions/send-message/')) {
+        sends++;
+        return new Response('', { status: 403, statusText: 'Forbidden', headers: { server: 'cloudflare' } });
+      }
+      return sseResponse([]);
+    },
+  });
+  page.run(chatJob({ rewriteOnRefusal: true }));
+  const end = await page.settled('j1');
+
+  assert.equal(sends, 1, 'the identical bytes are not sent again');
+  assert.equal(end.kind, 'error');
+  assert.match(end.message, /aipass returned 403/);
+  assert.match(end.message, /refused at the edge/, 'the refusal is named');
+  assert.doesNotMatch(end.message, /retries/, 'and it does not claim a probe that never happened');
+  const note = page.parts('j1').find((p) => p.kind === 'note');
+  assert.ok(note, 'the refusal is explained on the wire');
+  assert.match(note.text, /handed back/);
+});
+
 // Regression for the frame that used to be dumped into the answer as raw JSON,
 // and for sonar, which sends only this and no source-url.
 test('web search results become titled sources, not JSON in the answer', async () => {

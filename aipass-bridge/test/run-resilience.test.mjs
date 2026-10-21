@@ -52,6 +52,21 @@ test('a send refused while the extension is away is retried, not lost', async (t
   assert.equal(ext.chats.length, 1, 'and it was delivered exactly once');
 });
 
+test('the client claims the refusal — the tab hands it back instead of probing', async (t) => {
+  // The chain that can actually fix a refused message (drop the risky lines,
+  // shorten it, halve it) lives in the client, and the tab cannot see it. So
+  // the client says so on every send, and the extension then hands a 403 back
+  // at once: re-sending the identical bytes there was a probe of a window
+  // that was already hot, and it put the client's fix 75 seconds away.
+  const ext = await new FakeExtension(bridge.base, { onChat: scripted(['ok']) }).connect();
+  t.after(() => ext.disconnect());
+
+  const client = new BridgeClient(bridge.base);
+  await client.chat({ message: 'hi' });
+  assert.equal(ext.chats.length, 1, 'the job reached the tab');
+  assert.equal(ext.chats[0].rewriteOnRefusal, true, 'the job says the client rewrites a refusal');
+});
+
 test('a refusal after the answer started streaming is not retried', async (t) => {
   const ext = await new FakeExtension(bridge.base, {
     onChat: async (_job, e) => {

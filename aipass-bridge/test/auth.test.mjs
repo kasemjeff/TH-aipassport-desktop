@@ -8,10 +8,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { startBridge, freePort, tempDir, startRpcServer } from './harness.mjs';
+import { startBridge, freePort, tempDir, startRpcServer, FakeExtension } from './harness.mjs';
 
 import { Settings } from '../harness/settings.mjs';
 import { loadOrMintToken, authorized, tokenPath } from '../harness/authtoken.mjs';
+import { BridgeClient } from '../harness/bridge.mjs';
 
 const mkhome = () => fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-auth-'));
 
@@ -69,6 +70,98 @@ test('bridge: a tokenless extension is told what to do', async () => {
     }
     assert.match(bridge.logText(), /no loopback token/, 'the bridge says why');
     assert.match(bridge.logText(), /\.aipass\/\.token/, 'and where the token is');
+  } finally { bridge.stop(); }
+});
+
+// The harness's own client is a client like any other: the bridge gates
+// every route but its health probes, so a client that does not present the
+// token is refused with a 401. The harness's bridge client did not, so every
+// run the window started was refused — and the window turned that refusal
+// into "the extension's token is wrong", which is a different problem with a
+// different fix. The suite runs with the gate off, so this is where the
+// client's own credential is pinned.
+test('the harness\'s bridge client presents the loopback token', async () => {
+  const home = mkhome();
+  const prevHome = process.env.AIPASS_HOME;
+  const prevFlag = process.env.AIPASS_REQUIRE_AUTH;
+  process.env.AIPASS_HOME = home;
+  process.env.AIPASS_REQUIRE_AUTH = '1';
+  // No AIPASS_TOKEN: the bridge mints the file and everyone reads that one
+  // file — the client, the fake extension, the bridge. The shape a real
+  // machine has.
+  const bridge = await startBridge({ AIPASS_HOME: home, AIPASS_REQUIRE_AUTH: '1' });
+  const ext = new FakeExtension(bridge.base);
+  try {
+    await ext.connect();
+    const client = new BridgeClient(bridge.base);
+    // A guarded GET: the models the extension's tab would have carried.
+    const models = await client.models();
+    assert.ok(models?.data?.length, 'the client got through the gate');
+    // A guarded POST: the route that used to answer 401 for every run.
+    const made = await client.createConversation({ message: 'probe' });
+    assert.ok(made?.id, 'and the guarded POST answered');
+  } finally {
+    await ext.disconnect();
+    if (prevHome === undefined) delete process.env.AIPASS_HOME; else process.env.AIPASS_HOME = prevHome;
+    if (prevFlag === undefined) delete process.env.AIPASS_REQUIRE_AUTH; else process.env.AIPASS_REQUIRE_AUTH = prevFlag;
+    bridge.stop();
+  }
+});
+
+// The token is a cross-boundary credential: it stops another OS user and any
+// sandboxed app with loopback egress from driving the account. A remote
+// bridge is a different boundary, so the token goes to loopback and to
+// nothing else — the test is about the HOST, not a string prefix.
+test('the token rides loopback and nothing else', async () => {
+  const prevToken = process.env.AIPASS_TOKEN;
+  const prevFlag = process.env.AIPASS_REQUIRE_AUTH;
+  process.env.AIPASS_TOKEN = 'loopback-only-token';
+  process.env.AIPASS_REQUIRE_AUTH = '1';
+  const prevFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url, init = {}) => {
+    seen.push({ url: String(url), headers: init?.headers ?? {} });
+    return { ok: true, json: async () => ({ data: [] }) };
+  };
+  try {
+    await new BridgeClient('http://127.0.0.1:8787').models();
+    await new BridgeClient('https://collector.example').models();
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevToken === undefined) delete process.env.AIPASS_TOKEN; else process.env.AIPASS_TOKEN = prevToken;
+    if (prevFlag === undefined) delete process.env.AIPASS_REQUIRE_AUTH; else process.env.AIPASS_REQUIRE_AUTH = prevFlag;
+  }
+  assert.equal(seen.length, 2);
+  assert.equal(seen[0].headers.authorization, 'Bearer loopback-only-token', 'the loopback bridge gets the token');
+  assert.equal(seen[1].headers.authorization, undefined, 'a remote bridge never sees it');
+});
+
+// "extensions: 0" cannot tell a missing extension from an extension that
+// never got the token, and those are different jobs: one is a load, the
+// other is a paste. The bridge knows which — it is the one that refused —
+// so it says so.
+test('the bridge says the extension was refused for a missing token', async () => {
+  const home = mkhome();
+  const token = 'ext-token-' + '3'.repeat(52);
+  const bridge = await startBridge({ AIPASS_HOME: home, AIPASS_TOKEN: token, AIPASS_REQUIRE_AUTH: '1' });
+  try {
+    const before = await fetch(`${bridge.base}/status`).then((r) => r.json());
+    assert.equal(before.extensionToken, 'ok', 'nothing has been refused yet');
+
+    const refused = await fetch(`${bridge.base}/ext/events`, { headers: { accept: 'text/event-stream' } });
+    assert.equal(refused.status, 401, 'the extension without the token stays out');
+    await refused.body?.cancel();
+    const after = await fetch(`${bridge.base}/status`).then((r) => r.json());
+    assert.equal(after.extensionToken, 'missing', 'and the bridge names the state');
+
+    // An extension that gets through clears it: the state follows reality.
+    const ok = await fetch(`${bridge.base}/ext/events`, {
+      headers: { accept: 'text/event-stream', authorization: `Bearer ${token}` },
+    });
+    assert.equal(ok.status, 200);
+    await ok.body?.cancel();
+    const fixed = await fetch(`${bridge.base}/status`).then((r) => r.json());
+    assert.equal(fixed.extensionToken, 'ok', 'and it is back to ok once the extension is in');
   } finally { bridge.stop(); }
 });
 

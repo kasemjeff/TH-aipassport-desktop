@@ -303,6 +303,20 @@
     // from the client above). The ladder now waits like the 429 ladder does:
     // 15s then 60s — long enough for the window to actually cool, few enough
     // probes that the wait itself does not keep the limiter hot.
+    //
+    // A client that rewrites the message says so (the job carries
+    // `rewriteOnRefusal`), and then this ladder is the wrong place to spend
+    // the wait: the client holds the chain that can actually fix a refusal
+    // (drop the risky lines, shorten it, halve it) and the patience ladder
+    // for the refusals that are only pace. Re-sending the identical bytes
+    // here probes a window that is already hot, and it puts the client's fix
+    // 75 seconds away — the run sits in "[403] refused at the edge" for a
+    // minute and a quarter while the one request that carried on was
+    // available all along (recorded live, Oct 20 2026: a 3,721-byte message
+    // refused, the same message at 2,242 bytes accepted). So for such a job
+    // the refusal is handed back at once, and the tab is not paused for it:
+    // the client is about to send something different, and the pause belongs
+    // to whoever owns the policy.
     const RETRY_WAITS_MS = [10_000, 45_000, 120_000];
     const EDGE_WAITS_403_MS = [15_000, 60_000];
     // This job's own next-attempt time (the 403 ladder) and the waits its own
@@ -351,6 +365,16 @@
           announcedUntil = Math.max(announcedUntil, rateQuietUntil);
           push('note', `[${res.status}] rate limited by the edge — waiting ${Math.round(wait / 1000)}s, then retrying (${rateTries + 1}/${RETRY_WAITS_MS.length + 1})`);
         } else {
+          // The client rewrites this message, so the refusal is its to handle:
+          // it holds the chain that can fix one and the ladder for a refusal
+          // that is only pace. Another copy of the same bytes here would be a
+          // probe of a hot window and would put the client's fix 75 seconds
+          // away. Hand it back instead — the run continues on the next
+          // request, not after a minute and a quarter of waiting.
+          if (job.rewriteOnRefusal) {
+            push('note', '[403] refused at the edge — the message is handed back so it can be rewritten');
+            return res;
+          }
           edgeTries++;
           localUntil = Date.now() + wait;
           // A pace-score 403 comes from the same hot window as the 429s, so it
@@ -461,7 +485,14 @@
         throw new Error(
           `aipass returned ${res.status} ${res.statusText} [${body.length} bytes]` +
           `${res.status === 429 ? ` — rate-limited through ${RETRY_WAITS_MS.length} retries` : ''}` +
-          `${res.status === 403 ? ` — refused at the edge through ${EDGE_WAITS_403_MS.length} retries` : ''}` +
+          // The retry count is the ladder's: a job that was handed the refusal
+          // was never retried here, and saying otherwise would send the reader
+          // looking for probes that never happened.
+          `${res.status === 403
+            ? (job.rewriteOnRefusal
+              ? ' — refused at the edge'
+              : ` — refused at the edge through ${EDGE_WAITS_403_MS.length} retries`)
+            : ''}` +
           `${forensics ? ` {${forensics}}` : ''}${detail ? ` — ${detail}` : ''}`
         );
       }

@@ -9,8 +9,11 @@
 // for the web UI, so there is nothing to reconstruct on this side.
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MAX_ATTACHMENT_BYTES, isAllowedAttachment } from './attachment-types.mjs';
+import { recordBridgePid, forgetBridgePid } from '../harness/bridge-pid.mjs';
 
 const PORT = Number(process.env.AIPASS_PORT ?? 8787);
 const HOST = process.env.AIPASS_HOST ?? '127.0.0.1';
@@ -120,7 +123,14 @@ const log = (...a) => console.log(formatLogLine({ msg: a.map((x) => scrubSecrets
 // loop would otherwise fill the log with the same line.
 let lastUnauthExtensionLog = 0;
 const UNAUTH_EXTENSION_LOG_EVERY_MS = 30_000;
+// The same fact, for the readers that ask instead of reading the log: the
+// window shows "extensions: 0" as "no extension connected" and sends the
+// reader to load an extension that is already loaded. A refused extension is
+// a different problem with a different fix, so the bridge remembers which
+// one it is. Not a secret — it names a state, not a credential.
+let extensionTokenMissing = false;
 function noteUnauthenticatedExtension() {
+  extensionTokenMissing = true;
   const now = Date.now();
   if (now - lastUnauthExtensionLog < UNAUTH_EXTENSION_LOG_EVERY_MS) return;
   lastUnauthExtensionLog = now;
@@ -390,7 +400,7 @@ const DELTA_FLUSH_MS = 25;
 const TEXT_KINDS = new Set(['content', 'reasoning', 'status']);
 
 class Job {
-  constructor({ kind = 'chat', modelId, text, parts, conversationId, aspectRatio: ratio, url, message, requestId, assistant, assistantField, temporary, thinkingLevel, temperature, video, spec, imageStyleId, outputTone, outputFormat, timeoutMs, onDelta, onDone, onError }) {
+  constructor({ kind = 'chat', modelId, text, parts, conversationId, aspectRatio: ratio, url, message, requestId, assistant, assistantField, temporary, thinkingLevel, temperature, video, spec, imageStyleId, outputTone, outputFormat, rewriteOnRefusal, timeoutMs, onDelta, onDone, onError }) {
     this.id = randomUUID();
     this.kind = kind;
     this.url = url;
@@ -407,6 +417,11 @@ class Job {
     this.imageStyleId = imageStyleId;
     this.outputTone = outputTone;
     this.outputFormat = outputFormat;
+    // The client says it rewrites a refused message (the harness does — it
+    // holds the chain that can fix one). The extension then hands a 403 back
+    // at once instead of re-sending the same bytes, so the client's own fix
+    // is one request away rather than 75 seconds away.
+    this.rewriteOnRefusal = rewriteOnRefusal === true;
     this.timeoutMs = timeoutMs ?? IDLE_TIMEOUT_MS;
     this.modelId = modelId;
     this.text = text;
@@ -437,7 +452,7 @@ class Job {
       ? { jobId: this.id, kind: 'assistant', ...this.spec }
       : this.kind === 'video'
       ? { jobId: this.id, kind: 'video', conversationId: this.conversationId, modelId: this.modelId, text: this.text, ...this.video }
-      : { jobId: this.id, kind: 'chat', conversationId: this.conversationId, modelId: this.modelId, text: this.text, parts: this.parts, aspectRatio: this.aspectRatio, temporary: this.temporary, thinkingLevel: this.thinkingLevel, temperature: this.temperature, imageStyleId: this.imageStyleId, outputTone: this.outputTone, outputFormat: this.outputFormat });
+      : { jobId: this.id, kind: 'chat', conversationId: this.conversationId, modelId: this.modelId, text: this.text, parts: this.parts, aspectRatio: this.aspectRatio, temporary: this.temporary, thinkingLevel: this.thinkingLevel, temperature: this.temperature, imageStyleId: this.imageStyleId, outputTone: this.outputTone, outputFormat: this.outputFormat, rewriteOnRefusal: this.rewriteOnRefusal });
       // A dead socket must fail this job now — not leak it until the idle
       // timeout fires minutes later with jobs.size inflated.
       if (!ok) return this.fail('extension disconnected mid-dispatch — reconnect the tab and retry');
@@ -505,6 +520,26 @@ let modelCache = { at: 0, models: [] };
 let modelRefresh = null;
 const MODEL_TTL_MS = 60_000;
 
+/* What the window is looking at, said plainly.
+ *
+ * The catalog is fetched by the extension, in the page, from the site — so a
+ * window that cannot reach a tab is looking at a two-id stub and nothing
+ * says so. `source` is 'live' for the real catalog and 'fallback' for the
+ * stub; `at` is the stamp of the last CHANGE (not the last fetch), so a
+ * window can watch it and rebuild only when the list really moved; `error`
+ * is the last failure, which used to be logged and then lost — that is why
+ * the window could not say what went wrong.
+ *
+ * `/status` carries this under `catalog`: the bridge's own `models` field is
+ * the list itself, and two things called `models` would be a trap. */
+const modelState = { source: 'fallback', at: 0, count: 0, error: null };
+
+/** 'live' when the cache holds a real catalog, 'fallback' for the stub. */
+const catalogSource = () => (modelCache.models.length ? 'live' : 'fallback');
+
+/** The list's identity — two lists are the same list when their ids match. */
+const catalogSignature = () => modelCache.models.map((m) => m.id).join(',');
+
 /* What the caches saved. A hit is a caller answered without starting upstream
  * work — a fresh TTL entry, a refresh already in flight that this call joined,
  * or the last-known figures while no tab is attached. A fetch is the call that
@@ -546,23 +581,61 @@ async function listModels({ force = false } = {}) {
   }
   cacheStats.models.fetches += 1;
   modelRefresh = (async () => {
+    const before = catalogSignature();
+    const source = modelState.source;
     try {
       const models = extractModels(decodeTurboStream(await fetchLoader(LOADERS.models)));
       if (models.length) {
         modelCache = { at: Date.now(), models };
+        modelState.error = null;
         const free = models.filter((m) => m.free).map((m) => m.id);
         const byKind = [...new Set(models.map((m) => m.kind))]
           .map((k) => `${models.filter((m) => m.kind === k).length} ${k}`).join(', ');
         log(`${models.length} models (${byKind})${free.length ? ` · free credit: ${free.join(', ')}` : ''}`);
+      } else {
+        modelState.error = 'the site answered with no models';
       }
     } catch (err) {
+      modelState.error = err.message;
       log('model refresh failed:', err.message);
     } finally {
+      modelState.source = catalogSource();
+      modelState.count = modelCache.models.length;
+      // The stamp is the last CHANGE, not the last fetch: a window watches it
+      // and rebuilds the dropdown when it moves, so a fetch that returned the
+      // same list must not cost a rebuild — and a catalog that just became
+      // live must move it even though the ids did not change.
+      if (modelState.source !== source || catalogSignature() !== before) modelState.at = Date.now();
       modelRefresh = null;
     }
     return cachedModels();
   })();
   return modelRefresh;
+}
+
+/* A stub is the bridge's own failure state, so the bridge retries it.
+ *
+ * The one-shot warm at attach time is not enough: it can land before the
+ * page is logged in, and then nothing else ever asks again — the window sits
+ * on the stub until somebody reloads it. This retries while the catalog is
+ * still a stub and an extension is attached, and it stops the moment a real
+ * catalog lands. A tab nobody is using is not poked forever: the retry exists
+ * only in the state where there is nothing to show.
+ *
+ * `AIPASS_MODEL_RETRY_MS=0` turns it off. */
+const MODEL_RETRY_MS = Number(process.env.AIPASS_MODEL_RETRY_MS ?? 30_000);
+let modelRetry = null;
+
+function armModelRetry() {
+  if (modelRetry || MODEL_RETRY_MS <= 0) return;
+  modelRetry = setInterval(() => {
+    if (modelCache.models.length) { clearInterval(modelRetry); modelRetry = null; return; }
+    if (!extClients.size) return;   // nothing to fetch from — wait for a tab
+    listModels({ force: false }).catch(() => {});
+  }, MODEL_RETRY_MS);
+  // The timer is not a reason to stay alive: it only fires while the server
+  // is holding the process open.
+  modelRetry.unref?.();
 }
 
 /* --------------------------------------------------------------- credits */
@@ -746,7 +819,7 @@ async function resolveConversation() {
 
 // A 404 means the conversation was deleted; a 409 means the server still
 // believes a generation is running there. Neither recovers on its own.
-function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, temperature, video, imageStyleId, outputTone, outputFormat, conversation: fixedConversation = null, temporary: fixedTemporary = null, onDelta, onDone, onError }) {
+function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, temperature, video, imageStyleId, outputTone, outputFormat, rewriteOnRefusal = false, conversation: fixedConversation = null, temporary: fixedTemporary = null, onDelta, onDone, onError }) {
   // A video model does not go through /actions/send-message at all — it is a
   // job submitted to /actions/video-generation and then polled. Same Job
   // machinery, different kind, so retries and aborts behave the same way.
@@ -774,7 +847,7 @@ function startChat({ modelId, text, parts, aspectRatio: ratio, thinkingLevel, te
     current = new Job({
       kind: isVideo ? 'video' : 'chat',
       modelId, text, parts, conversationId, aspectRatio: ratio, thinkingLevel, temperature,
-      imageStyleId, outputTone, outputFormat,
+      imageStyleId, outputTone, outputFormat, rewriteOnRefusal,
       temporary: jobTemporary,
       // No aspect-ratio fallback here: videoOptionsFor already read the request
       // and dropped a ratio this provider is not served. Re-adding the raw value
@@ -1232,6 +1305,14 @@ async function chatCompletions(req, res) {
   const imageCount = (parts ?? []).filter(p => p.type === 'image').length;
   log(`chat -> ${model} (${Buffer.byteLength(text)} bytes text${imageCount ? `, ${imageCount} image(s)` : ''})`);
 
+  // The client says it rewrites a message the edge refuses (the harness does:
+  // it holds the chain that can fix one — drop the risky lines, shorten it,
+  // halve it). The extension then hands the refusal back at once instead of
+  // re-sending the same bytes, so the client's fix is the next request rather
+  // than one a minute and a quarter away. A client that does not say so keeps
+  // the extension's own ladder — it has no rewrite to offer.
+  const rewriteOnRefusal = payload.rewrite_on_refusal === true || payload.rewriteOnRefusal === true;
+
   if (payload.stream) {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -1260,7 +1341,7 @@ async function chatCompletions(req, res) {
 
     const job = startChat({
       modelId: model, text, parts, aspectRatio: ratio, thinkingLevel, temperature, video,
-      imageStyleId, outputTone, outputFormat,
+      imageStyleId, outputTone, outputFormat, rewriteOnRefusal,
       conversation, temporary: conversationTemporary,
       onDelta: (part) => {
         const frame = routeDelta(part);
@@ -1288,7 +1369,7 @@ async function chatCompletions(req, res) {
   await new Promise((resolve) => {
     const job = startChat({
       modelId: model, text, parts, aspectRatio: ratio, thinkingLevel, temperature, video,
-      imageStyleId, outputTone, outputFormat,
+      imageStyleId, outputTone, outputFormat, rewriteOnRefusal,
       conversation, temporary: conversationTemporary,
       onDelta: (p) => {
         const frame = routeDelta(p);
@@ -1338,11 +1419,18 @@ function extEvents(req, res) {
   const client = { id: randomUUID(), res };
   const wasEmpty = extClients.size === 0;
   extClients.add(client);
+  // The extension is here and it got past the gate, so whatever token problem
+  // the bridge recorded is over.
+  extensionTokenMissing = false;
   if (wasEmpty && !hadExtension) {
     log(`extension connected (${extClients.size} total)`);
   }
   hadExtension = true;
   sendToClient(client, 'ready', { clientId: client.id });
+  // A stub is healed by retrying it, not by hoping the next reader asks: the
+  // warm below is a one-shot and can land before the page is logged in. The
+  // retry waits for that and keeps asking until a real catalog arrives.
+  armModelRetry();
   // Warm the caches a moment after the tab attaches — but only if this client
   // is still the reason to: a tab that closed in the meantime would otherwise
   // send a loader job to whoever connected next. Once per process: the tab's
@@ -1405,13 +1493,98 @@ async function extPost(req, res, kind) {
   return json(res, 200, { ok: true });
 }
 
+/* ------------------------------------------------------- the bridge's own life */
+
+// The bridge is a background process. The CLI starts it and walks away; the
+// desktop backend starts it DETACHED, so it outlives whatever started it.
+// Detached is right — a CLI that starts the bridge must not take it down when
+// it exits — and it is also how one machine ended up with sixty bridges alive
+// at once, each holding sixty megabytes, with nothing left that could stop
+// any of them: the pid file is overwritten by the next bridge, and the
+// scratch home the test suite used went with the suite.
+//
+// So the bridge ends itself. It is not idle while somebody is using it: the
+// window asks for the credits every ten seconds, and the extension holds its
+// event stream open on a four-minute cycle. A bridge nobody has touched for
+// IDLE_EXIT_MS has no work left, and the memory it holds is better spent on
+// the work that is.
+//
+// `AIPASS_BRIDGE_IDLE_MS=0` turns the timer off, for a bridge somebody wants
+// to keep for ever.
+const IDLE_EXIT_MS = Number(process.env.AIPASS_BRIDGE_IDLE_MS ?? 600_000);
+
+// When the last request arrived, and when each in-flight request started.
+// The oldest in-flight start is what decides "busy": a request that has been
+// open longer than the idle window is a request that will never finish, and
+// it must not keep the bridge alive on its own.
+let lastActivity = Date.now();
+const inFlight = new Set();
+
+const markActivity = () => { lastActivity = Date.now(); };
+
+/** The bridge is busy while a request it started recently is still open. */
+const bridgeIsBusy = (now) => {
+  for (const started of inFlight) {
+    if (now - started < IDLE_EXIT_MS) return true;
+  }
+  return false;
+};
+
+// The pid file is how `aipass stop` — and the test suite's cleanup — find
+// this process. The CLI that starts the bridge writes the pid it spawned; a
+// bridge the desktop backend started has no such CLI, so the bridge records
+// itself, when it binds, which is the moment it really IS the bridge on this
+// port. A bridge that lost the race for the port never writes anything, so
+// the file always names the one that is answering.
+const recordPid = () => {
+  try {
+    recordBridgePid();
+  } catch { /* the pid file is a convenience, not a contract */ }
+};
+
+const forgetPid = () => {
+  try {
+    forgetBridgePid();
+  } catch { /* already gone */ }
+};
+
+if (IDLE_EXIT_MS > 0) {
+  // The check runs often enough that the window means what it says: a window
+  // of two seconds is honoured in two seconds, not in the next half minute.
+  const checkEvery = Math.max(250, Math.min(30_000, Math.floor(IDLE_EXIT_MS / 4)));
+  const idleCheck = setInterval(() => {
+    const now = Date.now();
+    if (bridgeIsBusy(now)) { markActivity(); return; }
+    const idleFor = now - lastActivity;
+    if (idleFor < IDLE_EXIT_MS) return;
+    clearInterval(idleCheck);
+    log(`idle for ${Math.round(idleFor / 1000)}s — nothing is using this bridge, so it is going away`);
+    forgetPid();
+    process.exit(0);
+  }, checkEvery);
+  // The timer is not a reason to stay alive; it only fires while the server
+  // is holding the process open.
+  idleCheck.unref?.();
+}
+
 /* --------------------------------------------------------------- the server */
 
 const server = http.createServer(async (req, res) => {
+  // Every request counts as the bridge being used. The idle timer is what
+  // ends a bridge nobody is talking to, so the count has to include the
+  // requests that are still open — a long generation holds the bridge busy
+  // for as long as it lasts, and the request that started it is the proof.
+  // The key is the request's own id, not a timestamp: two requests that start
+  // in the same millisecond shared one key, and the first to close deleted it
+  // while the second was still running — the bridge then looked idle with a
+  // request in flight.
+  const rid = requestId();
+  markActivity();
+  inFlight.add(rid);
+  res.on('close', () => inFlight.delete(rid));
   // Every request gets a short id: it rides the response header and any error
   // line this request produces, so one quoted log line points back at the
   // exchange it came from.
-  const rid = requestId();
   res.setHeader('x-aipass-rid', rid);
   // The Host check comes first and reads the raw header, because the URL
   // construction below it throws on a malformed one — an async handler that
@@ -1473,7 +1646,13 @@ const server = http.createServer(async (req, res) => {
         // the two-id stub is all there is. A caller about to judge a saved
         // model against the catalog (the harness pre-flight) must see a real
         // one — the stub is not the catalog.
-        source: modelCache.models.length ? 'live' : 'fallback',
+        source: catalogSource(),
+        // The stamp of the last CHANGE and the last failure. A caller that
+        // watches the stamp rebuilds only when the list really moved, and a
+        // caller that hit a failure is told what it was instead of being
+        // handed a stub with no explanation.
+        at: modelState.at,
+        error: modelState.error,
         data: models.map((m) => ({
           id: m.id, object: 'model', created: 0, owned_by: m.provider ?? 'aipass',
           name: m.name, free_credit: m.free, thinking: m.thinking,
@@ -1715,6 +1894,12 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         ok: true,
         extensions: extClients.size,
+        // Why the extension is not attached. 'missing' means it tried and the
+        // bridge refused it for want of the loopback token; 'ok' means either
+        // it is connected or it never tried. A reader that only saw
+        // `extensions: 0` could not tell "load the extension" from "paste the
+        // token", and those are different jobs.
+        extensionToken: extensionTokenMissing ? 'missing' : 'ok',
         activeJobs: jobs.size,
         defaultModel,
         conversation: PINNED_CONVERSATION || conversationCache,
@@ -1722,6 +1907,10 @@ const server = http.createServer(async (req, res) => {
         assistant: assistantId || null,
         aspectRatio,
         models: cachedModels(),
+        // What that list IS, said plainly — see modelState. The window reads
+        // this on the status call it already makes every ten seconds, so it
+        // learns that the catalog went live without asking for it.
+        catalog: { ...modelState },
         credits: quotaCache.value,
         cache: cacheStats,
       });
@@ -1754,6 +1943,10 @@ server.on('error', (err) => {
 });
 
 server.listen(PORT, HOST, () => {
+  // The bridge that bound the port is the bridge on this port, so this is the
+  // moment the pid file becomes true. A bridge that lost the race never gets
+  // here, and never overwrites the pid of the one that won.
+  recordPid();
   log(`aipass bridge on http://${HOST}:${PORT}`);
   log(`  default model : ${defaultModel}`);
   log(`  conversation  : ${PINNED_CONVERSATION || 'most recent on the account'}`);
