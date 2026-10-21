@@ -130,7 +130,10 @@ the whole point, and a checker that delegates is neither.
   process used to leave the whole copy behind, under `.aipass/run/run-*`,
   with nothing to collect it. Since 2026-10-20 the projection lives under
   `~/.aipass/run/` and a janitor (`sweepSandboxes`, called when a harness
-  opens a project) collects what no run can still own.
+  opens a project and before every run) collects what no run can still own.
+  The janitor knows who owns a projection — a stamp beside it, carrying the
+  pid — so a copy whose backend died is collected after minutes instead of
+  after the six hours a live run's budget needs.
 - **Missing tab / no helper conversation.** If `createConversation` fails, skip
   the check — never fall back to the parent's conversation. DONE is accepted,
   a note says why, `checks: 0`. `needs_tab` stays the parent's own path

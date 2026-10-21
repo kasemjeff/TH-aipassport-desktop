@@ -24,12 +24,21 @@ If you prefer checking by hand: `GET /status` is token-free on purpose, and
   `https://de.aipass.net/chat` tab open. Recommended: Chrome → Performance →
   *Always keep these sites active* → add `de.aipass.net`, so a long run is
   never frozen mid-stream.
+- **The tab opened in the wrong browser.** The backend opens the chat page in
+  Chrome, because the extension is a Chrome extension and answers from inside
+  that tab. A machine with no Chrome falls back to the platform default — and
+  a tab there carries no extension, so the run stops with "no de.aipass.net
+  tab is open". Install Chrome, or load the extension in the browser you
+  prefer and open the chat there yourself.
 - **Signed out.** The model list comes back empty or fallback-only; `doctor`
   reports this as the `login` check. Sign in, then reload the tab.
 - **The popup says the bridge needs a token.** The bridge mints a loopback
   token to `~/.aipass/.token` and prints the path when it starts. Open the
   extension popup → **Advanced** → paste the file's contents into
-  **Loopback token** → save. One time per browser.
+  **Loopback token** → save. One time per browser. The bridge says the same
+  thing in its own log — "the extension was refused: it has no loopback
+  token" — because a tokenless extension retries every three seconds and
+  `/status` only shows `extensions: 0`.
 - **A run dies on 403.** The upstream edge blocks trigger-shaped content; the
   harness encodes those tokens on the way out and decodes them on the way back
   (`harness/waf.mjs`), and a rejected turn is split and resent in halves — a
@@ -59,11 +68,19 @@ If you prefer checking by hand: `GET /status` is token-free on purpose, and
   `desktop/sidecar/`). When debugging, run `npm run desktop` in a plain
   browser first — same window, none of the shell.
 - Backend not answering? It listens on `127.0.0.1:8790`; its health is
-  `POST /rpc` with `{"method":"status"}`. The backend log is
+  `POST /rpc` with `{"method":"status"}` **and the loopback bearer token** —
+  without it the answer is a 401, which is the backend working, not a broken
+  one. The token is `~/.aipass/.token`; `AIPASS_REQUIRE_AUTH=0` turns the
+  check off. The backend log is
   `~/.aipass/logs/desktop-backend.log` (`docs/DATA_FORMATS.md`); in dev the
   terminal that ran `npm run desktop` carries it too. The packaged shell
   restarts a backend that exits — backoff, `[supervisor]` lines in the log —
   so a crash reads as a short pause, not a dead window.
+- "port 8790 is busy" on launch? Something else holds the port — a second
+  backend, or a server that is not ours. The launcher adopts a backend that
+  answers (a 401 carrying the backend's own refusal counts: it is ours, with
+  a different token) and says so; a stranger's server is left to the busy-port
+  message.
 
 ## A run stops early, or refuses a write
 

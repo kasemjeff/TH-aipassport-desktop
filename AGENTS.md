@@ -214,6 +214,6 @@ stay compatible:
 - Agents may tighten or correct this file; loosening a rule needs the human.
 - Bump `Last verified:` below when the full suite ran green.
 
-Last verified: 2026-10-17 — full suite ran green from a clean run. The exact
+Last verified: 2026-10-21 — full suite ran green from a clean run. The exact
 count moves as tests land (other sessions work here in parallel); don't record
 it in this file — `npm test` is the number.

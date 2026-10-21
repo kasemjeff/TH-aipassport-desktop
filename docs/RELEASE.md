@@ -43,10 +43,12 @@ Before `git tag vX.Y.Z`, all of these are true:
 6. **`CHANGELOG.md` updated** — `[Unreleased]` becomes the version; "Known
    limits, not bugs" (`SECURITY.md`) and the not-shipped list
    (`docs/HARNESS_DESIGN.md`) still tell the truth.
-7. Installers built (`npm run desktop:sidecar` first, then
-   `tauri:build` / `tauri:build:mac` / `tauri:build:linux`); the artifacts
-   are attached to the tag's release, and **the previous release's
-   installers stay downloadable** — that is the rollback.
+7. Installers built (`npm run desktop:build` — it puts the sidecar in place,
+   asks the bundler for the platform's bundles and writes `dist/` with the
+   checksums and the manifest); the artifacts are attached to the tag's
+   release, and **the previous release's installers stay downloadable** —
+   that is the rollback. A macOS artifact needs a Mac to build and to sign:
+   see [`INSTALL.md`](INSTALL.md#can-macos-do-it).
 
 ## Canary & soak
 
@@ -101,10 +103,23 @@ a fact you chose.
   for one) rides a rewrite untouched. A rolled-back build keeps working on
   data a newer build wrote. What it cannot do is understand *newer features* — a `credit-limited`
   stop reason, for example, reads as an unknown stop name in an old window.
-- **Upgrade/rollback testing today is manual.** A scripted
-  install-old → upgrade → assert → rollback → assert run is on the
-  not-shipped list; until it exists, this section is the procedure, and doing
-  it once per release is the test.
+- **The upgrade/rollback ladder is scripted.**
+  `npm run desktop:install-ladder` installs the artifact, checks that the
+  installed build is the one that shipped (its version) and that it actually
+  runs (its backend answers), installs the new build over the old one and
+  checks it again, installs the old build back and checks it again,
+  uninstalls — and then checks that the user's data is still there. Give it
+  both artifacts to walk the whole ladder:
+
+  ```powershell
+  npm run desktop:install-ladder -- --new <new installer> --old <the previous release's installer>
+  ```
+
+  It installs software on the machine it runs on, so it asks first (`--yes`
+  answers for a release machine), and it never touches the real `~/.aipass`:
+  the app runs with `AIPASS_HOME` pointing at a scratch directory. Doing it
+  once per release by hand is still the human's job — the script makes that
+  job repeatable, not automatic.
 
 **When and who.** The canary day is the trigger window: `doctor` red on a
 clean install of the tag, `stats --alerts` warning on the new build's first
@@ -132,5 +147,8 @@ means a compromised npm package cannot execute inside the harness.
   (dev-only, if anything ever lands there). A dependency PR is reviewed like
   code: read the diff, run `npm run check`.
 - A full supply-chain audit (signed releases, SLSA, `cargo vet`) is future
-  work and is not pretended here. The installers are unsigned today; your OS
-  will say so, and that warning is honest.
+  work and is not pretended here. The Windows installer is unsigned today;
+  your OS will say so, and that warning is honest. The macOS artifact is
+  the exception: Gatekeeper refuses an unnotarized bundle and Apple Silicon
+  refuses to run an unsigned one, so it is signed and notarized before it is
+  published — and the manifest records which of the two it is.

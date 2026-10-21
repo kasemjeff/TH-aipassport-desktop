@@ -22,12 +22,17 @@ deleting it is the whole uninstall (§Retention).
 
 ## settings.json
 
-Written atomically (`Settings.set()` writes a temp file, then renames — a
-crash mid-write never loses settings) and validated by `Settings.sane()` on
-every read and write: numbers are clamped to their documented bounds, enums
-fall back to defaults, and a path rule that could never match (empty pattern)
-is dropped rather than stored where it looks like protection. A missing or
-unreadable file is the normal first-run case; the defaults apply.
+Written atomically (`Settings.set()` writes a temp file with a name no other
+writer shares, fsyncs it and the directory, then renames — a crash mid-write
+never loses settings, and two writers never meet) and validated by
+`Settings.sane()` on every read and write: numbers are clamped to their
+documented bounds, enums fall back to defaults, the keys that would let a
+payload act on a prototype (`__proto__`, `constructor`, `prototype`) are
+stripped at every depth, and a path rule that could never match (empty
+pattern) is dropped rather than stored where it looks like protection. A
+missing file is the normal first-run case and the defaults apply; a file that
+is there and cannot be read is NOT the same thing — it is surfaced as a
+warning and in `Settings.problems`, with the safe defaults still in force.
 
 The full field list and its defaults live in `harness/settings.mjs`
 (`DEFAULTS`) — that file is the schema. The shape, in short:
@@ -37,6 +42,7 @@ The full field list and its defaults live in `harness/settings.mjs`
 | `defaultModel` | string? | null | the model a fresh run starts on |
 | `mode` | `ask` \| `auto` \| `yolo` | `ask` | who may write |
 | `allowRun` | bool | false | shell commands allowed at all |
+| `allowFetch` | bool | false | a fetch the model chose is allowed (the CLI's `--allow-fetch`; the window asks instead) |
 | `maxSteps` / `maxToolCalls` / `maxWallClockMs` | number | 0 / 300 / 1800000 | per-run caps; `maxSteps` 0 means no cap (the run ends on DONE, a guard, or a budget), the other two fall back to the default on zero or nonsense |
 | `maxCredits` | number | 0 | spend ceiling in credits — the one cap where 0 really means off; checked against the cached quota (at most ~30s stale) |
 | `plan`, `requirePlanApproval` | bool | false | the plan gate |
@@ -49,6 +55,8 @@ The full field list and its defaults live in `harness/settings.mjs`
 | `projects` | `{name, path}[]` | [] | the project picker, most recent first |
 | `root` | string? | null | the root a new backend starts on |
 | `plugins` | string[] | [] | plugin names to load from `plugins/` |
+| `skillsDirs` | string[] | [] | extra folders the playbook library is read from |
+| `searchI`, `attach`, `webScratch` | bool | false | the extra tool forms the model is taught |
 | `uploads` | string? | null | override for the staged-uploads directory |
 | `chatUrl`, `autoOpenTab` | string, bool | `https://de.aipass.net/chat`, true | where a run finds its tab |
 | `theme` | `dark` \| `light` \| `auto` | `dark` | the window's palette |

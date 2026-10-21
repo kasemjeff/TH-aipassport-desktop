@@ -95,12 +95,23 @@ waiting on a slow model is as real a spend as running a command. Stops:
 `time-limited` (via `spendBudget`).
 
 **2. The send.** `saySafe` → `resilientSay`: a message the edge rejects is
-retried once in a halved/rewritten form (`firewall_note` goes out). A 429 is
-not rewritten — it is waited out, first in the page (10s/45s/120s, on a clock
-the whole tab shares) and then by the client and the message layer
-(`RATE_WAITS_MS` — 60s/180s — twice over), so a busy edge pauses a run
-instead of ending it; the rewrite chain never sees a rate refusal, and a
-refusal that arrives after deltas streamed is never resent at all. Above the
+retried in a rewritten form (`firewall_note` goes out). The chain, in order:
+`redact()` drops the lines that match `RISKY_LINE`; a **big** message is sent
+again **shorter** — the head and the tail survive, the bulky middle is left
+out with a line that says so — because a run that stands still at a refusal
+is a run the person sees as stopped (the session ends after the last tool
+call, with no answer and no `run_stats`); a **small** message is never
+shortened, because that is the pace case and the wait is its medicine, and
+neither is the run's **first** message — that one carries the protocol, and a
+protocol with its middle cut out is worse than a message that waited; the
+identical message is then waited out (`EDGE_WAITS_MS` — 60s/180s) for a
+refusal that is about pace; and only then is the message halved and resent
+(recursively, down to ~300 bytes). A 429 is not rewritten — it is waited out,
+first in the page (10s/45s/120s, on a clock the whole tab shares) and then by
+the client and the message layer (`RATE_WAITS_MS` — 60s/180s — twice over), so
+a busy edge pauses a run instead of ending it; the rewrite chain never sees a
+rate refusal, and a refusal that arrives after deltas streamed is never resent
+at all. Above the
 chain the loop keeps one bounded recovery of its own (`RECOVER_WAITS_MS` —
 30s then 60s): a send that delivered nothing and heals by waiting — the
 connection-cycle shapes, a tab still loading, a rate window, a 403 the chain
@@ -202,8 +213,18 @@ each result) is kept for the last six steps:
 - the same step the third time → `stagnation`, stop;
 - two steps trading places (A, B, A, B, …) → the second occurrence →
   `stagnation`, stop;
+- a longer round (A, B, C, A, B, C, …) → the second lap of the same round →
+  `stagnation`, stop; the round is read off the window (the last p+1
+  signatures, the first and the last the same and the p in between all
+  different), and the counter counts laps, not detections, because in a
+  three-state round only every third step closes the loop;
 - one strike short of either → a `stagnation` warning rides the next message
   ("do something different — or say DONE and tell me what is still open").
+
+The evidence side of the same question: once most of a run's results are
+repeats (`repeatedResults / (novelResults + repeatedResults)`, at least four
+results and two repeats), the run is hearing itself, and the guard stops on
+the first strike instead of spending a correction on it.
 
 **10. Verify nudge (R4).** Once a run has staged code and nothing checked it
 since the last change, the next message asks for proof — once. Running a check
@@ -233,7 +254,7 @@ say what a completed run left open; the loop returns.
 | err loop | the same failure (kind + masked error line) on calls in a row | correction on the third result, `errLoops` | streak > `repeatGuardMax` → `stalled` |
 | chain guard | a failed change, mid-reply | the reply's later changes/RUNs skipped and stated, `chainSkips`; reads still run | — |
 | red-test gate | a `git commit` RUN while the declared check (`.aipass/check.txt`, or `verifyCommand` when set) has not passed at the current state | refusal naming the exact command and its source, `commitBlocks`; any later change re-arms | — (run the check first; a commit is never the way around it) |
-| stagnation | same step ×3, or two trading places ×2 | `stagnation` warn + "do something different" | `stagnation` |
+| stagnation | same step ×3, two trading places ×2, or a longer round twice | `stagnation` warn + "do something different" | `stagnation` |
 | budgets | tool count (300) and wall clock (30 min) — the only bound when no step cap is set; plus credits, only when set (`maxCredits`, 0 = off, checked against the cached quota) | `budget` event | `tools-limited` / `time-limited` / `credit-limited` |
 | plan gate | `PLAN` and no approval yet | `plan_request`, wait however long | decline → `plan-rejected` |
 | plan checkpoint | DONE with plan/TODO items still open | one nudge naming them and asking for a ticked TODO (`todoPrompts`); the finish pipeline reads: checker → checkpoint → language | — (the next DONE is honored either way) |
@@ -258,7 +279,7 @@ which are hard bars and only exist where the run declared its check.
 | `ask` | the model paused on a question (ASK) — the next message answers it |
 | `steps` | a set step cap ran out (no cap is the default) |
 | `stalled` | hollow replies ×3, repeat refusals past the cap, or a same-failure streak past it |
-| `stagnation` | the same step, or two trading places, with identical results |
+| `stagnation` | the same step, two trading places, or a longer round, with identical results |
 | `cancelled` | the user pressed stop |
 | `error` | transport/model failure, a saved model that left the catalog (the pre-flight's sentence), or a missing tab (with `needs_tab`) |
 | `plan-rejected` | the human declined the plan |

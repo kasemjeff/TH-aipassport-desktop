@@ -101,6 +101,25 @@ The instruments already exist; an experiment composes them:
 An admission gate (`docs/SPEC_EVALS.md`, "Model approval & routing") never
 cites a `proposed` record as evidence; only `done` ones exist to it.
 
+## The harness as its own experiment
+
+The queue above is for experiments a *person* proposes: a hypothesis, a
+baseline, a stop rule. The harness tuning itself is the same discipline with
+the proposer written down — `docs/META_HARNESS.md` has the shape, and
+`npm run meta` has the commands.
+
+The two records are different on purpose. A queue record is a decision to
+try; a meta record is a decision that was *made* — a proposal
+(`~/.aipass/meta/proposals/<id>/`, with the candidate, the baseline bytes and
+the evidence it cites) and a verdict (`~/.aipass/meta/verdicts/<id>.json`,
+with the rows of both arms and the gates they tripped). A proposal that did
+not move the score stays a proposal; nothing about it is a queue entry.
+
+The bridge between them is narrow and worth keeping: **a queue record may
+cite a meta verdict, never a proposal.** A measured change to the harness is
+the only thing an admission gate can point at — the same rule the safety
+evidence expiry already states for a model change.
+
 ## In the suite
 
 `aipass-bridge/test/experiments.test.mjs` validates the real committed queue on
