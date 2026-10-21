@@ -988,7 +988,11 @@ export function createRpc({
           return json(res, 400, { ok: false, error: `bad JSON body: ${err.message}` });
         }
 
-        const fn = methods[msg.method];
+        // A method is a method THIS backend has. `methods['toString']` would
+        // find the inherited one and answer 200 with "[object Undefined]" for
+        // a call nobody made — so the lookup is an OWN property, and every
+        // other name is the 404 it should be.
+        const fn = (typeof msg.method === 'string' && Object.hasOwn(methods, msg.method)) ? methods[msg.method] : null;
         if (!fn) {
           // Not a built-in — maybe a plugin provides it. A plugin may not
           // shadow anything above, so the built-in check comes first.

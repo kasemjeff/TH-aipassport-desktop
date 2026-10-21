@@ -495,6 +495,8 @@ test('the static file guard serves ui/ and nothing beside it', async (t) => {
 
   assert.equal(staticFileFor(ui, '/'), path.join(ui, 'index.html'));
   assert.equal(staticFileFor(ui, '/app.js'), path.join(ui, 'app.js'));
+  assert.equal(staticFileFor(ui, '/my%20file.js'), path.join(ui, 'my file.js'), 'a name that needs encoding is the decoded name on disk');
+  assert.equal(staticFileFor(ui, '/%zz'), path.join(ui, '%zz'), 'a malformed escape is not a name, and is taken as it came');
   assert.equal(fs.existsSync(sibling), true, 'the sibling really is outside ui');
   assert.equal(staticFileFor(ui, '/../ui-x/secret.txt'), null, 'a `..` into the sibling must not resolve');
   assert.equal(staticFileFor(ui, '/..'), null, 'the parent of ui is not served either');
@@ -624,6 +626,23 @@ test('the MCP list answers for the project the call is about', async (t) => {
   const other = await env.call('mcp.list', { project: second });
   assert.ok(other.servers.some((s) => s.name === 'beta'), 'and the other project with its own');
   assert.equal(other.servers.some((s) => s.name === 'alpha'), false, 'the first project is not in it');
+});
+
+test('a method nobody has is a 404, not an inherited one', async (t) => {
+  // `methods['toString']` is a function — the inherited one — so a call for
+  // it answered 200 with "[object Undefined]" instead of the 404 that says
+  // "there is no such method here".
+  const env = await startRpc({ files: {}, replies: ['DONE nothing'] });
+  t.after(() => env.stop());
+
+  const res = await fetch(`http://127.0.0.1:${env.rpc.port}/rpc`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ method: 'toString' }),
+  });
+  const body = await res.json();
+  assert.equal(res.status, 404, 'the call nobody made is refused');
+  assert.match(body.error, /no such method/, 'and it says so');
 });
 
 test('an image or a video is staged, listed and dropped', async (t) => {
@@ -1276,6 +1295,53 @@ test('a session of another project is not opened, renamed or deleted', async (t)
   const after = await env.call('session.list', {}, { 'x-aipass-project': other });
   assert.equal(after.length, 1, 'and it is still there, in its own project');
   assert.equal(after[0].title, list[0].title, 'with the name it had');
+});
+
+test('a session of another project is not opened by its path either', async (t) => {
+  // The window lists sessions with their path, and a path names a session at
+  // least as precisely as an id does — so the path is held to the same rule.
+  // A guard on the id spelling alone is a guard on one spelling.
+  const other = tempDir({ 'b.txt': 'b' });
+  const env = await startRpc({ files: { 'a.txt': 'a' }, replies: ['DONE nothing'] });
+  t.after(() => env.stop());
+
+  await env.call('run', { task: 'a task in the other project', mode: 'auto' }, { 'x-aipass-project': other });
+  const list = await env.call('session.list', {}, { 'x-aipass-project': other });
+  const file = list[0].file;
+  assert.ok(file, 'the listing carries the path of the session');
+
+  await assert.rejects(() => env.call('session.open', { id: file }), /another project/, 'it is not opened here');
+  await assert.rejects(() => env.call('session.rename', { id: file, title: 'mine now' }), /another project/, 'nor renamed');
+  await assert.rejects(() => env.call('session.delete', { id: file }), /another project/, 'nor deleted');
+
+  const after = await env.call('session.list', {}, { 'x-aipass-project': other });
+  assert.equal(after.length, 1, 'and it is still there, in its own project');
+});
+
+test('an archived session comes back through the window', async (t) => {
+  // The archive is a place a session can be put AND a place it can be taken
+  // from: without the way back, "archive" was a one-way door.
+  const env = await startRpc({ files: { 'a.txt': 'a' }, replies: ['DONE nothing'] });
+  t.after(() => env.stop());
+
+  await env.call('run', { task: 'a task to archive', mode: 'auto' });
+  const first = await env.call('session.list');
+  assert.equal(first.length, 1, 'the project has a session');
+  const id = first[0].id;
+  // The live session is never archived, so the one that moves is a second
+  // session the window has walked away from.
+  await env.call('session.new', { title: 'the live one' });
+
+  const out = await env.call('session.archive', { olderThanDays: 0 });
+  assert.ok(out.archived.includes(id), 'it is archived');
+  assert.equal((await env.call('session.list')).some((s) => s.id === id), false, 'and it left the picker');
+
+  const archived = await env.call('session.archived');
+  assert.equal(archived.some((s) => s.id === id), true, 'the archive holds it');
+
+  await env.call('session.unarchive', { id });
+  const back = await env.call('session.list');
+  assert.equal(back.some((s) => s.id === id), true, 'and it is back in the picker');
 });
 
 test('a session whose project moved still opens by id, and a live one does not', () => {

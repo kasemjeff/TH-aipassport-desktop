@@ -1997,12 +1997,20 @@ setInterval(() => { void checkForUpdate().catch(() => {}); }, 6 * 60 * 60 * 1000
  * conversation, and a window that HAS a conversation must not have the card
  * pushed in underneath it.
  *
+ * A banner is not a conversation either — it is the window's notice ("there
+ * is no chat tab", "the update is ready"), and the card still belongs under
+ * it. The card lists what the app is waiting for, and a banner takes one
+ * thing away from that list, not the whole of it.
+ *
  * The card is held by a reference and not looked up by id: it is built at
  * runtime, and an element that is not in the document cannot be found by
  * getElementById.
  */
 let welcomeCard = null;
-const hasConversation = () => log.children.some((n) => n !== welcomeCard);
+const isBanner = (n) => /\b(needs-tab|update-bar)\b/.test(n.className ?? '');
+// The rows are copied out of the collection first: in the browser `children`
+// is an HTMLCollection, which has a length but no `some`.
+const hasConversation = () => [...log.children].some((n) => n !== welcomeCard && !isBanner(n));
 
 function showWelcome(readiness) {
   // The card belongs to an empty window. It used to be painted whatever was

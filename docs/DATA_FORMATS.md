@@ -124,6 +124,43 @@ leaves either the old header or the new one plus its breadcrumb — never a
 session nobody can open. A leftover breadcrumb next to a healthy header is
 ignored and cleaned up on the next load.
 
+A header rewrite is a read-modify-write, and more than one writer can be
+looking at the same session: the desktop backend and the CLI share one store,
+and a window can be open on a project while a command line runs in it. So the
+rewrite takes a lock (`session-<id>.jsonl.lock`, created O_EXCL, taken over
+when it is older than 15 seconds) and merges: the header **on disk** plus the
+fields this call changed, not this call's own copy of the header. A rename in
+one writer therefore survives an append in the other, and so does the
+conversation binding. A lock that cannot be taken within 5 seconds falls back
+to the whole-file swap, which cannot tear the file.
+
+Two things follow from the header carrying the project:
+
+- **The directory is a bucket, not a boundary.** The directory name is the
+  path slugified, and a slug is lossy: `C:\a b` and `C:\a-b` are the same
+  slug, and a long path is cut at 60 characters. So the header's own `root`
+  is the authority on which project a session belongs to, and `list()`,
+  `resolveFile()` and `reassign()` all ask the header. A session of another
+  project is not this project's to open, rename, delete or relocate — by id
+  **or** by path.
+- **A session id is a file name.** It is 48 bits from the crypto module
+  (`crypto.randomBytes(6)`), because a collision is not a key that gets
+  refused: the new session would replace the old one, and the whole
+  conversation with it.
+
+A session file is read by walking it, not by loading it: a session grows by
+appends and nothing trims it, so the reader streams the lines and keeps what
+it needs. Past `MAX_SESSION_BYTES` (64 MB, `AIPASS_MAX_SESSION_BYTES` to
+change it) the session is refused with a reason rather than taking the window
+down with it.
+
+**The archive.** A session can be moved out of the picker's way into
+`<project>/archive/` (`archiveIdle()`), and it can be taken back out of it
+(`restore()`) — the archive is a place, not a one-way door. `pruneArchived()`
+is the one thing in the store that deletes: only what has sat in the archive
+past the threshold, and only as many as the limit says. The window does this
+from the session rail, the CLI from `aipass sessions`.
+
 Sessions are machine-local and sensitive: they contain your own text
 verbatim. Delete a project's directory to be done with it — `SECURITY.md`
 says the same, in the same words.

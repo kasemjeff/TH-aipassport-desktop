@@ -145,7 +145,6 @@ async function refreshSessions() {
   }
   if (!shown.length) {
     ul.append(el('li', 'dim', query ? 'ไม่พบบทสนทนาที่ค้น' : 'ยังไม่มีบทสนทนา'));
-    return;
   }
   // The group the rows fall in. It changes as the list walks down the days,
   // and each change opens a new group.
@@ -182,6 +181,71 @@ async function refreshSessions() {
     clickable(li, () => void ctx.openSession(s.id));
     ul.append(li);
   }
+  await drawArchived(ul);
+}
+
+/**
+ * The sessions that are in the archive, and the way back out of it.
+ *
+ * "เก็บ" (archive) moves a session out of the picker's way, into
+ * `<project>/archive/` — nothing is deleted, but until now nothing could
+ * bring one back either, which made the archive a one-way door. The row
+ * says how many are in there, and each of them can be put back where it was.
+ */
+async function drawArchived(ul) {
+  const archived = await rpc('session.archived').catch(() => []);
+  if (!archived.length) return;
+  const bar = el('li', 'dim archive-bar');
+  const btn = el('button', 'mini', `คืนจากที่เก็บ (${archived.length})`);
+  btn.title = 'บทสนทนาที่เก็บไว้ใน archive/ — กดเพื่อดูและคืนกลับเข้ารายการ';
+  // The one thing in the store that deletes. It asks first, it says what it
+  // will do, and it only ever touches what has been in the archive for
+  // months — a project that keeps every conversation it ever had is a
+  // project that runs out of disk.
+  const prune = el('button', 'mini', 'ลบที่เก็บเก่า');
+  prune.title = 'ลบบทสนทนาที่อยู่ใน archive/ มานานเกิน 90 วัน (ลบถาวร)';
+  prune.onclick = async () => {
+    if (!window.confirm('ลบบทสนทนาที่เก็บไว้นานเกิน 90 วันอย่างถาวร?')) return;
+    prune.disabled = true;
+    try {
+      const out = await rpc('session.prune', { olderThanDays: 90, limit: 50 });
+      addCommandOut(out?.count ? `ลบบทสนทนาที่เก็บเก่า ${out.count} รายการแล้ว` : 'ไม่มีบทสนทนาที่เก็บเก่าเกิน 90 วันให้ลบ');
+    } catch (err) { addNote(`ลบไม่ได้: ${err.message}`); }
+    await refreshSessions();
+  };
+  let open = false;
+  const box = el('div', 'archived-box');
+  const draw = () => {
+    box.textContent = '';
+    for (const s of archived) {
+      const row = el('div', 'archived-row');
+      const when = s.updated ? new Date(s.updated) : null;
+      const name = el('span', 'name', s.title ?? '(untitled)');
+      name.title = `${s.title ?? '(untitled)'}\n${s.id}\n${when ? when.toLocaleString() : ''}`;
+      row.append(name);
+      if (when) row.append(el('span', 'sub', sessionDay(when)));
+      const back = el('button', 'mini', 'คืน');
+      back.title = 'คืนบทสนทนานี้เข้ารายการ';
+      back.onclick = async () => {
+        back.disabled = true;
+        try {
+          await rpc('session.unarchive', { id: s.id });
+          addCommandOut(`คืนบทสนทนา "${s.title ?? '(untitled)'}" เข้ารายการแล้ว`);
+        } catch (err) { addNote(`คืนไม่ได้: ${err.message}`); }
+        await refreshSessions();
+      };
+      row.append(back);
+      box.append(row);
+    }
+  };
+  btn.onclick = () => {
+    open = !open;
+    btn.textContent = open ? `ปิดที่เก็บ (${archived.length})` : `คืนจากที่เก็บ (${archived.length})`;
+    if (open) { draw(); box.hidden = false; } else { box.hidden = true; }
+  };
+  bar.append(btn, prune);
+  ul.append(bar);
+  ul.append(box);
 }
 
 /**

@@ -803,6 +803,12 @@ export class Harness {
           this.#conversationTemporary = null;
           this.#conversationBoundTo = null;
         }
+        // The run is over: everything it appended is on the disk. The header
+        // rewrite fsyncs the file once per batch, so without this the last
+        // entries of a finished run would sit in the OS's hands until
+        // something else happened to flush them — and a power cut would take
+        // the end of the conversation with it.
+        try { runSession?.flush?.(); } catch { /* best effort */ }
       }
     } finally {
       // Every failure before the loop - a session that will not open, a

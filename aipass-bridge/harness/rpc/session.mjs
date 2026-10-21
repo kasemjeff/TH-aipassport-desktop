@@ -34,6 +34,10 @@ export function createSessionMethods(ctx) {
    * deleted in the project the window is on — but "nothing happened" is an
    * answer nobody can act on, and the id is usually in front of the person
    * who asked. The path says whose it is.
+   *
+   * A handle that names a FILE is asked the same question: the window lists
+   * sessions with their path, and a path names a session at least as
+   * precisely as an id does.
    */
   const refuseForeign = (h, id) => {
     if (!id || !h?.store) return;
@@ -90,6 +94,46 @@ export function createSessionMethods(ctx) {
         keepId: h.session?.id ?? null,
       });
       return { archived: out.archived, count: out.archived.length };
+    },
+    /**
+     * The sessions that are in the archive.
+     *
+     * The archive is a place a session can be put AND a place it can be
+     * taken from: without this, "archive" was a one-way door, and a session
+     * that went in could only come back by hand.
+     */
+    async 'session.archived'(params = {}) {
+      const h = targetFor(params);
+      return h.store.listArchived(h.root);
+    },
+    /**
+     * Take a session back out of the archive.
+     *
+     * The file moves back into the project's own directory; nothing about the
+     * session itself changes, so it opens exactly as it did before.
+     */
+    async 'session.unarchive'(params = {}) {
+      const h = targetFor(params);
+      if (!params.id) throw new Error('no session given');
+      const back = h.store.restore(params.id, { root: h.root });
+      if (!back) throw new Error('no archived session with that id');
+      return { ok: true, id: params.id };
+    },
+    /**
+     * Delete the archived sessions that have been there too long.
+     *
+     * The one place the store deletes. It is deliberately narrow: only the
+     * archive, only what has sat there past the threshold, and only as many
+     * as the limit says. The live session is never in the archive.
+     */
+    async 'session.prune'(params = {}) {
+      const h = targetFor(params);
+      const days = Number(params.olderThanDays ?? 90);
+      const out = h.store.pruneArchived(h.root, {
+        olderThanMs: (Number.isFinite(days) && days >= 0 ? days : 90) * 24 * 3600 * 1000,
+        limit: Math.min(200, Math.max(1, Math.floor(Number(params.limit ?? 20)) || 20)),
+      });
+      return { pruned: out.pruned, count: out.count };
     },
     async 'session.fork'(params = {}) {
       const h = targetFor(params);

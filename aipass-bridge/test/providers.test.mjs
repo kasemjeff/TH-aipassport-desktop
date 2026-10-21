@@ -14,7 +14,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { tempDir, startRpcServer } from './harness.mjs';
 import { ProviderStore, AIPASS_PROVIDER, sanitizeSpec } from '../harness/providers.mjs';
-import { ApiProviderClient, clientFor, endpointsFor } from '../harness/provider-client.mjs';
+import { ApiProviderClient, clientFor, endpointsFor, authHeaders } from '../harness/provider-client.mjs';
 import { RATE_REFUSED, resilientSay } from '../harness/bridge.mjs';
 import { Settings } from '../harness/settings.mjs';
 import { Harness } from '../harness/harness.mjs';
@@ -46,6 +46,28 @@ const OPENAI_SPEC = {
   id: 'openai', kind: 'openai', baseUrl: 'https://api.example.com/v1',
   apiKeyEnv: '', models: ['gpt-x'], defaultModel: null, headers: {},
 };
+
+test('the fields the provider client reads survive the spec', () => {
+  // A provider that wants its key under another header, without the "Bearer "
+  // prefix, or with its own token ceiling, says so in its spec — and the spec
+  // has to KEEP it, or the client quietly falls back to its defaults and the
+  // provider turns the key down.
+  const home = tempDir();
+  const store = new ProviderStore(home);
+  store.save({ ...OPENAI_SPEC, apiKeyHeader: 'x-api-key', apiKeyPrefix: '', maxTokens: 4096 });
+  const spec = store.get('openai');
+  assert.equal(spec.apiKeyHeader, 'x-api-key', 'the header name survives');
+  assert.equal(spec.apiKeyPrefix, '', 'and the prefix — an empty one means no prefix');
+  assert.equal(spec.maxTokens, 4096, 'and the token ceiling');
+
+  // The client reads the spec, so the header it builds is the one asked for.
+  const headers = authHeaders(spec, 'sk-x');
+  assert.equal(headers['x-api-key'], 'sk-x', 'the key goes under the header the spec names');
+  assert.equal(headers.authorization, undefined, 'and not under the default one');
+
+  // A header name with a newline in it is a header injection, not a name.
+  assert.throws(() => sanitizeSpec({ ...OPENAI_SPEC, apiKeyHeader: 'x-key\r\nX-Evil: 1' }), /header name/);
+});
 
 test('a provider spec is stored, listed and never carries its key', () => {
   const home = tempDir();

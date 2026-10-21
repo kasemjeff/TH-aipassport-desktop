@@ -31,12 +31,10 @@ import { clientFor } from '../provider-client.mjs';
  */
 function specChanged(before, after) {
   if (!before || !after) return true;
-  return before.kind !== after.kind
-    || before.baseUrl !== after.baseUrl
-    || before.apiKeyEnv !== after.apiKeyEnv
-    || before.defaultModel !== after.defaultModel
-    || JSON.stringify(before.models ?? []) !== JSON.stringify(after.models ?? [])
-    || JSON.stringify(before.headers ?? {}) !== JSON.stringify(after.headers ?? {});
+  const material = (s) => JSON.stringify([
+    s.kind, s.baseUrl, s.apiKeyEnv, s.defaultModel, s.models ?? [], s.headers ?? {},
+  ]);
+  return material(before) !== material(after);
 }
 
 /**

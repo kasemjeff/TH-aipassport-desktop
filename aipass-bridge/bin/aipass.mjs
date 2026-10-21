@@ -128,7 +128,7 @@ function stopBridge() {
 
 async function status() {
   const major = Number(process.versions.node.split('.')[0]);
-  console.log(`node          ${process.versions.node}${major >= 22 ? '' : red('  ✗ need >= 22')}`);
+  console.log(`node          ${process.versions.node}${major >= 20 ? '' : red('  ✗ need >= 20')}`);
 
   const up = await bridgeUp();
   console.log(`bridge        ${up ? `${BRIDGE}  ok` : `${BRIDGE}  ${red('not running')} — run \`aipass dev\` (or npm run dev)`}`);
@@ -158,6 +158,7 @@ const HELP = `aipass — de.aipass.net from your terminal
   aipass setup-assistant configure custom assistant
   aipass setup           first-run setup: Node, PATH, token, bridge, browser pages
   aipass memory          list/clear facts carried across sessions for this project
+  aipass sessions        list/archive/restore this project's conversations
   aipass relocate        re-key a project's stored data after its folder moved
   aipass scale "task"    test-time scaling: run a task N times, keep the best
   aipass plugin          install/inspect/enable/disable/remove plugins
@@ -218,6 +219,13 @@ switch (cmd) {
 
   case 'memory':
     finish(await run('memory.mjs', rest));
+    break;
+
+  case 'sessions':
+    // The conversations on disk: list them, move the idle ones into the
+    // archive, take one back out of it, or delete the ones that have sat in
+    // the archive too long. No bridge needed — the store is local.
+    finish(await run('sessions.mjs', rest));
     break;
 
   case 'relocate':

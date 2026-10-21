@@ -488,7 +488,32 @@ button.nav-item:hover { border-color: transparent; }
   margin-bottom: 2px;
   border-bottom: 1px solid var(--line);
 }
-.list li.archive-bar > button { opacity: 1; flex: 1; text-align: left; }
+.list li.archive-bar > button { opacity: 1; }
+/* The first button of the bar is the one that says what the bar does, so it
+   takes the room; the one beside it (prune the old ones) stays a button. */
+.list li.archive-bar > button:first-child { flex: 1; text-align: left; }
+.list li.archive-bar > button + button { flex: none; }
+
+/* The sessions that are in the archive, and the way back out of it. The rows
+   are the same shape as the history's rows — a name, a day, a button — so the
+   thing you are looking at is the same kind of thing either way. */
+.list .archived-box { display: flex; flex-direction: column; gap: 2px; padding: 2px 0 6px; }
+.list .archived-box[hidden] { display: none; }
+.list .archived-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0 3px 10px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.list .archived-row .name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.list .archived-row > button { opacity: 1; flex: none; }
 
 /* The fold: the rail is 264px and two lists want it. The reader decides which
    one wins today — and the window remembers the answer, because deciding it

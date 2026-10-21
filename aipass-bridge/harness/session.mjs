@@ -227,7 +227,17 @@ function writeHeader(file, header, { swapOnly = false } = {}) {
         if (first === line) { cleanBreadcrumb(file); return; }
         writeFileAtomic(hdrPath(file), JSON.stringify(header) + '\n', { mode: 0o600 });
         const fd = fs.openSync(file, 'r+');
-        try { fs.writeSync(fd, Buffer.from(line), 0, HEADER_WIDTH, 0); }
+        try {
+          fs.writeSync(fd, Buffer.from(line), 0, HEADER_WIDTH, 0);
+          // The bytes have to be on the disk before the name that points at
+          // them: the entries this header counts were appended but not yet
+          // flushed, and a power cut would leave a header that claims five
+          // entries over a file that holds two. One fsync puts the entries
+          // and the header on the disk together, so what survives is what the
+          // header says. The swap path needs no fsync of its own: the temp
+          // file carries the whole log and is fsync'd before the rename.
+          fs.fsyncSync(fd);
+        }
         finally { fs.closeSync(fd); }
         cleanBreadcrumb(file);
         return;
@@ -336,6 +346,23 @@ export class Session {
 
   find(entryId) { return this.entries.find((e) => e.id === entryId) ?? null; }
 
+  /**
+   * Put what has been appended on the disk.
+   *
+   * The header rewrite fsyncs the file once per batch, so a power cut costs
+   * at most the entries since the last rewrite. A run that has ENDED should
+   * cost nothing at all: this is the call that makes its last entries
+   * durable, and it is cheap — one flush of what the OS already holds.
+   */
+  flush() {
+    let fd;
+    try {
+      fd = fs.openSync(this.file, 'r+');
+      fs.fsyncSync(fd);
+    } catch { /* best effort — the file may be gone */ }
+    finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed */ } } }
+  }
+
   /** The chain of entries from the start up to and including one entry. */
   chainTo(entryId) {
     const at = this.entries.findIndex((e) => e.id === entryId);
@@ -420,14 +447,29 @@ export class Session {
  * The first line of a file, without reading the rest of it. A run's log grows
  * to megabytes, and the picker only ever needs the header: listing the whole
  * store used to read every session end to end.
+ *
+ * The read is sized to the header, not to the file: a padded header is
+ * HEADER_WIDTH bytes, and a first line that does not fit in that is read
+ * further (a hand-written file, a title long enough to outgrow the block).
+ * Reading 64 KB per file to get 2 KB of it was the picker's cost — the store
+ * has hundreds of files, and every one of them paid for a buffer it did not
+ * use.
  */
 function readFirstLine(file, cap = 64 * 1024) {
   let fd;
   try {
     fd = fs.openSync(file, 'r');
-    const buf = Buffer.alloc(cap);
-    const n = fs.readSync(fd, buf, 0, cap, 0);
-    return buf.subarray(0, n).toString('utf8').split('\n', 1)[0];
+    let buf = Buffer.alloc(Math.min(HEADER_WIDTH + 2, cap));
+    let n = fs.readSync(fd, buf, 0, buf.length, 0);
+    let text = buf.subarray(0, n).toString('utf8');
+    // No newline in what we read: the line is longer than the block, so the
+    // rest of it is read too (up to the cap).
+    if (!text.includes('\n') && n === buf.length && buf.length < cap) {
+      buf = Buffer.alloc(cap);
+      n = fs.readSync(fd, buf, 0, cap, n);
+      text = buf.subarray(0, n).toString('utf8');
+    }
+    return text.split('\n', 1)[0];
   } finally {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed */ } }
   }
@@ -510,10 +552,44 @@ export class SessionStore {
     // A store an older build (or a loose umask) left readable turns owner-only
     // the first time it is opened.
     tighten(dir, 0o700);
+    // The headers this store has read, memoized on the file's mtime+size —
+    // the same pair the overlay memoizes its texts on. The picker reads every
+    // session's header, and a store with hundreds of sessions spent its time
+    // opening and parsing files that had not changed since the last look.
+    /** @type {Map<string, {stamp: string, header: Record<string, any>}>} */
+    this.headers = new Map();
   }
 
   static default(base = path.join(os.homedir(), '.aipass', 'sessions')) {
     return new SessionStore(base);
+  }
+
+  /**
+   * The header of a session file, memoized on the file's mtime+size.
+   *
+   * A stat is cheap; an open, a read and a parse are not. A file that has not
+   * changed since the last look answers from the memo, and a file that has
+   * changed is read again — the stamp is the same test the overlay uses for
+   * its texts, so a session's title in the picker is as fresh as the file is.
+   *
+   * @param {string} file
+   * @returns {Record<string, any>|null}
+   */
+  headerOf(file) {
+    let stamp = '';
+    try {
+      const st = fs.statSync(file);
+      stamp = `${st.mtimeMs}:${st.size}`;
+    } catch { return null; }
+    const hit = this.headers.get(file);
+    if (hit && hit.stamp === stamp) return { ...hit.header };
+    const { header } = readSessionHeader(file);
+    if (!header) return null;
+    // The memo is a cache, not a ledger: it is dropped whole when it grows
+    // past what a store of this size needs.
+    if (this.headers.size > 5000) this.headers.clear();
+    this.headers.set(file, { stamp, header });
+    return { ...header };
   }
 
   dirFor(root) {
@@ -648,7 +724,7 @@ export class SessionStore {
           // Wrong-type data must not reach the picker: a first line that is
           // not a header object is skipped like a torn one — and a torn one
           // itself is recovered from the breadcrumb, not dropped.
-          const { header } = readSessionHeader(file);
+          const header = this.headerOf(file);
           if (!header) continue;
           if (root && header.root && !sameRoot(header.root, root)) continue;
           out.push({ ...header, file, entries: header.entryCount ?? 0 });

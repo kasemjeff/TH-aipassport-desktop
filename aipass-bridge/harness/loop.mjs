@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { outbound } from './waf.mjs';
 import { parseSources } from './web-sources.mjs';
+import { scrubOutput } from './output-scrub.mjs';
 import {
   REMINDER, REMINDER_HEAD, REMINDER_TAIL, prose, parse, parseTodo, mergeTodo, READING, attemptedMarker,
   preamble as buildPreamble,
@@ -541,7 +542,14 @@ export async function runTask(taskText, ctx = {}) {
       // window, in the replayed session, and in the step result the model reads
       // back. The first line is the label; a wrapped command reads until the
       // first break, which is what fits a row.
-      const label = call.kind === 'run' && !call.arg ? String(call.body ?? '').split('\n')[0].trim() : call.arg;
+      //
+      // The label is screened the way the command's OUTPUT is: a command can
+      // carry a credential in its own text (`curl -H "Authorization: Bearer
+      // …"`, `export TOKEN=…`), and the label is what lands in the transcript
+      // on disk and in the step the model reads back. The command the
+      // PERMISSION prompt shows is not this one — it is the raw call, so the
+      // person still consents to the command they can read.
+      const label = scrubOutput(call.kind === 'run' && !call.arg ? String(call.body ?? '').split('\n')[0].trim() : call.arg);
       // (chain guard) The first failed change poisons the rest of the reply:
       // whatever else touches the tree was planned against the state the
       // refusal just invalidated. It does not run — the model gets the skip
