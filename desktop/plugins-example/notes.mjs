@@ -27,13 +27,18 @@ export default {
 
     // The model writes `NOTE whatever it wants to remember` and gets the whole
     // pad back, so it can read what is already there before adding more.
+    // `risk: 'write'` is the truth about this marker: it appends to a file.
+    // A marker that declares no risk is classified like a write anyway — a
+    // plugin's code runs in the backend process with the app's rights, so
+    // silence is not trust — but saying it here keeps the question the person
+    // is asked honest, and a marker that only reads can say so.
     ctx.tools.register('NOTE', async ({ arg, body }) => {
       const text = (arg || body || '').trim();
       if (!text) return `the pad is empty. NOTE <text> adds a line.`;
       if (/^(read|show|list)$/i.test(text)) return read() || 'the pad is empty.';
       write(`${read()}${read() ? '\n' : ''}- ${text}\n`);
       return `noted. the pad now reads:\n${read()}`;
-    }, { description: 'remember a line in the shared scratchpad, or read it' });
+    }, { description: 'remember a line in the shared scratchpad, or read it', risk: 'write' });
 
     // A panel: markup the window drops into its sidebar. It can call back into
     // the backend with rpc() to keep itself fresh. The window draws the

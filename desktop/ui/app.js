@@ -5,6 +5,7 @@
  * `/events` — the window only has to render what it is told.
  */
 import { renderMarkdown, splitMarkdownStable } from './md.js';
+import { restoreText, setRestoreTable } from './waf-restore.js';
 import { scan, transcript } from './markers.js';
 
 const $ = (id) => document.getElementById(id);
@@ -31,11 +32,21 @@ async function fetchToken() {
 }
 
 async function rpc(method, params = {}) {
+  // The project this window is showing rides on every call, as a header. The
+  // backend holds one harness per project, and without this a second window
+  // on another project would decide what this one reads — its sessions, its
+  // file tree, its pending diffs — and its Apply button would write the other
+  // project's staged edits. A header, not a parameter: the scope says WHO is
+  // asking, and `root` already means "switch the machine to this project" in
+  // settings.set.
   const send = () => fetch('/rpc', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
+      // The token is read here, not above: a 401 below refreshes it, and the
+      // retry has to carry the NEW one.
       ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+      ...(state.root ? { 'x-aipass-project': state.root } : {}),
     },
     body: JSON.stringify({ method, params }),
   });
@@ -74,12 +85,21 @@ const setHint = (text, busy = false) => {
   h.classList.toggle('busy', Boolean(busy && text));
 };
 
+/** The settings sheet's context meter, while the sheet is open. */
+let meterTimer = null;
+
 /** Make a list row behave like a button: click, Enter and Space all run it. */
 const clickable = (row, run) => {
   row.onclick = run;
   row.tabIndex = 0;
   row.setAttribute('role', 'button');
   row.addEventListener('keydown', (ev) => {
+    // A key pressed on a control INSIDE the row is that control's business.
+    // The row's handler used to swallow it and call preventDefault, which
+    // cancelled the control's own activation: Enter on the "แนบ" button
+    // opened the file instead of attaching it — the one thing the button is
+    // there for.
+    if (ev.target && ev.target !== row) return;
     if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); run(ev); }
   });
   return row;
@@ -142,10 +162,14 @@ const state = {
   providers: [],
   plugins: null,
   pluginTools: [],      // {marker, takesBody} — what the transcript must hide
+  pluginPanels: [],     // the panels the plugins paint — the sheet draws them
+  skills: [],           // the playbooks on disk — the settings sheet lists them
+  panelHost: null,      // the settings sheet's panel area, when it is open
   needsTab: false,      // the last run could not proceed for want of a chat tab
   needsCompaction: false, // the budget is close to full and a rotation is coming
   runCursor: null,      // where in the log the live run's rows begin
   stopping: false,      // a stop was asked for; the run is winding down
+  modalReturnFocus: null, // where the focus was before the sheet took it
 };
 
 /* -------------------------------------------------------------- transcript */
@@ -227,13 +251,23 @@ function paintAssistant(a) {
   if (!kept) { a.stableText = ''; a.stableHtml = ''; }
   if (stable.length > a.stableText.length) {
     paintCache.appended += stable.length - a.stableText.length;
-    a.stableHtml += (a.stableHtml ? '\n' : '') + renderMarkdown(stable.slice(a.stableText.length));
+    const delta = renderMarkdown(stable.slice(a.stableText.length));
+    a.stableHtml += (a.stableHtml ? '\n' : '') + delta;
     a.stableText = stable;
     if (!a.stableEl) {
       a.stableEl = el('div', 'seg md-stable');
       a.el.insertBefore(a.stableEl, a.tailEl);
     }
-    a.stableEl.innerHTML = a.stableHtml;
+    // The settled layer is APPENDED to, never rewritten: assigning its
+    // innerHTML re-parsed every paragraph that was already on screen, so a
+    // long answer paid for its own prefix again on every block. The string
+    // is still kept — it is what the layer is made of, and what a reset
+    // (a late plugin report, a DONE summary) empties.
+    if (typeof a.stableEl.insertAdjacentHTML === 'function') {
+      a.stableEl.insertAdjacentHTML('beforeend', delta);
+    } else {
+      a.stableEl.innerHTML = a.stableHtml;
+    }
   } else if (a.stableEl && !a.stableText) {
     a.stableEl.remove();
     a.stableEl = null;
@@ -279,7 +313,18 @@ function flushPaints() {
     // Reasoning only ever grows; appending what arrived beats reassigning the
     // whole text node per frame, which re-laid out a pre that can be long.
     if (t && t.text.length > t.painted) {
-      t.el.append(document.createTextNode(t.text.slice(t.painted)));
+      // The fold shows the reasoning as it was written: a wire spelling (the
+      // address a search brought back) goes back before the text is painted.
+      // It still grows by appending — the restored text differs from what was
+      // painted only when a spelling completed across a delta, and then the
+      // tail is rewritten once.
+      const restored = restoreText(t.text);
+      if (restored.startsWith(t.shown)) {
+        t.el.append(document.createTextNode(restored.slice(t.shown.length)));
+      } else {
+        t.el.textContent = restored;
+      }
+      t.shown = restored;
       t.painted = t.text.length;
     }
   }
@@ -336,7 +381,7 @@ function thinkingText(delta) {
     const pre = el('pre');
     box.append(summary, pre);
     log.append(box);
-    state.thinking = { el: pre, text: '', box, summary, since: Date.now(), painted: 0 };
+    state.thinking = { el: pre, text: '', box, summary, since: Date.now(), painted: 0, shown: '' };
   }
   state.thinking.text += delta;
   queuePaint();
@@ -409,7 +454,51 @@ const TOOL_LABEL = {
   symbols: 'Symbols', def: 'Definition', refs: 'References', jobs: 'Jobs',
 };
 
-function addTool({ kind, arg, ok, head, lines = [] }) {
+/**
+ * The links a web search brought back, under the Web row.
+ *
+ * A search is the one tool whose result is a set of addresses, and the row
+ * used to keep them to itself — the reader saw a line of prose about the web
+ * and no way to reach any of it. Each source is a link the reader can open,
+ * with the address in the text: a link that cannot be copied is a link that
+ * cannot be used anywhere else.
+ */
+function sourceLinks(sources) {
+  const box = el('div', 'sources');
+  let n = 0;
+  for (const s of Array.isArray(sources) ? sources : []) {
+    const url = restoreText(String(s?.url ?? '').trim());
+    if (!/^https?:\/\//i.test(url)) continue;
+    const label = restoreText(String(s?.label ?? '').trim());
+    // The address is the link's text, not just its target: a URL the reader
+    // cannot see is a URL they cannot copy into another window.
+    const a = el('a', 'md-link', url);
+    a.href = url;
+    a.title = label ? `${label} — ${url}` : url;
+    box.append(a);
+    n++;
+  }
+  return n ? box : null;
+}
+
+/**
+ * A link in the chat opens in the browser, not in this window.
+ *
+ * The window is a webview on the app's own page: a link that navigated it
+ * would take the app away with it, and the shell has no opener of its own.
+ * So the click goes to the backend, which checks the address and opens it in
+ * Chrome — where the reader's other tabs are, and where the extension lives.
+ */
+log.addEventListener('click', (ev) => {
+  const a = ev.target?.closest?.('.md-link');
+  if (!a) return;
+  const href = String(a.href ?? '').trim();
+  if (!/^https?:\/\//i.test(href)) return;
+  ev.preventDefault?.();
+  rpc('browser.open', { url: href }).catch(() => {});
+});
+
+function addTool({ kind, arg, ok, head, lines = [], sources = [] }) {
   const row = document.createElement('details');
   row.className = ok ? 'tool' : 'tool bad';
   row.title = kind;
@@ -417,9 +506,15 @@ function addTool({ kind, arg, ok, head, lines = [] }) {
   summary.append(el('span', 'mark', ok ? '⏺' : '✗'));
   summary.append(el('span', 'kind', TOOL_LABEL[kind] ?? kind));
   if (arg) summary.append(el('span', 'arg', String(arg)));
-  if (head) summary.append(el('span', 'head', head));
+  if (head) summary.append(el('span', 'head', restoreText(head)));
   row.append(summary);
-  if (lines.length) row.append(el('pre', null, lines.map((line) => String(line)).join('\n')));
+  if (lines.length) row.append(el('pre', null, restoreText(lines.map((line) => String(line)).join('\n'))));
+  const links = sourceLinks(sources);
+  if (links) {
+    row.append(links);
+    // The links are the point of a search row, so it opens on its own.
+    row.open = true;
+  }
   log.append(row);
   scrollDown();
 }
@@ -490,8 +585,14 @@ function renderTodo(items) {
 function renderPending(changes) {
   const wrap = $('pending');
   const list = $('pending-list');
+  // A file the human unticked stays unticked. The panel is rebuilt on every
+  // diff frame and again when the run ends, and a reset to "checked" would
+  // re-select exactly the files they said no to — right before they press
+  // Apply. A file that was not in the list before is new, so it comes in
+  // checked.
+  const before = new Map(state.pending);
   state.pending.clear();
-  for (const c of changes ?? []) state.pending.set(c.file, { ...c, checked: true });
+  for (const c of changes ?? []) state.pending.set(c.file, { ...c, checked: before.get(c.file)?.checked ?? true });
 
   $('pending-count').textContent = `${state.pending.size} change${state.pending.size === 1 ? '' : 's'}`;
   list.textContent = '';
@@ -547,25 +648,103 @@ async function showDiff(file) {
   const close = el('button', 'primary', 'close');
   close.onclick = hideModal;
   actions.append(close);
-  $('modal').classList.remove('hidden');
+  openModal();
+}
+
+/**
+ * Open the sheet.
+ *
+ * It is a dialog, so the keyboard goes in with it: the focus lands on its
+ * first control, and where the focus came from is remembered so closing it
+ * puts the user back where they were.
+ */
+function openModal() {
+  const modal = $('modal');
+  if (modal.classList.contains('hidden')) {
+    state.modalReturnFocus = document.activeElement ?? null;
+  }
+  modal.classList.remove('hidden');
+  const first = modal.querySelector?.('button, input, select, textarea, [tabindex]');
+  first?.focus?.();
+}
+
+/**
+ * Keep Tab inside the sheet.
+ *
+ * A dialog that lets the focus walk out into the page behind it is a dialog
+ * the keyboard user has lost: they cannot tell where they are, and Escape is
+ * the only way back. Tab from the last control wraps to the first, and
+ * Shift+Tab from the first wraps to the last.
+ */
+function trapFocus(ev) {
+  const modal = $('modal');
+  const items = [...(modal.querySelectorAll?.('button, input, select, textarea, a[href], [tabindex]') ?? [])]
+    .filter((n) => n.getClientRects?.().length !== 0 || n.offsetParent !== null);
+  if (!items.length) return false;
+  const first = items[0];
+  const last = items.at(-1);
+  const active = document.activeElement;
+  if (ev.shiftKey && (active === first || !items.includes(active))) {
+    last.focus?.();
+    return true;
+  }
+  if (!ev.shiftKey && (active === last || !items.includes(active))) {
+    first.focus?.();
+    return true;
+  }
+  return false;
 }
 
 function hideModal() {
   $('modal').classList.add('hidden');
   $('modal').classList.remove('settings-sheet');
+  // The sheet is gone, so its panel area is gone: a repaint after this would
+  // write into a box nobody can see.
+  state.panelHost = null;
+  // The meter's timer dies with the sheet. It used to be written into the
+  // modal's dataset and never read, so every "คืนค่าเดิม" — which closes the
+  // sheet and opens it again — left another one polling the backend forever.
+  if (meterTimer) { clearInterval(meterTimer); meterTimer = null; }
+  // And the focus goes back where it came from: a sheet that opens and takes
+  // the keyboard with it, and then leaves the user at the top of the page.
+  if (state.modalReturnFocus && document.activeElement !== state.modalReturnFocus) {
+    state.modalReturnFocus.focus?.();
+  }
+  state.modalReturnFocus = null;
 }
 
 /* ------------------------------------------------------------ permissions */
 
-function askPermission({ id, kind, arg, risk, project = null }) {
-  $('modal-title').textContent = `${risk === 'shell' ? 'run this command' : 'change this file'}?`;
+function askPermission({ id, kind, arg, risk, preview, project = null }) {
+  // A plugin marker is not a file and not a command: it is code the model
+  // wants to run, and the person is asked about the marker and what it was
+  // handed. The title says so, because "change this file?" over a marker
+  // name would be a lie about what the answer does.
+  //
+  // The exfil tier is neither: it is data LEAVING the machine, and the
+  // destination is the model's own choice — so the question names the
+  // destination, because "change this file?" would be a lie about a call that
+  // changes nothing here and everything there.
+  const plugin = kind === 'plugin';
+  const exfil = risk === 'exfil';
+  $('modal-title').textContent = plugin
+    ? 'run this plugin marker?'
+    : exfil
+      ? 'send this out?'
+      : `${risk === 'shell' ? 'run this command' : 'change this file'}?`;
   const body = $('modal-body');
   body.textContent = '';
-  body.append(el('p', null, arg || kind));
-  if (risk === 'shell') {
-    const pre = el('pre', null, arg || '');
-    body.textContent = '';
-    body.append(el('p', 'dim', 'shell command the model wants to run'), pre);
+  if (plugin) {
+    body.append(el('p', 'dim', 'plugin marker the model wants to run'));
+    body.append(el('p', null, arg || kind));
+    if (preview) body.append(el('pre', null, preview));
+  } else if (exfil) {
+    body.append(el('p', 'dim', 'the model wants to send this off the machine'));
+    body.append(el('pre', null, arg || ''));
+  } else if (risk === 'shell') {
+    body.append(el('p', 'dim', 'shell command the model wants to run'), el('pre', null, arg || ''));
+  } else {
+    body.append(el('p', null, arg || kind));
   }
   const foreign = foreignProject(project);
   if (foreign) body.append(el('p', 'dim', `จากโปรเจกต์อื่น (${foreign}) — คำตอบนี้ไปถึง run ของโปรเจกต์นั้น`));
@@ -582,7 +761,7 @@ function askPermission({ id, kind, arg, risk, project = null }) {
   const always = el('button', null, 'always');
   always.onclick = () => answer('always');
   actions.append(deny, always, allow);
-  $('modal').classList.remove('hidden');
+  openModal();
 }
 
 function askPlan(project = null) {
@@ -599,7 +778,7 @@ function askPlan(project = null) {
   const yes = el('button', 'primary', 'approve');
   yes.onclick = () => { hideModal(); rpc('plan.answer', { ok: true, ...(project ? { project } : {}) }); };
   actions.append(no, yes);
-  $('modal').classList.remove('hidden');
+  openModal();
 }
 
 /** A gate the reload swallowed: the run is still waiting on an answer. */
@@ -661,7 +840,7 @@ async function restoreFromSnapshot() {
     // and the next assistant entry starts a new bubble, the way the live
     // stream splits them at every `step` event.
     else if (entry.type === 'todo' && Array.isArray(entry.items)) renderTodo(entry.items);
-    else if (entry.type === 'tool') { addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '' }); state.assistant = null; }
+    else if (entry.type === 'tool') { addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '', sources: entry.sources }); state.assistant = null; }
     else if (entry.type === 'note') addNote(entry.text);
   }
   endTurn();
@@ -934,9 +1113,12 @@ onRun('finished', async (data) => {
   for (const id of state.attachments.keys()) rpc('attachment.remove', { id }).catch(() => {});
   state.attachments.clear();
   renderAttachments();
-  // Repaint every panel the sidebar holds, in place — a finished run is exactly
-  // when the scratchpad's history changed.
-  for (const box of $('plugin-panels').children) if (box.dataset.panel) await paintPanel(box, box.dataset.panel);
+  // Repaint every panel the settings sheet holds, in place — a finished run is
+  // exactly when the scratchpad's history changed. With the sheet closed there
+  // is no panel on screen, and nothing to repaint.
+  if (state.panelHost) {
+    for (const box of state.panelHost.children) if (box.dataset.panel) await paintPanel(box, box.dataset.panel);
+  }
   await refreshPending();
 });
 onRun('applied', (data) => {
@@ -1114,7 +1296,8 @@ $('send').onclick = (ev) => {
 };
 
 document.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Escape' && !$('modal').classList.contains('hidden')) hideModal();
+  const modalOpen = !$('modal').classList.contains('hidden');
+  if (ev.key === 'Escape' && modalOpen) hideModal();
   else if (ev.key === 'Escape' && state.running) cancelRun();
   // Ctrl+K goes to the search: once the history is longer than a scroll, the
   // search is the only way back to a conversation you remember.
@@ -1122,11 +1305,16 @@ document.addEventListener('keydown', (ev) => {
     ev.preventDefault();
     $('session-filter')?.focus();
   }
+  // The sheet is a dialog: Tab stays inside it, so a keyboard user cannot
+  // wander out into the page behind the scrim and lose the sheet.
+  else if (ev.key === 'Tab' && modalOpen) {
+    if (trapFocus(ev)) ev.preventDefault();
+  }
   // Shift+Tab cycles ask → auto → plan from the composer or anywhere the
   // window itself has the focus — the one shortcut that has to work without
   // someone typing first. Form controls (the select, the settings sheet) keep
-  // their own Tab behaviour.
-  else if (ev.key === 'Tab' && ev.shiftKey && ev.target !== $('task')
+  // their own Tab behaviour, and an open sheet keeps its own too.
+  else if (ev.key === 'Tab' && ev.shiftKey && !modalOpen && ev.target !== $('task')
     && !['INPUT', 'TEXTAREA', 'SELECT'].includes(ev.target?.tagName ?? '')) {
     ev.preventDefault();
     cycleMode();
@@ -1149,7 +1337,14 @@ $('new-session').onclick = startNewSession;
 
 // The filter re-renders the list it filters, so there is one source of truth
 // for what is on screen.
-$('session-filter').oninput = () => void refreshSessions();
+// The filter is a text field: a round trip and a whole list rebuilt for every
+// keystroke is a lot of work for a person typing one word. The wait is short
+// enough to feel immediate and long enough to be one call.
+let filterTimer = null;
+$('session-filter').oninput = () => {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(() => void refreshSessions(), 180);
+};
 
 // The foot of the rail: the two doors to the rest of the app, spelled out.
 // A 15px gear in the header is easy to miss, and this is where people look.
@@ -1300,10 +1495,10 @@ function openHelp() {
 
   section('พิมพ์ / เพื่อสั่งงาน', [
     'พิมพ์ / ลงไปในช่องพิมพ์ จะขึ้นรายการคำสั่ง — เลื่อนด้วยลูกศร เลือกด้วย Enter/Tab',
-    'คุยกับโมเดล: /model /models /mode /status /conversations /fresh /compact',
+    'คุยกับโมเดล: /model /models /provider /mode /status /paint /conversations /fresh /compact',
     'บทสนทนา: /new /resume /fork /plan /stop',
-    'ไฟล์: /attach /clip /file /image /open /diff /apply /discard /skills',
-    'อื่น ๆ อีก: /project /settings /help',
+    'ไฟล์: /attach /clip /file /image /open /symbols /diff /apply /discard /skills',
+    'ระบบ: /memory /mcp /project /settings /help',
     'ใส่ argument ได้คราว ๆ เช่น /mode auto หรือ /open README.md',
   ]);
   section('บอกมันทำอะไร', [
@@ -1325,9 +1520,9 @@ function openHelp() {
     'แต่ละโปรเจกต์มีบทสนทนา คู่มือ และไฟล์แยกกัน',
   ]);
   section('ถ้าไม่ได้', [
-    'แถบด้านบน tells you what is missing: bridge / extension / tab',
-    'no tab → กด "เปิดให้" แล้วล็อกอินในหน้า de.aipass.net',
-    'settings (gear) ปรับได้หมด: model, สิทธิ์, ขนาด compaction, ปลั๊กอิน',
+    'แถบด้านบนบอกว่าขาดอะไร: bridge / extension / tab',
+    'ไม่มีแท็บ → กด "เปิดให้" แล้วล็อกอินในหน้า de.aipass.net',
+    'ตั้งค่าได้หมด: โมเดล สิทธิ์ ขนาด compaction ปลั๊กอิน MCP และความจำข้ามเซสชัน',
   ]);
 
   const actions = $('modal-actions');
@@ -1335,7 +1530,7 @@ function openHelp() {
   const close = el('button', 'primary', 'ปิด');
   close.onclick = hideModal;
   actions.append(close);
-  $('modal').classList.remove('hidden');
+  openModal();
 }
 $('help-btn').onclick = openHelp;
 
@@ -1417,32 +1612,47 @@ async function refreshSessions() {
   }
 }
 
+/**
+ * The playbooks on disk.
+ *
+ * They used to be a folded row in the rail: a heading you clicked to find out
+ * what it held, in a column whose job is the work. The list belongs to the
+ * settings sheet now, next to the folders it is searched in — so the window
+ * only has to remember what is there, and the sheet draws it when it opens.
+ */
 async function refreshSkills() {
-  const skills = await rpc('skills.list').catch(() => []);
-  const ul = $('skills');
+  state.skills = await rpc('skills.list').catch(() => []);
+  return state.skills;
+}
+
+/**
+ * The playbooks, drawn as a list you can open.
+ *
+ * A playbook opens in place, under its own row: the sheet is a modal of its
+ * own, and a second modal on top of it would take the settings away while you
+ * read.
+ */
+function renderSkillList(ul, skills = state.skills) {
   ul.textContent = '';
-  // A section with nothing in it is a row that leads nowhere, so it is not
-  // shown at all. The rail should only say what it can show.
-  const group = $('skills-group');
-  if (group) group.hidden = !skills.length;
-  if (!skills.length) return;
+  if (!skills.length) {
+    ul.append(el('li', 'dim', '(ยังไม่มีคู่มือ — วางไฟล์ .md ในโฟลเดอร์คู่มือด้านบน)'));
+    return;
+  }
   for (const s of skills) {
     const li = el('li');
     li.append(el('span', 'name', s.name));
     li.title = s.file ?? '';
+    const view = el('pre', 'dim skill-body', '');
+    view.hidden = true;
+    // Selecting a line of the playbook is not asking to close it.
+    view.onclick = (ev) => ev.stopPropagation();
     clickable(li, async () => {
+      if (!view.hidden) { view.hidden = true; return; }
       const found = await rpc('skills.load', { name: s.name }).catch((err) => ({ error: err.message }));
-      $('modal-title').textContent = `playbook — ${s.name}`;
-      const body = $('modal-body');
-      body.textContent = '';
-      if (found.error) body.append(el('p', null, found.error));
-      else body.append(el('pre', null, found.text));
-      $('modal-actions').textContent = '';
-      const close = el('button', 'primary', 'close');
-      close.onclick = hideModal;
-      $('modal-actions').append(close);
-      $('modal').classList.remove('hidden');
+      view.textContent = found.error ?? found.text ?? '';
+      view.hidden = false;
     });
+    li.append(view);
     ul.append(li);
   }
 }
@@ -1615,14 +1825,20 @@ async function refreshProjects(projects) {
     // events stop painting here (onRun), and the picker is where the window
     // says so instead of the run looking like it evaporated.
     opt.textContent = `${p.name ?? p.path}${p.running && !p.current ? ' • กำลังทำงาน' : ''}`;
-    if (p.current) opt.selected = true;
     select.append(opt);
   }
   if (!projects?.length) return;
-  // The window follows its picker: this is the project its events are filtered
-  // by and the root its runs are sent to.
-  const mine = projects.find((p) => p.current) ?? projects[0];
-  if (mine?.path) state.root = mine.path;
+  // The window keeps the project it is on. A fresh window adopts the one the
+  // backend names; a window that already has one keeps it, because the
+  // backend's "current" is whichever window spoke last — and this window's
+  // file panel, its sessions and its pending changes are the ones its user is
+  // looking at. Two windows on two projects must not trade places.
+  const inList = state.root ? projects.find((p) => sameProject(p.path, state.root)) : null;
+  const mine = inList ?? projects.find((p) => p.current) ?? projects[0];
+  if (mine?.path) {
+    if (!inList) state.root = mine.path;
+    select.value = mine.path;
+  }
   if (previous !== select.value) await refreshSessions();
 }
 
@@ -2021,6 +2237,12 @@ async function openSettings() {
       const group = el('div', 'set-group');
       group.append(row('โฟลเดอร์คู่มือ', 'ทีละ path ต่อบรรทัด · ลองโฟลเดอร์ในโปรเจกต์ก่อน แล้วค่อย ~/.aipass/skills · /skills = ดูที่มี · รายการรีเฟรชเองเมื่อบันทึก', control({ key: 'skillsDirs', type: 'textarea' })));
       page.append(group);
+      // The playbooks those folders hold, right under the folders: the list
+      // used to be a folded row in the rail, and the answer belongs next to
+      // the thing that decides what is in it.
+      const list = el('ul', 'list dim skill-list');
+      page.append(el('h5', 'set-title heading', 'คู่มือที่มี'), list);
+      renderSkillList(list, await refreshSkills());
       continue;
     }
 
@@ -2047,6 +2269,13 @@ async function openSettings() {
       const cards = el('div');
       const markers = el('div', 'plugin-markers');
       page.append(empty, cards, markers);
+
+      // The panels the plugins draw. They used to hang off the rail, where a
+      // heading and an empty box read as a broken feature; here they sit next
+      // to the plugin that draws them.
+      const panels = el('section', 'plugin-panels');
+      page.append(el('h5', 'set-title heading', 'แผงที่ปลั๊กอินวาด'), panels);
+      state.panelHost = panels;
 
       const paint = () => {
         const known = live.known ?? live.loaded.map((pl) => pl.name);
@@ -2118,10 +2347,11 @@ async function openSettings() {
       const refresh = async () => {
         live = await rpc('plugins.list').catch(() => live);
         paint();
-        // The rail's plugin section follows what is installed: a plugin you
-        // just installed has a panel, and the panel should be there now —
-        // not after a reload of the window.
-        await refreshPanels();
+        // The panels follow what is installed: a plugin you just installed has
+        // a panel, and the panel should be there now — not after a reload of
+        // the window.
+        state.pluginPanels = live.panels ?? [];
+        await paintPluginPanels();
       };
 
       check.onclick = async () => {
@@ -2200,6 +2430,8 @@ async function openSettings() {
       reload.onclick = async () => { await rpc('plugins.reload').catch(() => null); await refresh(); };
       page.append(reload);
       paint();
+      state.pluginPanels = live.panels ?? [];
+      await paintPluginPanels();
       continue;
     }
 
@@ -2508,7 +2740,8 @@ async function openSettings() {
 
   const reset = el('button', null, 'คืนค่าเดิม');
   reset.onclick = async () => {
-    await rpc('settings.reset');
+    const done = await rpc('settings.reset').catch((err) => ({ error: err.message }));
+    if (done.error) { error.textContent = friendly(done.error); error.classList.remove('hidden'); return; }
     hideModal();
     openSettings();
     addCommandOut('คืนการตั้งค่าทั้งหมดเป็นค่าเริ่มต้นแล้ว');
@@ -2589,7 +2822,8 @@ async function openSettings() {
     hideModal();
     await refreshHeader();
     // The playbook library is rebuilt by the backend when skillsDirs changes,
-    // and the rail shows what the folders hold — so the rail asks again.
+    // and the settings sheet lists what the folders hold — so the window asks
+    // again, and the list is right the next time the sheet opens.
     await refreshSkills();
     applyModeFromSettings();
     applyThinkingFromSettings();
@@ -2600,20 +2834,24 @@ async function openSettings() {
   const close = el('button', null, 'ปิด');
   close.onclick = () => { hideModal(); applyTheme(state.settings?.theme ?? 'dark'); };
   actions.append(error, reset, close, save);
-  $('modal').classList.remove('hidden');
+  openModal();
 
-  // The meter follows the live session while the sheet is open.
-  const timer = setInterval(async () => {
-    if ($('modal').classList.contains('hidden')) { clearInterval(timer); return; }
+  // The meter follows the live session while the sheet is open. The timer is
+  // module-level so closing the sheet can stop it: it used to be written into
+  // the modal's dataset and never read, so every "คืนค่าเดิม" — which closes
+  // the sheet and opens it again — left another one polling the backend
+  // forever.
+  if (meterTimer) clearInterval(meterTimer);
+  meterTimer = setInterval(async () => {
+    if ($('modal').classList.contains('hidden')) { clearInterval(meterTimer); meterTimer = null; return; }
     const live = await rpc('status').catch(() => null);
     const bar = $('ctx-bar');
-    if (!bar) { clearInterval(timer); return; }
+    if (!bar) { clearInterval(meterTimer); meterTimer = null; return; }
     const pct = live?.context?.percent ?? 0;
     bar.className = `ctx-bar ${pct >= 85 ? 'full' : pct >= 60 ? 'warm' : ''}`;
     bar.style.setProperty('--pct', `${pct}%`);
     bar.title = `${pct}% ของงบบริบท`;
   }, 2000);
-  $('modal').dataset.meterTimer = String(timer);
 }
 
 
@@ -2642,7 +2880,6 @@ $('theme-toggle').onclick = async () => {
 /* ---------------------------------------------------------- plugin panels */
 
 async function refreshPanels() {
-  const holder = $('plugin-panels');
   const details = await rpc('plugins.list').catch(() => null);
   // The transcript renderer hides plugin marker calls from the bubble, so it
   // has to know the current marker table; takesBody decides whether a block's
@@ -2650,23 +2887,30 @@ async function refreshPanels() {
   // still works: plain markers, single-line.
   state.pluginTools = (details?.toolDefs ?? (details?.tools ?? []).map((marker) => ({ marker })))
     .filter((t) => t?.marker);
-  // No plugin, no panel, no row. The section only appears when a plugin has
-  // something to draw — an empty "ปลั๊กอิน" heading read as a broken feature.
-  const group = $('plugins-group');
-  if (!details?.panels?.length) {
-    holder.classList.add('hidden');
-    if (group) { group.hidden = true; group.open = false; }
+  // The panels a plugin draws are a widget, not a rail row: they live in the
+  // settings sheet, next to the plugin that draws them. With no sheet open
+  // there is nothing to paint — the marker table above is still needed.
+  state.pluginPanels = details?.panels ?? [];
+  await paintPluginPanels();
+}
+
+/**
+ * Draw the panels the installed plugins paint.
+ *
+ * The holder is the settings sheet's panel area; it is null while the sheet is
+ * closed, and then there is simply nothing to draw. A plugin with nothing to
+ * say says so — a heading over an empty box reads as a broken feature.
+ */
+async function paintPluginPanels() {
+  const holder = state.panelHost;
+  if (!holder) return;
+  holder.textContent = '';
+  const panels = state.pluginPanels ?? [];
+  if (!panels.length) {
+    holder.append(el('p', 'settings-empty', 'ยังไม่มีแผงที่ปลั๊กอินวาดไว้ — ปลั๊กอินที่วาดแผงจะมาอยู่ตรงนี้'));
     return;
   }
-  holder.classList.remove('hidden');
-  if (group) {
-    // It opens the first time it appears and stays as you left it after that.
-    const wasHidden = group.hidden;
-    group.hidden = false;
-    if (wasHidden) group.open = true;
-  }
-  holder.textContent = '';
-  for (const panel of details.panels) {
+  for (const panel of panels) {
     const box = el('div', 'plugin-panel');
     box.id = `panel-${panel.id}`;
     box.dataset.panel = panel.id;
@@ -2712,7 +2956,7 @@ async function refreshHeader() {
   } else {
     $('status').append(dot(st.bridge, 'bridge'), dot(st.extensions > 0, `extension ×${st.extensions}`));
   }
-  refreshMeter();
+  refreshMeter(st);
   if (st.model) {
     // Live while a run spends credits; idle windows ride the bridge's cache
     // instead of poking the de.aipass.net tab every ten seconds.
@@ -2885,7 +3129,7 @@ const COMMANDS = [
   { cmd: 'compact', desc: 'บีบบริบททันที (สรุปงานเก่าแล้วเริ่ม conversation ใหม่)', run: compactNow },
   { cmd: 'memory', desc: 'ดู facts ที่จำข้าม session — /memory clear ลืมทั้งหมด', args: true, run: (arg) => showMemory(arg) },
   { cmd: 'mcp', desc: 'ดู servers/tools จาก MCP (จัดการที่ /settings → MCP)', run: showMcp },
-  { cmd: 'symbols', desc: 'ดู declarations ของไฟล์ — /symbols <file>', args: true, run: (arg) => showSymbols(arg) },
+  { cmd: 'symbols', desc: 'ดู declarations ของไฟล์ หรือที่ที่ชื่อถูกนิยาม — /symbols <file|name>', args: true, run: (arg) => showSymbols(arg) },
   { cmd: 'new', desc: 'เริ่มบทสนทนาใหม่ในหน้าต่าง', run: startNewSession },
   { cmd: 'resume', desc: 'เปิดบทสนทนาเดิม', run: resumeSession },
   { cmd: 'fork', desc: 'แยกบทสนทนาจุดนี้ไปแก้ต่อแยก', run: forkSession },
@@ -2927,6 +3171,10 @@ function renderSlash(value, keepSelection = false) {
   list.textContent = '';
   slash.items.forEach((item, i) => {
     const li = el('li');
+    // The palette is a listbox: each row is an option, and the selected one
+    // is named. A screen reader reads "1 of 29" instead of nothing at all.
+    li.setAttribute('role', 'option');
+    li.id = `slash-opt-${item.cmd}`;
     li.setAttribute('aria-selected', i === slash.index ? 'true' : 'false');
     li.append(el('span', 'cmd', '/' + item.cmd), el('span', 'desc', item.desc));
     li.onmousedown = (ev) => { ev.preventDefault(); pickSlash(i); };
@@ -2936,11 +3184,20 @@ function renderSlash(value, keepSelection = false) {
   // disappears looks like the "/" did nothing at all.
   if (!slash.items.length) {
     const li = el('li', 'empty');
+    li.setAttribute('role', 'option');
     li.setAttribute('aria-selected', 'false');
     li.append(el('span', 'desc', `ไม่พบคำสั่งที่ขึ้นต้นด้วย "/${typed}" — ลอง /help`));
     list.append(li);
   }
   $('slash').classList.remove('hidden');
+  // The composer says whether the palette is open and which row is on it, so
+  // the selection is not only a colour.
+  const task = $('task');
+  task.setAttribute('aria-expanded', 'true');
+  task.setAttribute('aria-controls', 'slash-list');
+  const chosen = slash.items[slash.index];
+  if (chosen) task.setAttribute('aria-activedescendant', `slash-opt-${chosen.cmd}`);
+  else task.removeAttribute('aria-activedescendant');
 }
 
 function openSlash(value) {
@@ -2951,6 +3208,11 @@ function openSlash(value) {
 function closeSlash() {
   slash.open = false;
   $('slash').classList.add('hidden');
+  // And the composer says so: a palette that is closed but still claims to
+  // be open is a lie a screen reader repeats.
+  const task = $('task');
+  task.setAttribute('aria-expanded', 'false');
+  task.removeAttribute('aria-activedescendant');
 }
 
 function moveSlash(delta) {
@@ -2985,7 +3247,8 @@ function runCommand(item, arg) {
 /* ------------------------------------------------------- command handlers */
 
 async function setModel(id) {
-  await rpc('config.set', { model: id });
+  const done = await rpc('config.set', { model: id }).catch((err) => ({ error: err.message }));
+  if (done.error) { addNote(`เปลี่ยนโมเดลไม่ได้: ${friendly(done.error)}`); return; }
   state.settings = await rpc('settings.get').catch(() => null);
   await refreshHeader();
   addCommandOut(`โมเดล: ${id}`);
@@ -2999,7 +3262,8 @@ async function setModel(id) {
  * afterwards: the models of one provider mean nothing to another.
  */
 async function setProvider(id) {
-  await rpc('provider.set', { id });
+  const done = await rpc('provider.set', { id }).catch((err) => ({ error: err.message }));
+  if (done.error) { addNote(`สลับผู้ให้บริการไม่ได้: ${friendly(done.error)}`); return; }
   state.provider = id;
   await fillProviders(id);
   const st = await rpc('status').catch(() => null);
@@ -3029,7 +3293,7 @@ function pickProvider() {
     const close = el('button', 'primary', 'ปิด');
     close.onclick = hideModal;
     $('modal-actions').append(close);
-    $('modal').classList.remove('hidden');
+    openModal();
   }).catch((err) => addNote(err.message));
 }
 
@@ -3053,7 +3317,7 @@ function pickModel() {
     const close = el('button', 'primary', 'ปิด');
     close.onclick = hideModal;
     $('modal-actions').append(close);
-    $('modal').classList.remove('hidden');
+    openModal();
   }).catch((err) => addNote(err.message));
 }
 
@@ -3089,7 +3353,7 @@ function pickMode() {
   const close = el('button', 'primary', 'ปิด');
   close.onclick = hideModal;
   $('modal-actions').append(close);
-  $('modal').classList.remove('hidden');
+  openModal();
 }
 
 /** Rotate the context now: the model summarises what it has done, that summary
@@ -3116,8 +3380,11 @@ async function compactNow() {
  * model name; it earns its place by being the one number that explains a run
  * suddenly forgetting the beginning of the conversation.
  */
-function refreshMeter() {
-  rpc('status').then((st) => {
+function refreshMeter(status = null) {
+  // The status the caller already has is used rather than asked for again:
+  // the header refreshes every ten seconds, and it was asking twice.
+  const ask = status ? Promise.resolve(status) : rpc('status');
+  ask.then((st) => {
     const use = st?.context;
     const slot = $('context');
     if (!slot) return;
@@ -3194,10 +3461,42 @@ async function showMcp() {
   for (const t of res.tools ?? []) addCommandOut(`      ${t.marker}  ${t.description}`);
 }
 
+/**
+ * The code-navigation index, from the window instead of from a run.
+ *
+ * `/symbols <file>` lists what a file declares; `/symbols <name>` says where
+ * a name is defined and where it is used. It is the same index the SYMBOLS,
+ * DEF and REFS markers use — the markers are for the model, this is for the
+ * person reading the window.
+ */
 async function showSymbols(arg) {
-  const file = (arg || '').trim();
-  if (!file) { addCommandOut('usage: /symbols <file>  (หรือใช้ marker SYMBOLS <file> ใน agent run)'); return; }
-  addCommandOut(`SYMBOLS ใช้ใน agent run: SYMBOLS ${file}  (หรือ DEF <name> / REFS <name>)`);
+  const what = (arg || '').trim();
+  if (!what) {
+    addCommandOut('usage: /symbols <file>  — declarations ของไฟล์ · /symbols <name> — ที่ที่มันถูกนิยามและใช้');
+    return;
+  }
+  const asFile = await rpc('symbols.list', { file: what }).catch((err) => ({ error: err.message }));
+  if (asFile.error) { addCommandOut(`symbols: ${friendly(asFile.error)}`); return; }
+  if (asFile.symbols?.length) {
+    addCommandOut(`${asFile.file} — ${asFile.symbols.length} ตัว:`);
+    for (const s of asFile.symbols.slice(0, 80)) addCommandOut(`  ${s.line}: ${s.kind} ${s.name}`);
+    return;
+  }
+  // Not a file, or a file with no declarations in it: try it as a name.
+  const def = await rpc('symbols.def', { name: what }).catch((err) => ({ error: err.message }));
+  if (def.error) { addCommandOut(`symbols: ${friendly(def.error)}`); return; }
+  if (!def.definitions?.length) {
+    addCommandOut(`ไม่พบ "${what}" — ไม่ใช่ไฟล์ที่มี declarations และไม่ใช่ชื่อที่ถูกนิยามในโปรเจกต์นี้`);
+    return;
+  }
+  addCommandOut(`${what} — ถูกนิยามไว้ที่:`);
+  for (const d of def.definitions) addCommandOut(`  ${d.file}:${d.line}  ${d.kind} ${d.name}`);
+  const refs = await rpc('symbols.refs', { name: what }).catch(() => null);
+  const used = refs?.references ?? [];
+  if (used.length) {
+    addCommandOut(`ใช้ที่ ${used.length} ที่:`);
+    for (const r of used.slice(0, 40)) addCommandOut(`  ${r.file}:${r.line}  ${r.snippet}`);
+  }
 }
 
 async function listModels() {
@@ -3234,7 +3533,7 @@ function pickConversation() {
     const close = el('button', 'primary', 'ปิด');
     close.onclick = hideModal;
     $('modal-actions').append(close);
-    $('modal').classList.remove('hidden');
+    openModal();
   });
 }
 
@@ -3283,7 +3582,8 @@ async function startNewSession() {
   viewSeq += 1;
   log.textContent = '';
   clearTodo();
-  await rpc('session.new');
+  const made = await rpc('session.new').catch((err) => ({ error: err.message }));
+  if (made.error) { addNote(`เริ่มบทสนทนาใหม่ไม่ได้: ${friendly(made.error)}`); return; }
   await refreshSessions();
   await refreshReadiness();
 }
@@ -3324,13 +3624,15 @@ function resumeSession() {
     const close = el('button', 'primary', 'ปิด');
     close.onclick = hideModal;
     $('modal-actions').append(close);
-    $('modal').classList.remove('hidden');
+    openModal();
   });
 }
 
 async function openSession(id) {
   const seq = ++viewSeq;
-  const entries = await rpc('session.open', { id });
+  const opened = await rpc('session.open', { id }).catch((err) => ({ error: err.message }));
+  if (opened.error) { addNote(`เปิดบทสนทนาไม่ได้: ${friendly(opened.error)}`); return; }
+  const entries = opened;
   // While this load was in flight the human may have picked another session
   // (or started a new one): the newest choice owns the screen. Without this,
   // two quick clicks interleaved their entries into one transcript.
@@ -3344,7 +3646,7 @@ async function openSession(id) {
     // The session's checklist is replayed like any other entry, so an old
     // conversation reopens with the plan card it was left with.
     else if (entry.type === 'todo' && Array.isArray(entry.items)) renderTodo(entry.items);
-    else if (entry.type === 'tool') { addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '' }); state.assistant = null; }
+    else if (entry.type === 'tool') { addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '', sources: entry.sources }); state.assistant = null; }
     else if (entry.type === 'note') addNote(entry.text);
   }
   endTurn();
@@ -3364,7 +3666,8 @@ async function togglePlan() {
   // Plan mode in the window is one thing — draft, then wait for the yes — the
   // same pair the Shift+Tab 'plan' view writes. The two flags move together so
   // the toggle and the view cannot mean two different states.
-  await rpc('settings.set', { plan: next, requirePlanApproval: next });
+  const saved = await rpc('settings.set', { plan: next, requirePlanApproval: next }).catch((err) => ({ error: err.message }));
+  if (saved.error) { addNote(`เปลี่ยน plan mode ไม่ได้: ${friendly(saved.error)}`); return; }
   state.settings = { ...(state.settings ?? {}), plan: next, requirePlanApproval: next };
   applyModeFromSettings();
   addCommandOut(`plan mode: ${next ? 'เปิด — ร่างแผนแล้วรออนุมัติก่อนทำ' : 'ปิด'}`);
@@ -3381,7 +3684,7 @@ async function openFile(file) {
   const close = el('button', 'primary', 'ปิด');
   close.onclick = hideModal;
   $('modal-actions').append(close);
-  $('modal').classList.remove('hidden');
+  openModal();
 }
 
 async function pickFile() {
@@ -3402,7 +3705,7 @@ async function pickFile() {
   const close = el('button', 'primary', 'ปิด');
   close.onclick = hideModal;
   $('modal-actions').append(close);
-  $('modal').classList.remove('hidden');
+  openModal();
 }
 
 function showSkills() {
@@ -3431,7 +3734,7 @@ function showSkills() {
     const close = el('button', 'primary', 'ปิด');
     close.onclick = hideModal;
     $('modal-actions').append(close);
-    $('modal').classList.remove('hidden');
+    openModal();
   });
 }
 
@@ -3444,12 +3747,14 @@ async function showPendingDiff() {
 async function applyChecked() {
   const files = [...state.pending.entries()].filter(([, info]) => info.checked).map(([file]) => file);
   if (!files.length) { addNote('ยังไม่มีไฟล์ที่ติ๊ก'); return; }
-  await rpc('apply', { files });
+  const written = await rpc('apply', { files }).catch((err) => ({ error: err.message }));
+  if (written.error) { addNote(`เขียนไฟล์ไม่ได้: ${friendly(written.error)}`); return; }
   await refreshPending();
 }
 
 async function discardAll() {
-  await rpc('discard');
+  const dropped = await rpc('discard').catch((err) => ({ error: err.message }));
+  if (dropped.error) { addNote(`ทิ้งไฟล์ไม่ได้: ${friendly(dropped.error)}`); return; }
   await refreshPending();
 }
 
@@ -3478,7 +3783,7 @@ function pickProject() {
     const close = el('button', 'primary', 'ปิด');
     close.onclick = hideModal;
     $('modal-actions').append(close);
-    $('modal').classList.remove('hidden');
+    openModal();
   });
 }
 
@@ -3489,10 +3794,33 @@ function pickProject() {
  * all — a setting that changes nothing is worse than no setting, because it
  * looks like a feature and behaves like a lie.
  */
+
+/** What the system asks for right now. `auto` means exactly this. */
+const systemTheme = () => (window.matchMedia?.('(prefers-color-scheme: light)')?.matches ? 'light' : 'dark');
+
+/**
+ * Follow the system while it is the one in charge.
+ *
+ * A machine that goes to bed at sunset changes its mind while the window is
+ * open. "auto" has to follow it, or the theme is stale until the window is
+ * reloaded — which is the one thing "auto" is supposed to save you from.
+ */
+let systemThemeQuery = null;
+const watchSystemTheme = () => {
+  const mq = window.matchMedia?.('(prefers-color-scheme: light)');
+  if (!mq) return;
+  if (systemThemeQuery === mq) return;
+  systemThemeQuery?.removeEventListener?.('change', onSystemTheme);
+  systemThemeQuery = mq;
+  mq.addEventListener?.('change', onSystemTheme);
+};
+const onSystemTheme = () => {
+  if ((state.settings?.theme ?? 'dark') === 'auto') applyTheme('auto');
+};
+
 function applyTheme(theme) {
-  const picked = theme === 'auto'
-    ? (window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
-    : (theme === 'light' ? 'light' : 'dark');
+  const picked = theme === 'auto' ? systemTheme() : (theme === 'light' ? 'light' : 'dark');
+  if (theme === 'auto') watchSystemTheme();
   document.documentElement.dataset.theme = picked;
   const btn = $('theme-toggle');
   if (btn) {
@@ -3502,6 +3830,11 @@ function applyTheme(theme) {
 }
 
 (async function boot() {
+  // The wire spellings first: the model writes a URL as HTTPS-URL…, and the
+  // reader must see the address itself. The table comes from the backend
+  // that owns it, so the window never keeps a copy of the rules.
+  const table = await rpc('waf.table').catch(() => null);
+  if (Array.isArray(table?.pairs)) setRestoreTable(table.pairs);
   // The provider switch comes first: the model list belongs to a provider,
   // so the picker has to know which one is in use before the models are read.
   await fillProviders();
@@ -3524,7 +3857,7 @@ function applyTheme(theme) {
 
 // A playbook dropped into a library folder while the window was in the
 // background is there the next time the window is looked at: the backend reads
-// the folders on every call, so the rail only has to ask again. One small
+// the folders on every call, so the window only has to ask again. One small
 // request, and only when the window comes back — not a poll.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') void refreshSkills().catch(() => {});

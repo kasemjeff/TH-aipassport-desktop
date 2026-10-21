@@ -1,0 +1,92 @@
+name: build
+
+# The install system's build lane: the artifact, its checksum and its
+# manifest, on every platform the app ships on.
+#
+# A macOS artifact can only be built on a Mac — the bundler needs `hdiutil`,
+# `codesign` and the macOS SDK — which is the whole reason this lane exists
+# next to the test lane. Nothing here is signed: signing needs the
+# certificate, and the release machine does that part.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    # A cold Rust build of the whole tree is minutes, not seconds; the
+    # ceiling is an hour so a stuck job cannot hold a runner.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows x64
+            artifact: aipass-desktop-windows
+          - os: macos-latest
+            label: macos
+            artifact: aipass-desktop-macos
+          - os: ubuntu-latest
+            label: linux x64
+            artifact: aipass-desktop-linux
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # The bridge and the harness have no runtime dependencies; the dev
+      # dependencies are only what `npm run typecheck` needs.
+      - name: Install dev dependencies
+        run: npm ci
+
+      # Tauri on Linux needs the webkit2gtk development packages; without
+      # them the shell does not compile.
+      - name: Install the Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.artifact }}-cargo-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+
+      # The one build command: it checks the three versions agree, puts the
+      # Node sidecar in place for this machine's triple, asks for this
+      # platform's bundles and writes dist/ with SHA256SUMS and the
+      # manifest.
+      - name: Build the artifact
+        run: npm run desktop:build
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error

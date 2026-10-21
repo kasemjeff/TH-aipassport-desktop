@@ -1,10 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The aipass window: it talks to one local backend process and nothing else.",
+  "description": "The aipass window: it talks to one local backend process and nothing else. The page uses no Tauri API at all — the Rust side owns the window, the tray and the sidecar — so this grants nothing beyond the window commands a shell may want to drive.",
   "windows": ["main"],
   "permissions": [
-    "core:default",
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "core:window:allow-set-size",
