@@ -18,8 +18,8 @@ Four programs, none of which share a runtime:
 | program | runtime | owns |
 |---|---|---|
 | the window | WebView2, in a Tauri 2 shell | pixels only |
-| the backend | Node ≥ 22 sidecar (`desktop/main.mjs`) | `/rpc` + `/events`, sessions, the harness |
-| the bridge | Node ≥ 22 (`aipass-bridge/bridge/server.mjs`) | an OpenAI-compatible API on 8787 |
+| the backend | Node ≥ 20 sidecar (`desktop/main.mjs`) | `/rpc` + `/events`, sessions, the harness |
+| the bridge | Node ≥ 20 (`aipass-bridge/bridge/server.mjs`) | an OpenAI-compatible API on 8787 |
 | the relay | Chrome MV3 extension | the actual request, inside your logged-in tab |
 
 ## The four constraints that chose everything
@@ -54,7 +54,7 @@ Four programs, none of which share a runtime:
 |---|---|---|---|
 | window shell | **Tauri 2** (Rust ≥ 1.77) | ~3 MB binary, uses the OS webview, tray + sidecar support built in; the Rust is ~a page of code | Electron (ships a whole Chromium for a page of HTML; ~10× the installer for zero benefit — the heavy part of this app is Node, which we ship anyway) |
 | webview | **WebView2** (offline installer) | guaranteed present on Windows 10/11 via the installer; Evergreen updates come from the OS | CEF (another Chromium to ship), Firefox/Gecko (no Windows guarantee) |
-| backend | **Node ≥ 22, zero npm deps** | the CLI is the same code; `node:http`, SSE, `node:crypto` and `fetch` cover every need; nothing to audit, nothing to break | Express/Fastify (a dependency for a router we don't need — the surface is two endpoints), Bun/Deno (the bridge predates them and the sidecar fetch story is Node's) |
+| backend | **Node ≥ 20, zero npm deps** | the CLI is the same code; `node:http`, SSE, `node:crypto` and `fetch` cover every need; nothing to audit, nothing to break | Express/Fastify (a dependency for a router we don't need — the surface is two endpoints), Bun/Deno (the bridge predates them and the sidecar fetch story is Node's) |
 | wire protocol | **POST `/rpc` + GET `/events` (SSE)** | one request/response channel for commands, one push channel for streams; SSE needs no client library and survives WebView2 | WebSockets (a second protocol to implement on both sides for no capability we use — the window never talks to the bridge directly), Tauri IPC commands (would weld the harness to the shell and break `npm run desktop` in a plain browser) |
 | UI | **vanilla HTML/CSS/JS, no build step** | the served files are the source files; a fix is a reload; `app.js` is the entry and the parts beside it (`ui/rpc.js`, `ui/state.js`, `ui/transcript.js`, `ui/settings.js`, `ui/commands.js`, `ui/panels/`) stay hand-editable — and the JSDoc + `tsc --checkJs` pass is the documented next move before any framework is considered | React/Vue/Svelte (a node_modules tree, a bundler, and a source/served split — all three violate constraint 4 for a single-window app) |
 | agent core | **shared harness modules** (`loop`, `tools`, `permissions`, `session`, `compact`, `skills`, `protocol`, `waf`) | constraint 2; the CLI's own tests (58 of them, `aipass-bridge/test/agent.test.mjs`) passing unchanged is the proof of the split | reimplementing in the backend (drift), porting to Rust (rewrites the working agent for no user-visible gain) |

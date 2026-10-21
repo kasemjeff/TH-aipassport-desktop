@@ -123,6 +123,28 @@ Then restart the bridge and reload the extension.
   `session.rename` rewrote its first line. A handle may only name a file
   inside the store, checked with `path.relative` — a string prefix would also
   match a sibling whose name merely begins with the store's.
+- **A path is a handle too, and it is held to the same rule** (hardened Oct
+  2026, `harness/session.mjs` `resolveFile` + `foreignFor`). The window
+  lists sessions with their absolute path, so a path is a legitimate handle —
+  and the guard that refused another project's session only recognised the
+  *id* spelling. A path to another project's session was accepted: it opened,
+  it was renamed, it was deleted. A path names a session at least as precisely
+  as an id does, so it is asked the same question, and the refusal names the
+  project it belongs to.
+- **The directory is a bucket, not a boundary** (hardened Oct 2026,
+  `harness/session.mjs` `list`/`resolveFile`/`reassign`). A session lives in
+  a directory named after its project's path, and that name is a lossy slug:
+  `C:\a b` and `C:\a-b` are the same slug, and a long path is cut at 60
+  characters. Two projects could therefore share one directory, and each
+  picker showed the other's conversations. The header's own `root` is the
+  authority on which project a session belongs to now: the picker, the
+  handle and the relocation all ask the file, not the folder it sits in.
+- **A session id is a file name, so it is a real one** (hardened Oct 2026,
+  `harness/session.mjs`). It was eight hex digits of `Math.random()` — 32
+  bits — and a collision was not a key that got refused: `writeFileAtomic`
+  replaced the session that was there, and the whole conversation was gone
+  without a word. 48 bits from the crypto module, and a collision can no
+  longer destroy anything.
 - **The suite never touches your bridge port** (hardened Oct 2026,
   `aipass-bridge/test/harness.mjs`). The suite turns the no-token escape hatch
   on for its own bridges, and a CLI the suite runs auto-starts a bridge —

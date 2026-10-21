@@ -26,7 +26,7 @@ Before `git tag vX.Y.Z`, all of these are true:
 
 1. **`npm run check`** green on the release commit — the full suite plus the
    QA loop, including the live backend checks.
-2. **CI matrix** green on both operating systems × Node 22/24
+2. **CI matrix** green on both operating systems × Node 20/22/24
    (`.github/workflows/test.yml`), plus the parse/shellcheck jobs.
 3. **`npm run doctor`** against a real signed-in tab, on at least one machine
    (the one the release notes were written on).

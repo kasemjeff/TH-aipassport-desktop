@@ -37,7 +37,7 @@ npm test
 runtime dependencies and should stay that way. The tests spawn the real bridge
 and a scriptable stand-in for the extension rather than mocking either.
 
-**Windows counts.** CI runs ubuntu and windows on node 22 and 24. Every path bug
+**Windows counts.** CI runs ubuntu and windows on node 20, 22 and 24. Every path bug
 this project has hit was Windows-only, which is why it is in the matrix.
 
 ## What to put in the description

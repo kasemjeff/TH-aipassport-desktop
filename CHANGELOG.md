@@ -38,6 +38,19 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Added
 
+- **The archive has a way back.** "เก็บ" (archive) moves an idle session out
+  of the picker's way into `<project>/archive/` — nothing was deleted, but
+  nothing could bring one back either, so the archive was a one-way door. The
+  **session rail** now says how many are in there, lists them, and puts any
+  of them back where it was; the **CLI** does the same from
+  `aipass sessions restore <id>`. Beside it, `aipass sessions prune` (and a
+  button in the rail) deletes what has sat in the archive for months — the
+  one thing in the store that deletes, deliberately narrow: only the archive,
+  only what is past the threshold, only as many as the limit says.
+- **`aipass sessions`** — the conversations this project keeps on disk, from
+  the terminal: `list`, `archived`, `archive`, `restore`, `prune`, `path`. No
+  bridge needed; the store is local.
+
 - **The window says it is working.** A run takes minutes — a model that reads
   twenty files does not answer in a second — and the window used to say so
   once: a pulsing dot under the composer, and then nothing for the rest of
@@ -426,6 +439,66 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **A session of another project is not reachable by its path.** The window
+  lists sessions with their path, and a path names a session at least as
+  precisely as an id does — but the guard that refused another project's
+  session only recognised the *id* spelling, so a path went straight past it.
+  `session.open`, `session.rename` and `session.delete` accepted a path to
+  another project's session: it opened, it was renamed, and it was deleted.
+  The path is held to the same rule as the id now, and the refusal names the
+  project it belongs to (`aipass-bridge/harness/session.mjs`,
+  `aipass-bridge/harness/rpc/session.mjs`).
+- **Two projects whose paths slugify the same no longer share a picker.** The
+  directory a session lives in is named after the path, and the name is
+  lossy: `C:\a b` and `C:\a-b` are the same slug, and a long path is cut at
+  60 characters. The two projects therefore shared one directory, and the
+  picker showed each of them the other's conversations. The header's own
+  `root` is the authority on which project a session belongs to now — so the
+  picker, the handle and the relocation all ask the file rather than the
+  folder it sits in.
+- **A relocation no longer carries another project's sessions with it.** The
+  same slug collision, one step further: moving a project re-keyed every
+  session in its directory, including a neighbour's, and the neighbour's
+  history was re-stamped to the wrong project.
+- **Two writers on one session no longer lose each other's changes.** The
+  desktop backend and the CLI share one store, and a window can be open on a
+  project while a command line runs in it. The header rewrite was a
+  read-modify-write with no lock, so the second writer put back a copy of
+  the header that was older than the file's: a rename was undone, and the
+  conversation binding — the thing that keeps one session's messages out of
+  another session's history — was rolled back. The rewrite takes a lock and
+  merges against the header on disk now, so a rename in one writer survives
+  an append in the other.
+- **A session id is no longer a birthday collision waiting to happen.** It
+  was eight hex digits of `Math.random()` — 32 bits, and a session id is a
+  FILE NAME, so a collision was not a key that got refused: the new session
+  replaced the old one and the whole conversation was gone without a word.
+  48 bits from the crypto module, and a collision can no longer destroy
+  anything.
+- **A long session no longer takes the window down with it.** A session file
+  was read whole and split into an array of lines — twice the file, in a
+  desktop app that also holds a browser. It is walked in chunks now, and
+  past 64 MB (`AIPASS_MAX_SESSION_BYTES`) the session is refused with a
+  reason rather than loaded.
+- **A command is screened in the transcript the way its output is.** The
+  output of a command was scrubbed of credentials before it entered the
+  session; the command line itself was not, so a credential written into a
+  command (`curl -H "Authorization: Bearer …"`) sat in the transcript on disk
+  in the clear, and was sent back to the model on the next resume. The
+  permission prompt still shows the real command — a person consents to what
+  they can read.
+- **A finished conversation is on the disk.** The entries of a session were
+  appended but never flushed: the header rewrite did not fsync the file, and
+  nothing flushed it at the end of a run either. A power cut could take the
+  end of a conversation — and the header that said how many entries it had —
+  with it. The rewrite now puts the entries and the header on the disk
+  together, and a run that has ended flushes its session once more.
+- **The picker does not read 64 KB to get 2 KB.** Every session's header was
+  read with a 64 KB buffer, and the store has hundreds of sessions. The read
+  is sized to the header now, and the headers the store has read are memoized
+  on the file's mtime+size — the same pair the overlay memoizes its texts on.
+  The picker over 500 sessions went from a quarter of a second to a fortieth
+  of one, and a renamed session is still shown under its new name.
 - **A window file that is gone is a 404, and the backend lives through it.**
   The window's files are served from disk while the backend runs, and the
   content update replaces that tree under it — so the file can vanish between
@@ -516,6 +589,18 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 - **An attached image is an icon, not a broken picture.** The backend holds
   the bytes and does not hand them back, so the thumbnail was an empty data
   URL (`desktop/ui/app.js`).
+- **A method nobody has is a 404.** The lookup found the inherited
+  `Object.prototype` members too, so a call for `toString` answered 200 with
+  "[object Undefined]" instead of the 404 that says "there is no such method
+  here" (`aipass-bridge/harness/rpc.mjs`).
+- **A provider spec keeps the fields the provider client reads.** The spec is
+  sanitized on the way in, and the sanitizer dropped `apiKeyHeader`,
+  `apiKeyPrefix`, `maxTokens` and `anthropicVersion` — so a provider that
+  wanted its key under another header, without the `Bearer ` prefix, or with
+  its own token ceiling, was saved without them and the client fell back to
+  its defaults. They survive now, and a header name that is not a token (a
+  newline in it is a header injection) is refused
+  (`aipass-bridge/harness/providers.mjs`).
 - **The window names its controls, and the transcript stops reading itself
   twice.** The icon buttons in the header and the rail carried only a `title` —
   a tooltip, which a screen reader does not read when the control takes focus —

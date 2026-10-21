@@ -5,7 +5,7 @@
 > community bridge that reaches the site through your own logged-in browser tab.
 
 <p align="left">
-  <img src="https://img.shields.io/badge/node-%E2%89%A522-blue?logo=node.js&style=flat-square" alt="Node >= 22" />
+  <img src="https://img.shields.io/badge/node-%E2%89%A520-blue?logo=node.js&style=flat-square" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/dependencies-zero-success?style=flat-square" alt="Zero Dependencies" />
   <img src="https://img.shields.io/badge/tests-npm%20test-blue?style=flat-square" alt="Tests: run npm test" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgray?style=flat-square" alt="Platforms" />
@@ -150,7 +150,7 @@ and the CLI*, below.
 
 | you need | why |
 |---|---|
-| **Node ≥ 22** | the only requirement to run it — the app imports `node:*` builtins and nothing else |
+| **Node ≥ 20** | the only requirement to run it — the app imports `node:*` builtins and nothing else |
 | **Chrome** (or Chromium) | the extension is the only thing that ever touches your session |
 | **A de.aipass.net account** | the site the window talks to; your logged-in browser tab *is* the credential |
 | **Nothing else** | no `npm install` to run it, no build step, no database, no API key |

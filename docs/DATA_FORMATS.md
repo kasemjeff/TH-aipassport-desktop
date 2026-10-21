@@ -154,6 +154,22 @@ it needs. Past `MAX_SESSION_BYTES` (64 MB, `AIPASS_MAX_SESSION_BYTES` to
 change it) the session is refused with a reason rather than taking the window
 down with it.
 
+**What is on the disk, and when.** The header rewrite fsyncs the file: the
+entries it counts and the header that counts them land on the disk together,
+so what survives a power cut is what the header says. A run that has ENDED
+flushes the session once more (`Session#flush`), so the tail of a finished
+conversation is durable rather than sitting in the OS's hands. Between two
+rewrites the header can lag by up to `HEADER_EVERY` entries — it never
+overstates, and it never goes backwards when a second writer is on the same
+file.
+
+**The picker reads headers, not transcripts.** `list()` needs each session's
+header and nothing else, so it reads the first line of each file — sized to
+the header (2 KB), not to the file (64 KB was the cost of a store with
+hundreds of sessions) — and memoizes what it read on the file's mtime+size,
+the same pair the overlay memoizes its texts on. A file that has not changed
+answers from the memo; a file that has is read again.
+
 **The archive.** A session can be moved out of the picker's way into
 `<project>/archive/` (`archiveIdle()`), and it can be taken back out of it
 (`restore()`) — the archive is a place, not a one-way door. `pruneArchived()`

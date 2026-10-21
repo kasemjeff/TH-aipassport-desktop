@@ -390,6 +390,22 @@ export function createRpc({
   };
 
   /**
+   * The model a provider's client starts on.
+   *
+   * An explicit model — the one the caller handed this backend — is an AiPASS
+   * model id: it belongs to the bridge's catalog, and another provider would
+   * refuse it. So the explicit model is the AiPASS provider's, and every other
+   * provider keeps its own. Without this, a backend started with a model (the
+   * CLI's `--model`) sent that id to an OpenAI-compatible endpoint, and the
+   * run failed with a model the provider had never heard of.
+   */
+  const modelForProvider = (providerId, explicit = model) => {
+    const spec = providers.get(providerId);
+    if (spec && spec.kind !== 'aipass') return modelFor(providerId);
+    return explicit ?? modelFor(providerId);
+  };
+
+  /**
    * The client a provider is reached through.
    *
    * AiPASS is the local bridge and its tab; every other provider is an HTTP
@@ -436,7 +452,7 @@ export function createRpc({
     // a provider client keeps the conversation history, and a settings save
     // must not drop it.
     if (!force && h.providerId === providerId && h.bridge) return;
-    const client = clientForProvider(providerId, { model: model ?? modelFor(providerId), events: h.events });
+    const client = clientForProvider(providerId, { model: modelForProvider(providerId), events: h.events });
     if (client) h.setProvider(client);
   };
 
@@ -449,7 +465,7 @@ export function createRpc({
       root: abs,
       bridgeURL,
       model: bridgeModel,
-      client: clientForProvider(activeProviderId(), { model: bridgeModel }),
+      client: clientForProvider(activeProviderId(), { model: modelForProvider(activeProviderId()) }),
       store: new SessionStore(storeDir),
       // The budget the sheet owns, plus the share of it the rotation knob
       // names. An explicit `compaction` (a test, a CLI flag) wins whole: it is
@@ -591,7 +607,7 @@ export function createRpc({
     // harness that is about to be moved to another provider must not keep the
     // old one's model, and each provider remembers its own.
     applyProviderTo(h);
-    h.bridge.model = model ?? modelFor(h.providerId) ?? null;
+    h.bridge.model = modelForProvider(h.providerId) ?? null;
     h.skills = skillLibraryFor(h.root);
     h.setRules(appSettings.get('rules') ?? []);
   };

@@ -206,6 +206,9 @@ async function bootApp(backend, { token = null, unauthorizedOnce = false } = {})
   const media = { light: false, listeners: new Set() };
   globalThis.window = {
     prompt: () => null,
+    // The destructive paths ask first: "ลบได้ไหม" — a test that clicks one
+    // of them needs the browser's answer, and the answer a test wants is yes.
+    confirm: () => true,
     matchMedia: (query) => ({
       get matches() { return query.includes('light') ? media.light : !media.light; },
       addEventListener: (_type, fn) => media.listeners.add(fn),
