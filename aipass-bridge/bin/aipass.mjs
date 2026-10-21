@@ -18,8 +18,9 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { readFileSync, existsSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync, rmSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { bridgePidFile, forgetBridgePid, stopRecordedBridge } from '../harness/bridge-pid.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const sibling = (name) => join(HERE, '..', name);          // aipass-bridge/<name>
@@ -27,7 +28,10 @@ const HOST = process.env.AIPASS_HOST || '127.0.0.1';
 const PORT = process.env.AIPASS_PORT || '8787';
 const BRIDGE = `http://${HOST}:${PORT}`;
 const STATE = process.env.AIPASS_HOME?.trim() || join(homedir(), '.aipass');
-const PIDFILE = join(STATE, 'bridge.pid');
+// The pid file belongs to the bridge: the bridge writes it when it binds, so
+// it always names the process that is really answering. `aipass stop` reads
+// exactly this file, and the test suite points it somewhere it can reach.
+const PIDFILE = bridgePidFile();
 
 const tty = Boolean(process.stdout.isTTY);
 const dim = (s) => (tty ? `\x1b[2m${s}\x1b[0m` : String(s));
@@ -71,7 +75,11 @@ async function ensureBridge() {
   mkdirSync(STATE, { recursive: true });
   const child = spawn(process.execPath, [sibling('bridge/server.mjs')], { detached: true, stdio: 'ignore', env: process.env });
   child.unref();
-  writeFileSync(PIDFILE, `${child.pid}\n`);
+  // The pid file belongs to the BRIDGE, not to whoever started it: the bridge
+  // writes it when it binds, so the file always names the process that is
+  // really answering. A starter that wrote it here could leave the file
+  // naming a process that lost the race for the port and died — and then
+  // `aipass stop` would stop nothing and the live bridge would stay.
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     if (await bridgeUp()) {
@@ -81,7 +89,7 @@ async function ensureBridge() {
     await new Promise((r) => setTimeout(r, 300));
   }
   try { process.kill(child.pid); } catch { /* never started */ }
-  rmSync(PIDFILE, { force: true });
+  forgetPidIfOurs(child.pid);
   process.stderr.write(
     red(`\n✗ Bridge not running at ${BRIDGE}\n`) +
     dim(`  It was started in the background but did not answer. Run it in the foreground to see why:\n`) +
@@ -91,15 +99,31 @@ async function ensureBridge() {
   return false;
 }
 
+/**
+ * Drop this pid from the pid file, and only this one.
+ *
+ * The file is the bridge's, and the bridge writes it when it binds. A bridge
+ * that DID bind and answered — while our probe was too slow to see it — must
+ * not have its pid removed by the starter that gave up, and the bridges that
+ * are still up must stay in the file.
+ */
+function forgetPidIfOurs(pid) {
+  try { forgetBridgePid({ pid }); } catch { /* never written */ }
+}
+
 function stopBridge() {
   if (!existsSync(PIDFILE)) {
     console.log('no background bridge running (a `aipass dev` / `npm run dev` bridge you stop with Ctrl+C)');
     return;
   }
-  const pid = Number(readFileSync(PIDFILE, 'utf8').trim());
-  try { process.kill(pid); console.log(`stopped the bridge (pid ${pid})`); }
-  catch { console.log(`bridge pid ${pid} was not running`); }
-  rmSync(PIDFILE, { force: true });
+  // The file names EVERY bridge of ours that is still running — the desktop's
+  // and a second one on another port are both real — and this ends them all.
+  const ended = stopRecordedBridge();
+  if (!ended.length) {
+    console.log('no background bridge running (a `aipass dev` / `npm run dev` bridge you stop with Ctrl+C)');
+    return;
+  }
+  for (const pid of ended) console.log(`stopped the bridge (pid ${pid})`);
 }
 
 async function status() {

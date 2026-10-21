@@ -32,8 +32,9 @@ aipass-bridge/harness/      the agent core, shared with `aipass agent`
 ```
 
 Nothing in `aipass-bridge/agent.mjs` was rewritten: it now calls the same
-harness modules, so the CLI and the window cannot drift apart. The 37 CLI tests
-pass unchanged, which is the proof.
+harness modules, so the CLI and the window cannot drift apart. The CLI's own
+tests (`aipass-bridge/test/agent.test.mjs`, 58 of them) pass unchanged, which
+is the proof.
 
 ## The constraint that shaped everything
 
