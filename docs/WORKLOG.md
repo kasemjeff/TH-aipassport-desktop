@@ -196,20 +196,23 @@ suite.
   `docs/WORKLOG.md` (this entry);
 - **Tests**: `npm test` — 1009 tests, 1003 pass, 0 fail, 6 skipped (the skips
   are Windows' file modes and GNU diff, as before). `npm run agents:lint` —
-  ok, 71 anchors against 1009 titles;
+  ok, 71 anchors against 1009 titles. The committed tree, extracted and run
+  on its own: 1032 tests, 1026 pass, 0 fail, 6 skipped;
 - **Deferred**: the visual identity and the 44px tap target stay where the
   session above left them: a design decision and a touch rule, and this app
   is mouse-first. The commits are NOT deferred: the human asked for them, and
-  they are made — ten of them, one per topic (the window's modules, the
-  update system, the shell, the fuzzy matcher, the backend's modules, the
-  provider's own models, the backend's edges, the bridge and the catalog,
-  the suite's own house, the law and the docs). The update commit is red on
-  its own: its test probes the staged content with `harness/health.mjs`,
-  which lands in the shell commit after it; the two want swapping, and the
-  swap needs a clean tree, which a session working in parallel did not
-  leave. The work of that session is left uncommitted on purpose — it was
-  being written while the commits were made, and a half-written file is not
-  a commit;
+  they are made — twenty-one of them, one per topic (the window's modules,
+  the shell, the update system, the fuzzy matcher, the backend's modules, the
+  provider's own models, the file lock, the backend's edges, the bridge and
+  the catalog, the suite's own house, the law and the docs, the provider's
+  own fields and the archive, the provider that never answers, the token,
+  and the last of the window's edges). Two of them are red ON THEIR OWN: the
+  shell's and the update's, because the test that says a bridge nobody is
+  using goes away needs the bridge's own pid recording, which lands three
+  commits later — the bridge commit wants to move up, and the move needs a
+  clean tree, which a session working in parallel did not leave. The work of
+  that session is left uncommitted on purpose: it was being written while
+  the commits were made, and a half-written file is not a commit;
 - **Open risks**: the light theme's muted text is now visibly darker — that
   is the cost of AA on a pale ground, and it is the one change in this entry
   a person will notice. The provider rebuild drops the conversation history
