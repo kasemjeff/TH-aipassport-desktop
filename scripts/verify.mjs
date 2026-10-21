@@ -315,12 +315,23 @@ async function runSmoke({ keepBridge = false, bridgePort: explicitBridgePort = n
       const { status, body } = await httpJson(bridgePort, { pathname: '/health' });
       return status === 200 && body?.ok === true;
     });
+    // The window bootstraps its bearer token from /token before it calls /rpc;
+    // the smoke does the same, or every probe is the 401 a token-less loopback
+    // caller is meant to get. The Origin header is what makes the request look
+    // like the same-origin page the endpoint exists for.
+    let token = null;
     await waitReady('backend', backend, async () => {
-      const { status, body } = await httpJson(backendPort, { method: 'POST', pathname: '/rpc', body: { method: 'settings.get' } });
-      return status === 200 && body?.ok === true;
+      const { status, body } = await httpJson(backendPort, {
+        pathname: '/token',
+        headers: { origin: `http://127.0.0.1:${backendPort}` },
+      });
+      if (status !== 200 || typeof body?.token !== 'string') return false;
+      token = body.token;
+      return true;
     });
 
-    const rpcCall = () => httpJson(backendPort, { method: 'POST', pathname: '/rpc', body: { method: 'settings.get' } });
+    const auth = { authorization: `Bearer ${token}` };
+    const rpcCall = () => httpJson(backendPort, { method: 'POST', pathname: '/rpc', headers: auth, body: { method: 'settings.get' } });
     const checks = [
       ['bridge GET /health', async () => {
         const { status, body } = await httpJson(bridgePort, { pathname: '/health' });
@@ -333,7 +344,7 @@ async function runSmoke({ keepBridge = false, bridgePort: explicitBridgePort = n
         if (!ok) throw new Error(`status ${status}, extensions=${body?.extensions}, models=${Array.isArray(body?.models) ? 'array' : typeof body?.models}`);
       }],
       ['bridge GET /v1/models', async () => {
-        const { status, body } = await httpJson(bridgePort, { pathname: '/v1/models' });
+        const { status, body } = await httpJson(bridgePort, { pathname: '/v1/models', headers: auth });
         const ok = status === 200 && body?.object === 'list' && Array.isArray(body?.data)
           && body.data.length > 0 && body.data.every((m) => typeof m?.id === 'string' && m.id.length > 0);
         if (!ok) throw new Error(`status ${status}, object=${body?.object}, entries=${body?.data?.length}`);

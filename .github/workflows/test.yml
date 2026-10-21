@@ -74,6 +74,79 @@ jobs:
             node --check "$f"
           done
 
+      # The window's contract with the backend: every RPC method the window
+      # calls has to exist, and every user-facing file has to be intact UTF-8.
+      # The window is a plain page with no types, so nothing else catches a
+      # method the backend does not have — it is a 404 in the window's own
+      # log, in front of a person who only wanted to use the app.
+      - name: Check the window's contract with the backend
+        run: node scripts/qa-loop.mjs --static
+
+      # The floor under the code the window and the backend run: a file whose
+      # coverage fell through the floor is a file nobody is testing any more,
+      # and the suite stays green while it happens.
+      - name: Check the coverage floors
+        run: npm run coverage:gate
+
+  rust:
+    name: the desktop shell
+    runs-on: ${{ matrix.os }}
+    # A cold Rust build of the whole tree is minutes, not seconds; the ceiling
+    # is an hour so a stuck job cannot hold a runner.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both platforms, because the shell's own tests are split by
+        # `#[cfg(windows)]`: the long-path prefix, the PATH registry and the
+        # per-user shim only exist on one side, and the other side has the
+        # tests that only exist there. One platform leaves half the shell
+        # untested and nobody notices which half.
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # Tauri on Linux needs the webkit2gtk development packages; without
+      # them the shell does not compile — the same list the build lane uses.
+      - name: Install the Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+
+      # The shell's unit tests: the settings migration, the PATH handling, the
+      # tray mark. They existed and never ran — nothing in CI asked for them,
+      # so a broken one merged green.
+      - name: Test the shell
+        working-directory: desktop/src-tauri
+        run: cargo test
+
+      # Lints, reported but not a gate: a new lint rule needs the human's
+      # sign-off, and a red clippy on the first run would block every commit
+      # over a warning nobody has agreed to be a warning.
+      - name: Lint the shell
+        working-directory: desktop/src-tauri
+        continue-on-error: true
+        run: cargo clippy --all-targets
+
   shellcheck:
     name: deploy scripts
     runs-on: ubuntu-latest

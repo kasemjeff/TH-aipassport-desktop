@@ -25,6 +25,10 @@ import { fileURLToPath } from 'node:url';
 // The browser the suite opened is closed with the suite: one rule, shared
 // with the backend that opened it.
 import { closeOpenedBrowsers } from '../aipass-bridge/harness/browser.mjs';
+// The bridge the suite started is detached, so it outlives the run.
+import { stopRecordedBridge } from '../aipass-bridge/harness/bridge-pid.mjs';
+// The scratch space a run uses, shared with the coverage gate.
+import { suiteEnv } from './suite-env.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const testDir = path.join(repoRoot, 'aipass-bridge', 'test');
@@ -152,24 +156,19 @@ const BROWSER_PIDS = path.join(BROWSER_HOME, 'pids.txt');
 // here names a port of the suite's own, so a CLI that starts a bridge starts
 // it somewhere harmless.
 const BRIDGE_PORT = await freePort();
+// The environment the suite runs in, shared with the coverage gate
+// (scripts/suite-env.mjs): the same scratch home, the same ports, the same
+// browser profile. A test that behaves differently under the gate measures
+// nothing.
+const suite = await suiteEnv({
+  home: process.env.AIPASS_HOME?.trim() || HOME,
+  browserProfile: BROWSER_PROFILE,
+  browserPidFile: BROWSER_PIDS,
+});
 const result = spawnSync(process.execPath, nodeArgs, {
   stdio: 'inherit',
   timeout: 10 * 60 * 1000,
-  // The token bucket in BridgeClient paces real sends at nine per four
-  // minutes; the suite's bridges are loopback fakes and must not pay that wall
-  // clock. A test that pins the bucket passes an explicit `rateBucket`
-  // option, so this floor never hides the production default from tests.
-  env: {
-    ...process.env,
-    AIPASS_HOME: process.env.AIPASS_HOME?.trim() || HOME,
-    AIPASS_PORT: process.env.AIPASS_PORT?.trim() || String(BRIDGE_PORT),
-    AIPASS_RATE_BUCKET: process.env.AIPASS_RATE_BUCKET ?? 'off',
-    // The suite's own browser, always: the profile and the pid file are the
-    // suite's business, and a caller that inherited somebody else's would
-    // make the suite close a browser it did not open.
-    AIPASS_BROWSER_PROFILE: BROWSER_PROFILE,
-    AIPASS_BROWSER_PIDFILE: BROWSER_PIDS,
-  },
+  env: suite.env,
 });
 
 // The browser the suite opened goes with the run: the window is closed (the
@@ -179,6 +178,13 @@ const closed = await closeOpenedBrowsers({
   env: { AIPASS_BROWSER_PIDFILE: BROWSER_PIDS },
 });
 if (closed.length) console.log(`closed ${closed.length} browser(s) the suite opened`);
+// The bridge goes with it. It is DETACHED, so it outlives the run that
+// started it, and a suite that left one behind per run filled the machine
+// with sixty of them, each holding sixty megabytes, with nothing left that
+// could stop any of them: the pid file is the suite's own, and the suite is
+// the only thing that knows where it is.
+const stoppedBridge = stopRecordedBridge({ env: suite.env });
+if (stoppedBridge.length) console.log(`stopped ${stoppedBridge.length} bridge(s) the suite started (pid ${stoppedBridge.join(', ')})`);
 // The browser may still be letting go of its files, so the removal is
 // retried before it is given up on: a profile left behind is a hundred
 // megabytes of scratch nobody will look at again.
