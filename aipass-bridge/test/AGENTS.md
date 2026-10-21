@@ -16,7 +16,11 @@
   Cursor-movement escapes are not stripped, which is why `chat.mjs` gates all
   of them behind `stdout.isTTY` — keep that gate when touching TTY output.
 - The suite runs with `AIPASS_REQUIRE_AUTH=0`; never weaken auth in production
-  code to make a test pass.
+  code to make a test pass. The gate is ON in `auth.test.mjs`, and that is
+  where each client's own credential is pinned: a client that forgets the
+  token looks fine everywhere else, and the refusal lands on the user.
+  Verify: "the harness's bridge client presents the loopback token"
+  Verify: "the token rides loopback and nothing else"
 
 ## UI tests are behavioral specs
 

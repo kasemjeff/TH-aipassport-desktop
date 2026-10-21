@@ -49,6 +49,16 @@ Before `git tag vX.Y.Z`, all of these are true:
    release, and **the previous release's installers stay downloadable** —
    that is the rollback. A macOS artifact needs a Mac to build and to sign:
    see [`INSTALL.md`](INSTALL.md#can-macos-do-it).
+8. **The content pack and the signed feed** (`npm run desktop:content-pack`
+   and `npm run desktop:feed`). The pack is the content tree — the harness,
+   the bridge, the window's own files — as one gzipped JSON file; the feed is
+   the signed index that names it and the installers. The feed is signed
+   with `AIPASS_RELEASE_KEY`, whose private half is a release secret and
+   never in git; the public half is in `aipass-bridge/harness/update-keys.mjs`
+   and lands in the app's next build. **A release without a signed feed is
+   not a release the app can update from**, and the key must be in the
+   keyring before the feed that names it is published — the app refuses a
+   feed signed by a key it does not know, and that is the point.
 
 ## Canary & soak
 
@@ -84,9 +94,24 @@ where they are, and the new build reads them with the same merge rules the
 old one did. After upgrading, run `npm run doctor` once — it is the one
 command that proves the chain end to end.
 
-There is no auto-updater, deliberately (Tauri's updater is not wired): the app
-never replaces itself in the background, so "which build is running" is always
-a fact you chose.
+There is no shell self-updater, deliberately (Tauri's updater is not wired):
+the app never replaces its own binary in the background, so "which build is
+running" is always a fact you chose.
+
+The **content** does update in place, under the person's hand: the app checks
+a signed feed, and when it names a newer content tree it offers it as a
+banner with one button. The click is the consent, the pack is verified
+against the hash in that signed feed before a file is written, the previous
+content tree is kept so it can be put back, and both versions stay on screen.
+The design is [`UPDATE_DESIGN.md`](UPDATE_DESIGN.md).
+
+The **shell** can be handed over to the installer — the app closes, the
+installer runs, the app comes back — but the gate is closed: the handover
+refuses to run an **unsigned** installer, and the Windows installer is
+unsigned. The gate is the feed's own `signature` field, and the feed is
+signed, so only the release key can open it: when the Windows installer is
+signed and the manifest says so, the same release that says `signed` opens
+the path. Nothing else changes.
 
 ## Rollback
 

@@ -13,6 +13,7 @@ the only honest availability is the chain: account → tab → bridge → backen
 | chain availability | bridge up, extension attached, signed in, one round trip | `npm run doctor` (exit 0) · the bridge status line (`extension: 0 connected` means the tab is gone) | doctor green on the release machine |
 | upstream step | seconds per model turn | `stats` `avg step` (from each run's `stepMs`) | reported, not targeted — upstream-controlled |
 | drift | refusal / guard / cost / firewall signals | `npm run stats -- --alerts --strict` | no warnings |
+| update check | how long the feed check takes, how often it fails, and how old the answer is | the window's update banner; the feed state in `~/.aipass/app/feed-state.json` | the check never blocks startup and never nags; an offline machine gets the cached feed or nothing |
 | model quality | check-scored task outcomes, safety set included | `npm run evals -- --all --live --attempts 3` | read medians; gate list in `docs/SPEC_EVALS.md` |
 
 `stats --json` carries the per-run rows — model, project root, stop reason,
@@ -54,13 +55,26 @@ shapes:
   (`sendRecoveries`), and only then ends the run, surfaced — never silent.
 - **Edge firewall (403)** → trigger-shaped content is encoded on the way
   out; a rejected turn is split and resent, and a fragment that cannot pass
-  is dropped with a `firewallNotes` count. A refusal that outlasts the whole
+  is dropped with a `firewallNotes` count. The refusal reaches that chain at
+  once — the client says it rewrites the message, so the tab hands the
+  refusal back instead of probing it. A refusal that outlasts the whole
   rewrite chain is paused and the same message goes again before it can end
   the run.
 - **A guard trips** → the run stops with the reason recorded (`stalled`,
   `stagnation`, `steps`, `tool-calls`, …) and the session keeps everything.
+- **The desktop's port is taken** → the backend says so with its own exit
+  code, and the supervisor asks who is holding it. One of our backends (a
+  second window, a browser `aipass desktop`): it is adopted, and no second
+  one is started — the window is already pointed at that port. Something
+  else: the situation is named once, with the fix, and the backoff
+  continues, so the port is picked up again if it is freed.
 - **Backend crash** → the desktop shell restarts it (`[supervisor]` lines);
   an in-flight run reads as a pause, and `~/.aipass/` is untouched.
+- **Nothing is using the bridge** → it ends itself after
+  `AIPASS_BRIDGE_IDLE_MS` (ten minutes). The bridge is a detached process,
+  so it outlives whatever started it; one that outlives every way of
+  reaching it is a leak, not a service. Its own pid is in
+  `~/.aipass/bridge.pid`, so `aipass stop` can end it at once.
 
 ## What is deliberately not here
 

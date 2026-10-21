@@ -12,12 +12,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TEST_DIR = path.join(ROOT, 'aipass-bridge', 'test');
 
-/** Guide files that may carry Verify anchors, with their size budgets. */
+/** Guide files that may carry Verify anchors, with their size budgets.
+ *  A budget is a ceiling, not a wish: the guide is cut to fit, and the
+ *  ceiling goes DOWN when it grows — raising it instead is the thing this
+ *  check exists to catch. */
 const GUIDE_FILES = [
-  { rel: 'AGENTS.md', budget: 220 },
+  { rel: 'AGENTS.md', budget: 218 },
   { rel: 'aipass-bridge/AGENTS.md', budget: 130 },
   { rel: 'aipass-bridge/test/AGENTS.md', budget: 90 },
-  { rel: 'desktop/AGENTS.md', budget: 90 },
+  { rel: 'desktop/AGENTS.md', budget: 88 },
 ];
 
 /** Thin shim files for tools that do not read AGENTS.md natively. */

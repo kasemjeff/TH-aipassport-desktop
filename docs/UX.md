@@ -110,8 +110,10 @@ Every failure names the single next action.
 **P1.5 Theme toggle affordance.**
 - Today: moon icon flips theme; choice is written through. Good, but the icon
   does not indicate the *current* theme at a glance.
-- Proposed: icon shows the theme you will switch *to* (sun when dark, moon when
-  light), with `aria-label="สลับเป็นธีมสว่าง"`.
+- Proposed: the icon shows the theme that is on now (moon when dark, sun when
+  light), and the button names that theme in Thai — `aria-label="ธีม: มืด"` —
+  so the state is announced, not only drawn. The tooltip says what pressing it
+  does.
 
 ### P2 — polish
 
@@ -175,13 +177,14 @@ What the first pass shipped, by the numbering above:
 | Item | Status | Where |
 |---|---|---|
 | P0.1 token paste | shipped — "Paste from clipboard" + "Test connection" in the popup's Advanced section | `extension/popup.{html,js}` |
+| P0.1 token paste (the window's half) | shipped — the bridge reports a refused extension in `/status`, so the window names the token instead of guessing "no extension", and one click puts that token on the clipboard: the paste is the only step left | `bridge/server.mjs`, `harness/rpc.mjs`, `desktop/ui/app.js` |
 | P0.2 no-tab recovery | already existed — popup action button, desktop welcome rows with "เปิดให้", `aipass doctor` | `popup.js`, `ui/app.js`, `doctor.mjs` |
 | P0.3 extension load | copy only — `aipass setup` prints the folder path and opens `chrome://extensions`; a "Copy path" button is **not possible** (Chrome exposes no filesystem path to the popup) | `setup.mjs` |
 | P1.1 discoverability | shipped — `/memory`, `/mcp`, `/symbols` in the desktop palette; `aipass --help` lists all commands | `ui/app.js` |
 | P1.2 memory visible | shipped — 🧠 panel in the sidebar (facts + "ลืมทั้งหมด"), backed by `memory.list` / `memory.clear` RPC | `ui/{index.html,app.js}`, `harness/rpc.mjs` |
 | P1.3 context story | already existed — live tooltip with used/budget/reserve + the rotation card in the transcript | `ui/app.js` |
 | P1.4 user card | shipped — hardcoded placeholder removed (populate from settings later if wanted) | `ui/index.html` |
-| P1.5 theme icon | shipped — the icon shows the theme you will switch *to*, with a Thai title | `ui/app.js` |
+| P1.5 theme icon | shipped — the icon shows the theme that is on now, and the button names it in Thai (`aria-label="ธีม: มืด"`) so the state is announced, not only drawn | `ui/{index.html,app.js}` |
 | P2.1 empty states | mostly existed — welcome card; memory list gained its empty hint | `ui/app.js` |
 | P2.2 long-running feedback | shipped (small) — the composer hint's dot pulses while a run is in flight | `ui/{styles.css,app.js}` |
 | P2.3 keyboard parity | shipped — sessions/skills/files rows are Enter/Space operable (`clickable` helper) | `ui/app.js` |

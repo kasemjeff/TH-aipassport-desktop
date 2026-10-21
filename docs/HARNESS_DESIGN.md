@@ -630,6 +630,22 @@ follows:
 `page.test.mjs` pins all of it: the envelope gap after a refusal, the floor
 between two sends, the create on the same clock, and the retry header.
 
+**Follow-up, Oct 21 — the refusal reaches the client that can fix it.** The
+ladder above answers a refusal with the same bytes again, and the ninety
+seconds before the client hears about it are the page's waits (15 s, then
+60 s) plus the tab's 20 s gap. But the cure for a content-shaped refusal is
+not another copy of the same bytes — it is the client's chain (drop the risky
+lines, shorten it, halve it), and the page cannot see that chain. So the
+client says on every send that it rewrites a refusal (`rewrite_on_refusal`),
+and the page hands the 403 back at once instead of probing: the recorded run
+sat in `[403] refused at the edge` for a minute and a quarter while the one
+request that carried on was available all along (a 3,721-byte message refused,
+the same message at 2,242 bytes accepted). A client that does not say so
+keeps the page's ladder — it has no rewrite to offer — and the pace case is
+not lost: the client's own ladder (60 s, then 180 s) is the patience the
+page's ladder was standing in for. `page.test.mjs` pins the handoff, and
+`run-resilience.test.mjs` pins that the client asks for it.
+
 ### The re-run that passed, and the gap it stepped on (Oct 2026)
 
 **Now:** the gap is closed. A `RUN` sees the tree the run has staged — the

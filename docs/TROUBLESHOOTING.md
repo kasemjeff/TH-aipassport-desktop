@@ -39,12 +39,27 @@ If you prefer checking by hand: `GET /status` is token-free on purpose, and
   thing in its own log — "the extension was refused: it has no loopback
   token" — because a tokenless extension retries every three seconds and
   `/status` only shows `extensions: 0`.
+- **The window says the extension has no token.** The window knows: the
+  bridge reports a refused extension in `/status` (`extensionToken:
+  "missing"`), so the window does not send you to load an extension that is
+  already loaded. Click **วาง token ให้** in the window — it puts the token
+  on your clipboard — then open the extension popup → **Advanced** →
+  **Paste from clipboard** → save. The window drops the notice as soon as
+  the extension gets through.
+- **The window says the bridge refused the token.** That is the window's own
+  credential, not the extension's: the extension talks to the bridge, and
+  pasting a token into its popup cannot change this. The window and the
+  backend read the same file, so start the app again and they agree.
 - **A run dies on 403.** The upstream edge blocks trigger-shaped content; the
   harness encodes those tokens on the way out and decodes them on the way back
   (`harness/waf.mjs`), and a rejected turn is split and resent in halves — a
   fragment that cannot pass at any size is dropped with a note. If a run still
   dies, the log names the refused message: `~/.aipass/logs/bridge.log` for a
-  bridge the desktop started, or the terminal running `aipass dev`.
+  bridge the desktop started, or the terminal running `aipass dev`. A run that
+  stands still at `[403] refused at the edge` is waiting for the edge: the
+  refusal reaches the harness at once (the client says it rewrites the
+  message), and the rewrite — a shorter copy, a halved one — goes out as the
+  next request.
 - **429s.** The client waits the rate window out and retries; only an error
   that survives the retries ends the run.
 
@@ -80,7 +95,20 @@ If you prefer checking by hand: `GET /status` is token-free on purpose, and
   backend, or a server that is not ours. The launcher adopts a backend that
   answers (a 401 carrying the backend's own refusal counts: it is ours, with
   a different token) and says so; a stranger's server is left to the busy-port
-  message.
+  message. The packaged shell asks the same question through the same probe:
+  one of our backends is adopted, and a stranger is named in the log with the
+  fix (`AIPASS_DESKTOP_PORT=<other>`).
+- The window opens and then keeps losing the backend? Read
+  `~/.aipass/logs/desktop-backend.log`. A line that says
+  "port … is held by something that is not an aipass backend" is the whole
+  story: something else has 8790, and the shell is waiting for it to go.
+  A line that says "another aipass backend is answering on the port — it is
+  adopted" means a second copy is serving, and the window is talking to it.
+- The machine feels slow and there are dozens of `node.exe` processes? Those
+  are bridges. A bridge that nobody is using ends itself after ten minutes
+  (`AIPASS_BRIDGE_IDLE_MS`); the one that is answering is in
+  `~/.aipass/bridge.pid`, and `aipass stop` ends it. Anything older than
+  that is a leftover from before — end it and it does not come back.
 
 ## A run stops early, or refuses a write
 

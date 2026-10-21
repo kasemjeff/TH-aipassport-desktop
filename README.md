@@ -419,6 +419,7 @@ The design and operations docs live in [`docs/`](./docs/):
 | [`docs/RELIABILITY.md`](./docs/RELIABILITY.md) | what healthy means: the SLIs and their targets, the error budget, degradation modes |
 | [`docs/RELEASE.md`](./docs/RELEASE.md) | versioning, the release checklist, upgrade and rollback, dependency review |
 | [`docs/INSTALL.md`](./docs/INSTALL.md) | the install system: what an install guarantees, what each platform ships, what macOS needs |
+| [`docs/UPDATE_DESIGN.md`](./docs/UPDATE_DESIGN.md) | the update system: the shell and the content as two versioned halves, the signed feed, the phases |
 | [`docs/MATURITY.md`](./docs/MATURITY.md) | capability status — production vs experimental, owners, what changes a status |
 | [`docs/TEST_PLAN.md`](./docs/TEST_PLAN.md) | the test design: layers L1–L5, cases, pass criteria, what each layer cannot prove |
 
