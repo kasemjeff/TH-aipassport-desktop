@@ -1462,6 +1462,34 @@ test('the archive is a door both ways', async () => {
   assert.ok(calls.includes('session.prune'), 'the prune asks the backend to do it');
 });
 
+test('past forty sessions the picker offers the archive, and it moves the quiet ones', async () => {
+  // Past 40 sessions the picker is a junk drawer, not a list: the one-click
+  // archive (nothing deleted, files move to <project>/archive/) sits above it
+  // instead of hiding in a settings page. And the day a session is from is
+  // said in a word — including the ones older than a month.
+  const many = Array.from({ length: 45 }, (_, i) => ({
+    id: `s${i}`, title: `session ${i}`, updated: Date.UTC(2026, 9, 10 - (i % 40)),
+  }));
+  const { node, calls, tick } = await bootApp({
+    ...BACKEND,
+    'session.list': () => many,
+    'session.archive': () => ({ count: 7 }),
+  });
+  await tick(); await tick();
+
+  const rail = node('sessions');
+  const bar = rail.children.find((li) => (li.className ?? '').includes('archive-bar'));
+  assert.ok(bar, 'the archive button sits above the list');
+  const btn = bar.children.find((b) => b.tagName === 'BUTTON');
+  assert.match(btn.textContent, /เก็บ/, 'and it says what it will do');
+
+  assert.match(rail.textContent, /เก่ากว่านั้น/, 'and a session older than a month says so in a word');
+
+  btn.dispatch('click');
+  await tick(); await tick();
+  assert.ok(calls.includes('session.archive'), 'and the backend moves the quiet ones');
+});
+
 test('the file panel walks into folders and attaches a file', async () => {
   // The panel listed one directory and stopped: a folder was a dead click.
   const { node, calls, tick } = await bootApp({
