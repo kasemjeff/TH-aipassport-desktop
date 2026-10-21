@@ -78,9 +78,12 @@ export function loadOrMintToken(home = aipassHome()) {
     try { fs.chmodSync(file, 0o600); } catch { /* best effort on Windows */ }
     written = true;
   } catch (err) {
+    // The caught value is unknown to the type checker; the annotation says
+    // what the error is allowed to carry, and changes nothing at runtime.
+    const e = /** @type {{code?: string, message?: string}} */ (err);
     console.error(formatLogLine({
       level: 'warn',
-      msg: `the loopback token could not be written to ${file} (${err?.code ?? err?.message}) — it is held in memory for this run`,
+      msg: `the loopback token could not be written to ${file} (${e?.code ?? e?.message}) — it is held in memory for this run`,
     }));
   }
   // Cache the token just written, from the recreated file's own stat. Without

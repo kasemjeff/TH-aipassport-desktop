@@ -14,6 +14,9 @@ import path from 'node:path';
 import { formatLogLine } from '../log-line.mjs';
 import { publicSpec, AIPASS_PROVIDER } from '../providers.mjs';
 import { clientFor } from '../provider-client.mjs';
+// The settings file's own schema: the keys a save may write. The defaults are
+// that schema — a key the file has never heard of is not a setting.
+import { DEFAULTS } from '../settings.mjs';
 
 /**
  * Did the provider's spec change in a way the client cares about?
@@ -195,6 +198,13 @@ export function createSettingsMethods(ctx) {
       // setting, and the settings file is not where that lives.
       const patch = { ...params };
       delete patch.project;
+      // Only the keys the settings file knows are written. Every key the
+      // caller sent used to be persisted, so a form that typed `modde` instead
+      // of `mode` left the typo in the file for ever — where it read like a
+      // setting nobody could change, and the sheet never showed it.
+      for (const key of Object.keys(patch)) {
+        if (!(key in DEFAULTS)) delete patch[key];
+      }
       const next = appSettings.set(patch);
       // A change of root moves the live run onto another project first: every
       // policy below it belongs to the harness that keeps running.
