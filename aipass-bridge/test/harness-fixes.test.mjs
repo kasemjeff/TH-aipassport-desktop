@@ -182,9 +182,15 @@ test('append batches the header rewrite, and rename still fixes it at once', (t)
   // breadcrumb write that precedes an in-place rewrite reads as a second
   // rewrite, and one batched rewrite reads as two.
   let inWriteFile = false;
+  // The caller that matters is `writeHeader` — the function that writes the
+  // header line — and not `rewriteHeader`: the rewrite takes a LOCK first, and
+  // that lock is a file of its own. A spy that cannot tell the two apart
+  // counts every lock write as a header rewrite, and the bound this test
+  // checks (one rewrite per batch) reads as broken. The look-behind is what
+  // tells them apart: "rewriteHeader" ends in "writeHeader" too.
   const count = (file) => {
     const target = String(file) === session.file || String(file) === `${session.file}.tmp`;
-    if (target && /rewriteHeader/.test(new Error().stack)) rewrites.push(String(file));
+    if (target && /(?<!re)writeHeader/.test(new Error().stack)) rewrites.push(String(file));
   };
   fs.writeFileSync = function spied(file, ...rest) {
     inWriteFile = true;

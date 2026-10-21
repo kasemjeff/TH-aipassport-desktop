@@ -96,6 +96,144 @@ test('remove() reports the file gone, and archiveIdle moves only idle sessions',
   assert.equal(store.list(root).some((e) => e.id === live.id), true, 'live stays even when idle');
 });
 
+test('an archived session can be taken back', () => {
+  // The archive is a place a session can be put AND a place it can be taken
+  // from. Without a way back, "archive" was a one-way door and a session that
+  // went in could only come out by hand.
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const root = path.join(dir, 'proj');
+  const idle = store.create({ root, title: 'idle' });
+  const live = store.create({ root, title: 'live' });
+
+  store.archiveIdle(root, { olderThanMs: 1, keepId: live.id });
+  assert.equal(store.list(root).some((e) => e.id === idle.id), false, 'it left the picker');
+  const archived = store.listArchived(root);
+  assert.equal(archived.some((e) => e.id === idle.id), true, 'and it is in the archive');
+
+  assert.equal(store.restore(idle.id, { root }), true, 'and it comes back');
+  assert.equal(store.list(root).some((e) => e.id === idle.id), true, 'into the picker');
+  assert.equal(store.load(idle.id, { root })?.title, 'idle', 'and it still opens');
+  assert.equal(store.listArchived(root).length, 0, 'the archive is empty again');
+});
+
+test('a session of another project is not reachable by its path either', () => {
+  // The window lists sessions with their path, and a path names a session at
+  // least as precisely as an id does. The guard on the id branch was a guard
+  // on one spelling of the handle only.
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const here = path.join(dir, 'here');
+  const there = path.join(dir, 'there');
+  fs.mkdirSync(here); fs.mkdirSync(there);
+  const theirs = store.create({ root: there, title: 'theirs' });
+  theirs.append('user', { text: 'a secret of another project' });
+
+  assert.equal(store.resolveFile(theirs.file, { root: here }), null, 'the path does not resolve');
+  assert.equal(store.load(theirs.file, { root: here }), null, 'and the session does not open');
+  assert.equal(store.remove(theirs.file, { root: here }), false, 'and it is not deleted');
+  assert.equal(fs.existsSync(theirs.file), true, 'the file is still there');
+  const foreign = store.foreignFor(theirs.file, { root: here });
+  assert.equal(foreign?.root, path.resolve(there), 'the refusal names the project it belongs to');
+});
+
+test('two projects whose paths slugify the same do not share a picker', () => {
+  // The directory is named after the path, and the name is a slug: `a b` and
+  // `a-b` are the same slug, so the two projects share a directory. The
+  // header's own root is the authority on which project a session belongs
+  // to — the directory is a bucket, not a boundary.
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const a = path.join(dir, 'a b');
+  const b = path.join(dir, 'a-b');
+  fs.mkdirSync(a); fs.mkdirSync(b);
+  const mine = store.create({ root: a, title: 'mine' });
+  const theirs = store.create({ root: b, title: 'theirs' });
+
+  assert.equal(store.dirFor(a), store.dirFor(b), 'the two do share a directory — that is the hazard');
+  assert.deepEqual(store.list(a).map((s) => s.id), [mine.id], 'and the picker is not shared');
+  assert.deepEqual(store.list(b).map((s) => s.id), [theirs.id], 'each project sees its own');
+});
+
+test('a relocation does not carry another project\'s sessions with it', () => {
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const a = path.join(dir, 'a b');
+  const b = path.join(dir, 'a-b');
+  fs.mkdirSync(a); fs.mkdirSync(b);
+  store.create({ root: a, title: 'mine' });
+  const theirs = store.create({ root: b, title: 'theirs' });
+
+  const out = store.reassign(a, path.join(dir, 'moved'));
+  assert.equal(out.moved, 1, 'only this project\'s session moves');
+  assert.equal(fs.existsSync(theirs.file), true, 'the neighbour\'s session is still on disk');
+  const header = JSON.parse(fs.readFileSync(theirs.file, 'utf8').split('\n')[0]);
+  assert.equal(header.root, path.resolve(b), 'and it still names its own project');
+});
+
+test('two writers on one session do not lose each other\'s header changes', () => {
+  // The desktop backend and the CLI write the same store, and a window can be
+  // open on a project while a command line runs in it. A header rewrite is a
+  // read-modify-write: without a lock and a merge, the second writer puts
+  // back a copy of the header that is older than the file's.
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const root = path.join(dir, 'proj');
+  const shared = store.create({ root, title: 'shared' });
+  const w1 = store.load(shared.id, { root });
+  const w2 = store.load(shared.id, { root });
+
+  store.rename(shared.id, 'renamed', { root });
+  w2.append('user', { text: 'after the rename' });
+  let head = JSON.parse(fs.readFileSync(shared.file, 'utf8').split('\n')[0]);
+  assert.equal(head.title, 'renamed', 'a rename survives the other writer\'s append');
+
+  w1.bindConversation('conv-1', true);
+  w2.append('user', { text: 'after the binding' });
+  head = JSON.parse(fs.readFileSync(shared.file, 'utf8').split('\n')[0]);
+  assert.equal(head.conversation, 'conv-1', 'and so does the conversation binding');
+
+  const before = head.entryCount;
+  w1.append('user', { text: 'one more' });
+  head = JSON.parse(fs.readFileSync(shared.file, 'utf8').split('\n')[0]);
+  assert.ok(head.entryCount >= before, 'and the count never goes backwards');
+  assert.equal(store.load(shared.id, { root }).entries.length, 3, 'every entry is on disk');
+});
+
+test('a session id is not a birthday collision waiting to happen', () => {
+  // A session id is a FILE NAME, so a collision is not a key that gets
+  // refused: the new session replaces the old one and the whole conversation
+  // is gone without a word. 32 bits of Math.random made that a question of
+  // how many sessions a machine has; 48 bits of the crypto module does not.
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const root = path.join(dir, 'proj');
+  const ids = new Set();
+  for (let i = 0; i < 400; i++) ids.add(store.create({ root }).id);
+  assert.equal(ids.size, 400, 'every id is its own');
+  assert.ok([...ids][0].length >= 12, 'and long enough that the birthday is far away');
+});
+
+test('a session file that is too large to open is refused, not loaded', () => {
+  // A session grows by appends and nothing trims it. A file this size is a
+  // memory bomb in a desktop app that also holds a browser, so it is refused
+  // with a reason instead of taking the window down with it.
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const root = path.join(dir, 'proj');
+  const s = store.create({ root, title: 'huge' });
+  s.append('user', { text: 'x'.repeat(5000) });
+  const before = process.env.AIPASS_MAX_SESSION_BYTES;
+  process.env.AIPASS_MAX_SESSION_BYTES = '1024';
+  try {
+    assert.throws(() => store.load(s.id, { root }), /too large/, 'the session is refused with a reason');
+  } finally {
+    if (before === undefined) delete process.env.AIPASS_MAX_SESSION_BYTES;
+    else process.env.AIPASS_MAX_SESSION_BYTES = before;
+  }
+  assert.ok(store.load(s.id, { root }), 'and it opens again once the ceiling is back');
+});
+
 test('wrong-typed data never reaches the picker or the chain', () => {
   const dir = tmp();
   const proj = path.join(dir, 'proj'); // list() scans project directories

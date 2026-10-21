@@ -20,6 +20,37 @@ import { RulesStore, grantCovers } from '../harness/rules.mjs';
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const scratch = () => fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-clamp-'));
 
+test('a save does not undo the change another surface made', () => {
+  // The settings file is shared by the window, the CLI and the backend, and
+  // two of them can write it. A save that merged into the copy the process
+  // happened to be holding wrote every other key back unchanged — so a
+  // project that had been moved landed back under its old path, and the
+  // change was gone with no trace of who undid it.
+  const dir = scratch();
+  try {
+    const s = new Settings(dir, 'settings.json');
+    s.set({ mode: 'ask' });
+
+    // Another surface writes the file: the CLI, a second backend, a backup
+    // restored underneath this one.
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+    onDisk.projects = [{ name: 'moved', path: path.join(dir, 'moved') }];
+    onDisk.root = path.join(dir, 'moved');
+    fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify(onDisk, null, 2));
+
+    const next = s.set({ maxSteps: 12 });
+    assert.equal(next.root, onDisk.root, 'the other surface’s change survived the save');
+    assert.equal(next.projects.length, 1, 'and so did its project list');
+    assert.equal(next.maxSteps, 12, 'and the save did what it was asked');
+
+    // And it is on disk, not only in memory.
+    const reread = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+    assert.equal(reread.root, onDisk.root, 'the file says the same');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a value that would break a run is clamped, not stored', () => {
   // A negative step count is the case that justifies this: it would reach the
   // loop and stop a run before its first step. Zero is different — it is the
