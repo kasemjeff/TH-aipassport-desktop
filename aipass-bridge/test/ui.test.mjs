@@ -1419,6 +1419,39 @@ test('a session row opens with Enter, not only with the mouse', async () => {
   assert.ok(calls.includes('session.open'), 'Enter opens the session');
 });
 
+test('the archive is a door both ways', async () => {
+  // "เก็บ" (archive) moves a session out of the picker's way, into
+  // <project>/archive/ — nothing is deleted, but nothing could bring one back
+  // either, which made the archive a one-way door. The row says how many are
+  // in there, and each of them can be put back where it was.
+  const { node, calls, tick } = await bootApp({
+    ...BACKEND,
+    'session.archived': () => [{ id: 's9', title: 'the old one', updated: Date.UTC(2026, 9, 1) }],
+    'session.unarchive': () => ({ ok: true }),
+    'session.prune': () => ({ count: 2 }),
+  });
+  await tick(); await tick();
+
+  const rail = node('sessions');
+  const bar = rail.children.find((li) => (li.className ?? '').includes('archive-bar'));
+  assert.ok(bar, 'the archive says it is there');
+  const open = bar.children.find((b) => b.tagName === 'BUTTON');
+  assert.match(open.textContent, /คืนจากที่เก็บ/, 'and offers the way back');
+
+  open.dispatch('click');
+  await tick();
+  const box = rail.children.find((c) => (c.className ?? '').includes('archived-box'));
+  assert.ok(box, 'the way back opens');
+  const row = box.children.find((c) => (c.className ?? '').includes('archived-row'));
+  assert.ok(row, 'and the archived session is in it');
+  assert.match(row.textContent, /the old one/, 'named as it was');
+
+  const back = row.children.find((b) => b.tagName === 'BUTTON');
+  back.dispatch('click');
+  await tick(); await tick();
+  assert.ok(calls.includes('session.unarchive'), 'and the row puts it back');
+});
+
 test('the file panel walks into folders and attaches a file', async () => {
   // The panel listed one directory and stopped: a folder was a dead click.
   const { node, calls, tick } = await bootApp({

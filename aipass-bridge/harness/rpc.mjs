@@ -272,15 +272,29 @@ export function createRpc({
     const body = { seq: ++seq, ...(payload ?? {}) };
     const data = JSON.stringify(body);
     replay.push({ event: type, seq: body.seq, data });
-    replayBytes += data.length;
+    // The budget is in BYTES and the frame is a string: `data.length` counts
+    // UTF-16 code units, and Thai text is three bytes a character in UTF-8 —
+    // so a "4 MB" buffer really held twelve. The count has to be the one the
+    // limit is written in.
+    const bytes = Buffer.byteLength(data);
+    replayBytes += bytes;
     while (replay.length > REPLAY_LIMIT || (replayBytes > REPLAY_BYTES && replay.length > 1)) {
-      replayBytes -= replay.shift().data.length;
+      replayBytes -= Buffer.byteLength(replay.shift().data);
     }
     const frame = `event: ${type}\nid: ${seq}\ndata: ${data}\n\n`;
     // A listener whose socket died between frames must be dropped, not written
     // to — one dead window must not take down the backend for the live ones.
+    //
+    // A listener that cannot keep up is dropped as well: `write` answers
+    // false when the socket's buffer is full, and everything after that is
+    // queued in THIS process, so a window that stops reading (a backgrounded
+    // one, a suspended laptop) grows the backend's memory with the transcript
+    // it never read. The window's EventSource reconnects on its own and the
+    // replay fills the gap, so ending the stream is the cheap way out.
     for (const res of [...listeners]) {
-      try { res.write(frame); } catch { listeners.delete(res); }
+      try {
+        if (!res.write(frame)) { res.end(); listeners.delete(res); }
+      } catch { listeners.delete(res); }
     }
   };
 
