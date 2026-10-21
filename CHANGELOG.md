@@ -278,6 +278,28 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **Two projects no longer share one session folder.** A project's sessions
+  live in a folder named after its path, and the name was the path with
+  everything but letters and digits turned into dashes, cut at 60 characters.
+  macOS puts a temporary directory at `/var/folders/<xx>/<hash>/T/<name>`,
+  which is longer than 60 characters once it is spelled out, so the
+  distinguishing tail was cut off and TWO projects under one temporary
+  directory shared ONE folder: one project's conversations showed up in
+  another project's picker, and a relocation left the other's files behind.
+  The name carries a hash of the whole path now — unique however long the path
+  is — and the folder an older build named is still read by the picker and
+  still moved out of by a relocation, so no session is left behind
+  (`aipass-bridge/harness/session.mjs`).
+- **The symbol index is written again.** The indexer called the writer
+  without the index, so `JSON.stringify(undefined)` was `undefined`, the write
+  threw, and the throw was swallowed: the index never reached the disk and
+  every run re-read the whole project
+  (`aipass-bridge/harness/symbols.mjs`).
+- **A read no longer re-pins the memory store's folder.** The store set its
+  folder to owner-only on every call, a read included, and the chmod undid any
+  lock the owner had put on that folder — so a folder made read-only took the
+  write anyway. The mode is set when the store creates the folder and left
+  alone afterwards (`aipass-bridge/harness/memory-store.mjs`).
 - **The suite now runs when the code lands.** The workflow's push filter named
   `master`, but this repository's only branch is `main` — the remote has no
   `master` at all, and the history holds no pull-request merge either, so

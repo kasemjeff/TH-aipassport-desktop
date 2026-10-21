@@ -72,8 +72,17 @@ test('a path that differs only in case is inside the project', () => {
   const dir = tempDir({ 'a.txt': 'hello\n' });
   const overlay = new Overlay(dir);
   const abs = path.join(dir, 'a.txt');
-  assert.doesNotThrow(() => overlay.safe(abs.toUpperCase()), 'Windows does not care about case');
-  assert.doesNotThrow(() => overlay.safe(abs.toLowerCase()));
+  // The boundary is lexical, and `path.relative` follows the platform's own
+  // rules: Windows does not care about case, so the path is inside there.
+  // Every POSIX platform compares case, so the name is a different name - and
+  // a different name is not inside the project.
+  if (process.platform === 'win32') {
+    assert.doesNotThrow(() => overlay.safe(abs.toUpperCase()), 'Windows does not care about case');
+    assert.doesNotThrow(() => overlay.safe(abs.toLowerCase()));
+  } else {
+    const other = abs === abs.toUpperCase() ? abs.toLowerCase() : abs.toUpperCase();
+    assert.throws(() => overlay.safe(other), /outside project root/, 'a case-sensitive filesystem does care about case');
+  }
   assert.throws(() => overlay.safe(path.join(dir, '..', 'outside.txt')), /outside project root/);
 });
 

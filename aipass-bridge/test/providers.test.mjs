@@ -86,6 +86,9 @@ test('the key comes from the environment first and the credentials file second',
 test('the credentials file is owner-only', { skip: process.platform === 'win32' ? 'POSIX modes are not a thing on windows' : false }, () => {
   const home = tempDir();
   const store = new ProviderStore(home);
+  // The provider has to exist before it can hold a key: the store refuses a
+  // key for a provider it does not know ("no provider \"openai\"").
+  store.save(OPENAI_SPEC);
   store.setKey('openai', 'sk-secret');
   const mode = fs.statSync(path.join(home, 'credentials.json')).mode & 0o777;
   assert.equal(mode, 0o600, 'the key file is readable by its owner only');
