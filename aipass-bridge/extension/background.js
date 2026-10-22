@@ -20,6 +20,11 @@ let connected = false;
 let lastError = '';
 let retryMs = RECONNECT_FIRST_MS;
 const jobTabs = new Map();
+// The per-run token the bridge hands over in its `ready` frame. Every post to
+// /ext/* carries it, so the bridge can tell the extension from any other
+// local process that learned a job id. It is handed over, never configured:
+// nothing is pasted anywhere.
+let extToken = '';
 
 // The content script's keepalive port only exists while a de.aipass.net tab is
 // open. With no tab the worker is evicted, the SSE stream dies with it, and the
@@ -84,6 +89,7 @@ async function post(path, body) {
       headers: {
         'content-type': 'application/json',
         ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...(extToken ? { 'x-aipass-token': extToken } : {}),
       },
       body: JSON.stringify(body),
     });
@@ -221,7 +227,13 @@ async function connect() {
           else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
         }
         if (!dataLines.length) continue; // comment / keepalive
-        try { handleEvent(name, JSON.parse(dataLines.join('\n'))); } catch { /* ignore */ }
+        try {
+          const data = JSON.parse(dataLines.join('\n'));
+          // The bridge's per-run token arrives with the `ready` frame, before
+          // any job does — so it is known by the time anything is posted.
+          if (name === 'ready' && typeof data.token === 'string') extToken = data.token;
+          handleEvent(name, data);
+        } catch { /* ignore */ }
       }
     }
   } catch (err) {

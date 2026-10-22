@@ -24,6 +24,9 @@
         #chat   one grid, rows stacked: #meta, then the stage (#log), then
                 #pending, #attachments and #composer. The composer carries the
                 model and the effort level — both ride the next message.
+                The stage carries the worktree bar above the transcript: when
+                the run works in a worktree, the bar says which one and where
+                it lives.
 
      IDS app.js ALREADY OWNS (kept, same handlers) — do not rename:
        bar, project, add-project, model, thinking, mode, status, context,
@@ -182,11 +185,23 @@
         <ul id="files" class="list dim"></ul>
       </section>
 
-      <!-- The playbooks and the plugin panels are not rows here. They used to
-           be two folded headings in this column — "คู่มือ" and "ปลั๊กอิน" —
-           and clicking one opened a box you had to guess at, in a column
-           whose job is the work. Both live in the settings sheet now, next
-           to what configures them. -->
+      <!-- The panels a plugin draws are not rows here. They used to be two
+           folded headings in this column — "คู่มือ" and "ปลั๊กอิน" — and
+           clicking one opened a box you had to guess at, in a column whose job
+           is the work. Both live in the settings sheet now, next to what
+           configures them.
+
+           The PANELS themselves are a different thing: they are the plugin's
+           own work surface (a scratchpad, a board), and they used to be drawn
+           only while the settings sheet was open — the sheet releases its
+           panel area when it closes, so a window at work showed nothing at
+           all. They belong in the window, so the rail carries them. -->
+      <section class="side-section hidden" id="panels-section">
+        <h3 class="side-h">
+          <span>แผงงาน</span><span class="side-count" id="panels-count"></span>
+        </h3>
+        <div id="plugin-panels" class="rail-panels"></div>
+      </section>
     </div>
 
     <!-- The two doors to the rest of the app, written out: a 15px gear in the
@@ -212,6 +227,17 @@
          region that announced every frame read the same sentence over and
          over. The answer is read once, when the run ends. -->
     <div class="stage">
+      <!-- Where the run works. A worktree is a SECOND checkout of the same
+           repository: the run writes there, not into the files the person is
+           editing. The bar says so, and it says the PATH — a person who
+           cannot find the folder cannot merge it. -->
+      <div id="worktree-bar" class="hidden">
+        <span class="wt-tag">worktree</span>
+        <span id="worktree-path" class="wt-path"></span>
+        <span class="grow"></span>
+        <button type="button" id="worktree-list" class="mini">รายการ worktree</button>
+        <button type="button" id="worktree-back" class="mini">กลับไปที่โปรเจกต์</button>
+      </div>
       <div id="log" role="log" aria-live="polite" aria-relevant="additions text" aria-busy="false"></div>
 
       <!-- The run's heartbeat. It floats over the foot of the transcript, so
@@ -237,6 +263,18 @@
         <button id="discard">ทิ้ง</button>
       </div>
       <ul id="pending-list"></ul>
+    </div>
+
+    <!-- The undo of a write. Every apply keeps the bytes that were on the disk
+         before it — outside the project, so a copy of the source can never be
+         committed by accident — and this is where they are listed: what was
+         written, when, and the button that puts the old bytes back. -->
+    <div id="checkpoints" class="hidden">
+      <div class="pending-head">
+        <strong id="checkpoints-count">ย้อนกลับได้</strong>
+        <span class="dim">ทุกครั้งที่เขียนไฟล์ เก็บของเดิมไว้ให้ย้อนกลับ (เก็บไว้นอกโปรเจกต์)</span>
+      </div>
+      <ul id="checkpoint-list"></ul>
     </div>
 
     <div id="attachments" class="hidden">

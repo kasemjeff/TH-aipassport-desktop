@@ -135,6 +135,30 @@ test('a stop that lands right after the run started is not lost', async () => {
   assert.equal(result.stopReason, 'cancelled', 'the run ended as cancelled, not as done');
 });
 
+test('a stop that lands between two runs is not lost', async () => {
+  // The retry loop is a run too: a stop pressed between two attempts has no
+  // controller to abort — the attempt that just ended owns it — and the next
+  // attempt installed a fresh, un-aborted one. So the work carried on after
+  // the person had told it to stop. The request is remembered instead, and
+  // the run that starts after it is stopped at once.
+  const dir = tempDir();
+  const bridge = new StubBridge(['DONE never reached']);
+  const h = new Harness({
+    root: dir,
+    client: bridge,
+    store: new SessionStore(path.join(dir, 'sessions')),
+    options: { mode: 'yolo' },
+  });
+
+  await h.run('the first attempt');
+  assert.equal(bridge.sends, 1, 'the first attempt went out to the model');
+
+  h.cancel(); // the stop lands in the gap between the attempts
+  const result = await h.run('the second attempt');
+  assert.equal(bridge.sends, 1, 'the second attempt never went out to the model');
+  assert.equal(result.stopReason, 'cancelled', 'and the run ended as cancelled, not as done');
+});
+
 /* --------------------------------------------------------------- the tools */
 
 test('a RUN in flight is killed when the run is stopped', async () => {

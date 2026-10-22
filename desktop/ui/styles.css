@@ -479,6 +479,11 @@ button.nav-item:hover { border-color: transparent; }
 /* And for a keyboard user it shows when it is FOCUSED: a button at opacity 0
    with a focus ring around it is a button nobody can find. */
 #files li > button:focus-visible { opacity: 1; }
+/* The same for the history rows: a session carries its own export button, and
+   it only shows when you mean to — the row itself opens the session. */
+#sessions li:not(.archive-bar) > button { opacity: 0; flex: none; }
+#sessions li:hover > button { opacity: 1; }
+#sessions li > button:focus-visible { opacity: 1; }
 .list.dim li { color: var(--dim); }
 /* The one-click archive sits above the history when there is more history
    than the list shows. Its button is the whole point of the bar, so it stays
@@ -755,9 +760,29 @@ button.nav-item:hover { border-color: transparent; }
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
+  /* Two rows now: the worktree bar (empty — and so zero high — when the run
+     works in the project itself) and the transcript. */
+  grid-template-rows: auto minmax(0, 1fr);
 }
-#log { grid-row: 1; grid-column: 1; overflow: auto; padding: 20px 26px 14px; min-height: 0; position: relative; z-index: 1; }
+#log { grid-row: 2; grid-column: 1; overflow: auto; padding: 20px 26px 14px; min-height: 0; position: relative; z-index: 1; }
+
+/* Where the run works. The bar sits above the transcript, so the reader knows
+   WHICH checkout the run touches before they read a line of the answer — and
+   the path is on it, because a person who cannot find the folder cannot merge
+   it. */
+#worktree-bar {
+  grid-row: 1; grid-column: 1;
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 26px;
+  border-bottom: 1px solid var(--line);
+  background: var(--side-bg);
+  font-size: 12px;
+}
+#worktree-bar .wt-tag { font-family: var(--mono); font-size: 11px; color: var(--warn); flex: none; }
+#worktree-bar .wt-path { font-family: var(--mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#worktree-bar button { flex: none; }
+/* The buttons of a worktree row: work in it, and take it away. */
+.wt-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 /* One column, one rail: every block in the transcript — messages, runs, the
    welcome card — takes the same width and centers like the composer does, so a
    wide window does not leave the conversation hugging the left edge. */
@@ -1049,6 +1074,23 @@ details.run > *:not(summary) { margin-left: 2px; }
 #pending-list .del { color: var(--bad); }
 #pending-list li button { padding: 1px 8px; font-size: 12px; }
 #pending-list li.rejected { opacity: .45; text-decoration: line-through; }
+
+/* ------------------------------------------------------------ checkpoints */
+
+/* The undo of a write. It sits under the pending panel because it is the
+   other half of the same question: what is about to be written, and what can
+   be taken back. */
+#checkpoints {
+  border-top: 1px solid var(--line);
+  background: var(--side-bg);
+  padding: 10px 26px;
+  max-height: 22vh;
+  overflow: auto;
+}
+#checkpoint-list { list-style: none; margin: 0; padding: 0; font-size: 12.5px; }
+#checkpoint-list li { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+#checkpoint-list .counts { font-family: var(--mono); font-size: 11.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#checkpoint-list li button { padding: 1px 8px; font-size: 12px; flex: none; }
 
 /* ------------------------------------------------------------ attachments */
 
@@ -1357,6 +1399,13 @@ details.run > *:not(summary) { margin-left: 2px; }
 .plugin-body { font-size: 12.5px; }
 .plugin-body > :first-child { margin-top: 0; }
 .plugin-body > :last-child { margin-bottom: 0; }
+
+/* The panels in the rail. The rail is narrow and the panels are the
+   plugin's own work surface, so they get their own scroll box: a scratchpad
+   with a hundred notes must not push the file list out of the column. */
+.rail-panels { max-height: min(30vh, 300px); overflow: auto; }
+.rail-panels .plugin-panel { margin: 0 0 6px; }
+.rail-panels .settings-empty { margin: 0; font-size: 11.5px; }
 
 /* --------------------------------------------------------------- settings */
 

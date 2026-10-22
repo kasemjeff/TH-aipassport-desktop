@@ -13,7 +13,7 @@ import { createRpc, staticFileFor } from '../harness/rpc.mjs';
 import { Settings } from '../harness/settings.mjs';
 import { SessionStore } from '../harness/session.mjs';
 import { backendIsUp } from '../harness/backend-probe.mjs';
-import { UNAUTHORIZED } from '../harness/authtoken.mjs';
+import { UNAUTHORIZED, loadOrMintToken } from '../harness/authtoken.mjs';
 import { windowContract } from '../../scripts/window-contract.mjs';
 
 // The repository, for the two places a test has to run a real process: the
@@ -34,9 +34,11 @@ before(async () => {
 after(() => { ext.disconnect(); bridge.stop(); });
 
 /** RPC on a free port, rooted at a temp project, answering through `ext`. */
-async function startRpc({ files = {}, replies, rpcOptions = {}, ...rest } = {}) {
+async function startRpc({ files = {}, replies, handler = null, rpcOptions = {}, ...rest } = {}) {
   const root = rest.root ? path.resolve(rest.root) : tempDir(files);
-  onChat = scripted(replies);
+  // A test that needs to answer DIFFERENTLY to different turns (the checker
+  // is a run of its own) brings its own handler; the rest use the script.
+  onChat = handler ?? scripted(replies);
   const rpc = await startRpcServer({
     root,
     bridgeURL: bridge.base,
@@ -1368,4 +1370,161 @@ test('a session whose project moved still opens by id, and a live one does not',
   assert.equal(store.load(theirs.id, { root: here }), null, 'a session of a project that is still there does not open here');
   assert.equal(store.foreignFor(theirs.id, { root: here })?.root, path.resolve(liveRoot),
     'and the refusal names the project it belongs to');
+});
+
+/* ------------------------------------------------- the stream and the budget */
+
+test('a window that stops reading loses no frame', async (t) => {
+  // A window that is backgrounded stops reading its stream. The frames used
+  // to pile up in the BACKEND's memory then — a long run's transcript is big
+  // enough to matter — and nothing ever noticed, because the socket was
+  // alive. The listener is paused instead, and caught up from the replay
+  // buffer when the socket drains: nothing is lost, and nothing is queued.
+  const env = await startRpc({ files: {}, replies: [] });
+  t.after(() => env.stop());
+
+  const req = http.get(`http://127.0.0.1:${env.rpc.port}/events`);
+  t.after(() => req.destroy());
+  const res = await new Promise((resolve, reject) => {
+    req.on('response', resolve);
+    req.on('error', reject);
+  });
+  await new Promise((r) => setTimeout(r, 50));
+
+  // The window is not reading: the frames go out while nobody takes them.
+  const frames = 600;
+  for (let i = 0; i < frames; i++) env.rpc.events.emit('note', { text: `frame ${i}` });
+
+  // Now it reads. The stream is NOT ended — the listener was paused, not
+  // dropped — and every frame must arrive, in order, with no hole: it was
+  // caught up from the replay buffer when the socket drained.
+  let body = '';
+  res.on('data', (chunk) => { body += chunk; });
+  const until = Date.now() + 10_000;
+  const count = () => [...body.matchAll(/"text":"frame (\d+)"/g)].map((m) => Number(m[1]));
+  while (count().length < frames && Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  const notes = count();
+  assert.equal(notes.length, frames, `every frame arrived (${notes.length} of ${frames}) — dupes: ${JSON.stringify(notes.filter((n, i) => i > 0 && n === notes[i - 1]))} first: ${JSON.stringify(notes.slice(0, 3))} last: ${JSON.stringify(notes.slice(-3))}`);
+  for (let i = 1; i < notes.length; i++) {
+    assert.equal(notes[i], notes[i - 1] + 1, 'and they arrived in order, with no hole');
+  }
+  const ids = [...body.matchAll(/^id: (\d+)$/gm)].map((m) => Number(m[1]));
+  assert.ok(ids.length >= frames, 'and every one of them carried its sequence number');
+});
+
+test('the replay buffer counts bytes, not characters', async (t) => {
+  // The budget is 4 MB — of BYTES. The frames are counted in UTF-16 code
+  // units, and Thai text is three bytes a character in UTF-8, so the "4 MB"
+  // buffer really held twelve megabytes: a long run's transcript cost three
+  // times the memory it said it did.
+  const env = await startRpc({ files: {}, replies: [] });
+  t.after(() => env.stop());
+
+  const thai = 'ก'.repeat(1000); // 1000 characters, 3000 bytes
+  for (let i = 0; i < 2000; i++) env.rpc.events.emit('note', { text: thai });
+  const stats = env.rpc.replay;
+  assert.ok(stats.bytes <= 4 * 1024 * 1024 + 200_000, `the buffer is inside its byte budget (${stats.bytes} bytes)`);
+  // 4 MB of bytes is about 1400 of these frames. The old count kept 4000.
+  assert.ok(stats.frames < 1600, `the frames that fit are the ones the bytes allow (${stats.frames})`);
+  assert.ok(stats.frames > 1000, `and it did not throw the buffer away (${stats.frames})`);
+});
+
+test('the window hears the end of a run once, after the last attempt', async (t) => {
+  // Attempts are one run from the window's point of view. The frame used to
+  // arrive after EVERY attempt, so the window took its working bar down and
+  // cleared the staged attachments while the next attempt was streaming into
+  // it.
+  const settings = new Settings(tempDir(), 'settings.json');
+  // The declared check: the one command that decides this run, and the strict
+  // gate that refuses a DONE while it is failing.
+  settings.set({ verifyCommand: 'node check.mjs', requireCheck: true });
+  const env = await startRpc({
+    files: { 'a.txt': 'x', 'check.mjs': 'process.exit(1);\n' },
+    settings,
+    // The checker is a run of its own, and it is asked to run the command
+    // that fails — so the answer depends on WHO is talking: the checker runs
+    // the check, everything else stages a file and says DONE.
+    handler: (job, emit) => {
+      const checker = /you are the checker/i.test(String(job.text ?? ''));
+      emit.text(checker
+        ? 'RUN\nnode check.mjs\nEND'
+        : 'CREATE app.js\nexport const x = 1;\nEND\nDONE first');
+      emit.done();
+    },
+  });
+  t.after(() => env.stop());
+
+  // The bus is what the window hears: the harness's own frame still goes out
+  // per attempt (the CLI reads it), but the window's stream carries one.
+  const heard = [];
+  env.rpc.events.on('finished', (payload) => heard.push(payload));
+  const result = await env.call('run', { task: 'a task that keeps failing', mode: 'yolo', allowRun: true, attempts: 3 });
+  assert.equal(result.attempts, 3, `all three attempts ran (${result.attempts})`);
+  assert.equal(heard.length, 1, `the window heard "finished" once (${heard.length} times)`);
+});
+
+test('a settings save writes only the keys the file knows', async (t) => {
+  // A form that typed `modde` instead of `mode` used to leave the typo in
+  // the settings file for ever, where it read like a setting nobody could
+  // change and the sheet never showed it.
+  const env = await startRpc({ files: {}, replies: ['DONE nothing'] });
+  t.after(() => env.stop());
+
+  await env.call('settings.set', { mode: 'auto', modde: 'yolo' });
+  const after = await env.call('settings.get');
+  assert.equal(after.mode, 'auto', 'the key that was meant to be there is');
+  assert.equal('modde' in after, false, 'and the typo is not');
+});
+
+test('a home that cannot be written does not take the backend down', async (t) => {
+  // The token is minted inside a request handler, and a throw there is an
+  // unhandled rejection — which ends the backend for every window that is
+  // open. A home that cannot be written must not be able to do that.
+  const home = tempDir();
+  const blocked = path.join(home, 'blocked');
+  fs.mkdirSync(blocked);
+  fs.chmodSync(blocked, 0o500); // read-only: the token cannot be created
+  t.after(() => { try { fs.chmodSync(blocked, 0o700); } catch { /* windows */ } });
+
+  const token = loadOrMintToken(blocked);
+  assert.ok(token && token.length >= 32, 'a token is still minted');
+  assert.equal(loadOrMintToken(blocked), token, 'and it is the SAME one every call');
+});
+
+test('the checkpoints of a project are listed, restored and forgotten', async (t) => {
+  // The undo of an apply: the backend takes a copy of what an apply is about
+  // to write, and the window asks for it afterwards. The three methods are
+  // the RPC surface of that store — and they were the one part of it with no
+  // test at all.
+  const env = await startRpc({
+    files: { 'notes.md': 'line one\nline two\n' },
+    replies: ['EDIT notes.md\nFIND\nline two\nNEW\nline 2\nEND', 'DONE patched the notes'],
+  });
+  t.after(() => env.stop());
+
+  const before = await env.call('checkpoints.list');
+  assert.equal(before.root, env.root, 'the listing names the project it is about');
+  assert.deepEqual(before.checkpoints, [], 'and nothing is in it before an apply');
+
+  await env.call('run', { task: 'fix the second line', mode: 'auto' });
+  await env.call('apply', { files: ['notes.md'] });
+  assert.equal(fs.readFileSync(path.join(env.root, 'notes.md'), 'utf8'), 'line one\nline 2\n', 'the apply wrote the change');
+
+  const after = await env.call('checkpoints.list');
+  assert.equal(after.checkpoints.length, 1, 'and it left a checkpoint behind');
+  const id = after.checkpoints[0].id;
+  assert.ok(after.checkpoints[0].files.some((f) => f.path === 'notes.md'), 'the checkpoint names the file it holds');
+
+  // Put it back: the file is what it was before the apply.
+  await env.call('checkpoints.restore', { id });
+  assert.equal(fs.readFileSync(path.join(env.root, 'notes.md'), 'utf8'), 'line one\nline two\n', 'the checkpoint put the file back');
+
+  // And forget it: a checkpoint nobody asked for is litter.
+  await env.call('checkpoints.remove', { id });
+  assert.deepEqual((await env.call('checkpoints.list')).checkpoints, [], 'and it can be forgotten');
+
+  // A name that is not a checkpoint is refused, not guessed at.
+  await assert.rejects(() => env.call('checkpoints.restore', {}), /which checkpoint/, 'a restore with no name says so');
 });

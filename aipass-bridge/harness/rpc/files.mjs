@@ -11,6 +11,9 @@ import { listSymbols, findDefinition, findReferences } from '../symbols.mjs';
 import { fuzzyMatch } from '../fuzzy.mjs';
 import { restoreTable } from '../waf.mjs';
 import { openBrowser } from '../browser.mjs';
+// The undo of an apply (harness/checkpoints.mjs): the store lives outside the
+// project, so nothing here writes inside it.
+import { list as listCheckpoints, restore as restoreCheckpoint, remove as removeCheckpoint } from '../checkpoints.mjs';
 
 /** The most a file the window opens may weigh. */
 const MAX_FILE_READ = 1_000_000;
@@ -31,6 +34,7 @@ export function createFilesMethods(ctx) {
     stageAttachment,
     dropAttachment,
     fileIndex,
+    dropIndex,
     root,
     model,
   } = ctx;
@@ -45,6 +49,45 @@ export function createFilesMethods(ctx) {
     },
     async 'attachment.list'() { return [...staged.values()]; },
     async 'attachment.remove'(params = {}) { dropAttachment(params.id); return { ok: true }; },
+
+    /* ----------------------------------------------------------- checkpoints */
+
+    /**
+     * The checkpoints of this project — what an apply can be taken back from.
+     *
+     * The store lives OUTSIDE the project (root rule 1), so listing it never
+     * touches the tree the person is looking at.
+     */
+    async 'checkpoints.list'(params = {}) {
+      const h = targetFor(params);
+      const checkpoints = listCheckpoints({ root: h.root });
+      return {
+        root: h.root,
+        checkpoints: checkpoints.map((c) => ({
+          id: c.id,
+          createdAt: c.createdAt,
+          files: (c.files ?? []).map((f) => ({ path: f.path, deleted: Boolean(f.deleted) })),
+        })),
+      };
+    },
+
+    /** Put a checkpoint's files back as they were. */
+    async 'checkpoints.restore'(params = {}) {
+      const h = targetFor(params);
+      const id = String(params.id ?? '').trim();
+      if (!id) throw new Error('which checkpoint? — /checkpoints restore <id>');
+      // The tree just changed: the index of it is a picture of the past.
+      dropIndex(h.overlay.trySafe('.'));
+      return restoreCheckpoint({ root: h.root, id });
+    },
+
+    /** Forget a checkpoint without restoring it. */
+    async 'checkpoints.remove'(params = {}) {
+      const h = targetFor(params);
+      const id = String(params.id ?? '').trim();
+      if (!id) throw new Error('which checkpoint? — /checkpoints remove <id>');
+      return removeCheckpoint({ root: h.root, id });
+    },
 
     /* -------------------------------------------------------------- browser */
 

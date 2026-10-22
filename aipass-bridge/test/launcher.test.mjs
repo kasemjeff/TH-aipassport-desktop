@@ -285,6 +285,12 @@ test('the detached launcher starts the backend and leaves it running', async () 
       ...process.env,
       AIPASS_HOME: home,
       AIPASS_PORT: String(bridgePort),
+      // The backend the launcher detaches is its own process, so it finds the
+      // bridge by the environment. The launcher starts that bridge on the port
+      // AIPASS_PORT names; without this line the backend looks at the default
+      // port, finds no bridge there, and starts a second one — a process this
+      // test does not own, holding the log file open.
+      AIPASS_BRIDGE: `http://127.0.0.1:${bridgePort}`,
       AIPASS_DESKTOP_NO_OPEN: '1',
     },
     out: { write: (s) => lines.push(s) },
@@ -299,8 +305,16 @@ test('the detached launcher starts the backend and leaves it running', async () 
     // And the log the launcher's own failure would point at is where it says.
     assert.ok(fs.existsSync(path.join(home, 'logs', 'desktop-backend.log')), 'the log is where it says it is');
   } finally {
-    done.backend?.kill('SIGKILL');
-    done.bridge?.kill('SIGKILL');
+    // The children hold the log files open, and Windows will not remove a
+    // file a dying process still holds — so the home goes after they are
+    // gone, or the removal fails with ENOTEMPTY.
+    const children = [done.backend, done.bridge].filter(Boolean);
+    for (const child of children) child.kill('SIGKILL');
+    await Promise.all(children.map((child) => new Promise((resolve) => {
+      if (child.exitCode !== null) return resolve();
+      const timer = setTimeout(resolve, 5000);
+      child.once('exit', () => { clearTimeout(timer); resolve(); });
+    })));
     fs.rmSync(home, { recursive: true, force: true });
   }
 });

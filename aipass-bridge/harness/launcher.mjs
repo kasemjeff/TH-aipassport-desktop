@@ -20,6 +20,11 @@ import { authHeaders } from './authtoken.mjs';
 import { backendIsUp as probeBackend } from './backend-probe.mjs';
 import { openLogFile } from './log-file.mjs';
 import { aipassHome } from './settings.mjs';
+// The janitor for the worktrees this house made (harness/worktree.mjs). A
+// worktree is a whole checkout on the person's disk, so a forgotten one is
+// litter — and the sweep is the house's shape for that (harness/sandbox.mjs's
+// sweepSandboxes), so it runs where the sandbox one runs: at the boot.
+import { sweep as sweepWorktrees } from './worktree.mjs';
 
 /** The default port the desktop backend binds. */
 export const DEFAULT_DESKTOP_PORT = 8790;
@@ -199,6 +204,14 @@ export async function runLauncher({
   err = process.stderr,
   onBusy = null,
 } = {}) {
+  // The janitor, at the boot: a worktree nobody wants is a checkout of the
+  // person's source sitting on their disk for ever. Only the ones this house
+  // made, only the ones with nothing uncommitted in them and only the ones
+  // that have sat there for a while go (harness/worktree.mjs#sweep).
+  //
+  // Best effort, like the sandbox sweep: a project that is not a repository
+  // has no worktrees, and that must never keep the window from opening.
+  void sweepWorktrees({ root }).catch(() => {});
   if (detach && (await backendIsUp(port, { env }))) {
     // `tauri dev` runs this before every launch; a backend that already
     // answers is the job done. Spawning another would only land EADDRINUSE

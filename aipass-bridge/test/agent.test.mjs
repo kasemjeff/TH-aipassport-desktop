@@ -2,7 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import { startBridge, FakeExtension, scripted, tempDir, run, AGENT } from './harness.mjs';
 import { outbound, inbound } from '../harness/waf.mjs';
 import { bootstrapSnapshot } from '../harness/loop.mjs';
@@ -499,6 +499,88 @@ test('shell commands are refused unless --allow-run is given', async (t) => {
 
   const { out } = await agent(dir);
   assert.match(out, /disabled for this run/);
+});
+
+// A shell command can do strictly more than a write, so on a terminal it is
+// shown and confirmed before it runs. A child process cannot be given a
+// terminal, so AIPASS_ASSUME_TTY says there is one — and the answer has to
+// arrive AFTER the question, so this waits for the question in the output.
+const agentAt = (dir, args = [], { answer = 'n', env = {} } = {}) => new Promise((resolve) => {
+  const child = spawn(process.execPath, [AGENT, 'task text', '--root', dir, '--bridge', bridge.base, ...args], {
+    env: { ...process.env, AIPASS_EDGE_WAITS_MS: '0', AIPASS_ASSUME_TTY: '1', ...env },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let out = '';
+  let answered = false;
+  const say = (d) => {
+    out += d;
+    if (!answered && /run it\?/.test(out)) {
+      answered = true;
+      child.stdin.write(`${answer}\n`);
+    }
+  };
+  child.stdout.on('data', say);
+  child.stderr.on('data', say);
+  // A question nobody answered would hold the run open: the child is ended.
+  const guard = setTimeout(() => child.kill(), 30_000);
+  child.on('close', (code) => {
+    clearTimeout(guard);
+    try { child.stdin.end(); } catch { /* already gone */ }
+    resolve({ code, out: out.replace(/\x1b\[[0-9;]*m/g, '') });
+  });
+});
+
+// The command leaves a trace, so "did it run" is a fact and not a log line.
+const RUNNER = "import fs from 'node:fs';\nfs.writeFileSync('ran.txt', 'x');\n";
+
+test('a RUN asks before it runs, and a declined command does not run', async (t) => {
+  const dir = tempDir({ 'write.mjs': RUNNER });
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: scripted(['RUN\nnode write.mjs\nEND', 'DONE tried']),
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agentAt(dir, ['--allow-run'], { answer: 'n' });
+  assert.match(out, /the model wants to run/, 'the command is shown before it runs');
+  assert.match(out, /run it\?/, 'and the person is asked');
+  assert.equal(fs.existsSync(path.join(dir, 'ran.txt')), false, 'the command did not run');
+});
+
+test('a RUN that is answered yes runs', async (t) => {
+  const dir = tempDir({ 'write.mjs': RUNNER });
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: scripted(['RUN\nnode write.mjs\nEND', 'DONE tried']),
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agentAt(dir, ['--allow-run'], { answer: 'y' });
+  assert.match(out, /run it\?/, 'the person was asked');
+  assert.equal(fs.existsSync(path.join(dir, 'ran.txt')), true, 'the command ran');
+});
+
+test('--apply asks nothing about a RUN — the person already said yes to everything', async (t) => {
+  const dir = tempDir({ 'write.mjs': RUNNER });
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: scripted(['RUN\nnode write.mjs\nEND', 'DONE tried']),
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agentAt(dir, ['--allow-run', '--apply'], { answer: 'n' });
+  assert.doesNotMatch(out, /run it\?/, 'no question was asked');
+  assert.equal(fs.existsSync(path.join(dir, 'ran.txt')), true, 'and the command ran');
+});
+
+test('a RUN nobody can answer still runs — off a terminal the flag is the consent', async (t) => {
+  const dir = tempDir({ 'write.mjs': RUNNER });
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: scripted(['RUN\nnode write.mjs\nEND', 'DONE tried']),
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const { out } = await agent(dir, ['--allow-run']);
+  assert.match(out, /the model wants to run/, 'the command is still shown');
+  assert.doesNotMatch(out, /run it\?/, 'but nobody was there to answer');
+  assert.equal(fs.existsSync(path.join(dir, 'ran.txt')), true, 'so the command ran');
 });
 
 test('starts its own temporary conversation by default', async (t) => {

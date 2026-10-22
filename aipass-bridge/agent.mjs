@@ -55,7 +55,19 @@ const MAX_RAW = Number(flag('max', 0));
 const MAX_STEPS = Number.isFinite(MAX_RAW) && MAX_RAW > 0 ? Math.floor(MAX_RAW) : 0;
 const APPLY = has('apply');
 const ALLOW_RUN = has('allow-run');
+// Two powers a run is GIVEN, never powers it takes: the write side of git
+// (stage, commit, branch) and the VERIFY marker. Both are off unless the
+// person who started the run said so on the command line.
+const ALLOW_GIT_WRITE = has('allow-git-write');
+const ALLOW_VERIFY = has('allow-verify');
 const MAX_RESULT = Number(flag('max-result', 3000));
+// Whether there is a person at the other end of this terminal. A shell
+// command can do strictly more than a write, so it is shown and confirmed
+// before it runs — but only where there is somebody to answer. A piped run
+// has none: there, the flag is the consent, exactly as it was before.
+// The suite cannot hand a child process a terminal, so AIPASS_ASSUME_TTY
+// says so for it.
+const INTERACTIVE = Boolean(process.stdin.isTTY) || process.env.AIPASS_ASSUME_TTY === '1';
 // How hard the model thinks before each step: off | low | medium | high | max.
 // Same default as the window's (settings.mjs 'thinking'): 'off' asks for
 // nothing and lets each model's own default stand.
@@ -386,12 +398,11 @@ const harness = new Harness({
     allowRun: ALLOW_RUN,
     allowFetch: ALLOW_FETCH,
     // `auto` asks about a shell command — it is the mode that lets WRITES
-    // through, not the one that lets the shell run unattended. The CLI has no
-    // window to ask in, so a question would be a question nobody can answer
-    // and the command would be refused. `--allow-run` is the old
-    // `--apply --allow-run`, and the old `--allow-run` was the old yolo: the
-    // person typed the flag, so the flag is the consent.
-    mode: ALLOW_RUN ? 'yolo' : 'auto',
+    // through, not the one that lets the shell run unattended. `yolo` is the
+    // old `--apply --allow-run`: the person typed both flags, so there is
+    // nothing left to ask. `--allow-run` on its own asks about every command
+    // it reaches, because a shell command can do strictly more than a write.
+    mode: ALLOW_RUN ? (APPLY ? 'yolo' : 'auto') : 'auto',
     slim: SLIM || Boolean(ASSISTANT),
     snapshot: SNAPSHOT,
     verifyCommand: VERIFY_COMMAND,
@@ -468,6 +479,38 @@ async function prompt(text) {
 
 const canPrompt = () => Boolean(process.stdin.isTTY) || !WATCH;
 
+// The permission engine asks; the CLI answers. The window answers the same
+// question with a button, and the two are the same permission engine in two
+// different modes.
+//
+// The shell is the one call worth asking about twice: a write is staged and
+// shown as a diff, but a command does what it says — on this machine, with
+// this person's account. So the command is printed as it is, and on a
+// terminal the person confirms it. Off a terminal there is nobody to ask,
+// and the flag is the consent: `--allow-run` means the run may reach the
+// shell, and a script that cannot answer does not block on a question
+// nobody can see.
+events.on('permission_request', async ({ id, kind, arg, preview }) => {
+  try {
+    const what = String(preview || arg || '').trim();
+    const verb = kind === 'run' ? 'run' : kind;
+    console.log(bold(`\nthe model wants to ${verb}:`) + '\n' + gray(what) + '\n');
+    if (!INTERACTIVE) {
+      console.log(dim('  (no terminal to ask on — the flag is the consent)'));
+      harness.answer(id, 'allow');
+      return;
+    }
+    const answer = await prompt(bold('run it? [y/N] '));
+    const yes = answer !== null && /^y(es)?$/i.test(String(answer).trim());
+    harness.answer(id, yes ? 'allow' : 'deny');
+  } catch (err) {
+    // A question that could not be asked is a question with no answer: the
+    // safe one. The run continues either way.
+    console.error(red(`\ncould not ask about that ${kind}: ${err.message}`));
+    harness.answer(id, 'deny');
+  }
+});
+
 /* ------------------------------------------------------------------- main */
 
 await harness.prepareConversation();
@@ -517,4 +560,9 @@ if (WATCH) {
   }
   rl?.close();
   console.log(dim('\ndone.'));
+} else {
+  // The run is over, so the terminal is released. A readline interface left
+  // open on stdin holds the process open, and the agent would sit there after
+  // the answer it just gave.
+  rl?.close();
 }

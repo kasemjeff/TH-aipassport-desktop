@@ -5,6 +5,7 @@
 // on two projects cannot read each other's sessions — and one window's Apply
 // button cannot write the other window's staged edits.
 import path from 'node:path';
+import { toMarkdown, toHtml, tree, resolveExportPath, writeExport } from '../export.mjs';
 
 /**
  * The session methods of the backend.
@@ -142,6 +143,49 @@ export function createSessionMethods(ctx) {
       emit('session_forked', forked.meta());
       return forked.meta();
     },
+    /**
+     * The session as a file a person can keep or send to somebody else.
+     *
+     * Every competitor has this (Devin's "Share Conversation", Claude Code's
+     * /export) and the desktop README named it as missing. The transcript is
+     * read through the store, not from the harness's memory: a session that
+     * is still being written is on the disk already (every entry is appended
+     * as it happens), and a header that lags behind the entries does not
+     * matter — the export counts the entries it read.
+     *
+     * With a path the file is written (atomically, and owner-only: a
+     * transcript is the person's own words) and the path comes back. Without
+     * one the text itself does, so the window can show it before it saves
+     * it.
+     */
+    async 'session.export'(params = {}) {
+      const h = targetFor(params);
+      const format = String(params.format ?? 'md').toLowerCase();
+      if (format !== 'md' && format !== 'html') throw new Error(`unknown export format: "${format}"`);
+      refuseForeign(h, params.id);
+      if (!params.id) throw new Error('no session given');
+      const session = h.store.load(params.id, { root: h.root });
+      if (!session) throw new Error('session not found');
+      const text = format === 'html' ? toHtml(session, { root: h.root }) : toMarkdown(session, { root: h.root });
+      if (!params.path) return { id: session.id, format, text };
+      // A relative path is relative to the project, the way every other path
+      // in the window is (a relative path is relative to the project, not to
+      // the backend).
+      const target = resolveExportPath(params.path, h.root);
+      await writeExport(target, text);
+      return { id: session.id, format, path: target };
+    },
+    /**
+     * The sessions of this project, grouped by the day they belong to.
+     *
+     * The window's own history rail groups its rows by day; this is the same
+     * grouping as data, so the /tree view and the rail cannot disagree about
+     * where a session sits.
+     */
+    async 'session.tree'(params = {}) {
+      const h = targetFor(params);
+      return tree({ root: h.root, sessions: h.store.list(h.root) });
+    },
     async conversations(params = {}) { return targetFor(params).bridge.conversations(); },
 
     /* ------------------------------------------------------- conversations */
@@ -201,6 +245,12 @@ export function createSessionMethods(ctx) {
         // the run call, so the live value is the default — an explicit run
         // param still wins.
         requirePlanApproval: Boolean(params.requirePlanApproval ?? h.options.requirePlanApproval),
+        // The two powers a run is GIVEN. The window sends them with the run;
+        // without them the run lands on the saved setting, and without the
+        // saved setting it lands on nothing — which is the point: a run never
+        // gains a power nobody handed it.
+        allowGitWrite: Boolean(params.allowGitWrite ?? h.options.allowGitWrite),
+        allowVerify: Boolean(params.allowVerify ?? h.options.allowVerify),
         maxSteps: params.maxSteps ?? h.options.maxSteps,
         maxToolCalls: params.maxToolCalls ?? h.options.maxToolCalls,
         maxWallClockMs: params.maxWallClockMs ?? h.options.maxWallClockMs,
@@ -233,15 +283,29 @@ export function createSessionMethods(ctx) {
       runSessions.set(h.root, runSessionId);
       let result = null;
       let used = 0;
+      // A new message is a new intent: a stop that asked for nothing (the
+      // button pressed when no run was in flight) must not stop this one.
+      h.clearStopRequest();
+      // The window hears "finished" once, after the LAST attempt: the
+      // attempts are one run from its point of view, and a window that hears
+      // it after the first one puts its working bar away and clears the
+      // staged attachments while the next attempt is still going.
+      const several = attempts > 1;
+      if (several) ctx.holdFinished(h.root, true);
       try {
         for (let i = 1; i <= attempts; i++) {
           used = i;
           result = await h.run(params.task, { runPluginTool: (marker, args) => plugins.runTool(marker, args) });
           const verdict = result.check?.verdict ?? null;
           if (used === attempts || verdict !== 'fail') break;
+          // A stop that landed between the attempts has no controller to
+          // abort, so the next attempt starts already stopped: the retry must
+          // not carry on with the work the person asked to stop.
+          if (h.stopRequested()) break;
           emit('note', { text: `check failed after attempt ${used} of ${attempts} — running the task again`, project: h.root, session: runSessionId });
         }
       } finally {
+        if (several) ctx.holdFinished(h.root, false);
         runSessions.delete(h.root);
       }
       return {

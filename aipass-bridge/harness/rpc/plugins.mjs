@@ -34,7 +34,15 @@ export function createPluginMethods(ctx) {
   return {
 
     /* ------------------------------------------------------------- plugins */
-    async 'plugins.list'() { return decoratedPlugins(); },
+    async 'plugins.list'() {
+      // The startup load may still be running: a window that asks in the
+      // first moments after the backend came up would be told "no plugins"
+      // and paint an empty list for the life of the window. The load is
+      // already on its way — wait for it rather than answer about a
+      // half-loaded set.
+      await ctx.pluginsReady;
+      return decoratedPlugins();
+    },
     async 'plugins.reload'() {
       await plugins.load();
       const details = decoratedPlugins();

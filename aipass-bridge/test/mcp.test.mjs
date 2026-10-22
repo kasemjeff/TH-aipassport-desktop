@@ -278,6 +278,37 @@ test('reload is how a config edit reaches the running manager', () => withHome(a
   }
 }));
 
+test('switching projects does not duplicate the MCP markers', () => withHome(async (home) => {
+  // A project switch closes the manager of the project being LEFT (rpc.mjs
+  // does it for every other harness it holds), and the next run there loads
+  // it again. The tool table belongs to the clients: a table that outlives
+  // them is told to the model twice — once for the tools that are there and
+  // once for the tools whose servers are gone — and it grows with every
+  // switch for the life of the backend.
+  const dir = tempDir();
+  const root = tempDir();
+  writeJson(path.join(home, 'mcp.json'), {
+    servers: [{ name: 'fixture', ...fixtureArgs(dir, 'switch', FIXTURE) }],
+  });
+
+  const manager = new McpManager({ root, log: () => {} });
+  try {
+    await manager.ensureLoaded();
+    assert.deepEqual(manager.toolTable().map((t) => t.marker), ['MCP__fixture__echo', 'MCP__fixture__pwd']);
+
+    manager.close(); // the switch away
+    assert.deepEqual(manager.toolTable(), [], 'closing drops the tools with the clients');
+    assert.deepEqual(manager.status(), [], 'and the rows of the servers that are gone');
+
+    await manager.ensureLoaded(); // the switch back
+    const markers = manager.toolTable().map((t) => t.marker);
+    assert.deepEqual(markers, ['MCP__fixture__echo', 'MCP__fixture__pwd'], 'the tools are back');
+    assert.equal(new Set(markers).size, markers.length, 'and each marker is listed once, not twice');
+  } finally {
+    manager.close();
+  }
+}));
+
 test('a project-scoped server is not spawned without the user approving it by name', () => withHome(async (home) => {
   // A project file is repository content: it arrives with the code, and a
   // repository that ships .aipass/mcp.json would otherwise get its program

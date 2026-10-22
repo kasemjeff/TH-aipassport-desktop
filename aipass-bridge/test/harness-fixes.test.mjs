@@ -72,13 +72,13 @@ test('the spill directory is out of every listing, but still readable', async ()
   assert.ok(search.includes('a.ts'), 'the real file is still found');
   assert.ok(!search.includes('.aipass'), `an earlier run's spill is not searchable:\n${search}`);
 
-  const listing = tools.list('.').split('\n');
+  const listing = (await tools.list('.')).split('\n');
   assert.ok(listing.includes('a.ts'));
   assert.ok(!listing.some((n) => n.startsWith('.aipass')), `.aipass is skipped: ${listing.join(', ')}`);
 
   // SKIP governs listing/search/glob only. The locator spill() returns points
   // the model straight back at one of these files, so that path must survive.
-  const back = tools.read('.aipass/spill/x.txt');
+  const back = await tools.read('.aipass/spill/x.txt');
   assert.ok(back.includes('needle from an earlier run'), 'NEED file still reads the spill');
 
   const globbed = await tools.glob('**/*.txt');
@@ -135,7 +135,7 @@ test('git refuses the forms that delete, write or reach another repository', asy
 
   for (const bad of DANGEROUS) {
     const out = await tools.git(bad);
-    assert.match(out, /^err: only read-only git subcommands are allowed/, `refused: ${bad}`);
+    assert.match(out, /^err: (?:only read-only git subcommands are allowed|git write subcommands are not allowed)/, `refused: ${bad}`);
     assert.ok(out.includes(bad), `the message names what was tried: ${out}`);
   }
 
@@ -145,7 +145,7 @@ test('git refuses the forms that delete, write or reach another repository', asy
     assert.ok(!/^err: only read-only git subcommands/.test(await tools.git(ok)), `allowed: ${ok}`);
   }
   for (const refused of ['stash', 'stash apply', 'branch -a', 'tag -l', 'remote -v']) {
-    assert.match(await tools.git(refused), /^err: only read-only git subcommands are allowed/, `refused: ${refused}`);
+    assert.match(await tools.git(refused), /^err: (?:only read-only git subcommands are allowed|git write subcommands are not allowed)/, `refused: ${refused}`);
   }
 });
 

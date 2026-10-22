@@ -16,33 +16,64 @@
  * quotation, never a call. One honest gap: a plugin marker is known here only
  * after plugins.list has reported it, and its body is eaten only when the
  * report says takesBody.
+ *
+ * The keyword list is the window's copy of the harness's MARKER_LINE
+ * (protocol.mjs): the protocol grew VERIFY and TASK: and this file did not,
+ * so a VERIFY line showed up in the bubble as the raw wire it is. The list is
+ * exported and compared with the harness's, keyword for keyword — a marker the
+ * harness grows and the window does not is a failed parity test, not a bubble
+ * full of protocol.
  */
 
 const FENCE_LINE = /^\s*(```|~~~)/;
 
 // The single-line calls, mirrored from protocol.parse() in its own order.
+// Every rule names the keyword it reads, so the exported list below is the
+// walk's own list and cannot drift away from what the walk understands.
 const SINGLE = [
   // `dir`/`list`/`ls` all mean the listing; `file` means a read. Mirrors
   // parse()'s alias branch.
-  { re: /^\s*NEED\s+(dir|list|ls|file)\s+(.+?)\s*$/i, pick: (m) => ({ kind: m[1].toLowerCase() === 'file' ? 'read' : 'list', arg: m[2].trim() }) },
+  { marker: 'NEED', re: /^\s*NEED\s+(dir|list|ls|file)\s+(.+?)\s*$/i, pick: (m) => ({ kind: m[1].toLowerCase() === 'file' ? 'read' : 'list', arg: m[2].trim() }) },
   // A bare listing word with the path forgotten — the project root.
-  { re: /^\s*NEED\s+(?:dir|list|ls)\s*$/i, pick: () => ({ kind: 'list', arg: '.' }) },
+  { marker: 'NEED', re: /^\s*NEED\s+(?:dir|list|ls)\s*$/i, pick: () => ({ kind: 'list', arg: '.' }) },
   // The bare file shape — `NEED events.mjs` — mirroring parse()'s fallback.
-  { re: /^\s*NEED\s+([^\s]+(?: \d+-\d+)?)\s*$/i, pick: (m) => ({ kind: 'read', arg: m[1].trim() }) },
-  { re: /^\s*SEARCH\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'search', arg: m[1].trim() }) },
-  { re: /^\s*GLOB\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'glob', arg: m[1].trim() }) },
+  { marker: 'NEED', re: /^\s*NEED\s+([^\s]+(?: \d+-\d+)?)\s*$/i, pick: (m) => ({ kind: 'read', arg: m[1].trim() }) },
+  { marker: 'SEARCH', re: /^\s*SEARCH\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'search', arg: m[1].trim() }) },
+  { marker: 'GLOB', re: /^\s*GLOB\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'glob', arg: m[1].trim() }) },
   // The code-navigation markers — mirrored from parse()'s rules, or the bubble
   // would show raw wire the moment a model used one.
-  { re: /^\s*SYMBOLS\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'symbols', arg: m[1].trim() }) },
-  { re: /^\s*DEF\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'def', arg: m[1].trim() }) },
-  { re: /^\s*REFS\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'refs', arg: m[1].trim() }) },
-  { re: /^\s*SKILL\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'skill', arg: m[1].trim() }) },
-  { re: /^\s*GIT\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'git', arg: m[1].trim() }) },
-  { re: /^\s*FETCH\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'fetch', arg: m[1].trim() }) },
-  { re: /^\s*WEB\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'web', arg: m[1].trim() }) },
-  { re: /^\s*ATTACH\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'attach', arg: m[1].trim() }) },
-  { re: /^\s*DELETE\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'delete', arg: m[1].trim() }) },
-  { re: /^\s*MOVE\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'move', arg: m[1].trim() }) },
+  { marker: 'SYMBOLS', re: /^\s*SYMBOLS\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'symbols', arg: m[1].trim() }) },
+  { marker: 'DEF', re: /^\s*DEF\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'def', arg: m[1].trim() }) },
+  { marker: 'REFS', re: /^\s*REFS\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'refs', arg: m[1].trim() }) },
+  { marker: 'SKILL', re: /^\s*SKILL\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'skill', arg: m[1].trim() }) },
+  { marker: 'GIT', re: /^\s*GIT\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'git', arg: m[1].trim() }) },
+  // VERIFY — the model asks for the project's check. The command is optional,
+  // so the shape is parse()'s: the keyword may stand alone.
+  { marker: 'VERIFY', re: /^\s*VERIFY\s*(.*?)\s*$/i, pick: (m) => ({ kind: 'verify', arg: m[1].trim() }) },
+  // RECALL — the model asks what this project said before. The question is
+  // required, so the shape is parse()'s: the keyword needs its argument.
+  { marker: 'RECALL', re: /^\s*RECALL\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'recall', arg: m[1].trim() }) },
+  { marker: 'FETCH', re: /^\s*FETCH\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'fetch', arg: m[1].trim() }) },
+  { marker: 'WEB', re: /^\s*WEB\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'web', arg: m[1].trim() }) },
+  { marker: 'ATTACH', re: /^\s*ATTACH\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'attach', arg: m[1].trim() }) },
+  { marker: 'DELETE', re: /^\s*DELETE\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'delete', arg: m[1].trim() }) },
+  { marker: 'MOVE', re: /^\s*MOVE\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'move', arg: m[1].trim() }) },
+];
+
+/**
+ * The keywords that are wire even when nothing acts on them.
+ *
+ * The harness hides these lines from the prose (protocol.MARKER_LINE): a
+ * stray END, a TASK: line — they are protocol, not writing, and a bubble that
+ * showed them would show the model its own wire. The harness's parse() has no
+ * rule for them either, so they make no call here either: the walk drops the
+ * line and moves on.
+ */
+const WIRE_ONLY = [
+  { marker: 'FIND', re: /^\s*FIND\s*$/i },
+  { marker: 'NEW', re: /^\s*NEW\s*$/i },
+  { marker: 'END', re: /^\s*END\s*$/i },
+  { marker: 'TASK', re: /^\s*TASK\s*:/i },
 ];
 
 const EDIT_LINE = /^\s*EDIT\s+(.+?)\s*$/i;
@@ -52,6 +83,10 @@ const PLAN_LINE = /^\s*PLAN\s*$/i;
 const TODO_LINE = /^\s*TODO\s*$/i;
 const SUBAGENT_LINE = /^\s*SUBAGENT\s*$/i;
 const JOBS_LINE = /^\s*JOBS\s*$/i;
+
+// The block markers: a keyword, a body, and the line that ends it. Named here
+// so the exported keyword list below is the walk's own list.
+const BLOCK_MARKERS = ['EDIT', 'CREATE', 'RUN', 'PLAN', 'TODO', 'SUBAGENT', 'JOBS'];
 // Mirrors parse()'s ASK tail: the keyword may carry a colon or a dash before
 // the question, and the question itself is required — a bare ASK is prose.
 const ASK_LINE = /^\s*ASK\b[:\s—–-]*(.+)$/i;
@@ -149,6 +184,18 @@ function walk(reply, plugins) {
     m = DONE_LINE.exec(line);
     if (m) { i += 1; calls.push({ kind: 'done', arg: m[1].trim() }); continue; }
 
+    // The keywords that are wire and nothing else. The harness hides them from
+    // the prose (protocol.MARKER_LINE) and acts on none of them, so the walk
+    // drops the line too — and a built-in name is never shadowed by a plugin's.
+    let wire = false;
+    for (const w of WIRE_ONLY) {
+      if (!w.re.test(line)) continue;
+      i += 1;
+      wire = true;
+      break;
+    }
+    if (wire) continue;
+
     // Plugin markers last: a built-in name is never shadowed by one.
     let matchedPlugin = false;
     for (const p of pluginList) {
@@ -173,6 +220,23 @@ function walk(reply, plugins) {
 export function scan(reply, { plugins = [] } = {}) {
   return walk(reply, plugins).calls;
 }
+
+/**
+ * Every keyword the window's walk knows.
+ *
+ * The window's copy of the harness's marker table (protocol.mjs MARKER_LINE),
+ * built from the rules above so it cannot claim a keyword the walk does not
+ * read. The parity test compares it with the harness's own list: the protocol
+ * grew VERIFY and TASK: once, and this file did not — and a marker the window
+ * does not know shows up in the bubble as the raw wire it is.
+ */
+export const MARKER_KEYWORDS = [...new Set([
+  ...SINGLE.map((s) => s.marker),
+  ...BLOCK_MARKERS,
+  ...WIRE_ONLY.map((w) => w.marker),
+  'ASK',
+  'DONE',
+])].sort();
 
 /** The reply's prose, with every marker call (headers and bodies) dropped. */
 export function transcript(reply, plugins = []) {

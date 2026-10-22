@@ -126,7 +126,7 @@ test('SessionStore.default resolves under the home directory', () => {
   assert.ok(path.resolve(store.dir).endsWith(path.join('.aipass', 'sessions')));
 });
 
-test('spill files are pruned to the newest N, foreign files untouched', () => {
+test('spill files are pruned to the newest N, foreign files untouched', async () => {
   const dir = tmp();
   try {
     for (let i = 0; i < 8; i++) {
@@ -137,17 +137,17 @@ test('spill files are pruned to the newest N, foreign files untouched', () => {
     }
     fs.writeFileSync(path.join(dir, 'keep.md'), 'not a spill');
 
-    pruneSpill(dir, 5);
+    await pruneSpill(dir, 5);
     const left = fs.readdirSync(dir).sort();
     assert.equal(left.length, 6, 'five spills plus the foreign file');
     assert.ok(left.includes('keep.md'), 'non-spill files are never swept');
     for (const gone of ['s0.txt', 's1.txt', 's2.txt']) assert.ok(!left.includes(gone), `${gone} was the oldest`);
     for (const kept of ['s7.txt', 's6.txt', 's5.txt']) assert.ok(left.includes(kept), `${kept} is the newest`);
 
-    pruneSpill(dir, 0);
+    await pruneSpill(dir, 0);
     assert.deepEqual(fs.readdirSync(dir), ['keep.md'], 'a cap of zero clears every spill');
 
-    pruneSpill(path.join(dir, 'missing'), 5); // must not throw on a missing directory
+    await pruneSpill(path.join(dir, 'missing'), 5); // must not throw on a missing directory
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

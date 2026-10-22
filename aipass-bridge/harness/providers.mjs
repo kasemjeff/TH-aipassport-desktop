@@ -118,9 +118,14 @@ export function sanitizeSpec(raw = {}) {
   const anthropicVersion = typeof raw.anthropicVersion === 'string' && raw.anthropicVersion.trim()
     ? raw.anthropicVersion.trim().slice(0, 40)
     : null;
+  // The deadline for this provider's model list, when it needs longer than
+  // the default. The client reads it, so the spec has to KEEP it — a row
+  // that loses the field falls back to the default deadline silently.
+  const modelsTimeoutMs = Number(raw.modelsTimeoutMs) > 0 ? Math.floor(Number(raw.modelsTimeoutMs)) : null;
   return {
     id, label, kind, baseUrl, apiKeyEnv, models, defaultModel, headers,
     apiKeyHeader: header, apiKeyPrefix, maxTokens, anthropicVersion,
+    modelsTimeoutMs,
   };
 }
 
@@ -140,6 +145,7 @@ export function publicSpec(spec) {
     apiKeyPrefix: spec.apiKeyPrefix ?? null,
     maxTokens: spec.maxTokens ?? null,
     anthropicVersion: spec.anthropicVersion ?? null,
+    modelsTimeoutMs: spec.modelsTimeoutMs ?? null,
     builtin: Boolean(spec.builtin),
   };
 }

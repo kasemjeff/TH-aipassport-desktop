@@ -78,42 +78,42 @@ test('an empty RUN says what to do instead of running nothing', async () => {
   assert.match(out, /^err: the RUN block has no command/);
 });
 
-test('MOVE refuses to land on an existing file, and a free name still works', () => {
+test('MOVE refuses to land on an existing file, and a free name still works', async () => {
   const dir = mkTracked({ 'a.txt': 'one\n', 'b.txt': 'two\n' });
   const tools = toolsIn(dir);
   const out = tools.move('a.txt b.txt');
   assert.match(out, /^err: b\.txt already exists/);
   assert.match(out, /DELETE b\.txt/);
-  assert.match(tools.read('b.txt'), /two/, 'the file that was there is untouched');
+  assert.match(await tools.read('b.txt'), /two/, 'the file that was there is untouched');
   assert.match(tools.move('a.txt c.txt'), /^marked: move a\.txt → c\.txt/);
 });
 
-test('a spill read hands back the verbatim range — never a spill of a spill', () => {
+test('a spill read hands back the verbatim range — never a spill of a spill', async () => {
   const rows = Array.from({ length: 300 }, (_, i) => `row ${i + 1} ${'y'.repeat(160)}`);
   const dir = mkTracked({ 'big.txt': rows.join('\n') + '\n' });
   const tools = toolsIn(dir);
 
-  const first = tools.read('big.txt');
+  const first = await tools.read('big.txt');
   const loc = first.match(/NEED file (\.aipass\/spill\/[a-f0-9]+\.txt) (\d+)-(\d+)/);
   assert.ok(loc, `the first read spilled and handed a locator:\n${first.slice(0, 300)}`);
   const start = Number(loc[2]);
 
   // The whole suggested range is too big for one message: it is cut here,
   // not spilled again — no second locator, no nested file.
-  const whole = tools.read(`${loc[1]} ${loc[2]}-${loc[3]}`);
+  const whole = await tools.read(`${loc[1]} ${loc[2]}-${loc[3]}`);
   assert.match(whole, /the range was cut/, 'a giant range is cut');
   assert.doesNotMatch(whole, /more bytes,/, 'a spill read is never spilled again');
 
   // A range that fits comes back exactly as the content sits on disk: one
   // gutter (the original), no second layer of numbering.
-  const page = tools.read(`${loc[1]} ${start}-${start + 50}`);
+  const page = await tools.read(`${loc[1]} ${start}-${start + 50}`);
   assert.doesNotMatch(page, /more bytes,/, 'still no second spill');
   assert.doesNotMatch(page, /^\s*\d+ \| \s*\d+ \| /m, 'no second gutter stacked on the first');
   assert.match(page, new RegExp(`row ${start} `));
   assert.match(page, new RegExp(`row ${start + 50} `));
 });
 
-test('the spill locator starts where the head really ended, not where the byte cap guessed', () => {
+test('the spill locator starts where the head really ended, not where the byte cap guessed', async () => {
   // The start line was guessed from the byte cap (80 characters a line), and
   // the cap says nothing about how long the lines are: on long-lined files
   // the guess pointed past lines the model had never seen, so the range it
@@ -122,7 +122,7 @@ test('the spill locator starts where the head really ended, not where the byte c
   const dir = mkTracked({ 'long.txt': rows.join('\n') + '\n' });
   const tools = toolsIn(dir);
 
-  const out = tools.read('long.txt');
+  const out = await tools.read('long.txt');
   const loc = out.match(/NEED file (\.aipass\/spill\/[a-f0-9]+\.txt) (\d+)-(\d+)/);
   assert.ok(loc, `the read spilled and handed a locator:\n${out.slice(0, 300)}`);
 
@@ -137,6 +137,6 @@ test('the spill locator starts where the head really ended, not where the byte c
 
   // Nothing is skipped: the row the head broke on is the row the range opens
   // with.
-  const page = tools.read(`${loc[1]} ${loc[2]}-${Number(loc[2]) + 1}`);
+  const page = await tools.read(`${loc[1]} ${loc[2]}-${Number(loc[2]) + 1}`);
   assert.match(page, new RegExp(`row ${firstMissing} `), 'the row after the head is the row the range starts with');
 });

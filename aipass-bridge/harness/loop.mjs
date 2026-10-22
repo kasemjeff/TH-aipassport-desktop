@@ -28,7 +28,13 @@ import {
 } from './protocol.mjs';
 import { decode } from './bridge.mjs';
 import { classify, classifyPlugin, isGitCommit } from './permissions.mjs';
-import { posix } from './overlay.mjs';
+import { posix, DELETED } from './overlay.mjs';
+// The undo of an apply (harness/checkpoints.mjs): taken BEFORE the write, so
+// the bytes a restore puts back are the bytes that were really there.
+import { take as takeCheckpoint } from './checkpoints.mjs';
+import { sharedWriteRefusal } from './sandbox.mjs';
+// The GIT grammar, one owner with the tool and the permission engine.
+import { parseGitArg } from './git.mjs';
 import { PATHY, pathVariants, beYearNote } from './argguard.mjs';
 import { validateCall } from './validate.mjs';
 import { RunContext } from './run/context.mjs';
@@ -47,11 +53,16 @@ const MUTATING = new Set(['write', 'replace', 'delete', 'move']);
 const CODE_FILE = /\.(m?js|cjs|tsx?|jsx|py|rb|go|rs|java|cs|php|swift|kt|c|h|cpp|hpp|sh|ps1|css|html?|sql)$/i;
 
 // (chain guard) After a change has failed in the same reply, only calls whose
-// outcome cannot touch the tree keep running — reads, git, web, control
-// markers. Another edit or a RUN would act on the state the reply was planned
-// against, and one real error cascading into three consequential ones is how
-// a step gets lost. (Research round, after the false-success findings.)
-const SURVIVES_FAILURE = (kind) => !MUTATING.has(kind) && kind !== 'run';
+// outcome cannot touch the tree keep running — reads, exfil, control markers.
+// Another edit, a shell command, a git write or a VERIFY would act on the
+// state the reply was planned against, and one real error cascading into
+// three consequential ones is how a step gets lost. The risk tier comes from
+// the same classifier the permission gate uses, so a git commit and a plugin
+// marker are judged by what they do, not by the name of their kind.
+const SURVIVES_FAILURE = (call) => {
+  const tier = classify(call.kind, call.body, call.arg);
+  return tier === 'read' || tier === 'exfil';
+};
 
 /**
  * (research) The signature of one failure, for the err-loop guard: the first
@@ -95,7 +106,7 @@ const previewOf = (call) => {
 export async function bootstrapSnapshot(tools, root) {
   const parts = [];
   try {
-    const status = String(await tools.git('status --short')).trim();
+    const status = String(await tools.git('status --short')).trimEnd();
     if (status && !/^err:/i.test(status)) {
       const lines = status.split('\n');
       const shown = lines.slice(0, 15).map((l) => `  ${l}`).join('\n');
@@ -204,7 +215,7 @@ export async function runTask(taskText, ctx = {}) {
   const reminder = run.waf ? REMINDER : REMINDER_HEAD + REMINDER_TAIL;
 
   let listing = '';
-  try { listing = run.waf ? outbound(tools.list('.')) : tools.list('.'); } catch { /* ignore */ }
+  try { listing = run.waf ? outbound(await tools.list('.')) : await tools.list('.'); } catch { /* ignore */ }
 
   // (bootstrap snapshot) The head start a fresh run otherwise spends round
   // trips discovering: whether the project is a repo and what is uncommitted,
@@ -241,6 +252,10 @@ export async function runTask(taskText, ctx = {}) {
     subagent: Boolean(run.options.subagent),
     searchI: Boolean(run.options.searchI),
     attach: Boolean(run.options.attach),
+    // The VERIFY marker: the model may ask for a check. It is taught behind
+    // an option, because the preamble's bytes are pinned by the recorded
+    // replay (evals/fixtures/).
+    verify: Boolean(run.options.allowVerify),
     plugins: pluginTools,
     lang: replyLanguage,
   });
@@ -474,7 +489,12 @@ export async function runTask(taskText, ctx = {}) {
       // has not passed at the current tree state. The gate sits ahead of the
       // permission ask on purpose: this is not a question to override, it is
       // "run the check first" — the command that un-bars it is named in full.
-      if (run.options.allowRun && call.kind === 'run' && isGitCommit(call.body)) {
+      // The GIT marker's own commit is the same act, so it meets the same
+      // gate: a way around the gate would make the gate a suggestion.
+      const commits = call.kind === 'run'
+        ? isGitCommit(call.body)
+        : (call.kind === 'git' && parseGitArg(call.arg)?.op === 'commit');
+      if (run.options.allowRun && commits) {
         const declared = run.declaredCheckCommand();
         if (declared && run.declaredPassAt !== run.mutations) {
           run.commitBlocks += 1;
@@ -555,7 +575,7 @@ export async function runTask(taskText, ctx = {}) {
       // refusal just invalidated. It does not run — the model gets the skip
       // spelled out and re-plans from the new state; reads keep running,
       // because they are how it learns that state.
-      if (brokenBy && !SURVIVES_FAILURE(call.kind)) {
+      if (brokenBy && !SURVIVES_FAILURE(call)) {
         run.chainSkips += 1;
         if (!chainNoted) {
           chainNoted = true;
@@ -966,9 +986,22 @@ export const SUBAGENT_ROLES = {
 async function execute(call, run) {
   const { tools, permissions, events, subagent, todoState, session, options, runPluginTool, backgroundJobs } = run;
 
+  // VERIFY — the model asks for a check. Its shape is checked here (the
+  // generic shape check knows the tool table's kinds, and VERIFY is the
+  // loop's own), and from there it rides the permission gate below like any
+  // other call: it runs a command, so it is a shell call and the person is
+  // asked before it runs.
+  const isVerify = call.kind === 'verify';
+  if (isVerify && /[\r\n]/.test(String(call.arg ?? ''))) {
+    return 'err: VERIFY takes one command on its own line — a second line is a second call.';
+  }
+
   // One shape check before anything is dispatched: built-in tools, plugin
   // markers and MCP tools all answer a malformed call with the same `err: …`
   // sentence, and no tool implementation has to own the parser's contract.
+  // VERIFY is a built-in kind now, so it rides the same shape check as every
+  // other call; the one VERIFY-specific guard (a second line is a second call)
+  // stays above it.
   const invalid = validateCall(call, { pluginTools: options?.pluginTools ?? [], runPluginTool });
   if (invalid) return invalid;
 
@@ -1088,10 +1121,17 @@ async function execute(call, run) {
     }
   }
 
-  const risk = classify(call.kind, call.body);
+  // The risk of the call, with its ARGUMENT: a GIT write is a write, and the
+  // argument is what says so (`GIT status` reads, `GIT commit` writes). A
+  // write classified as a read would go through the gate without a question.
+  const risk = classify(call.kind, call.body, call.arg);
   // Shell when it was never enabled: the tool itself owns that message, and
   // letting the gate refuse it instead would hide why.
   if (call.kind === 'run' && !options.allowRun) return await tools.run('', call.body);
+  // The same for a VERIFY: the check needs the shell, and the tool owns that
+  // message — a question the person cannot answer with "yes, run the shell"
+  // would only hide the reason.
+  if (isVerify && !options.allowRun) return await tools.verify(call.arg, call.body);
   if (permissions) {
     const verdict = permissions.evaluate({ kind: call.kind, arg: call.arg, body: call.body });
     if (risk === 'read') {
@@ -1120,9 +1160,63 @@ async function execute(call, run) {
  * posix-relative paths; null means everything.
  */
 export function applyOverlay(overlay, accepted = null, { session = null, events = null } = {}) {
-  const wanted = accepted ? new Set(accepted.map((f) => overlay.safe(f))) : null;
+  const wanted = accepted ? new Set(accepted.map((f) => overlay.safe(f))) : new Set(overlay.keys());
+  // A staged write into a directory the projection SHARES with the real
+  // project (node_modules, dist) would land in the user's own tree. The tool
+  // path refuses such a change when it is staged; one staged before the rule
+  // existed is refused HERE, at the moment it would touch the disk — and it is
+  // named, so the person knows why their file did not change.
+  for (const abs of [...wanted]) {
+    const why = sharedWriteRefusal(overlay.root, abs);
+    if (!why) continue;
+    wanted.delete(abs);
+    session?.append('note', { text: why });
+    events?.emit('note', { text: why });
+  }
+  // The checkpoint goes in BEFORE the first byte is written: the bytes that
+  // are on the disk right now are the bytes a restore puts back. It lives
+  // outside the project (root rule 1) and it is what makes an apply
+  // reversible — without it the only way back was `git restore` by hand.
+  const checkpoint = checkpointOf(overlay, wanted);
+  if (checkpoint?.error) {
+    const why = `checkpoint: this apply cannot be undone — ${checkpoint.error}`;
+    session?.append('note', { text: why });
+    events?.emit('note', { text: why });
+  }
   const result = overlay.applyToDisk(wanted);
   for (const file of result.files) session?.append('diff', { file, decision: 'applied' });
   events?.emit('applied', result);
+  // The checkpoint is either a descriptor of one or nothing: a checkpoint that
+  // could not be taken is reported in the note above, not as a half answer.
+  result.checkpoint = checkpoint?.id ? checkpoint : null;
   return result;
+}
+
+/**
+ * The checkpoint of the files an apply is about to write.
+ *
+ * The bytes are read from the disk at this moment, not from the overlay's
+ * memory of them: the person may have edited a file between the stage and
+ * the apply, and a restore has to put back what was really there.
+ *
+ * A checkpoint that cannot be taken must not stop the apply — the apply is
+ * the person's explicit act — but it says so, because an apply that cannot
+ * be undone is a different thing from one that can.
+ */
+function checkpointOf(overlay, wanted) {
+  try {
+    const changes = overlay.entries()
+      .filter(([abs]) => !wanted || wanted.has(abs))
+      .map(([abs, value]) => ({
+        abs,
+        file: posix(path.relative(overlay.root, abs)),
+        deleted: value === DELETED,
+        after: value === DELETED ? null : value,
+      }));
+    if (!changes.length) return null;
+    const meta = takeCheckpoint({ root: overlay.root, changes });
+    return meta ? { id: meta.id, createdAt: meta.createdAt, files: meta.files.map((f) => f.path) } : null;
+  } catch (err) {
+    return { error: String(err?.message ?? err) };
+  }
 }

@@ -34,6 +34,7 @@
  * @property {Function} stageAttachment  stage one attachment
  * @property {Function} dropAttachment   unstage one attachment
  * @property {Function} partsFor         the attachment parts of a send
+ * @property {Function} holdFinished     hold a project's "finished" frame (attempts)
  * @property {Function} fileIndex        the tree index of one project
  * @property {Function} dropIndex        forget the tree index of one project
  * @property {Function} checkForUpdates  ask the signed feed what is out there

@@ -25,7 +25,12 @@ const state = createState();
 
 // The backend client: one place knows the loopback token, the project header
 // every call carries, and the shape of a refusal (see rpc.js).
-const client = createRpcClient({ getRoot: () => state.root });
+//
+// The header names the folder the window is WORKING in, which is the project
+// itself or the worktree the run is in: inside a worktree every call has to
+// be about that checkout, or the diffs, the files and the apply would all
+// talk about the project the worktree was made from.
+const client = createRpcClient({ getRoot: () => state.runRoot ?? state.root });
 const rpc = client.rpc;
 
 /* ---------------------------------------------------------------- helpers */
@@ -250,11 +255,31 @@ ctx.paintPluginPanels = paintPluginPanels;
 ctx.refreshPanels = refreshPanels;
 ctx.applyTheme = applyTheme;
 ctx.applySettingsToUi = applySettingsToUi;
+// The surfaces the palette reaches: the undo points, the export, the tree and
+// the state of the machine's own work (git, the schedule, the media models).
+ctx.showCheckpoints = showCheckpoints;
+ctx.exportSession = exportSession;
+ctx.showSessionTree = showSessionTree;
+ctx.showGitStatus = showGitStatus;
+ctx.showSchedule = showSchedule;
+ctx.showMediaModels = showMediaModels;
+ctx.showWorktrees = showWorktrees;
 
 const transcript = createTranscript(ctx);
 // The transcript's own words are what every other module writes into.
 Object.assign(ctx, transcript);
 const { addTask, addNote, addCommandOut, assistantText, assistantSummary, replayAssistant, thinkingText, foldThinking, endTurn, foldRun, addTool, paintCacheStats, bubbleSays } = transcript;
+
+/**
+ * The word a tool row shows.
+ *
+ * The rows carry the loop's own kind names, and the label table lives with
+ * the transcript. VERIFY — the loop's own kind, the marker that asks for the
+ * project's check — has no entry in that table, so the row would read
+ * "verify" where every other row reads a word. The label is applied here.
+ */
+const TOOL_KIND = { verify: 'Verify' };
+const toolKind = (kind) => TOOL_KIND[kind] ?? kind;
 
 // The rail: the session list, the playbooks and the facts the app remembers.
 const sessionsPanel = createSessionsPanel(ctx);
@@ -610,7 +635,7 @@ async function restoreFromSnapshot() {
     // and the next assistant entry starts a new bubble, the way the live
     // stream splits them at every `step` event.
     else if (entry.type === 'todo' && Array.isArray(entry.items)) renderTodo(entry.items);
-    else if (entry.type === 'tool') { addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '', sources: entry.sources }); state.assistant = null; }
+    else if (entry.type === 'tool') { addTool({ kind: toolKind(entry.kind), arg: entry.arg, ok: entry.ok, head: '', sources: entry.sources }); state.assistant = null; }
     else if (entry.type === 'note') addNote(entry.text);
   }
   endTurn();
@@ -675,17 +700,29 @@ setInterval(() => {
  */
 const sameProject = (a, b) => String(a).replace(/\\/g, '/').toLowerCase() === String(b).replace(/\\/g, '/').toLowerCase();
 
+/**
+ * Is this project one of ours?
+ *
+ * Two, when the window is inside a worktree: the project the worktree was
+ * made from, and the worktree itself. The run's frames carry the folder they
+ * happened in, and a frame from the worktree is as much ours as one from the
+ * project — otherwise the run in the worktree would be invisible.
+ */
+const isOwnProject = (project) => !project || !state.root
+  || sameProject(project, state.root)
+  || (state.runRoot && sameProject(project, state.runRoot));
+
 /** null when the event belongs to this window's project; otherwise the
  *  project's folder name, for the answer surfaces that show anyway. */
 function foreignProject(project) {
-  if (!project || !state.root || sameProject(project, state.root)) return null;
+  if (!project || isOwnProject(project)) return null;
   return String(project).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(project);
 }
 
 function onRun(name, fn) {
   stream.addEventListener(name, (e) => {
     const data = JSON.parse(e.data);
-    if (data.project && state.root && !sameProject(data.project, state.root)) return;
+    if (data.project && state.root && !isOwnProject(data.project)) return;
     // A run's frames name the session that run writes to (rpc.mjs tags them
     // at the harness boundary). A window showing a different session must not
     // take them: an `assistant_delta` would write a running task into an old
@@ -757,6 +794,19 @@ onAny('tab_opened', (data) => {
   state.needsTab = false;
   addNote(`เปิด ${data.url} ในบราวเซอร์แล้ว — รอสักครู่แล้วส่งใหม่`);
   refreshReadiness();
+});
+/* The frames the window missed -----------------------------------------------
+ *
+ * The backend's fan-out keeps a bounded queue per subscriber and drops the
+ * OLDEST frames when a window stops reading — a backgrounded window, a
+ * suspended laptop. It counts what it dropped and says so in a frame of its
+ * own. A window that silently loses frames is a window that shows a run it
+ * did not fully see, so the loss is a line in the conversation.
+ */
+onAny('fell_behind', (data) => {
+  const dropped = Number(data?.dropped ?? 0);
+  if (!dropped) return;
+  addNote(`ตกหล่น ${dropped} ข้อความจาก backend (หน้าต่างไม่ได้อ่านเร็วพอ) — บทสนทนาที่เหลืออาจไม่ครบ`);
 });
 /* The extension's token ----------------------------------------------------
  *
@@ -855,7 +905,7 @@ onRun('thinking', (data) => {
   log.append(el('div', 'thinking', '⎿ ' + text));
   scrollDown();
 });
-onRun('tool', (data) => addTool(data));
+onRun('tool', (data) => addTool({ ...data, kind: toolKind(data.kind) }));
 onRun('note', (data) => addNote(data.text));
 onRun('firewall_note', (data) => addNote(data.text));
 onRun('nudge', (data) => addNote(`no marker in that reply — nudging (${data.n}/2)`));
@@ -989,12 +1039,10 @@ onRun('finished', async (data) => {
   for (const id of state.attachments.keys()) rpc('attachment.remove', { id }).catch(() => {});
   state.attachments.clear();
   renderAttachments();
-  // Repaint every panel the settings sheet holds, in place — a finished run is
-  // exactly when the scratchpad's history changed. With the sheet closed there
-  // is no panel on screen, and nothing to repaint.
-  if (state.panelHost) {
-    for (const box of state.panelHost.children) if (box.dataset.panel) await paintPanel(box, box.dataset.panel);
-  }
+  // Repaint every panel the plugins draw, in place — a finished run is
+  // exactly when the scratchpad's history changed. The panels are in the rail
+  // as well as in the sheet, and both are repainted.
+  await repaintPanels();
   await refreshPending();
 });
 onRun('applied', (data) => {
@@ -1046,6 +1094,22 @@ const saveDraft = () => {
 $('task').addEventListener('input', saveDraft);
 $('task').value = loadDraft();
 
+/**
+ * The options a run carries, when the machine has them.
+ *
+ * The two switches the option sheet owns are read from the settings the
+ * window already holds. A key the machine does not know is left out rather
+ * than sent as false: a backend that does not have the option keeps its own
+ * default, and one that has it gets the person's choice.
+ */
+function runOptions() {
+  const out = {};
+  const s = state.settings ?? {};
+  if (s.allowGitWrite !== undefined) out.allowGitWrite = Boolean(s.allowGitWrite);
+  if (s.allowVerify !== undefined) out.allowVerify = Boolean(s.allowVerify);
+  return out;
+}
+
 async function sendTask(seed = null) {
   const text = (seed ?? $('task').value).trim();
   if (!text) return;
@@ -1080,15 +1144,26 @@ async function sendTask(seed = null) {
   try {
     await rpc('run', {
       task: text,
-      // The project this window shows. The backend runs where the window is
-      // looking even if another window switched it since (rpc.mjs run).
-      root: state.root ?? undefined,
+      // Where the run works. Normally the project the window is showing; a
+      // worktree is a SECOND checkout of the same repository, and the run has
+      // to land in it — the harness's root is that folder, so every tool path
+      // is confined to it and the overlay writes there. The backend reads the
+      // project before the root (rpc.mjs's targetFor), so the worktree is
+      // named as the project: the header alone would not do, because the
+      // window's project is still the project the worktree was made from.
+      project: state.runRoot ?? undefined,
+      root: state.runRoot ?? state.root ?? undefined,
       // The select's 'plan' view is not a permission mode: the approved plan is
       // the consent, so the run works under 'auto'. Everything else goes as-is.
       mode: $('mode').value === 'plan' ? 'auto' : ($('mode').value || undefined),
       model: $('model').value || undefined,
       attachments: [...state.attachments.keys()],
       title: text.slice(0, 60),
+      // The two switches the option sheet owns: the model may write to git,
+      // and it may ask for the project's check. They ride the run the way
+      // every other option does — and only when the machine has them, so a
+      // backend that does not know the option keeps its own default.
+      ...runOptions(),
     });
   } catch (err) {
     addNote(`error: ${friendly(err.message)}`);
@@ -1400,10 +1475,7 @@ function openHelp() {
 
   section('พิมพ์ / เพื่อสั่งงาน', [
     'พิมพ์ / ลงไปในช่องพิมพ์ จะขึ้นรายการคำสั่ง — เลื่อนด้วยลูกศร เลือกด้วย Enter/Tab',
-    'คุยกับโมเดล: /model /models /provider /mode /status /paint /conversations /fresh /compact',
-    'บทสนทนา: /new /resume /fork /plan /stop',
-    'ไฟล์: /attach /clip /file /image /open /symbols /diff /apply /discard /skills',
-    'ระบบ: /memory /mcp /project /settings /help',
+    'คำสั่งทั้งหมดอยู่ท้ายหน้านี้ — รวมที่เพิ่งมาใหม่ ไม่มีคำสั่งที่หน้าต่างมีแต่หน้านี้ไม่บอก',
     'ใส่ argument ได้คราว ๆ เช่น /mode auto หรือ /open README.md',
   ]);
   section('บอกมันทำอะไร', [
@@ -1429,6 +1501,15 @@ function openHelp() {
     'ไม่มีแท็บ → กด "เปิดให้" แล้วล็อกอินในหน้า de.aipass.net',
     'ตั้งค่าได้หมด: โมเดล สิทธิ์ ขนาด compaction ปลั๊กอิน MCP และความจำข้ามเซสชัน',
   ]);
+
+  // Every command the window has, taken from the palette itself.
+  //
+  // The list used to be written out by hand here, and a hand-written list goes
+  // stale the moment a command is added: the window grew four commands the
+  // help never mentioned. A command that exists but is not in the help is a
+  // command nobody finds, so the help reads the palette — one list, and it
+  // cannot lie about what the window can do.
+  section('คำสั่งทั้งหมด', COMMANDS.map((c) => `/${c.cmd} — ${c.desc}`));
 
   const actions = $('modal-actions');
   actions.textContent = '';
@@ -1561,6 +1642,10 @@ $('project').onchange = async () => {
   const result = await rpc('projects.switch', { path: $('project').value }).catch((err) => ({ error: err.message }));
   if (result.error) { addNote(`สลับโปรเจกต์ไม่ได้: ${friendly(result.error)}`); return; }
   state.root = result.root ?? $('project').value;
+  // The worktree belongs to the project it was made from, so switching
+  // project leaves it too — otherwise the run would land in a checkout of
+  // the project the window just left.
+  if (state.runRoot) { state.runRoot = null; renderWorktreeBar(); }
   log.textContent = '';
   state.sessionId = null;
   renderPending([]);
@@ -1571,7 +1656,7 @@ $('project').onchange = async () => {
   filesState.searching = false;
   $('file-filter').value = '';
   addNote(`project: ${$('project').value}`);
-  await Promise.all([refreshSessions(), refreshFiles('.'), refreshSkills(), refreshPanels()]);
+  await Promise.all([refreshSessions(), refreshFiles('.'), refreshSkills(), refreshPanels(), refreshCheckpoints()]);
 };
 
 $('add-project').onclick = async () => {
@@ -1648,9 +1733,9 @@ async function refreshPanels() {
   // still works: plain markers, single-line.
   state.pluginTools = (details?.toolDefs ?? (details?.tools ?? []).map((marker) => ({ marker })))
     .filter((t) => t?.marker);
-  // The panels a plugin draws are a widget, not a rail row: they live in the
-  // settings sheet, next to the plugin that draws them. With no sheet open
-  // there is nothing to paint — the marker table above is still needed.
+  // The panels a plugin draws are a widget, not a configuration row: they are
+  // the plugin's own work surface, so they live in the rail — and in the
+  // settings sheet, next to the plugin that draws them.
   state.pluginPanels = details?.panels ?? [];
   await paintPluginPanels();
 }
@@ -1658,26 +1743,49 @@ async function refreshPanels() {
 /**
  * Draw the panels the installed plugins paint.
  *
- * The holder is the settings sheet's panel area; it is null while the sheet is
- * closed, and then there is simply nothing to draw. A plugin with nothing to
- * say says so — a heading over an empty box reads as a broken feature.
+ * Two places, and both of them are the point: the rail (so a window at work
+ * shows them) and the settings sheet (so the plugin that draws them is next
+ * to them). The sheet used to be the only place, and the sheet releases its
+ * panel area when it closes — so a plugin's scratchpad was visible exactly
+ * while a settings page happened to be open, and nowhere else.
  */
 async function paintPluginPanels() {
-  const holder = state.panelHost;
+  const panels = state.pluginPanels ?? [];
+  await paintPanelsInto($('plugin-panels'), panels, 'rail-panel-');
+  if (state.panelHost) await paintPanelsInto(state.panelHost, panels, 'panel-');
+  const section = $('panels-section');
+  // The class, not the attribute: the section's own rule says `display: flex`,
+  // and a rule beats the browser's default for `hidden`.
+  if (section) section.classList.toggle('hidden', panels.length === 0);
+}
+
+/** Fill one holder with the panels. A plugin with nothing to say says so. */
+async function paintPanelsInto(holder, panels, idPrefix) {
   if (!holder) return;
   holder.textContent = '';
-  const panels = state.pluginPanels ?? [];
   if (!panels.length) {
     holder.append(el('p', 'settings-empty', 'ยังไม่มีแผงที่ปลั๊กอินวาดไว้ — ปลั๊กอินที่วาดแผงจะมาอยู่ตรงนี้'));
     return;
   }
   for (const panel of panels) {
     const box = el('div', 'plugin-panel');
-    box.id = `panel-${panel.id}`;
+    box.id = `${idPrefix}${panel.id}`;
     box.dataset.panel = panel.id;
     box.dataset.title = panel.title ?? panel.id;
     holder.append(box);
     await paintPanel(box, panel.id);
+  }
+}
+
+/**
+ * Repaint every panel that is on screen, wherever it is.
+ *
+ * A finished run is exactly when a plugin's panel changed, so every holder
+ * that has a panel in it is repainted in place.
+ */
+async function repaintPanels() {
+  for (const holder of [$('plugin-panels'), state.panelHost].filter(Boolean)) {
+    for (const box of holder.children) if (box.dataset.panel) await paintPanel(box, box.dataset.panel);
   }
 }
 
@@ -1697,11 +1805,274 @@ async function paintPanel(box, id) {
   }
 }
 
-/* ------------------------------------------------------------ header state */
+/* ------------------------------------------------------- the work surfaces */
 
+/**
+ * The repository's state.
+ *
+ * These are the HUMAN's buttons — a commit is a person clicking, not a model
+ * asking — so they never consult the model's permission mode; the sheet's git
+ * page has the buttons. This prints the state, so `/git` answers with the
+ * truth instead of pointing at another page.
+ */
+async function showGitStatus() {
+  const st = await rpc('git.status').catch(() => null);
+  if (!st) { addNote('อ่านสถานะ git ไม่ได้ — โปรเจกต์นี้อาจไม่ใช่ที่เก็บของ git'); return; }
+  state.git = st;
+  addCommandOut(`git: ${st.branch ?? '(ไม่ทราบ branch)'}${st.clean ? ' · สะอาด ไม่มีอะไรค้าง' : ''}`);
+  for (const [label, rows] of [['staged', st.staged], ['unstaged', st.unstaged], ['untracked', st.untracked]]) {
+    const list = rows ?? [];
+    addCommandOut(`${label}: ${list.length ? list.join(', ') : '(ไม่มี)'}`);
+  }
+}
+
+/**
+ * The tasks this machine runs at a time of day.
+ *
+ * A scheduled task needs the bridge and a logged-in tab: it is a run like any
+ * other, started by the CLI, so a machine with no tab has nobody to answer.
+ */
+async function showSchedule() {
+  const res = await rpc('schedule.list').catch((err) => ({ error: err.message }));
+  // An unreachable list is not an empty one: saying "no tasks" would tell the
+  // person their schedule is gone when the bridge simply did not answer.
+  if (res?.error) { addNote(`อ่านตารางเวลาไม่ได้: ${friendly(res.error)}`); return; }
+  const entries = res?.entries ?? [];
+  state.schedule = entries;
+  if (!entries.length) { addCommandOut('ยังไม่มีงานที่ตั้งเวลาไว้ — เพิ่มได้ที่ /settings → ตารางเวลา'); return; }
+  addCommandOut(`งานที่ตั้งเวลาไว้ ${entries.length} รายการ:`);
+  for (const e of entries) {
+    addCommandOut(`  ${e.at ?? '?'} · ${e.kind === 'once' ? 'ครั้งเดียว' : 'ทุกวัน'} · ${e.task} — ${folderName(e.root)}`);
+  }
+}
+
+/** The last folder of a path — a project named by its folder, not its full path. */
+const folderName = (root) => String(root ?? '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(root ?? '');
+
+/**
+ * The media models of the live catalog.
+ *
+ * A media model is a chat model that makes pictures, clips or songs, and the
+ * bridge is what knows which: a window that cannot reach a tab sees nothing
+ * here, and says so.
+ */
+async function showMediaModels() {
+  const res = await rpc('media.models').catch(() => null);
+  if (!res) { addNote('อ่านรายการโมเดลสื่อไม่ได้ — ต้องมี bridge ที่เชื่อมอยู่'); return; }
+  state.media = res;
+  for (const [kind, label] of [['image', 'รูป'], ['video', 'วิดีโอ'], ['music', 'เสียง']]) {
+    const list = res[kind] ?? [];
+    addCommandOut(`${label}: ${list.length} โมเดล${list.length ? ` — ${list.map((m) => m.id).join(', ')}` : ''}`);
+  }
+}
+
+/* -------------------------------------------------------------- worktrees */
+
+/**
+ * The worktrees of this project — the second checkouts a run can work in.
+ *
+ * A worktree is git's answer to two runs (or a run and the person) editing
+ * one repository: "if two Cascades edit the same file at the same time, the
+ * edits can race … consider using worktrees" (Devin). The run's files are
+ * then not the person's files, and the person merges the branch when they are
+ * happy or throws the folder away when they are not.
+ *
+ * The window says what a worktree is, where it lives, and what changed in
+ * each one: a person who cannot find the folder cannot merge it.
+ */
+async function showWorktrees() {
+  const res = await rpc('worktree.list').catch((err) => ({ error: err.message }));
+  const list = res?.worktrees ?? [];
+  state.worktrees = list;
+
+  $('modal-title').textContent = 'worktree';
+  const body = $('modal-body');
+  body.textContent = '';
+  if (res?.error) body.append(el('p', 'install-out err', friendly(res.error)));
+  body.append(el('p', 'dim',
+    'worktree คือโฟลเดอร์สำเนาของ repo อีกชุดหนึ่ง — รันในนั้นแล้วไฟล์ที่แก้จะไม่ไปแตะไฟล์ที่คุณกำลังแก้อยู่ เสร็จแล้วค่อย merge กลับ branch หรือทิ้งทิ้งไป'));
+  body.append(el('p', 'dim', `ที่อยู่: ${res?.home ?? '(ไม่ทราบ)'} — นอกโปรเจกต์ เพื่อไม่ให้ git add -A ไปเจอ`));
+
+  const group = el('div', 'set-group');
+  body.append(group);
+  if (!list.length) group.append(el('p', 'settings-empty', 'ยังไม่มี worktree ของโปรเจกต์นี้'));
+
+  for (const w of list) {
+    const box = el('div', 'set-group');
+    const info = el('div', 'set-info');
+    info.append(el('div', 'set-title', w.main ? 'โปรเจกต์นี้เอง' : (w.branch ?? '(ไม่มี branch)')));
+    // The path, in full: it is the one thing the person needs and cannot
+    // guess — the folder is somewhere else on the disk, not under the project.
+    info.append(el('div', 'set-note', w.path));
+    box.append(info);
+    if (!w.main) {
+      // What changed in there: the person decides with this, not with the
+      // name of the folder.
+      const st = await rpc('worktree.status', { path: w.path }).catch(() => null);
+      const files = st?.files ?? [];
+      info.append(el('div', 'set-note', files.length
+        ? `เปลี่ยน ${files.length} ไฟล์ (+${st.added ?? 0} −${st.removed ?? 0}) · ${files.slice(0, 4).join(', ')}${files.length > 4 ? '…' : ''}`
+        : 'ยังไม่มีอะไรเปลี่ยนในนี้'));
+      const row = el('div', 'wt-actions');
+      const enter = el('button', 'mini', state.runRoot && sameProject(state.runRoot, w.path) ? 'กำลังทำงานในนี้' : 'ทำงานในนี้');
+      enter.onclick = async () => { await enterWorktree(w.path); await showWorktrees(); };
+      const drop = el('button', 'mini', 'ลบ');
+      drop.onclick = async () => { await removeWorktree(w.path); await showWorktrees(); };
+      row.append(enter, drop);
+      box.append(row);
+    }
+    group.append(box);
+  }
+
+  // The new one. The name becomes the folder's name, so it is the person's
+  // own word — Thai is fine, the folder is named after it.
+  const name = document.createElement('input');
+  name.type = 'text';
+  name.placeholder = 'ชื่อ worktree — เช่น ทดลองแนวคิดใหม่';
+  // The field is named, not only hinted: a placeholder is not a name a
+  // screen reader reads.
+  name.setAttribute('aria-label', 'ชื่อ worktree ใหม่');
+  const make = el('button', 'primary', 'สร้าง worktree');
+  make.onclick = async () => {
+    const text = name.value.trim();
+    if (!text) { addNote('ต้องตั้งชื่อ worktree ก่อน'); return; }
+    make.disabled = true;
+    const made = await rpc('worktree.create', { name: text }).catch((err) => ({ error: err.message }));
+    make.disabled = false;
+    if (made.error) { addNote(`สร้าง worktree ไม่สำเร็จ: ${friendly(made.error)}`); return; }
+    await enterWorktree(made.path);
+    await showWorktrees();
+  };
+  const form = el('div', 'set-group');
+  form.append(el('div', 'set-title', 'สร้าง worktree ใหม่'));
+  form.append(el('div', 'set-note', 'รันต่อจากนี้จะทำในโฟลเดอร์นี้ ไฟล์ในโปรเจกต์จะไม่ถูกแตะ'));
+  form.append(name, make);
+  body.append(form);
+
+  const actions = $('modal-actions');
+  actions.textContent = '';
+  // The janitor: a worktree is a whole checkout on the person's disk, so a
+  // forgotten one is litter. Only the ones with nothing uncommitted in them
+  // and the ones that have sat there for a while go.
+  const sweep = el('button', null, 'เก็บกวาดที่ไม่ต้องการแล้ว');
+  sweep.onclick = async () => {
+    const done = await rpc('worktree.sweep').catch((err) => ({ error: err.message }));
+    if (done.error) { addNote(`เก็บกวาดไม่สำเร็จ: ${friendly(done.error)}`); return; }
+    addNote(done.removed?.length
+      ? `เก็บกวาดไป ${done.removed.length} worktree — branch ยังอยู่ใน repo ถ้าต้องการเอากลับ`
+      : 'ไม่มี worktree ที่เก็บกวาดได้ (ที่ยังมีงานค้าง หรือยังใหม่อยู่ จะไม่ถูกแตะ)');
+    await showWorktrees();
+  };
+  const close = el('button', 'primary', 'ปิด');
+  close.onclick = hideModal;
+  actions.append(sweep, close);
+  openModal();
+}
+
+/**
+ * Work inside a worktree from now on.
+ *
+ * The run's root becomes the worktree's path, so the harness confines every
+ * tool to it and the overlay writes there: the person's own files are not
+ * touched. The project stays the project, so leaving the worktree is one
+ * click.
+ */
+/**
+ * A live run is tied to the root it started in.
+ *
+ * Changing the root under it would make the run's frames belong to a folder
+ * the window no longer claims, and the window would go quiet for the rest of
+ * the run. So the switch waits for the run to end.
+ */
+function worktreeLocked() {
+  if (!state.running) return false;
+  addNote('รันอยู่ — สลับหรือลบ worktree ระหว่างรันไม่ได้ หยุดรันก่อน');
+  return true;
+}
+
+async function enterWorktree(path) {
+  if (worktreeLocked()) return;
+  state.runRoot = path;
+  renderWorktreeBar();
+  await Promise.all([refreshSessions(), refreshFiles('.'), refreshPending(), refreshCheckpoints()]);
+  addNote(`รันต่อจากนี้ทำใน worktree: ${path}`);
+}
+
+/** Back to the project the worktree was made from. */
+async function leaveWorktree() {
+  if (worktreeLocked()) return;
+  state.runRoot = null;
+  renderWorktreeBar();
+  await Promise.all([refreshSessions(), refreshFiles('.'), refreshPending(), refreshCheckpoints()]);
+  addNote('กลับไปทำงานในโปรเจกต์แล้ว');
+}
+
+/**
+ * Take a worktree away.
+ *
+ * The window asks first: an uncommitted file inside a worktree exists
+ * nowhere else, and the branch keeps the COMMITS but not those bytes.
+ */
+async function removeWorktree(path) {
+  if (worktreeLocked()) return;
+  const st = await rpc('worktree.status', { path }).catch(() => null);
+  const files = st?.files ?? [];
+  const ask = files.length
+    ? `ลบ worktree นี้? — ยังมี ${files.length} ไฟล์ที่ไม่ได้ merge การลบจะทำให้ไฟล์เหล่านั้นหายไป`
+    : 'ลบ worktree นี้? — โฟลเดอร์จะถูกลบออกจากเครื่อง (branch ยังอยู่ใน repo)';
+  if (!window.confirm(ask)) return;
+  const done = await rpc('worktree.remove', { path, force: true }).catch((err) => ({ error: err.message }));
+  if (done.error) { addNote(`ลบ worktree ไม่ได้: ${friendly(done.error)}`); return; }
+  if (state.runRoot && sameProject(state.runRoot, path)) await leaveWorktree();
+  addNote('ลบ worktree แล้ว — branch ยังอยู่ใน repo ถ้าต้องการเอากลับ');
+}
+
+/**
+ * The bar that says where the run works.
+ *
+ * It is on screen the whole time the window is in a worktree, and it carries
+ * the PATH: the folder is somewhere else on the disk, and a person who cannot
+ * find it cannot merge it.
+ */
+function renderWorktreeBar() {
+  const bar = $('worktree-bar');
+  if (!bar) return;
+  const on = Boolean(state.runRoot);
+  bar.classList.toggle('hidden', !on);
+  if (on) $('worktree-path').textContent = state.runRoot;
+}
+$('worktree-list').onclick = () => { void showWorktrees(); };
+$('worktree-back').onclick = () => { void leaveWorktree(); };
+// The bar's state is the window's state, so it is painted once here: a
+// window that is not in a worktree shows no bar at all.
+renderWorktreeBar();
+
+/**
+ * Run the scheduled work that is due.
+ *
+ * The backend ticks nothing by itself: the window is what asks, and it asks
+ * on the header's own poll — a second timer would be a second thing to keep
+ * alive, and the header already talks to the backend every ten seconds. Once
+ * a minute is often enough for a task that is scheduled for a time of day.
+ */
+let lastScheduleTick = 0;
+async function runDueSchedule({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && now - lastScheduleTick < 60_000) return null;
+  lastScheduleTick = now;
+  const out = await rpc('schedule.runDue').catch(() => null);
+  if (!out) return null;
+  if (out.count) addNote(`ตั้งเวลา: เริ่ม ${out.count} งานที่ครบเวลาแล้ว`);
+  return out;
+}
+
+/* ------------------------------------------------------------ header state */
 async function refreshHeader() {
   const st = await rpc('status').catch(() => null);
   if (!st) return;
+  // The schedule rides on this poll: the window is what runs the work that is
+  // due, and the header already talks to the backend every ten seconds.
+  void runDueSchedule();
   $('status').textContent = '';
   const dot = (ok, label) => {
     const s = el('span');
@@ -2412,6 +2783,10 @@ function resumeSession() {
       const open = el('button', null, s.title || '(ไม่มีชื่อ)');
       open.onclick = () => { hideModal(); void openSession(s.id); };
       row.append(open);
+      // Export: the transcript as a file the person can keep or send to
+      // somebody else. The shape and the path are the person's to choose.
+      const out = el('button', 'mini', 'ส่งออก');
+      out.onclick = () => { hideModal(); exportSession(s.id, s.title); };
       // Rename and delete: the sidebar has no room for them, so they live here.
       // Without them a session list only grows, and old runs are unfindable.
       const rename = el('button', 'mini', 'เปลี่ยนชื่อ');
@@ -2430,7 +2805,7 @@ function resumeSession() {
         await refreshSessions();
         resumeSession();
       };
-      row.append(rename, del);
+      row.append(rename, out, del);
       body.append(row);
     }
     $('modal-actions').textContent = '';
@@ -2459,7 +2834,7 @@ async function openSession(id) {
     // The session's checklist is replayed like any other entry, so an old
     // conversation reopens with the plan card it was left with.
     else if (entry.type === 'todo' && Array.isArray(entry.items)) renderTodo(entry.items);
-    else if (entry.type === 'tool') { addTool({ kind: entry.kind, arg: entry.arg, ok: entry.ok, head: '', sources: entry.sources }); state.assistant = null; }
+    else if (entry.type === 'tool') { addTool({ kind: toolKind(entry.kind), arg: entry.arg, ok: entry.ok, head: '', sources: entry.sources }); state.assistant = null; }
     else if (entry.type === 'note') addNote(entry.text);
   }
   endTurn();
@@ -2569,6 +2944,146 @@ function showSkills() {
   });
 }
 
+/* ----------------------------------------------------------------- export */
+
+/**
+ * Export a session: the transcript as a file the person can keep.
+ *
+ * The person chooses the shape (markdown or HTML) and where it goes; the
+ * backend writes it atomically and answers with the path it wrote, so the
+ * window can say exactly where the thing is instead of "exported".
+ *
+ * A relative path is relative to the PROJECT — the house's rule for every
+ * path the window hands over — so the default lands in the project and the
+ * reader can change it.
+ */
+function exportSession(id = null, title = null) {
+  const sessionId = id ?? state.sessionId;
+  if (!sessionId) { addNote('ยังไม่มีบทสนทนาที่จะส่งออก — เปิดบทสนทนาก่อน'); return; }
+  $('modal-title').textContent = 'ส่งออกบทสนทนา';
+  const body = $('modal-body');
+  body.textContent = '';
+  const group = el('div', 'set-group');
+  const form = el('div', 'set-group');
+
+  const format = document.createElement('select');
+  for (const [v, text] of [['md', 'Markdown (.md)'], ['html', 'HTML (.html)']]) {
+    const opt = document.createElement('option');
+    opt.value = v;
+    opt.textContent = text;
+    format.append(opt);
+  }
+  // The default is named rather than implied: a select with no value is a
+  // select the backend refuses.
+  format.value = 'md';
+  // Both controls carry a name for a screen reader: the row's label is a
+  // sibling, not a <label>, and a placeholder is not a name.
+  format.setAttribute('aria-label', 'รูปแบบไฟล์ที่จะส่งออก');
+  const path = document.createElement('input');
+  path.type = 'text';
+  path.value = `exports/session-${sessionId}.md`;
+  path.title = 'ทางของไฟล์ — ถ้าไม่ขึ้นต้นด้วย / หรือ C:\\ ถือว่าอยู่ในโปรเจกต์นี้';
+  path.setAttribute('aria-label', 'ทางของไฟล์ที่จะส่งออก');
+  // The extension follows the shape: a file named .md that holds HTML is a
+  // file nobody can open the way they expect.
+  format.onchange = () => {
+    const wanted = format.value === 'html' ? '.html' : '.md';
+    path.value = path.value.replace(/\.(md|html)$/i, '') + wanted;
+  };
+  const row = (label, note, node) => {
+    const r = el('div', 'set-row');
+    const info = el('div', 'set-info');
+    info.append(el('div', 'set-title', label));
+    if (note) info.append(el('div', 'set-note', note));
+    const c = el('div', 'set-control');
+    c.append(node);
+    r.append(info, c);
+    return r;
+  };
+  form.append(row('รูปแบบ', 'markdown อ่านต่อได้ทุกเครื่อง · HTML เปิดในเบราว์เซอร์ได้เลย', format));
+  form.append(row('ทางของไฟล์', 'เขียนลงโปรเจกต์นี้ (ใส่ทางเต็มก็ได้)', path));
+  group.append(el('p', 'settings-empty', title ? `บทสนทนา: ${title}` : `บทสนทนา #${sessionId}`), form);
+  body.append(group);
+
+  const actions = $('modal-actions');
+  actions.textContent = '';
+  const save = el('button', 'primary', 'ส่งออก');
+  save.onclick = async () => {
+    save.disabled = true;
+    const done = await rpc('session.export', {
+      id: sessionId,
+      format: format.value,
+      path: path.value.trim(),
+    }).catch((err) => ({ error: err.message }));
+    save.disabled = false;
+    if (done.error) {
+      const err = el('p', 'install-out err', `ส่งออกไม่ได้: ${friendly(done.error)}`);
+      body.append(err);
+      return;
+    }
+    // Without a path the backend answers with the text itself, so the reader
+    // can see what would be written before it is written.
+    if (!done.path) {
+      body.textContent = '';
+      body.append(el('p', 'dim', 'ใส่ทางของไฟล์เพื่อให้เขียนลงดิสก์ — นี่คือเนื้อหาที่จะได้:'));
+      body.append(el('pre', null, done.text ?? ''));
+      return;
+    }
+    hideModal();
+    addCommandOut(`ส่งออกแล้ว: ${done.path}`);
+  };
+  const close = el('button', null, 'ปิด');
+  close.onclick = hideModal;
+  actions.append(close, save);
+  openModal();
+}
+
+/* ------------------------------------------------------------------- tree */
+
+/** The day a tree row falls in, read as a local day (never a UTC one). */
+const dayKeyDate = (key) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(key ?? ''));
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+};
+
+/**
+ * The sessions of this project, grouped by the day they belong to.
+ *
+ * The same grouping the rail uses, but as data (session.tree): the tree and
+ * the rail cannot disagree about where a session sits, because both read the
+ * same store.
+ */
+async function showSessionTree() {
+  const res = await rpc('session.tree').catch(() => null);
+  if (!res) { addNote('อ่านต้นไม้บทสนทนาไม่ได้'); return; }
+  $('modal-title').textContent = 'ต้นไม้บทสนทนา';
+  const body = $('modal-body');
+  body.textContent = '';
+  const days = res.days ?? [];
+  body.append(el('p', 'dim', `${res.count ?? 0} บทสนทนาในโปรเจกต์นี้`));
+  if (!days.length) body.append(el('p', 'dim', 'ยังไม่มีบทสนทนาในโปรเจกต์นี้'));
+  for (const day of days) {
+    const when = dayKeyDate(day.day);
+    body.append(el('h4', null, when ? `${sessionDay(when)} · ${day.day}` : String(day.day ?? '')));
+    for (const s of day.sessions ?? []) {
+      const row = el('div', 'session-row');
+      const open = el('button', null, s.title || '(ไม่มีชื่อ)');
+      open.onclick = () => { hideModal(); void openSession(s.id); };
+      row.append(open);
+      row.append(el('span', 'dim', `${s.entryCount ?? 0} รายการ`));
+      const out = el('button', 'mini', 'ส่งออก');
+      out.onclick = () => { hideModal(); exportSession(s.id, s.title); };
+      row.append(out);
+      body.append(row);
+    }
+  }
+  $('modal-actions').textContent = '';
+  const close = el('button', 'primary', 'ปิด');
+  close.onclick = hideModal;
+  $('modal-actions').append(close);
+  openModal();
+}
+
 async function showPendingDiff() {
   const pending = await rpc('pending').catch(() => []);
   if (!pending.length) { addNote('ไม่มีไฟล์รอเขียน'); return; }
@@ -2581,12 +3096,128 @@ async function applyChecked() {
   const written = await rpc('apply', { files }).catch((err) => ({ error: err.message }));
   if (written.error) { addNote(`เขียนไฟล์ไม่ได้: ${friendly(written.error)}`); return; }
   await refreshPending();
+  await refreshCheckpoints();
+  // The apply keeps the bytes that were on the disk before it, so the way back
+  // is here — in the window — and not in a terminal with `git restore`.
+  if (written.checkpoint?.id) addNote(`เขียนแล้ว — ย้อนกลับได้ที่จุด #${written.checkpoint.id}`);
 }
 
 async function discardAll() {
   const dropped = await rpc('discard').catch((err) => ({ error: err.message }));
   if (dropped.error) { addNote(`ทิ้งไฟล์ไม่ได้: ${friendly(dropped.error)}`); return; }
   await refreshPending();
+}
+
+/* ------------------------------------------------------------- checkpoints */
+
+/**
+ * The undo points of this project.
+ *
+ * Every apply keeps the bytes that were on the disk before it — outside the
+ * project, so a copy of the source can never be committed by accident — and
+ * the window lists them: when the write happened, what it covered, and the
+ * two buttons. Taking a write back is the one thing a person wants after a
+ * run that changed more than they meant it to.
+ */
+async function refreshCheckpoints() {
+  const res = await rpc('checkpoints.list').catch(() => null);
+  state.checkpoints = res?.checkpoints ?? [];
+  renderCheckpoints();
+  return state.checkpoints;
+}
+
+/** The checkpoint rows. Each one says what it can bring back. */
+function renderCheckpoints() {
+  const wrap = $('checkpoints');
+  const list = $('checkpoint-list');
+  if (!wrap || !list) return;
+  const rows = state.checkpoints ?? [];
+  list.textContent = '';
+  $('checkpoints-count').textContent = rows.length ? `ย้อนกลับได้ ${rows.length} ครั้ง` : 'ย้อนกลับได้';
+  for (const cp of rows) {
+    const li = el('li');
+    const when = Number.isFinite(cp?.createdAt) ? new Date(cp.createdAt) : null;
+    li.append(el('span', null, when ? when.toLocaleString() : String(cp?.id ?? '')));
+    // The files are the point of a checkpoint: it names what it can bring
+    // back, so the row names them too.
+    const files = (cp?.files ?? [])
+      .map((f) => (typeof f === 'string' ? f : f?.path))
+      .filter(Boolean);
+    const shown = files.slice(0, 3).join(', ');
+    li.append(el('span', 'counts', files.length ? `${shown}${files.length > 3 ? ` +${files.length - 3}` : ''}` : 'ไม่มีไฟล์'));
+    li.title = files.length ? files.join('\n') : '';
+    li.append(el('span', 'grow'));
+    const back = el('button', 'mini', 'ย้อนกลับ');
+    back.title = 'เอาของเดิมกลับ — ไฟล์ที่อยู่ตอนนี้จะถูกแทนที่ด้วยของเดิม';
+    back.onclick = () => restoreCheckpoint(cp, files);
+    const forget = el('button', 'mini', 'ลบ');
+    forget.title = 'ลบจุดย้อนกลับนี้ — ไฟล์ที่เขียนไปแล้วไม่กลับ';
+    forget.onclick = () => removeCheckpoint(cp);
+    li.append(back, forget);
+    list.append(li);
+  }
+  wrap.classList.toggle('hidden', rows.length === 0);
+}
+
+/**
+ * Put a checkpoint's files back as they were.
+ *
+ * The backend answers with what came back, what was taken away and what it
+ * could not touch — the window says all three, because "restored" alone does
+ * not tell a person whether the tree is the tree they wanted.
+ */
+async function restoreCheckpoint(cp, files = []) {
+  const what = files.length ? `${files.length} ไฟล์ (${files.slice(0, 3).join(', ')}${files.length > 3 ? '…' : ''})` : 'ไฟล์ที่เขียนไป';
+  if (!window.confirm(`ย้อนกลับ${what}? — ของที่อยู่ตอนนี้จะถูกแทนที่ด้วยของเดิม`)) return;
+  const done = await rpc('checkpoints.restore', { id: cp.id }).catch((err) => ({ error: err.message }));
+  if (done.error) { addNote(`ย้อนกลับไม่ได้: ${friendly(done.error)}`); return; }
+  const restored = done.restored ?? [];
+  const removed = done.removed ?? [];
+  const skipped = done.skipped ?? [];
+  addNote(`ย้อนกลับแล้ว — กลับมา ${restored.length} ไฟล์${removed.length ? ` · ถูกลบออก ${removed.length} ไฟล์` : ''}${skipped.length ? ` · ข้าม ${skipped.length} ไฟล์` : ''}`);
+  // The tree on the disk changed: the panel that lists it is a picture of the
+  // past until it is asked again.
+  void refreshFiles();
+  await refreshCheckpoints();
+}
+
+/** Forget a checkpoint without restoring it. */
+async function removeCheckpoint(cp) {
+  const done = await rpc('checkpoints.remove', { id: cp.id }).catch((err) => ({ error: err.message }));
+  if (done.error) { addNote(`ลบจุดย้อนกลับไม่ได้: ${friendly(done.error)}`); return; }
+  addNote('ลบจุดย้อนกลับแล้ว — ไฟล์ที่เขียนไปแล้วไม่กลับ');
+  await refreshCheckpoints();
+}
+
+/** The checkpoints in a dialog, for the reader who wants the whole list. */
+async function showCheckpoints() {
+  await refreshCheckpoints();
+  const rows = state.checkpoints ?? [];
+  $('modal-title').textContent = 'ย้อนกลับได้';
+  const body = $('modal-body');
+  body.textContent = '';
+  if (!rows.length) {
+    body.append(el('p', 'dim', 'ยังไม่มีจุดย้อนกลับ — จะมีตอนที่กด "เขียนเลย" แล้วไฟล์ถูกเขียนลงดิสก์'));
+  }
+  for (const cp of rows) {
+    const files = (cp?.files ?? []).map((f) => (typeof f === 'string' ? f : f?.path)).filter(Boolean);
+    const when = Number.isFinite(cp?.createdAt) ? new Date(cp.createdAt) : null;
+    const row = el('div', 'session-row');
+    row.append(el('span', 'name', when ? when.toLocaleString() : String(cp?.id ?? '')));
+    row.append(el('span', 'dim', files.join(', ')));
+    const back = el('button', 'mini', 'ย้อนกลับ');
+    back.onclick = async () => { hideModal(); await restoreCheckpoint(cp, files); };
+    const forget = el('button', 'mini', 'ลบ');
+    forget.onclick = async () => { await removeCheckpoint(cp); await showCheckpoints(); };
+    row.append(back, forget);
+    body.append(row);
+  }
+  const actions = $('modal-actions');
+  actions.textContent = '';
+  const close = el('button', 'primary', 'ปิด');
+  close.onclick = hideModal;
+  actions.append(close);
+  openModal();
 }
 
 function pickProject() {
@@ -2685,6 +3316,7 @@ function applyTheme(theme) {
   await refreshSkills();
   await refreshPanels();
   await refreshPending();
+  await refreshCheckpoints();
   applySettingsToUi(state.settings);
   // The update check runs after the window is up and never before it: it is
   // one GET of a static file, and the app must not wait for it.

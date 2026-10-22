@@ -17,6 +17,12 @@ export const MIN_SPLIT = 300;
 export const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:8787';
 
 /**
+ * The kinds of model that make media. The catalog groups them this way, and
+ * a caller that wants a picture or a clip asks for these and nothing else.
+ */
+const MEDIA_KINDS = new Set(['image', 'video', 'music']);
+
+/**
  * Where the bridge is: AIPASS_BRIDGE when the environment names it, the
  * loopback default otherwise. Accepted forms are a full URL
  * (http://127.0.0.1:8788), a host:port pair (localhost:8788) or a bare port
@@ -449,6 +455,11 @@ export class BridgeClient {
    * from the edge is waited out (RATE_REFUSED → RATE_WAITS_MS) — a run must
    * not die for either. The retry only happens before any delta streamed
    * back — after that a resend would deliver the answer twice.
+   *
+   * `options` carries what a media generation needs beyond the prompt (the
+   * aspect ratio, the resolution, the duration, the style), and `timeoutMs`
+   * gives the request its own clock — a render sits quiet for minutes, and
+   * the idle timeout killed an image that had already spent the credits.
    */
   async chat(args = {}) {
     let streamed = false;
@@ -461,7 +472,7 @@ export class BridgeClient {
   }
 
   /** One wire attempt of chat(); `markStreamed` flips the retry gate above. */
-  async #sendOnce({ message, parts = null, model = null, conversation = null, temporary = null, thinkingLevel = null, temperature = null, onText = () => {}, onReasoning = () => {}, signal = null } = {}, markStreamed) {
+  async #sendOnce({ message, parts = null, model = null, conversation = null, temporary = null, thinkingLevel = null, temperature = null, options = null, timeoutMs = null, onText = () => {}, onReasoning = () => {}, signal = null } = {}, markStreamed) {
     const content = Array.isArray(parts) && parts.length
       ? [{ type: 'text', text: message }, ...parts]
       : message;
@@ -469,6 +480,12 @@ export class BridgeClient {
     // a 429 is exactly the probe that keeps a window hot, so it waits for a
     // token too.
     await this.#pace(signal);
+    // A generation can sit quiet for minutes — the render happens upstream and
+    // the answer arrives when it is ready — so a caller may give the request
+    // its own clock (the media timeout, not the idle one). A stop, which is
+    // the caller's signal, still wins: the two are combined, not swapped.
+    const timer = timeoutMs ? AbortSignal.timeout(timeoutMs) : null;
+    const deadline = signal && timer ? AbortSignal.any([signal, timer]) : (signal ?? timer);
     const res = await fetch(`${this.base}/v1/chat/completions`, {
       method: 'POST',
       headers: this.#headers({ 'content-type': 'application/json' }),
@@ -477,6 +494,19 @@ export class BridgeClient {
         ...(conversation ? { conversation, ...(temporary === null ? {} : { temporary: temporary === true }) } : {}),
         ...(thinkingLevel ? { thinking_level: thinkingLevel } : {}),
         ...(typeof temperature === 'number' ? { temperature } : {}),
+        // The options a media generation carries. The bridge resolves the
+        // presets (an image style by its id, a tone by its code) and drops
+        // what the model does not take — but a dropped option still costs
+        // credits, so the caller drops it first.
+        ...(options?.aspectRatio ? { aspect_ratio: options.aspectRatio } : {}),
+        ...(options?.resolution ? { resolution: options.resolution } : {}),
+        ...(typeof options?.duration === 'number' ? { duration: options.duration } : {}),
+        ...(options?.stylePreprompt ? { style_preprompt: options.stylePreprompt } : {}),
+        ...(options?.imageStyle ? { image_style: options.imageStyle } : {}),
+        ...(typeof options?.cameraFixed === 'boolean' ? { camera_fixed: options.cameraFixed } : {}),
+        ...(typeof options?.generateAudio === 'boolean' ? { generate_audio: options.generateAudio } : {}),
+        ...(options?.tone ? { output_tone: options.tone } : {}),
+        ...(options?.format ? { output_format: options.format } : {}),
         // The client rewrites a message the edge refuses: the chain above
         // (redact → shorten → halve) is what can actually fix one, and it
         // lives here, not in the tab. So the extension hands a refusal back
@@ -487,7 +517,7 @@ export class BridgeClient {
         stream: true,
         messages: [{ role: 'user', content }],
       }),
-      ...(signal ? { signal } : {}),
+      ...(deadline ? { signal: deadline } : {}),
     });
     if (!res.ok) throw new Error(`bridge returned ${res.status}: ${(await res.text()).slice(0, 300)}`);
 
@@ -576,6 +606,45 @@ export class BridgeClient {
     return fetch(`${this.base}/v1/models${refresh ? '?refresh=1' : ''}`, { headers: this.#headers() })
       .then((r) => (r.ok ? r.json() : null))
       .catch(() => null);
+  }
+
+  /**
+   * The style presets the service publishes: the image styles, and the tone
+   * and format presets every model takes.
+   *
+   * The values come from the site's own loaders, read by the extension in the
+   * page — so they are what the account is really offered, and a preset that
+   * is withdrawn stops being offered here too.
+   */
+  async styleOptions(refresh = false) {
+    return fetch(`${this.base}/style-options${refresh ? '?refresh=1' : ''}`, { headers: this.#headers() })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+  }
+
+  /**
+   * The video presets: the style preprompts, and what each provider is served
+   * (the resolutions, the durations, the aspect ratios).
+   */
+  async videoOptions(refresh = false) {
+    return fetch(`${this.base}/video-options${refresh ? '?refresh=1' : ''}`, { headers: this.#headers() })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+  }
+
+  /**
+   * The media models of the catalog, with the options each one accepts.
+   *
+   * The catalog is the bridge's (`/v1/models`), and it reports an `options`
+   * surface per model: what a video model takes (the aspect ratios, the
+   * durations, the resolutions, the image limits) and whether it takes a
+   * duration at all. The media kinds are the ones the bridge groups as image,
+   * video and music — the rest are chat models and belong to another surface.
+   */
+  async mediaModels(refresh = false) {
+    const catalog = await this.models(refresh);
+    if (!catalog) return null;
+    return { ...catalog, data: (catalog.data ?? []).filter((m) => MEDIA_KINDS.has(m.kind)) };
   }
 
   async conversations() {

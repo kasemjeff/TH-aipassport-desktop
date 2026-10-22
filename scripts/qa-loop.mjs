@@ -72,6 +72,7 @@ const encodings = [
   'desktop/ui/rpc.js', 'desktop/ui/state.js', 'desktop/ui/transcript.js',
   'desktop/ui/settings.js', 'desktop/ui/commands.js',
   'desktop/ui/panels/files.js', 'desktop/ui/panels/sessions.js',
+  'desktop/ui/panels/tools.js',
   'aipass-bridge/harness/rpc.mjs',
   'aipass-bridge/harness/run/context.mjs', 'aipass-bridge/harness/run/options.mjs',
   'aipass-bridge/harness/run/send.mjs', 'aipass-bridge/harness/run/gates.mjs',

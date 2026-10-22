@@ -35,6 +35,10 @@ import { SAFETY_RULES, SECRET_RULES } from './settings.mjs';
 // owner, so the engine and the file it writes can never disagree about what
 // a grant covers.
 import { grantCovers, commandShape } from './rules.mjs';
+// The GIT grammar has one owner too (harness/git.mjs): the tool that runs it
+// and the engine that judges it read the same parse, so a git write can never
+// be a read for one of them and a write for the other.
+import { parseGitArg, parseGitCommand, gitSubcommandWrites } from './git.mjs';
 export const WRITE_KINDS = new Set(['write', 'replace', 'delete', 'move']);
 export const SHELL_KINDS = new Set(['run']);
 /** The tools that move data OUT of the machine to a place the MODEL chose.
@@ -65,12 +69,21 @@ const OUTBOUND_WRITE_KINDS = new Set(['attach']);
  *  lives in `body`, never in `arg` (protocol.mjs), so the kind alone cannot
  *  tell an ordinary command from a destructive one — classifyRun reads the
  *  text. FETCH is 'exfil': the destination is the model's own, and no mode
- *  pre-answers it. */
-export function classify(kind, body = '') {
+ *  pre-answers it. A GIT write is a 'write': the argument says which
+ *  subcommand it is (`GIT status` reads, `GIT commit` writes), and a write
+ *  that was classified as a read would go through the gate without a
+ *  question — the one thing the gate exists for. */
+export function classify(kind, body = '', arg = '') {
   if (WRITE_KINDS.has(kind)) return 'write';
   if (SHELL_KINDS.has(kind)) return classifyRun(body);
   if (EXFIL_KINDS.has(kind)) return 'exfil';
   if (OUTBOUND_WRITE_KINDS.has(kind)) return 'write';
+  if (kind === 'git') return parseGitArg(arg)?.kind === 'write' ? 'write' : 'read';
+  // VERIFY runs a command — the run's declared check, or the one the model
+  // named — so it is a shell call and rides the shell gate: a question in
+  // `ask`, a question in `auto`, free in `yolo`. A check that nobody was
+  // asked about is a check nobody agreed to run.
+  if (kind === 'verify') return 'shell';
   // A plugin marker with no declared risk is not a read: its code runs in
   // this process with the harness's access, so it is classified like a write
   // until the plugin says otherwise.
@@ -131,9 +144,10 @@ const DELETE_HAZARDS = {
 const FETCHERS = new Set(['curl', 'wget', 'iwr', 'irm', 'invoke-webrequest', 'invoke-restmethod']);
 const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'cmd', 'powershell', 'pwsh', 'iex', 'invoke-expression', 'node', 'python', 'python3', 'perl', 'ruby']);
 
-// Git subcommands that write: history, refs, the working tree or the remote.
-// Reads (status, diff, log, show, blame, rev-parse …) stay ordinary commands.
-const GIT_WRITES = new Set(['push', 'commit', 'reset', 'clean', 'checkout', 'switch', 'restore', 'rebase', 'merge', 'cherry-pick', 'revert', 'am', 'apply', 'pull', 'rm', 'mv']);
+// Git subcommands that write are everything the read allowlist does not
+// name (harness/git.mjs#GIT_READ_SUBCOMMANDS). The old blocklist missed
+// update-ref, filter-branch, worktree, config and whatever git grows next —
+// an unknown write was a read by default, which is the wrong way round.
 
 // Shapes a wrapper can hide (`bash -c "rm -rf …"`), searched in the raw text
 // because a first-word check cannot see inside a quoted payload.
@@ -147,33 +161,15 @@ const commandWord = (segment) => {
 
 const wordsOf = (segment) => segment.trim().replace(/^["']+/, '').toLowerCase().split(/\s+/).filter(Boolean);
 
-/** Does this git invocation write? Global flags that take a value (-C dir,
- *  -c name=value) are skipped so the first bare word is the subcommand. */
+/** Does this git invocation write? The subcommand parser owns the grammar,
+ *  so global flags that take a value (-C dir, -c name=value, --git-dir path,
+ *  --work-tree path) are skipped and the first bare word is the subcommand.
+ *  The write test is an allowlist (git.mjs): an unknown subcommand is a
+ *  write, never a read. */
 function gitHazard(words) {
-  let sub = '';
-  let args = [];
-  for (let i = 1; i < words.length; i++) {
-    const w = words[i];
-    if (w === '-c' || w === '-C') { i++; continue; }
-    if (w.startsWith('-')) continue;
-    sub = w;
-    args = words.slice(i + 1);
-    break;
-  }
-  if (GIT_WRITES.has(sub)) return true;
-  // `branch` and `tag` list when they only carry listing flags; a name or a
-  // mutation flag means create/rename/delete. `stash` saves unless it is told
-  // to list or show.
-  if (sub === 'branch' || sub === 'tag') {
-    if (['-d', '-m', '-c', '-f', '--delete', '--move', '--force'].some((f) => args.includes(f))) return true;
-    if (args.includes('-l') || args.includes('--list')) return false;
-    return args.some((a) => !a.startsWith('-'));
-  }
-  if (sub === 'stash') {
-    const first = args.find((a) => !a.startsWith('-'));
-    return first !== 'list' && first !== 'show';
-  }
-  return false;
+  const parsed = parseGitCommand(words.slice(1));
+  if (!parsed) return false;
+  return gitSubcommandWrites(parsed.sub, parsed.args);
 }
 
 /** 'shell-risk' for a RUN body a person should confirm, 'shell' otherwise. */
@@ -196,25 +192,20 @@ export function classifyRun(body) {
 }
 
 /**
- * True when a RUN body asks git to commit. The same shallow parse classifyRun
- * uses: any segment counts (`git status && git commit` still commits), global
- * `-c`/`-C` values are skipped, and the first bare word after `git` is the
- * subcommand. The red-test commit gate (loop.mjs) keys off this one function,
- * so the gate and the risk classifier cannot drift apart.
+ * True when a RUN body asks git to commit. The same parse classifyRun uses:
+ * any segment counts (`git status && git commit` still commits), global
+ * `-c`/`-C`/`--git-dir`/`--work-tree` values are skipped, and the first bare
+ * word after `git` is the subcommand. The red-test commit gate (loop.mjs)
+ * keys off this one function, so the gate and the risk classifier cannot
+ * drift apart.
  */
 export function isGitCommit(body) {
   const text = String(body ?? '').toLowerCase();
   if (!text.trim()) return false;
   for (const segment of text.split(RUN_SPLIT).map((s) => s.trim()).filter(Boolean)) {
     if (commandWord(segment) !== 'git') continue;
-    const words = wordsOf(segment);
-    for (let i = 1; i < words.length; i++) {
-      const w = words[i];
-      if (w === '-c' || w === '-C') { i++; continue; }
-      if (w.startsWith('-')) continue;
-      if (w === 'commit') return true;
-      break; // the first bare word is the subcommand; anything else is not a commit
-    }
+    const parsed = parseGitCommand(wordsOf(segment).slice(1));
+    if (parsed?.sub === 'commit') return true;
   }
   return false;
 }
@@ -370,7 +361,7 @@ export class PermissionEngine {
    *  still can.
    */
   evaluate({ kind, arg = '', body = '', risk: riskOverride = null, paths = [], ruleKinds = null, secretText = '' }) {
-    const risk = riskOverride ?? classify(kind, body);
+    const risk = riskOverride ?? classify(kind, body, arg);
     const kinds = ruleKinds ?? [kind];
     const named = (rule) => !rule.kinds || rule.kinds.some((k) => kinds.includes(k));
     // The extra tokens, split the way a shell would split them.
@@ -502,7 +493,7 @@ export class PermissionEngine {
    * call is refused rather than hanging the run forever.
    */
   async request({ kind, arg = '', preview = '', body = '', risk: riskOverride = null, paths = [], ruleKinds = null, secretText = '' } = {}) {
-    const risk = riskOverride ?? classify(kind, body);
+    const risk = riskOverride ?? classify(kind, body, arg);
     const verdict = this.evaluate({ kind, arg, body, risk: riskOverride, paths, ruleKinds, secretText });
     if (verdict.decision !== 'ask') return verdict.decision;
 

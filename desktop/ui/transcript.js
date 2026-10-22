@@ -19,6 +19,51 @@ import { scan, transcript } from './markers.js';
 export function createTranscript(ctx) {
   const { el, log, state, scrollDown, atBottom, rpc } = ctx;
 
+/**
+ * The reader's scrollback, bounded.
+ *
+ * The transcript grew without limit: every row the window ever painted stayed
+ * in the DOM, so a session that ran for an hour made the page heavy and the
+ * scroll slow — the rows are the VIEW, not the record. The record is the
+ * session file on disk, and it is still there after the oldest rows leave the
+ * window. So the oldest rows go, and a line says how many went: a window that
+ * silently drops what it showed is a window that lies about what it did.
+ */
+const MAX_LOG_ROWS = 300;
+let trimmedRows = 0;
+let trimMarker = null;
+
+/**
+ * Keep the log at a size a person can scroll.
+ *
+ * The oldest top-level rows go first, and the marker line stays: it is the
+ * one row that explains the hole. The live run's rows begin at `runCursor`,
+ * so a row that leaves before that point carries the start of the run with it
+ * — otherwise the fold at the end of a run would close over the wrong rows.
+ */
+function boundLog() {
+  const rows = [...log.children];
+  const extra = rows.length - MAX_LOG_ROWS;
+  if (extra <= 0) return;
+  let removed = 0;
+  for (const row of rows) {
+    if (removed >= extra) break;
+    if (row === trimMarker) continue;
+    row.remove();
+    removed += 1;
+    trimmedRows += 1;
+    if (state.runCursor != null && state.runCursor > 0) state.runCursor -= 1;
+  }
+  if (!trimMarker) {
+    trimMarker = el('div', 'note trimmed');
+    log.insertBefore(trimMarker, log.children[0] ?? null);
+    // The marker takes the front row, so every row after it — the live run's
+    // start included — moves down one. A cursor that was clamped to 0 by the
+    // trim points at the marker otherwise, and the fold would swallow it.
+    if (state.runCursor != null) state.runCursor += 1;
+  }
+  trimMarker.textContent = `… ตัด ${trimmedRows} รายการเก่าออกจากหน้าต่าง — บทสนทนาทั้งหมดยังอยู่ในไฟล์ session`;
+}
 
 function addTask(text) {
   const msg = el('div', 'msg task');
@@ -26,11 +71,13 @@ function addTask(text) {
   body.append(el('span', null, text));
   msg.append(body);
   log.append(msg);
+  boundLog();
   scrollDown();
 }
 
 function addNote(text) {
   log.append(el('div', 'note', text));
+  boundLog();
   scrollDown();
 }
 
@@ -41,6 +88,7 @@ function addNote(text) {
  */
 function addCommandOut(text) {
   log.append(el('div', 'cmd-out', text));
+  boundLog();
   scrollDown();
 }
 
@@ -50,6 +98,7 @@ function ensureAssistant() {
   const body = el('div', 'body');
   msg.append(body);
   log.append(msg);
+  boundLog();
   // The settled stretch and the moving tail paint into two wrappers (`.seg`,
   // boxless by CSS): the window used to re-parse the whole reply per frame,
   // which is exactly the cost that grows with the answer. The cache fields
@@ -253,6 +302,7 @@ function thinkingText(delta) {
     const pre = el('pre');
     box.append(summary, pre);
     log.append(box);
+    boundLog();
     state.thinking = { el: pre, text: '', box, summary, since: Date.now(), painted: 0, shown: '' };
   }
   state.thinking.text += delta;
@@ -388,6 +438,7 @@ function addTool({ kind, arg, ok, head, lines = [], sources = [] }) {
     row.open = true;
   }
   log.append(row);
+  boundLog();
   scrollDown();
 }
 

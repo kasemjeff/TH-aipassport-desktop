@@ -29,6 +29,49 @@ export const aipassHome = () => process.env.AIPASS_HOME?.trim() || path.join(os.
 export const DEFAULT_MAX_TOOL_CALLS = 300;
 export const DEFAULT_MAX_WALL_CLOCK_MS = 1_800_000;
 
+/**
+ * The moments a hook may be bound to.
+ *
+ * A hook is a command line the PERSON configured (harness/hooks.mjs): after a
+ * change is staged, before a commit goes through, and when a run ends. The
+ * list lives here because the settings file owns the shape of a setting, and
+ * the hook runner reads the shape from here.
+ */
+export const HOOK_MOMENTS = ['afterWrite', 'beforeCommit', 'done'];
+
+/**
+ * The hooks a settings file holds, in the one shape the harness reads.
+ *
+ * A moment is a string or a list of strings, and the LIST is the chain: each
+ * entry is one command, run on its own, in order. Anything that is not a
+ * command line is dropped rather than stored — a hook that cannot run is a
+ * setting that looks like protection and is not.
+ *
+ * @param {any} value what the settings file held
+ * @returns {{afterWrite: string[], beforeCommit: string[], done: string[]}}
+ */
+export function normalizeHooks(value) {
+  const out = { afterWrite: [], beforeCommit: [], done: [] };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
+  for (const moment of HOOK_MOMENTS) {
+    const raw = value[moment];
+    const list = Array.isArray(raw) ? raw : (raw == null ? [] : [raw]);
+    const commands = [];
+    for (const item of list) {
+      if (typeof item !== 'string') continue;
+      const text = item.trim();
+      // A long command line is a script pasted into a setting; the cap keeps
+      // the file readable and the argument list sane.
+      if (!text || text.length > 300) continue;
+      if (commands.includes(text)) continue;
+      commands.push(text);
+      if (commands.length >= 10) break;
+    }
+    out[moment] = commands;
+  }
+  return out;
+}
+
 export const DEFAULTS = {
   // the model a new run starts on; the window can still switch per session
   defaultModel: null,
@@ -41,6 +84,16 @@ export const DEFAULTS = {
   // 'yolo' (writes and shell both go through)
   mode: 'ask',
   allowRun: false,
+  // May the model run git's WRITE side (stage, commit, branch)? Off by
+  // default: a run that can write files is one thing, a run that can rewrite
+  // the project's history is another, and the person who turns this on is the
+  // one who decides that. A git write still rides the permission gate as a
+  // write, so 'ask' asks before it happens.
+  allowGitWrite: false,
+  // May the model ask for a check (the VERIFY marker)? Off by default, because
+  // the check runs a command and a command is the shell gate: the person
+  // decides whether the model may run one on its own.
+  allowVerify: false,
   // The step cap one run may spend, or 0 for no cap: the run goes until DONE,
   // a guard stops it, or a budget below is spent. A positive cap is 1..200.
   maxSteps: 0,
@@ -138,6 +191,19 @@ export const DEFAULTS = {
   allowFetch: false,
   // where staged uploads wait before they are sent
   uploads: null,
+  // The person's own commands, at the points that matter (harness/hooks.mjs).
+  // A hook is a command line the person configured — not one the model
+  // chose — bound to a moment: after a change is staged, before a commit
+  // goes through, and when a run ends. Each moment is a string or a list of
+  // strings, and the list is the chain: each entry is ONE command.
+  hooks: { afterWrite: [], beforeCommit: [], done: [] },
+  // May the model look into this project's past? The RECALL marker reads the
+  // project's own sessions and answers with what was said — a read of the
+  // person's own history, and the only way "what did we decide yesterday?"
+  // gets an answer. It is a read, not a power, so it is on by default; the
+  // switch is here for a project whose past nobody wants in the model's
+  // context.
+  recall: true,
 };
 
 /**
@@ -158,6 +224,8 @@ export const DEFAULTS = {
  * @property {string} [mode]                  'ask' | 'auto' | 'yolo'
  * @property {boolean} [allowRun]             may the run reach the shell
  * @property {boolean} [allowFetch]           may the run send data out
+ * @property {boolean} [allowGitWrite]        may the run stage, commit, branch
+ * @property {boolean} [allowVerify]          may the run ask for a check
  * @property {boolean} [plan]                 plan mode
  * @property {boolean} [requirePlanApproval]  wait for a human before the work
  * @property {boolean} [subagent]             may the run call a helper
@@ -165,6 +233,7 @@ export const DEFAULTS = {
  * @property {boolean} [searchI]              the case-insensitive SEARCH
  * @property {boolean} [attach]               the ATTACH of a non-text file
  * @property {boolean} [webScratch]           the scratch conversation
+ * @property {boolean} [recall]               may the model look into the past
  * @property {string|null} [conversation]     the conversation to send into
  * @property {boolean} [reuse]                reuse the bridge's conversation
  * @property {boolean} [permanent]            keep the conversation afterwards
@@ -207,6 +276,10 @@ export const HARNESS_OPTION_DEFAULTS = Object.freeze({
   mode: 'ask',
   allowRun: false,
   allowFetch: false,
+  // The write side of git and the VERIFY marker: both are powers a run is
+  // GIVEN, never powers it takes. Off by default; the person turns them on.
+  allowGitWrite: false,
+  allowVerify: false,
   // plan mode: the model writes a plan first, and waits for the human
   plan: false,
   requirePlanApproval: false,
@@ -217,6 +290,8 @@ export const HARNESS_OPTION_DEFAULTS = Object.freeze({
   searchI: false,
   attach: false,
   webScratch: false,
+  // the RECALL marker: the model may ask what this project said before
+  recall: true,
   // the conversation the run sends into
   conversation: null,
   reuse: false,
@@ -509,6 +584,9 @@ export class Settings {
     next.minThaiRatio = Number.isFinite(ratio)
       ? Math.min(1, Math.max(0, Math.round(ratio * 100) / 100)) : DEFAULTS.minThaiRatio;
     next.langCheck = Boolean(next.langCheck);
+    // The RECALL marker is a read, and a read is a switch like any other: a
+    // settings file that says "true" as a string says no.
+    next.recall = Boolean(next.recall);
     next.repeatGuard = Boolean(next.repeatGuard);
     next.repeatGuardMax = num(next.repeatGuardMax, 1, 50, DEFAULTS.repeatGuardMax);
     next.attempts = num(next.attempts, 1, 5, DEFAULTS.attempts);
@@ -520,6 +598,10 @@ export class Settings {
       ? next.verifyCommand.split(/\r?\n/)[0].trim().slice(0, 300)
       : null;
     next.requireCheck = Boolean(next.requireCheck);
+    // The two new powers are booleans and nothing else: a settings file that
+    // says "true" as a string is a file that says no.
+    next.allowGitWrite = Boolean(next.allowGitWrite);
+    next.allowVerify = Boolean(next.allowVerify);
     // Path rules are policy, and policy that a typo silently disables is worse
     // than no policy: a rule with no pattern would never match anything, and a
     // decision of "yes" would never be honoured by the engine. Both are dropped
@@ -556,6 +638,12 @@ export class Settings {
     next.plugins = Array.isArray(next.plugins)
       ? next.plugins.filter((n) => typeof n === 'string' && n.trim())
       : [];
+    // The hooks are commands the person configured, so the file keeps the
+    // shape the runner reads: three moments, each a list of command lines.
+    // A hand-edited file with anything else in it is normalized here rather
+    // than at the moment a hook fires — the same place every other value
+    // that cannot work is dropped.
+    next.hooks = normalizeHooks(next.hooks);
     if (next.compaction) {
       const budget = num(next.compaction.contextTokens, 1000, 4_000_000, 24_000);
       const reserve = num(next.compaction.reserveTokens, 128, budget - 1, 4_096);

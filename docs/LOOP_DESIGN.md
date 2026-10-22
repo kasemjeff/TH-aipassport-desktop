@@ -81,6 +81,10 @@ preamble with the task; every later pass carries the results of the last
 reply as one message. A DONE is therefore read in the pass that asked for it,
 not a pass later.
 
+A run's root is the folder the call names: the project, or the worktree it
+works in (`harness/worktree.mjs`) — and every path the run touches is
+confined to it.
+
 The loop returns `{ summary, stopReason, steps, changes, credits, spent,
 check, todo }`. The two credit fields are not two views of one number:
 `credits` is the quota **after** the run (`quota(true)` — `available`,
@@ -230,6 +234,13 @@ runs before the fan-out, so a hundred helpers never start).
   built-in, a plugin marker and an MCP tool all answer a malformed call with
   the same `err: …` sentence, so no implementation has to own the parser's
   contract and no malformed call reaches a tool that might throw;
+- **VERIFY dispatch** — a `VERIFY` from the model is a shell call: the
+  run's declared check runs first (`verifyCommand`, or the project's
+  `.aipass/check.txt`), and the checker — the read-only child — is the
+  fallback when there is no command to run. The answer comes back as an
+  ordinary tool result (a check that fails is a failing check with its
+  output, not a bare `err:`), and it rides the permission gate below like
+  any other call. Off unless the run was given `allowVerify`;
 - **red-test gate** — a `git commit` RUN while the run's declared check
   (`.aipass/check.txt`, or the `verifyCommand` option) has not passed at the
   current tree state is refused with the exact command that un-bars it and the
@@ -242,7 +253,17 @@ runs before the fan-out, so a hundred helpers never start).
   More than `repeatGuardMax` refusals in one run stop it (see the table);
 - **permission gate** — `permissions.request()`: `deny` answers the model with
   `err: the person watching declined …`; `always` records a grant for the
-  project;
+  project. A read never asks: `RECALL` is a read — it searches this
+  project's own sessions — so its question rides the secret floor like any
+  other read and no mode pre-answers it;
+- **git write** — `GIT stage` / `commit` / `branch` is classified as a
+  WRITE, because the argument says which subcommand it is (`GIT status`
+  reads, `GIT commit` writes) — a write classified as a read would go
+  through the gate without a question. The tool refuses the write outright
+  unless the run was given `allowGitWrite`; the wrapper uses argv arrays
+  (never a shell string), refuses a path that leaves the project (lexically
+  and through a link), and refuses a commit with no message or nothing
+  staged;
 - **arg guard** — a path call refused for a missing file is retried once with
   invisible characters stripped and non-ASCII digits normalised, and the
   result says so;
@@ -357,11 +378,29 @@ say what a completed run left open; the loop returns.
 Stops: `steps` (a set cap ran out), `tools-limited`, `time-limited`,
 `credit-limited` (a budget spent).
 
+**The moments the person's own commands fire at.** A hook is a command line
+the person configured, bound to a moment (`settings.json` → `hooks`):
+
+| moment | when | what the verdict does |
+|---|---|---|
+| `afterWrite` | after a change is staged — a write or an edit | rides back to the model with the tool result; a failing hook is reported and the change stays staged |
+| `beforeCommit` | before the model's `GIT commit` goes through | a failing hook refuses the commit, and the run continues: the model is told what the hook said |
+| `done` | when the run ends | comes back to the person as a note, after the run's own answer — it does not change the result |
+
+Each hook runs as an argv array (never a shell string), with the run's root
+as its cwd and a timeout on it, and its output is screened for secrets
+before it becomes part of a transcript. A hook is the person's command, so it
+never asks the model — or the person — for permission. The `beforeCommit`
+moment rides the model's `GIT commit`; the window's own commit button is the
+person's, and it does not consult the hooks.
+
 ## Guards at a glance
 
 | guard | watches | first response | stop |
 |---|---|---|---|
 | nudge | a reply with no actionable marker | `nudge` + reminder (×2) | 3rd: the checker's last chance — a `fail` gives one more step (the streak resets), a `pass` ends `done`, no verdict → `give_up` → `stalled` |
+| VERIFY dispatch | the model asked for a check (`VERIFY`) | the declared check runs first, the checker is the fallback; the answer is a tool result | — (it is a shell call: the gate asks, and the run's `allowVerify` decides whether the marker exists at all) |
+| git write | a `GIT stage` / `commit` / `branch` | classified as a write, so the gate asks; refused outright unless the run was given `allowGitWrite` | — (a refusal is the tool's `err:`, not a stop) |
 | repeat guard | identical call, 3rd time, nothing staged in between | refusal text as the result, `repeat_block` | > `repeatGuardMax` (4) refusals → `stalled` |
 | err loop | the same failure (kind + masked error line) on calls in a row | correction on the third result, `errLoops` | streak > `repeatGuardMax` → `stalled` |
 | chain guard | a failed change, mid-reply | the reply's later changes/RUNs skipped and stated, `chainSkips`; reads still run | — |
@@ -411,7 +450,9 @@ check command; `requireCheck` exists wherever the checker can run.
    failing.
 3. **Writes stop at the overlay.** Tools never touch the disk;
    `applyOverlay(overlay, accepted)` is the only writer — driven by the
-   window's Apply — and emits `applied`.
+   window's Apply — and emits `applied`. It snapshots the files it is about
+   to write first (a checkpoint, kept outside the project), so an approved
+   change can be taken back; the answer carries the checkpoint's id.
 4. **WAF once, at assembly.** Tools return real text; `outbound()` is applied
    when the loop assembles the results, so bytes on disk are exactly the
    file's.
@@ -472,6 +513,12 @@ the helper keeps its original behaviour.
 | `test/run-overlay.test.mjs` | the staged tree projected into RUN; the disk untouched until Apply |
 | `test/gates.test.mjs` · `test/permissions.test.mjs` | the decisions the gate consumes — yolo still asks about destructive RUNs |
 | `test/checker.test.mjs` | verdicts pass/fail/none, the read-only child, the always-run exit check bounded at two verdicts, the declared check command (`.aipass/check.txt` / `verifyCommand`) and the `requireCheck` gate |
+| `test/verify-marker.test.mjs` | the VERIFY marker: the model can ask for a check, the answer is a tool result, and a VERIFY with no declared check says so instead of inventing a pass |
+| `test/checkpoints.test.mjs` | the checkpoint before the apply, the bytes back exactly, the store outside the project, and the newest-first list with the oldest pruned |
+| `test/git.test.mjs` | the git write side: it asks before it runs, it refuses a path outside the project, and it is refused outright until the run is given `allowGitWrite` |
+| `test/media.test.mjs` | the media surface: the option surface a model declares, an undeclared option dropped before the request, the media timeout, and the file kept where it was asked to go |
+| `test/export.test.mjs` | the export keeps every entry, the HTML escapes what the page would have executed, and the tree groups the sessions by day |
+| `test/schedule.test.mjs` | a due entry runs once and is then spent, a disabled one never runs, and the store keeps its file owner-only |
 | `test/ask.test.mjs` | the ASK pause: closing line, no check, deferral beside a NEED |
 | `test/lang-guard.test.mjs` | path variants (invisibles, Thai digits), the Thai reply policy, the repeat / err-loop / chain guards up to `stalled` |
 | `test/harness-fixes.test.mjs` · `test/harness-research.test.mjs` | the stagnation guard's warn-then-stop |

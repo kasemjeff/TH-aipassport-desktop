@@ -6,6 +6,127 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-23 — the review pass: a cursor that moved, a bar that showed, and names for the controls
+
+*Files*: `desktop/ui/transcript.js` (the first trim inserts the marker at the
+front, so the live run's cursor moves down with every row it shifted; the fold
+no longer starts one row early), `desktop/ui/styles.css` (the archive bar is
+not a hover-to-reveal row), `desktop/ui/app.js` (a schedule list that cannot
+be read is an error, the export fields have names, and a worktree switch waits
+for a live run), `desktop/ui/panels/tools.js` (accessible names on the new
+git/media/schedule controls; the schedule page reports a failure instead of an
+empty list), `aipass-bridge/test/{transcript-bound,ui}.test.mjs`,
+`CHANGELOG.md`.
+
+*Tests*: `npm test` — 1173 tests, 1167 pass, 0 fail, 6 skipped;
+`node scripts/agents-lint.mjs` — ok, 154 anchors against 1172 test titles.
+
+*Deferred*: the window's `VERIFY` rule still mirrors `protocol.parse()` rather
+than `MARKER_LINE`'s word boundary, so a line that starts with a longer word
+such as `VERIFIES` parses as a call in both places; changing that is a
+protocol decision, not a window fix.
+
+*Open risks*: refusing to switch or remove a worktree while a run is live is a
+small behavior change — the person has to stop the run first. Nothing else in
+the review pass changes behavior.
+
+*Cleanup*: no scratch files were left; the review fixes and the batch they
+correct are in the same commit (the batch itself was uncommitted when the
+review began).
+
+## 2026-10-21 — the batch that closed the gap list: undo, git, media, export, schedule, an editor, hooks, worktree
+
+*Files*: `aipass-bridge/harness/{checkpoints,git,media,export,schedule,hooks,worktree}.mjs` (new),
+`harness/{tools,loop,protocol,permissions,overlay,sandbox,events,mcp,providers,provider-client,settings,harness,validate,memory-store}.mjs`,
+`harness/rpc/{files,core,session,media}.mjs`, `harness/rpc.mjs`,
+`aipass-bridge/bridge/{server,private-hosts}.mjs`, `aipass-bridge/extension/background.js`,
+`aipass-bridge/{agent,chat}.mjs`, `desktop/ui/{app,commands,settings,state,markers,transcript}.mjs`,
+`desktop/ui/panels/{sessions,tools}.js`, `desktop/ui/{index.html,styles.css}`,
+`ide-extension/` (new), `docs/{FEATURE_GAPS,MATURITY,DATA_FORMATS,HARNESS_DESIGN,LOOP_DESIGN,SPEC_CHECKER}.md`,
+`desktop/README.md`, `CHANGELOG.md`, the four `AGENTS.md` guides, `scripts/qa-loop.mjs`.
+
+*Tests*: `npm test` — the whole suite green; `npm run agents:lint` — ok, 154 anchors
+against 1163 titles; `npm run coverage:gate` — ok.
+New suites: `checkpoints`, `git`, `verify-marker`, `media`, `export`, `schedule`,
+`hooks`, `recall`, `worktree`, `worktree-rpc`, `shared-write-refusal`,
+`bridge-hardening`, `background-token`, `events`, `provider-timeout`,
+`transcript-bound`; the UI suite grew to 152.
+
+*Deferred*: the checkpoint store is synchronous (the apply path it serves is
+synchronous by construction, and one owner of "atomic" beat a second async
+copy); a restore undoes an APPLY, it is not a general undo; `GIT branch` creates
+a branch without checking it out; the recall is a word match over the newest
+sessions, so an answer buried in an older one is not found; the worktree has no
+"merge back" button (a merge is git shape and the human owns it), and its
+selection does not survive a window reload; the plugin sandbox is still not
+designed; a signed Windows installer and a published feed are still future work
+(a certificate, not code).
+
+*Open risks*: nothing in this batch has run against a LIVE bridge, tab or
+provider — the registry says so, and the CHANGELOG states what a person needs;
+the export's default path is relative, so a transcript can land inside a repo;
+the IDE extension's `package.json` is an npm package directory and needs the
+human's sign-off (root rule 11); a scheduled task needs the bridge and a
+logged-in tab, and the entry is still marked as run for the day when the tab is
+closed; while the window is in a worktree EVERY project-scoped call targets
+the worktree — the apply included, which is the point, but the person has to be
+told; a worktree removed with force can delete bytes that exist nowhere else.
+
+*Cleanup*: no git shape was touched — nothing committed, staged, stashed or
+reset; the scratch scripts every session wrote were deleted; the guides were
+cut to fit their budgets rather than the budgets raised, and the anchor index
+moved to `test/CONTRACTS.md` with a budget of its own so the guides stay law.
+
+## 2026-10-21 — the floor is Node 20, and the bridge is asked the right question
+- **Files**: `package.json`, `package-lock.json` and
+  `aipass-bridge/bridge/package.json` (`engines` `>=22` → `>=20`);
+  `aipass-bridge/install.sh`, `aipass-bridge/install.ps1`,
+  `aipass-bridge/setup.mjs`, `aipass-bridge/bin/aipass.mjs` (the version check
+  and the message it prints); `README.md` (the badge and the "what you need"
+  row), `aipass-bridge/README.md`, `CONTRIBUTING.md`, `docs/TECH_STACK.md`,
+  `docs/RELEASE.md`, `aipass-bridge/deploy/Dockerfile` and
+  `aipass-bridge/deploy/README.md` (the floor, stated everywhere);
+  `.github/workflows/test.yml` (the matrix is 20/22/24 now, and the smoke lane
+  runs the floor instead of 22);
+  `aipass-bridge/harness/rpc.mjs` (the bridge check asks `/status` instead of
+  the root path, which the bearer gate answers 401 — so every backend was
+  starting a bridge of its own; the plugin listing waits for the startup load
+  it is describing);
+  `aipass-bridge/harness/rpc/plugins.mjs` (`plugins.list` awaits that load);
+  `aipass-bridge/harness/provider-client.mjs` (the catalog deadline is a timer
+  the process holds, not Node's unref'd timeout signal);
+  `aipass-bridge/test/launcher.test.mjs` (the detached backend is told where
+  the bridge is, and the cleanup waits for the children it kills);
+  `CHANGELOG.md`; `docs/WORKLOG.md` (this entry);
+- **Tests**: `npm test` under Node 24.18.0 — 1114 tests, 1108 pass, 0 fail,
+  6 skipped. The same suite under Node 20.19.5 (a portable build fetched to
+  the temp directory) — 1114 tests, 1107 pass, 1 fail, 6 skipped: the one
+  failure was `aipass-bridge/AGENTS.md` being over its line budget, which is
+  another session's guide, in flight while the suite ran; a later run of the
+  same file under Node 20 was green. `npm run agents:lint` — ok, 88 anchors
+  against 1114 titles;
+- **Deferred**: the floor says `>=20` and the version checks compare the major
+  only, so a machine on 20.0–20.2 passes the check and then fails at runtime
+  on `AbortSignal.any` (20.3) — the check has always been major-only, and the
+  20.x line's last release is 20.19, so nobody sits on 20.0; a minor-aware
+  check is a separate decision. The `>=20` floor is also a courtesy to
+  machines that have not upgraded: Node 20 is past its end of life, and the
+  CI lane on it proves the floor works, not that patches are coming;
+- **Open risks**: the tree carries another session's work — `AGENTS.md` over
+  its budget, the bridge's media-frame test, a new `provider-timeout` test —
+  and the suite was red on those while this session ran; the hunks here are
+  disjoint from theirs, except `harness/provider-client.mjs`, where this
+  session changed the deadline in the method that session was rewriting: the
+  signal line and the `finally` that clears the timer. If that work is
+  re-applied, the deadline has to come back with it. The plugin listing now
+  waits for the startup load: a window that asks while the load is running
+  waits for it, and a plugin whose `setup()` hangs would hold that listing —
+  the load is a plugin's own code, and it was always able to hang the backend;
+- **Cleanup**: the Node 20 build used for the comparison sits in the temp
+  directory (`%TEMP%\opencode\node20`) and the probe scripts beside it; the
+  stray bridges those probes started were killed. Nothing was committed — the
+  human owns the git shape;
+
 ## 2026-10-21 — the session store: a project boundary, a second writer, a way back
 - **Files**: `aipass-bridge/harness/session.mjs` (a path handle is held to the
   same rule as an id — a session of another project is not opened, renamed or
@@ -38,11 +159,17 @@ suite.
   its budget, not the budget raised); `docs/DATA_FORMATS.md`; `SECURITY.md`;
   `CHANGELOG.md`;
 - **Tests**: `npm test` — 1027 tests, 1021 pass, 0 fail, 6 skipped (the skips
-  are Windows' file modes and GNU diff, as before). `npm run typecheck` — clean.
-  `npm run agents:lint` — ok, 78 anchors against 1028 titles. A probe script
-  outside the repo walked the store end to end: the cross-project refusals, the
-  slug collision, the two-writer merge, the archive round trip and the
-  oversized refusal;
+  are Windows' file modes and GNU diff, as before). `npm run typecheck` — clean
+  (a cast was added to `harness/authtoken.mjs` for a catch clause the type
+  checker does not know; it changes nothing at runtime). `npm run
+  agents:lint` — ok, 80 anchors against 1031 titles. A probe script outside
+  the repo walked the store end to end: the cross-project refusals, the slug
+  collision, the two-writer merge, the archive round trip and the oversized
+  refusal. A later run of the whole suite showed 1107 tests with one failure —
+  a bridge test that posts to `/ext/chunk` without the extension token, which
+  is the OTHER session's in-flight change (a per-run `EXT_TOKEN` on every
+  `/ext` post), not this one's; the store's own suites are green (144 tests,
+  143 pass, 0 fail);
 - **Deferred**: nothing. The three items this session left open are closed:
   the header's `entryCount` still lags by up to `HEADER_EVERY` appends — that
   is the design (root rule 8: "may lag, never overstate"), and it now holds
@@ -62,7 +189,10 @@ suite.
   by the `writeHeader` frame) is what pins the batching;
 - **Cleanup**: the temporary probe scripts live outside the repo, in the
   scratch directory, and the CLI was exercised against a scratch `AIPASS_HOME`
-  — the real `~/.aipass` was never written to.
+  — the real `~/.aipass` was never written to. Twenty-six bridges that earlier
+  test runs had left behind (their parent process gone) were stopped; the
+  machine's own app on 8787 and 8790 was left alone. The suite leaks a bridge
+  when a run is interrupted — worth a look by whoever owns the test harness.
 
 ## 2026-10-21 — the backend's own edges: a 404, an attachment, a save, a session
 - **Files**: `aipass-bridge/harness/rpc.mjs` (the static branch answers 404
@@ -84,54 +214,63 @@ suite.
   `scripts/qa-loop.mjs` (a ceiling per step, so a step that never finishes is a
   failed step that names itself; the live check carries the loopback token, so
   a backend that refuses it is reported as refusing it);
-  `aipass-bridge/test/desktop.test.mjs` (four tests);
+  `aipass-bridge/test/desktop.test.mjs` (ten tests — the stream, the replay
+  bytes, the end of a run, the settings keys, the token, and the checkpoints
+  the apply leaves behind, which had no test at all);
   `aipass-bridge/test/settings-clamp.test.mjs` (one test);
+  `aipass-bridge/test/stop.test.mjs` (a stop between two runs);
+  `aipass-bridge/test/events.test.mjs` (the fan-out writes a frame once);
+  `aipass-bridge/test/providers.test.mjs` (the catalog deadline, the provider's
+  own model);
   `aipass-bridge/test/harness-fixes.test.mjs` (the rewrite spy: the session
   header is now written under a lock, and the lock file's write was counted
   as a header rewrite, so the batch bound read as broken);
-  `aipass-bridge/AGENTS.md` (the law and its anchors — the guide was cut to fit
-  its budget, not the budget raised); `CHANGELOG.md`;
-- **Tests**: `npm test` — 1028 tests, 1022 pass, 0 fail, 6 skipped (the skips
+  `aipass-bridge/test/bridge.test.mjs` (the extension's own post carries the
+  per-run token the bridge now asks for);
+  `aipass-bridge/AGENTS.md`, `AGENTS.md`, `desktop/AGENTS.md` (the law and its
+  anchors — the guides were cut to fit their budgets, not the budgets raised);
+  `CHANGELOG.md`;
+- **Tests**: `npm test` — 1132 tests, 1126 pass, 0 fail, 6 skipped (the skips
   are Windows' file modes and GNU diff, as before). `npm run agents:lint` —
-  ok, 78 anchors against 1028 titles. `npm run qa` — 27 ok, 0 warning, 0
+  ok, 91 anchors against 1132 titles. `npm run qa` — 27 ok, 0 warning, 0
   failing, and the live backend line names the model it actually sees
   (`model DeepSeek-V4-Flash · context 23% · 1 extension`) instead of the
   `model undefined` a 401 used to produce. `npm run coverage:gate` — the one
-  file under its floor is `desktop/ui/panels/sessions.js`, which is the
-  parallel session's new rail; the files this work touched are over it
-  (`harness/run/context.mjs` went from 83.7% to 91.2% branches, over the
-  90% floor, because the session-level gate it removed was a branch nothing
-  else covered);
-- **Deferred**: the medium findings of the same review are untouched, each
-  because it needs its own test and its own hour: a run with `attempts > 1`
-  emits `finished` after every attempt and loses a stop that lands between
-  them; `sanitizeSpec` drops `apiKeyHeader`/`apiKeyPrefix`/`maxTokens`, which
-  the provider client reads; the provider's model list is fetched with no
-  timeout, so a provider that never answers hangs a run;
-  `McpManager.close()` leaves the tool table populated, so every project switch
-  duplicates the MCP markers; `methods[msg.method]` resolves an inherited
-  member (`{"method":"toString"}` answers 200); the SSE fan-out ignores
-  backpressure, so a window that stops reading grows the backend's memory.
-  The cheap wins wait with them: the token is minted outside a try, the
-  `replayBytes` budget counts UTF-16 units, `settings.set` writes a key nobody
-  knows, and `applyProviderTo` reads the outer `model` instead of the
-  provider's own;
+  file under its floor is `desktop/ui/panels/sessions.js` (the parallel
+  session's new rail, 69.4% against 70%); the backend's own files are over
+  theirs, and two of them were under before this work: `harness/rpc.mjs` went
+  from 71.7% to 79.1% branches (the floor is 74%), and `harness/rpc/files.mjs`
+  from 70.8% to 84.6% functions (the floor is 71%) — the checkpoints the
+  apply leaves behind had no test at all, and `harness/run/context.mjs` went
+  from 83.7% to 91.2% branches (the floor is 90%);
+- **Deferred**: the one finding left open is the provider client's history: a
+  conversation and its whole message list live for the life of the process, so
+  a long-lived backend on a provider grows without bound and every turn pays
+  for the entire history. Bounding it changes what the model sees, so it is a
+  decision, not a fix. The ping frame still goes straight to a paused
+  listener's socket (16 bytes, and the socket's own buffer is the cap);
 - **Open risks**: another session is working in the same tree at the same time
   — it fixed the MCP project scoping in `harness/rpc.mjs` and
-  `harness/rpc/plugins.mjs` (with its own test) and cut `desktop/AGENTS.md` to
-  make room. The hunks here are disjoint from those, but `harness/rpc.mjs` and
-  `desktop/AGENTS.md` carry foreign work; the edits in `rpc.mjs` are the static
-  branch and `applySettingsTo` only. The guide's size budget was NOT raised:
-  the guide was tightened instead, and the new laws live in
+  `harness/rpc/plugins.mjs` (with its own test), the provider's catalog
+  deadline (`harness/provider-client.mjs`, with an env knob), and the bridge's
+  per-run extension token. The hunks here are disjoint from those, but
+  `harness/rpc.mjs` and `desktop/AGENTS.md` carry foreign work; the edits in
+  `rpc.mjs` are the static branch, `applySettingsTo`, the replay buffer, the
+  fan-out and the provider's model. The guide's size budget was NOT raised:
+  the guides were tightened instead, and the new laws live in
   `aipass-bridge/AGENTS.md` (the backend's own law) rather than in
   `desktop/AGENTS.md`, which had no room. The settings file is read again
   before every write, which is one small file read per save and per run — the
   read-modify-write window between the two surfaces is still open, but it is a
-  moment now instead of the life of the process;
-- **Cleanup**: the probe that checked what the backend really does with an
-  edited provider lives in the temp directory and is not part of the
-  repository; the suite processes this session left hanging (a test file
-  another session had created and deleted mid-run) were ended;
+  moment now instead of the life of the process. A careless script of this
+  session overwrote the root `AGENTS.md` with an empty file; it was restored
+  from the last commit (which is what the tree held) and the parallel
+  session's own edits to it came back on their own save — the file is byte for
+  byte what it was, plus the anchors here;
+- **Cleanup**: the probes that checked what the backend really does live in the
+  temp directory and are not part of the repository; the suite processes this
+  session left hanging (a test file another session had created and deleted
+  mid-run) were ended;
 
 ## 2026-10-21 — the window says it is working, and a reload brings the conversation back
 - **Files**: `desktop/ui/app.js` (`setWorking()`/`paintWorking()` — the bar over

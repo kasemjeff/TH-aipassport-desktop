@@ -9,6 +9,12 @@
 // What the older sheet got right, this keeps: edits are staged in a draft and
 // only "บันทึก" writes them, validation names the problem instead of saving a
 // bad number, and the context meter ticks live while the sheet is open.
+//
+// Three of the pages are not settings at all: the repository's own buttons
+// (git), the media models and the schedule. They live here because this is
+// where the rest of the app's surfaces are — and because a page that acts on
+// the machine belongs next to the page that says what the machine may do.
+import { renderGitTab, renderMediaTab, renderScheduleTab } from './panels/tools.js';
 
 
 /**
@@ -90,6 +96,12 @@ const saveModelTab = (sheet) => {
       defaultModel: d.defaultModel,
       mode: d.mode,
       allowRun: d.allowRun,
+      // The two switches the harness option sheet owns. They are sent only
+      // when the machine has them: a backend that does not know the key
+      // drops it (rpc/settings.mjs writes only the keys DEFAULTS knows), and
+      // the window says so after the save instead of pretending it took.
+      allowGitWrite: d.allowGitWrite,
+      allowVerify: d.allowVerify,
       maxSteps: d.maxSteps,
       maxToolCalls: d.maxToolCalls,
       // The sheet's minutes go back to the stored milliseconds.
@@ -832,6 +844,43 @@ const renderHealthTab = async (page, sheet) => {    // One button, same answers 
     page.append(out, run);
 };
 
+/**
+ * The hooks tab: the person's own commands, at the moments that matter.
+ *
+ * A hook is a command line the person wrote, run by the harness at a named
+ * moment — after the run stages a change, before a commit goes through, or
+ * when the run ends. The command's verdict comes back to the model (and, for
+ * the last one, to the person as a note), so "run the linter after every
+ * edit" is a setting rather than a habit.
+ *
+ * @param {object} page
+ * @param {object} sheet
+ */
+const renderHooksTab = async (page, sheet) => {
+  const group = el('div', 'set-group');
+  group.append(sheet.row('หลังแก้ไฟล์ (afterWrite)',
+    'รันคำสั่งนี้ทุกครั้งที่รันเตรียมการแก้ไฟล์ — เช่น "npm run lint" — ผลของคำสั่งกลับไปหาโมเดล',
+    sheet.control({ key: 'hooks.afterWrite', type: 'textarea' })));
+  group.append(sheet.row('ก่อน commit (beforeCommit)',
+    'รันก่อน commit — ถ้าคำสั่งล้มเหลว commit จะไม่เกิดขึ้น',
+    sheet.control({ key: 'hooks.beforeCommit', type: 'textarea' })));
+  group.append(sheet.row('ตอนจบรัน (done)',
+    'รันตอนรันจบ — ผลขึ้นที่คนใช้เป็นบันทึกในบทสนทนา',
+    sheet.control({ key: 'hooks.done', type: 'textarea' })));
+  page.append(group);
+  const note = el('p', 'settings-empty');
+  note.append('คำสั่งหนึ่งบรรทัดต่อ hook — เช่น "npm run lint" หรือ "npm test" · คำสั่งที่ล้มเหลวจะถูกบอก ไม่ทำให้รันตาย');
+  page.append(note);
+};
+
+/**
+ * The hooks save: the three moments, and nothing else.
+ *
+ * @param {object} sheet
+ * @returns {TabSave}
+ */
+const saveHooksTab = (sheet) => ({ patch: { hooks: sheet.draft.hooks ?? {} }, problems: [] });
+
 const TABS = [
   {
     id: 'model',
@@ -843,6 +892,8 @@ const TABS = [
       { key: 'defaultModel', label: 'โมเดลเริ่มต้น', type: 'text', note: 'id ของโมเดล — ดูรายการได้ที่ /models หรือกดที่หัวหน้าต่าง' },
       { key: 'mode', label: 'สิทธิ์แก้ไฟล์', type: 'select', options: [['ask', 'ถามก่อนเขียนทุกไฟล์'], ['auto', 'เขียนเลยไม่ถาม'], ['yolo', 'เขียน + รันคำสั่ง shell']] },
       { key: 'allowRun', label: 'อนุญาตให้รันคำสั่ง shell', type: 'checkbox', note: 'ปิด = โมเดลแก้ไฟล์ได้อย่างอื่นไม่ได้' },
+      { key: 'allowGitWrite', label: 'ให้โมเดลเขียน git ได้ (ปิดไว้เป็นค่าเริ่มต้น)', type: 'checkbox', note: 'โมเดลสั่ง GIT stage/commit/branch เองได้ — ยังถามก่อนตามโหมดสิทธิ์เหมือนเดิม' },
+      { key: 'allowVerify', label: 'ให้โมเดลใช้ marker VERIFY ได้ (ปิดไว้เป็นค่าเริ่มต้น)', type: 'checkbox', note: 'โมเดลขอรันเช็คของโปรเจกต์เองได้ (VERIFY) — คำสั่งเช็คเป็นงาน shell จึงถูกถามตามโหมดสิทธิ์' },
       { key: 'maxSteps', label: 'สูงสุดกี่ Step ต่อคำสั่ง', type: 'number', note: '0 = ไม่จำกัด — งานยาวไปจนจบ; เบรกจริงคือ budget ด้านล่าง (tool calls / เวลา)' },
       { key: 'maxToolCalls', label: 'สูงสุดกี่ tool call ต่อคำสั่ง', type: 'number', note: 'เพดานกันหลุด — คำตอบเดียวที่สั่งเครื่องมือร้อยครั้งจะหยุดเมื่อถึงตัวเลขนี้ (ค่าเริ่มต้น 300)' },
       { key: 'maxWallClockMin', label: 'เวลาสูงสุดต่อคำสั่ง (นาที)', type: 'number', note: 'เพดานเวลา — งานที่ค้างจะหยุดเอง (ค่าเริ่มต้น 30)' },
@@ -863,6 +914,12 @@ const TABS = [
   },
   { id: 'context', icon: '📊', title: 'บริบท (context)', sub: 'งบ token และจังหวะการบีบเอ็น', custom: 'context', render: renderContextTab, save: saveContextTab },
   { id: 'providers', icon: '🌐', title: 'ผู้ให้บริการ', sub: 'ใครตอบรัน — AiPASS (ผ่าน bridge) หรือ API อื่น', custom: 'providers', render: renderProvidersTab, save: saveEmptyTab },
+  // The three pages that act on the machine instead of describing it. They
+  // are the HUMAN's buttons: a commit is a person clicking, not a model
+  // asking, and the permission mode of a run has nothing to do with them.
+  { id: 'git', icon: '🌿', title: 'git', sub: 'สถานะ repo — stage / commit / branch ของคุณเอง', custom: 'git', render: renderGitTab, save: saveEmptyTab },
+  { id: 'media', icon: '🎨', title: 'สร้างสื่อ', sub: 'รูป วิดีโอ และเสียงจากโมเดลสื่อ', custom: 'media', render: renderMediaTab, save: saveEmptyTab },
+  { id: 'schedule', icon: '⏰', title: 'ตารางเวลา', sub: 'งานที่ทำตามเวลา — ต้องมี bridge และแท็บที่ล็อกอินอยู่', custom: 'schedule', render: renderScheduleTab, save: saveEmptyTab },
   { id: 'memory', icon: '🧠', title: 'ความจำข้ามเซสชัน', sub: 'สิ่งที่แอปจำไว้จากบทสนทนาก่อน ๆ — ดูได้ ลบได้ทันที', custom: 'memory', render: renderMemoryTab, save: saveEmptyTab },
   { id: 'window', icon: '🪟', title: 'หน้าต่าง', sub: 'ธีมและหน้า chat ที่ใช้เชื่อมต่อ', save: saveWindowTab, fields: [
     { key: 'theme', label: 'ธีม', type: 'select', options: [['dark', 'มืด'], ['light', 'สว่าง'], ['auto', 'ตามเครื่อง']], note: 'สลับดูได้ทันทีตอนเลือก' },
@@ -871,6 +928,7 @@ const TABS = [
   ] },
   { id: 'skills', icon: '📘', title: 'คู่มือ (playbook)', sub: 'โฟลเดอร์ที่ใช้ค้นหาคู่มือ', custom: 'skillsDirs', render: renderSkillsDirsTab, save: saveSkillsTab },
   { id: 'rules', icon: '🛡️', title: 'กฎไฟล์', sub: 'path ที่มีกฎละเว้นโหมด — first match wins', custom: 'rules', render: renderRulesTab, save: saveRulesTab },
+  { id: 'hooks', icon: '🪝', title: 'hooks (คำสั่งของคุณ)', sub: 'คำสั่งที่รันเองหลังแก้ไฟล์ · ก่อน commit · ตอนจบรัน', custom: 'hooks', render: renderHooksTab, save: saveHooksTab },
   // Health is pull-based on purpose (docs/RELIABILITY.md): no daemon pages
   // anyone, so the check lives where the person already looks — one button,
   // same answers as `aipass doctor` + `npm run stats -- --alerts`.
@@ -971,8 +1029,10 @@ async function openSettings() {
   const mcpList = await rpc('mcp.list').catch(() => null);
   const mcpReady = mcpList && Array.isArray(mcpList.servers) ? mcpList : null;
   // The sheet every tab draws into: the draft the edits land in, the helpers
-  // that read and write it, and the two answers only the backend has.
-  const sheet = { draft, read, write, control, row, details, mcpReady };
+  // that read and write it, and the two answers only the backend has. The
+  // window's own helpers ride along too, so a page that acts on the machine
+  // (git, media, the schedule) can talk to it the way the other pages do.
+  const sheet = { draft, read, write, control, row, details, mcpReady, rpc, el, state, addNote, addCommandOut, friendly };
   const tabs = details
     ? [...TABS,
       { id: 'plugins', icon: '🧩', title: 'ปลั๊กอิน', sub: `โค้ดเสริมจาก ${details.dir}`, custom: 'plugins', render: renderPluginsTab, save: saveEmptyTab },
@@ -1052,7 +1112,15 @@ async function openSettings() {
     // again, and the list is right the next time the sheet opens.
     await refreshSkills();
     applySettingsToUi(state.settings);
-    addCommandOut('บันทึกการตั้งค่าแล้ว');
+    // The two switches the harness option sheet owns: a backend that does not
+    // know the key drops it (rpc/settings.mjs writes only the keys DEFAULTS
+    // knows), and the window says so rather than showing a switch that
+    // quietly does nothing.
+    const dropped = ['allowGitWrite', 'allowVerify']
+      .filter((key) => patch[key] !== undefined && next[key] !== patch[key]);
+    addCommandOut(dropped.length
+      ? `บันทึกการตั้งค่าแล้ว · ค่า ${dropped.join(', ')} ยังไม่มีผล — backend รุ่นนี้ยังไม่รองรับตัวเลือกนี้`
+      : 'บันทึกการตั้งค่าแล้ว');
   };
 
   const close = el('button', null, 'ปิด');

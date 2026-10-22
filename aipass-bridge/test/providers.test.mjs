@@ -620,3 +620,71 @@ test('the bridge is not asked for the models of a provider that has a key', asyn
     delete process.env.FAKE_PROVIDER_KEY;
   }
 });
+
+test('a provider that never answers its catalog does not hang the run', async () => {
+  // The catalog is asked for at the START of every run and by the sheet's
+  // one-click check, so a provider that takes the connection and never
+  // answers would hang every run in the project before the first message.
+  // The deadline is what says "no".
+  const prev = process.env.AIPASS_PROVIDER_MODELS_TIMEOUT_MS;
+  process.env.AIPASS_PROVIDER_MODELS_TIMEOUT_MS = '150';
+  const real = globalThis.fetch;
+  // A fetch that never answers, and that gives up when the deadline says so.
+  globalThis.fetch = (_url, init) => new Promise((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) return;
+    signal.addEventListener('abort', () => {
+      const err = new Error('the deadline passed');
+      err.name = 'AbortError';
+      reject(err);
+    });
+  });
+  try {
+    const client = new ApiProviderClient(
+      { ...OPENAI_SPEC, models: ['written-model'] },
+      { key: 'sk-test' },
+    );
+    const started = Date.now();
+    const models = await client.models();
+    const took = Date.now() - started;
+    assert.ok(took < 5000, `the catalog gave up (it took ${took} ms)`);
+    assert.deepEqual(models.data.map((m) => m.id), ['written-model'], 'and the list the person wrote down is what is left');
+    assert.equal(models.source, 'spec', 'the answer says where the list came from');
+  } finally {
+    globalThis.fetch = real;
+    if (prev === undefined) delete process.env.AIPASS_PROVIDER_MODELS_TIMEOUT_MS;
+    else process.env.AIPASS_PROVIDER_MODELS_TIMEOUT_MS = prev;
+  }
+});
+
+test('an added provider keeps its own model, not the one the backend was given', async () => {
+  // A model id means nothing across providers: the model the caller pinned
+  // belongs to the AiPASS catalog, and an OpenAI-compatible endpoint would
+  // refuse it. The provider keeps its own — and the backend's own model is
+  // the AiPASS provider's.
+  const home = tempDir();
+  const store = new ProviderStore(home);
+  store.save({
+    id: 'fake', kind: 'openai', baseUrl: 'http://127.0.0.1:1/v1',
+    apiKeyEnv: 'FAKE_PROVIDER_KEY', models: ['own-model'], defaultModel: 'own-model',
+  });
+  process.env.FAKE_PROVIDER_KEY = 'sk-fake';
+  const settings = new Settings(home, 'settings.json');
+  settings.set({ defaultProvider: 'fake' });
+  const rpc = await startRpcServer({
+    root: tempDir(),
+    store: tempDir(),
+    settings,
+    providerStore: store,
+    autostartBridge: false,
+    // The model the caller pinned — an AiPASS model id.
+    model: 'gemini-3.5-flash-lite',
+  });
+  try {
+    assert.equal(rpc.current.bridge.model, 'own-model', 'the provider kept its own model');
+    assert.equal(rpc.current.providerId, 'fake', 'and it is the provider that is in use');
+  } finally {
+    rpc.server.close();
+    delete process.env.FAKE_PROVIDER_KEY;
+  }
+});

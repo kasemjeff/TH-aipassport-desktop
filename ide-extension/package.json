@@ -1,0 +1,45 @@
+{
+  "name": "aipass",
+  "displayName": "AiPASS",
+  "description": "แผงผู้ช่วย AiPASS ใน VS Code — ส่งงานให้ agent ที่แก้ไฟล์ในโปรเจกต์ของคุณ (drives the local harness backend on 127.0.0.1).",
+  "version": "0.1.0",
+  "publisher": "aipass",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onCommand:aipass.openPanel",
+    "onCommand:aipass.openPanelToSide"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "aipass.openPanel",
+        "title": "AiPASS: เปิดแผงผู้ช่วย (open the agent panel)"
+      },
+      {
+        "command": "aipass.openPanelToSide",
+        "title": "AiPASS: เปิดแผงผู้ช่วยข้างตัวแก้ไข (open it beside the editor)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "aipass.openPanel"
+        },
+        {
+          "command": "aipass.openPanelToSide"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "selftest": "node selftest.mjs"
+  }
+}

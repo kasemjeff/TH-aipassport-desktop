@@ -234,8 +234,12 @@ export class Harness {
    * was queued for, not to the harness. Building here also keeps the table's
    * copy of live options (allowRun's refusal text, the web scratch hook) in
    * step with setPolicy between runs.
+   *
+   * @param {Function|null} [checker] the checker this run may ask for a
+   *   verdict — the same one the DONE gate uses, so a VERIFY and a DONE are
+   *   judged by the same child.
    */
-  #makeTools() {
+  #makeTools(checker = null) {
     return createTools({
       root: this.root,
       overlay: this.overlay,
@@ -243,6 +247,16 @@ export class Harness {
       bridge: this.bridge,
       model: this.bridge.model,
       allowRun: this.options.allowRun,
+      // The write side of git: off unless the run was given the power, so a
+      // run never changes the repository on its own.
+      allowGitWrite: Boolean(this.options.allowGitWrite),
+      // The check a VERIFY runs: the run's declared command, and the checker
+      // that produces a verdict when there is no command to run. The checker
+      // is the run's own — a run that may not use a helper has no checker
+      // either (the DONE gate's rule), so a VERIFY without a declared check
+      // has nothing to fall back on and says so.
+      declaredCheck: this.#declaredCheck().command,
+      checker: this.options.subagent ? checker : null,
       // The CLI's --max-result / --read-lines are per-run knobs: without this
       // plumbing they sat in this.options and the tools kept their defaults,
       // so the flags were notes nobody read.
@@ -381,12 +395,17 @@ export class Harness {
    * have to move together, or a mode switch from the window would change what
    * the UI reports and not what the loop does.
    */
-  setPolicy({ mode = null, allowRun = null, allowFetch = null } = {}) {
+  setPolicy({ mode = null, allowRun = null, allowFetch = null, allowGitWrite = null, allowVerify = null } = {}) {
     if (mode) { this.options.mode = mode; this.permissions.mode = mode; }
     if (allowRun != null) { this.options.allowRun = Boolean(allowRun); this.permissions.allowRun = Boolean(allowRun); }
     // The exfil tier travels with the policy: a fetch the model chose is a
     // question, and the machine may have been told to stop asking.
     if (allowFetch != null) { this.options.allowFetch = Boolean(allowFetch); this.permissions.allowExfil = Boolean(allowFetch); }
+    // The two powers a run is GIVEN: git's write side and the VERIFY marker.
+    // They are options, not permissions — the permission gate still asks about
+    // a git write in 'ask' mode.
+    if (allowGitWrite != null) this.options.allowGitWrite = Boolean(allowGitWrite);
+    if (allowVerify != null) this.options.allowVerify = Boolean(allowVerify);
     return this.options;
   }
 
@@ -474,6 +493,8 @@ export class Harness {
         subagent: Boolean(this.options.subagent),
         searchI: Boolean(this.options.searchI),
         attach: Boolean(this.options.attach),
+        verify: Boolean(this.options.allowVerify),
+        recall: Boolean(this.options.recall),
         plugins: this.options.pluginTools ?? [],
         lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
@@ -585,6 +606,8 @@ export class Harness {
         subagent: Boolean(this.options.subagent),
         searchI: Boolean(this.options.searchI),
         attach: Boolean(this.options.attach),
+        verify: Boolean(this.options.allowVerify),
+        recall: Boolean(this.options.recall),
         plugins: this.options.pluginTools ?? [],
         lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
@@ -732,6 +755,13 @@ export class Harness {
             subagent: Boolean(this.options.subagent),
             searchI: Boolean(this.options.searchI),
             attach: Boolean(this.options.attach),
+            // The VERIFY marker: the model may ask for a check. It is taught
+            // behind an option, because the preamble's bytes are pinned by
+            // the recorded replay (evals/fixtures/).
+            verify: Boolean(this.options.allowVerify),
+            // The RECALL marker: the model may ask what this project said
+            // before. The same reason - the preamble's bytes are pinned.
+            recall: Boolean(this.options.recall),
             plugins: this.options.pluginTools ?? [],
             lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
           }),
@@ -754,6 +784,11 @@ export class Harness {
         ? `Facts carried from earlier sessions (durable; re-check anything that may have gone stale):\n${this.#crossSessionMemory.map((f) => '- ' + f).join('\n')}\n\nTask: ${task}`
         : task;
 
+      // One checker for this run: the DONE gate and a VERIFY ask the SAME
+      // child, so the verdict the model asked for and the verdict the run
+      // accepted cannot come from two different judges.
+      const checker = this.#makeChecker(task);
+
       try {
         return await runTask(effectiveTask, {
           bridge: this.bridge,
@@ -764,13 +799,13 @@ export class Harness {
           // of a temporary conversation has to repeat it.
           conversation: this.conversation,
           conversationTemporary: this.conversation ? this.#conversationTemporary : null,
-          tools: this.#makeTools(),
+          tools: this.#makeTools(checker),
           overlay: this.overlay,
           session: runSession,
           permissions: this.permissions,
           events: this.events,
           subagent: this.options.subagent ? this.#makeHelper() : null,
-          check: this.#makeChecker(task),
+          check: checker,
           runPluginTool: (marker, args) => {
             // The stop rides the call: an MCP tool the person stopped does not
             // keep the run waiting for the server's answer.
@@ -910,6 +945,16 @@ export class Harness {
     this.#stopAsked = false;
   }
 
+  /**
+   * Was a stop asked for that no run has answered yet?
+   *
+   * The attempts loop asks this between two attempts: a stop that landed in
+   * that gap has no controller to abort, and the next attempt must not start.
+   */
+  stopRequested() {
+    return this.#stopAsked;
+  }
+
   pendingChanges() {
     return this.overlay.changes().map(({ file, added, removed, deleted, isNew }) => ({ file, added, removed, deleted, isNew }));
   }
@@ -1033,6 +1078,34 @@ export class Harness {
   }
 
   /**
+   * The one command that decides correctness, when a run or a project names
+   * it.
+   *
+   * `verifyCommand` (the option sheet) wins over the project's own
+   * `.aipass/check.txt`, and the file is read from DISK — not the overlay — so
+   * a value staged in this run cannot bend the command that judges it. One
+   * owner, because the DONE gate, the red-test commit gate and the VERIFY
+   * marker must all mean the same command by the same rule.
+   *
+   * @returns {{command: string|null, source: 'run'|'project'|null}}
+   */
+  #declaredCheck() {
+    const configured = String(this.options.verifyCommand ?? '').trim();
+    if (configured) {
+      return { command: configured.split('\n')[0].trim().slice(0, 300), source: 'run' };
+    }
+    try {
+      const declaredFile = path.join(this.root, '.aipass', 'check.txt');
+      if (fs.existsSync(declaredFile)) {
+        const line = fs.readFileSync(declaredFile, 'utf8').split('\n')
+          .map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
+        if (line) return { command: line.slice(0, 300), source: 'project' };
+      }
+    } catch { /* no declared check — the checker infers one */ }
+    return { command: null, source: null };
+  }
+
+  /**
    * The checker (docs/SPEC_CHECKER.md): one read-only child run over the staged
    * tree — the piece that puts a verdict behind a DONE. Its tools read a
    * snapshot of the parent's staged files, so `read` and `run` see the tree
@@ -1080,22 +1153,7 @@ export class Harness {
       // not the overlay, so a value staged in this run cannot bend the command
       // that judges it. Absent both, the checker infers the project's checks
       // the way it always has.
-      let declared = null;
-      let declaredSource = null;
-      const configured = String(this.options.verifyCommand ?? '').trim();
-      if (configured) {
-        declared = configured.split('\n')[0].trim().slice(0, 300);
-        declaredSource = 'run';
-      } else {
-        try {
-          const declaredFile = path.join(this.root, '.aipass', 'check.txt');
-          if (fs.existsSync(declaredFile)) {
-            const line = fs.readFileSync(declaredFile, 'utf8').split('\n')
-              .map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
-            if (line) { declared = line.slice(0, 300); declaredSource = 'project'; }
-          }
-        } catch { declared = null; declaredSource = null; }
-      }
+      const { command: declared, source: declaredSource } = this.#declaredCheck();
       // The parent's path rules travel, as they do to a helper. The engine is
       // permissive because the readOnly tools are the real gate: the checker
       // cannot write even where a rule would have allowed it. The event bus

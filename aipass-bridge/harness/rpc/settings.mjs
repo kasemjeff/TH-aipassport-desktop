@@ -324,8 +324,31 @@ export function createSettingsMethods(ctx) {
       return { ok: true };
     },
 
-    /* ------------------------------------------------------------ projects */
+    /* ---------------------------------------------------------------- hooks */
 
+    /**
+     * The person's own commands, as the harness reads them.
+     *
+     * A hook is a command line bound to a moment (afterWrite, beforeCommit,
+     * done) — the file is the truth, and the window, the CLI and the backend
+     * share it, so a hook configured here is the hook every surface runs.
+     */
+    async 'hooks.get'() {
+      return { hooks: appSettings.get('hooks') ?? {} };
+    },
+
+    /**
+     * Replace the hooks. Written through the settings file, so the shape the
+     * file knows is the shape that is kept: a moment that is not a command
+     * line is dropped rather than stored.
+     */
+    async 'hooks.set'(params = {}) {
+      const next = appSettings.set({ hooks: params.hooks ?? {} });
+      emit('settings', next);
+      return { hooks: next.hooks ?? {} };
+    },
+
+    /* ------------------------------------------------------------ projects */
     async 'projects.list'() { return appSettings.projectList(); },
     async 'projects.add'(params = {}) {
       const abs = path.resolve(params.path ?? '');

@@ -52,11 +52,13 @@ Format: rule — why — `Verify:` anchor naming the exact test that enforces it
    Verify: "dry run shows a diff but writes nothing; --apply writes"
    Verify: "a heavy directory is linked, not copied, and staged files sit beside it"
    Verify: "the projection lives outside the project"
+   Verify: "an applied change can be restored"
 2. **Every tool path is confined to the project root** (`safe()`/`trySafe()`); a
    path that escapes answers `err:` and touches nothing — LEXICALLY and PHYSICALLY.
    Verify: "refuses to touch anything outside the project root"
    Verify: "a path that differs only in case is inside the project"
    Verify: "a link out of the project is a link out of the root"
+   Verify: "a write into a linked heavy directory does not land in the real tree"
 3. **A tool failure starts with `err:`** — the loop keys on that one word; never
    invent a new failure phrase a regex has to learn.
    Verify: "failures carry the err: prefix the loop keys on"
@@ -99,6 +101,7 @@ Format: rule — why — `Verify:` anchor naming the exact test that enforces it
     Verify: "a stop ends the tools that were still queued in the reply"
     Verify: "a RUN in flight is killed when the run is stopped"
     Verify: "a stop that lands right after the run started is not lost"
+    Verify: "a stop that lands between two runs is not lost"
     Verify: "a stopped run stages no more edits"
     Verify: "a stop ends the projection a RUN waits for"
     Verify: "a stop ends an mcp call the server never answers"
@@ -156,12 +159,11 @@ compatible:
    the human asks. Standing policy here: do not commit.
 3. **Targeted edits only.** Never rewrite a file wholesale. If you must touch
    one that carries foreign WIP, keep your hunks disjoint and name it in the report.
-4. **Untracked files are undelivered work.** Read them if useful; never edit
-   or delete them.
-5. **End-of-session report** — five items, no more: files touched · tests run
+   Untracked files are undelivered work: read them if useful, never edit or delete them.
+4. **End-of-session report** — five items, no more: files touched · tests run
    + result · deferred items with reasons · open risks · cleanup done. Handoffs
    that must outlive the chat append the same five to `docs/WORKLOG.md`.
-6. **Escalate instead of guessing** on destructive git, deleting files, new
+5. **Escalate instead of guessing** on destructive git, deleting files, new
    dependencies, loosening any rule. Tightening is always welcome.
 
 ## Where truth lives
@@ -192,8 +194,7 @@ compatible:
 ## Gotchas
 
 - Don't put `node -e "…"` (or other code-execution shapes) in `package.json`
-  scripts — the agent reads `package.json` early and such a field gets the read
-  refused upstream; that is why `list.mjs` exists.
+  scripts — the agent reads `package.json` early and such a field gets refused upstream.
 - `*.har`, `aipass*.md`, `apipass*.md` are git-ignored: captures hold live cookies.
 - The bridge refuses cross-origin browser callers unless `AIPASS_CORS_ORIGIN`
   names them; every route except `/status`/`/health` requires the bearer token.

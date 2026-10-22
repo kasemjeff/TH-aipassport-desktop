@@ -16,7 +16,7 @@
  * @param {object} ctx the window it draws into
  */
 export function createCommands(ctx) {
-  const { $, el, state, rpc, friendly, scrollDown, addNote, addCommandOut, paintCacheStats, hideModal, openModal, fillModels, refreshModels, fillProviders, refreshHeader, refreshMeta, checkForUpdate, openHelp, openSettings, showMemory, showMcp, showSymbols, listModels, pickConversation, freshConversation, attachPath, clipPaste, startNewSession, resumeSession, forkSession, togglePlan, showSkills, showPendingDiff, applyChecked, discardAll, pickProject, openFile, pickFile, setWorking } = ctx;
+  const { $, el, state, rpc, friendly, scrollDown, addNote, addCommandOut, paintCacheStats, hideModal, openModal, fillModels, refreshModels, fillProviders, refreshHeader, refreshMeta, checkForUpdate, openHelp, openSettings, showMemory, showMcp, showSymbols, listModels, pickConversation, freshConversation, attachPath, clipPaste, startNewSession, resumeSession, forkSession, togglePlan, showSkills, showPendingDiff, applyChecked, discardAll, pickProject, openFile, pickFile, setWorking, showCheckpoints, exportSession, showSessionTree, showGitStatus, showSchedule, showMediaModels, showWorktrees } = ctx;
 
 
 /* Every command the app has, reachable by typing "/". The header carries three
@@ -50,6 +50,18 @@ const COMMANDS = [
   { cmd: 'diff', desc: 'ดูการเปลี่ยนแปลงที่รอเขียน', run: showPendingDiff },
   { cmd: 'apply', desc: 'เขียนไฟล์ที่อนุมัติลงดิสก์', run: applyChecked },
   { cmd: 'discard', desc: 'ทิ้งไฟล์ที่รออยู่ทั้งหมด', run: discardAll },
+  // The undo of a write, the transcript as a file, and the tree of the
+  // project's sessions: the three things a person asks the window for when the
+  // work is done and they want to keep it, take it back, or see what there is.
+  { cmd: 'checkpoints', desc: 'ดูจุดย้อนกลับของไฟล์ที่เขียนไป (ย้อนกลับได้)', run: showCheckpoints },
+  { cmd: 'export', desc: 'ส่งออกบทสนทนาเป็นไฟล์ md หรือ html', run: () => exportSession() },
+  { cmd: 'tree', desc: 'ดูต้นไม้บทสนทนาของโปรเจกต์ (จัดกลุ่มตามวัน)', run: showSessionTree },
+  { cmd: 'git', desc: 'ดูสถานะ git — stage/commit ได้ที่ /settings → git', run: showGitStatus },
+  // A second checkout of the same repository: the run works in it, so the
+  // files it writes are not the files the person is editing.
+  { cmd: 'worktree', desc: 'worktree — โฟลเดอร์แยกสำหรับรัน (ไฟล์ไม่ไปแตะโปรเจกต์)', run: showWorktrees },
+  { cmd: 'schedule', desc: 'ดูงานที่ตั้งเวลาไว้ — เพิ่ม/ลบได้ที่ /settings → ตารางเวลา', run: showSchedule },
+  { cmd: 'media', desc: 'ดูโมเดลสื่อ (รูป/วิดีโอ/เสียง) — สร้างได้ที่ /settings → สร้างสื่อ', run: showMediaModels },
   { cmd: 'project', desc: 'เลือกโฟลเดอร์โปรเจกต์', run: pickProject },
   { cmd: 'settings', desc: 'ตั้งค่าทั้งหมด', run: openSettings },
   // A stop is a request with an answer: the bar says the run is winding down,

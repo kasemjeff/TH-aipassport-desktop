@@ -78,7 +78,9 @@ folds away, and plan/todo renders as a checklist — bounded and scrollable,
 headed with a `done/total` count that turns green when everything is ticked;
 a run that ends done with items still open names them and offers the one-click
 carry-on. Pending changes appear at the bottom with per-file checkboxes and a
-diff view. When a run ends with an
+diff view. The transcript itself is bounded: the oldest rows are dropped after
+300 and a line says how many went — the rows are the VIEW, and the record is
+the session file on disk, which still holds everything. When a run ends with an
 answer, its working trail folds into one `✻ ระหว่างทำงาน` line and the closing
 bubble is labelled **ผลลัพธ์**; a run that stopped short (step limit, error,
 stall) keeps the whole trail open, and a row with a button on it — carry on,
@@ -89,6 +91,17 @@ Header: project, model, permission mode — three controls, one thin row.
 
 Keys: `Enter` sends, `Shift+Enter` is a newline, `Shift+Tab` cycles the mode (ask → auto → plan), `Esc` cancels a running turn
 (or closes a dialog), `Ctrl+K` goes to the sidebar's search.
+
+**The Apply leaves an undo.** Before the Apply writes to the disk, the files
+it is about to change are snapshotted — outside the project, under
+`~/.aipass/run/checkpoints/`, so a copy of your source never sits in the
+tree — and the answer to the apply carries the checkpoint's id. A restore
+puts the old bytes back exactly and removes a file that did not exist
+before, so an approved change can be taken back without git. What it is
+not: a general undo — it undoes one apply, and only the files that apply
+touched. The pending panel carries the list, and `/checkpoints` opens the
+whole one with a **ย้อนกลับ** (restore) and a **ลบ** (forget) button per
+checkpoint.
 
 ### `/` — every command, from the keyboard
 
@@ -118,6 +131,12 @@ Typing `/` in the composer opens the palette: arrows move, `Enter`/`Tab` picks,
 | `/mcp` | the MCP servers and the tools they offer (they are managed in the sheet's 🔌 MCP page) |
 | `/symbols <file>\|<name>` | the code-navigation index: what a file declares, or where a name is defined and used — the same index the `SYMBOLS`/`DEF`/`REFS` markers use, asked from the window |
 | `/diff` `/apply` `/discard` | the pending-change buffer |
+| `/checkpoints` | the undo of an apply: what was written, when, and the button that puts the old bytes back |
+| `/tree` | the sessions of this project, grouped by the day they belong to |
+| `/export` | keep the open session as markdown or as one self-contained HTML page |
+| `/git` | the repository's state — staged, unstaged, untracked (the buttons are on the sheet's git page) |
+| `/media` | the media models of the live catalog (the page that makes one is on the sheet) |
+| `/schedule` | the tasks this machine runs at a time of day (the page that adds one is on the sheet) |
 | `/project` | switch or remove a project folder (removing never deletes the folder) |
 | `/settings` | the settings sheet |
 | `/stop` | cancel the running turn — works while a run is in flight |
@@ -160,6 +179,27 @@ row folded away in the rail, under a heading nobody could place — the one thin
 you want to find when you ask "what does this app remember about me?" is where
 you look when you ask what an app is doing.
 
+Three pages of the sheet are not settings at all — they act on the machine,
+and they live beside the page that says what the machine may do:
+
+- **git** — the repository's state (staged, unstaged, untracked), a stage
+  button per file and one for the files you ticked in the pending panel, a
+  commit with a message, and a branch to create. These are the HUMAN's
+  calls: they never consult the model's permission mode, because a person
+  clicking a button is the consent. The commit asks once, because a commit
+  lands in the repository's history and no button here undoes that.
+- **สร้างสื่อ** — a picture, a clip or a song from the media models of the
+  live catalog. Only the options the chosen model accepts are on screen
+  (the backend drops the rest — an option a model does not declare is
+  refused upstream, once the credits are gone), and the answer names the
+  file it wrote and what was dropped. The file lands in `~/.aipass/media/`,
+  outside the project.
+- **ตารางเวลา** — the tasks this machine runs at a time of day: what to do,
+  at what local time, every day or once. The backend ticks nothing by
+  itself; the window asks it to run what is due (once a minute, on the
+  header's own poll), and the page has the button for it too. A task needs
+  the bridge and a logged-in tab — it is a run like any other.
+
 ### The providers
 
 The picker next to the model one says **who answers the run**. AiPASS is the
@@ -177,6 +217,9 @@ base url      https://api.openai.com/v1  ·  http://localhost:11434/v1
 env var       OPENAI_API_KEY — the environment answers first, the file is the fallback
 models        comma separated, or leave it empty and the provider is asked at run time
 api key       written once, to ~/.aipass/credentials.json (owner-only)
+deadline      modelsTimeoutMs — how long the provider gets to answer with its model
+              list (default 10 s, or AIPASS_PROVIDER_MODELS_TIMEOUT_MS for the
+              machine); a provider that never answers must not hang a run
 ```
 
 A key is never put in `settings.json` — that file is shared by every surface
@@ -235,6 +278,11 @@ so one long list cannot push the others out of the column.
   playbook opens it under its own row; clicking it again puts it away. The
   panels a plugin draws are on the plugins page, under the plugin that draws
   them, and a finished run repaints them in place.
+- **แผงงาน** — the panels a plugin draws, in the rail itself. They used to
+  be shown only while the settings sheet was open — the sheet releases its
+  panel area when it closes, so a window at work showed none of them at all.
+  A panel is the plugin's own work surface (a scratchpad, a board), and it
+  belongs in the window rather than behind a dialog.
 
 ### When a run ends badly
 
@@ -313,11 +361,16 @@ from a browser. Plain tools send neither and pass untouched.
 
 Methods: `status`, `models`, `credits`, `conversations`, `config.set`,
 `conversations.list`, `conversation.new`, `conversation.pin`,
-`session.list|new|open|entries|fork|rename|delete|archive`, `run`, `cancel`,
+`session.list|new|open|entries|fork|rename|delete|archive`, `session.export`,
+`session.tree`, `run`, `cancel`,
 `permission.answer`, `plan.answer`, `pending`, `diff`, `apply`, `discard`,
 `compact`, `skills.list|index|load`, `fs.list`, `fs.read`,
 `symbols.list|def|refs`,
 `attachment.stage|list|remove`,
+`checkpoints.list|restore|remove`,
+`git.status|stage|commit|branch`,
+`media.models|options|styles|generate`,
+`schedule.list|add|remove|runDue`,
 `plugins.list|reload|inspect|install|remove|enable|disable`,
 `mcp.list|reload|add|remove|enable|disable|test`, `panel.render`,
 `projects.list|add|remove|switch`, `providers.list`, `provider.set|save|remove|test`,
@@ -364,7 +417,14 @@ Events: `task_start`, `assistant_delta`, `reasoning_delta`, `step`, `thinking`,
 `permission_request`, `plan_request`, `compacted`, `helper_start`,
 `helper_end`, `applied`, `discarded`, `session`, `conversation`, `cancelled`,
 `needs_tab`, `tab_opened`, `stagnation`, `verify_prompt`, `check_start`,
-`check_end`, `budget`, `plugin_call`.
+`check_end`, `budget`, `plugin_call`, `fell_behind`.
+
+`fell_behind` is not a harness event: it is the notice the event fan-out
+sends a subscriber that stopped reading. Its queue is bounded by frames and
+by bytes; when it overflows the oldest frames go, the losses are counted,
+and the notice says how many. The window does not read the notice yet — the
+loss is still silent on screen — so a run that outran the window can leave a
+gap in the transcript that only the session file on disk can fill.
 
 ### The links a search brings back
 
@@ -535,6 +595,12 @@ check is still failing; the run ends as `done-unverified` instead of accepting
 it). Both are off by default, so the checker stays advisory until a project
 or a person asks for the gate.
 
+Two more keys sit on the sheet's permissions page, both off by default:
+`allowGitWrite` (may the model run git's write side — `stage`, `commit`,
+`branch`; a git write still asks like any other write) and `allowVerify`
+(may the model ask for a check with the `VERIFY` marker; the preamble that
+teaches the marker is behind the same switch).
+
 The sheet validates before it writes, and `settings.reset` returns everything to
 the shipped defaults while keeping the project you are in.
 
@@ -693,6 +759,13 @@ error and never blocks a run.
    The installer lands at `D:\aipass-build\target\{debug,release}\bundle\nsis\`.
 2. Session tree view (`/tree`) and export to markdown/HTML. Renaming from the
    window is shipped (`/resume` → rename, and `session.rename` on the RPC).
+   **Shipped** — `session.export` (markdown, or one self-contained HTML page
+   with everything escaped) and `session.tree` (the sessions of the project
+   grouped by the day they belong to) are on the RPC and in the suite
+   (`test/export.test.mjs`), and the window has both: `/tree` opens the
+   sessions by day, and `/export` writes the open session as markdown or
+   HTML — the dialog asks for the format and the path, and a relative path
+   lands in the project.
 3. ~~Permission path rules from the window instead of code~~ **done** — the
    rules page in the settings sheet, `rules.get|set` on the RPC, and the same
    list honoured by `aipass agent` from the same settings file.

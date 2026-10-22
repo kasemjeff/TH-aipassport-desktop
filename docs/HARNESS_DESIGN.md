@@ -39,6 +39,8 @@ run(task)
   │   RUN        → project the overlay into a throwaway copy         │
   │                (sandbox.mjs): the staged edit is what the        │
   │                command sees, the real tree stays untouched       │
+  │   VERIFY     → run the run's declared check, or ask the          │
+  │                checker for a verdict; the result is a tool result │
   │   PLAN       → maybe stop and wait for a human                   │
   │   SUBAGENT   → run a whole child loop on a second conversation   │
   │ paste every result back as the next ONE message                  │
@@ -57,6 +59,8 @@ run(task)
   │                   asked for, never blocking
   ▼
 finished: summary, credits spent, pending changes → the window's Apply
+          (the apply snapshots the files it is about to write first, so
+          the apply can be taken back — checkpoints.mjs)
 ```
 
 The two facts that shaped all of it: the upstream accepts **one user message
@@ -86,11 +90,19 @@ event — is in [`LOOP_DESIGN.md`](LOOP_DESIGN.md).
 | `loop.mjs` | send → parse → execute → paste results | results go back as ONE message; writes stop at the overlay; a plan gates the work |
 | `tools.mjs` | string in, string out, one function per marker | no tool ever writes to disk; a read cannot change anything |
 | `overlay.mjs` | a pending-edit filesystem over `Map<abs, string \| DELETED>` | a run that dies halfway leaves the tree untouched; diffs exist before anything changes |
+| `checkpoints.mjs` | the bytes an apply is about to overwrite, kept outside the project | an approved change can be taken back without git, and the copy of the source never sits in the tree |
+| `git.mjs` | the git binary, spoken to with argv arrays | a git write is a write (it asks), and a path that leaves the project never reaches the binary |
+| `hooks.mjs` | the person's own commands, bound to a moment (`afterWrite`, `beforeCommit`, `done`): an argv array (never a shell string), the run's root as cwd, a timeout, the output screened for secrets | a hook is the person's command, so it never asks the model for permission, and it may not name a secret file; a failing hook is reported and the run continues, except a failing `beforeCommit`, which refuses the model's `GIT commit` |
+| `worktree.mjs` | a run's own checkout: `git worktree add` outside the project (`~/.aipass/run/worktrees/<name>`), on a branch of its own | the files a run writes in a worktree are not the files the person is editing, and the merge is the person's |
+| `media.mjs` | the image, video and music models, their presets and their option surface | an option the model does not declare is dropped before the request, and the file is kept outside the project |
+| `export.mjs` | one block list, two renderers (markdown, HTML) | the two exports cannot drift, and a transcript loses no entry |
+| `schedule.mjs` | the machine's tasks, and the detached CLI that runs them | a due task runs once and is then spent; the backend is never held open by one |
 | `sandbox.mjs` | the overlay projected into a child-visible tree for one `RUN` | a child process sees the staged edit, and the disk is still never written by a run |
 | the checker (in `harness.mjs`) | a read-only child that runs the project's own check over the staged tree | a DONE is backed by a verdict the run cannot write for itself |
 | `permissions.mjs` | classify → rules → mode → ask | path rules outrank the mode — reads included (H9); nobody listening to a question means deny, not hang |
 | `rules.mjs` | one JSON file (`~/.aipass/rules.json`) keyed by project root | "always allow writes under src/" survives a restart |
 | `compact.mjs` | estimate bytes/4 → summarise → rotate → re-seed | summarisation happens in the conversation that still holds the history |
+| `memory-store.mjs` | the facts a project carries across sessions, and the `RECALL` word match over the sessions it already wrote | a carry survives a rotation, and the recall answers with what was said — never with a guess, and "nothing said" when there is nothing |
 | `lang.mjs` | `thaiRatio` over a reply, with code, URLs and commands excluded | the closing message is measured, not guessed at — one rewrite asked for, never a block |
 | `harness.mjs` | the facade a CLI, the window and tests all drive | the one-conversation resource is managed nowhere else; helpers propose into the parent overlay |
 | `session.mjs` | JSONL append with a forkable tree | a session opened next week reads as one continuous piece of work |
@@ -105,6 +117,34 @@ a run is wasted on mojibake, the listing that merges pending writes (issue
 deny when no one is listening, and helpers whose "yolo" is safe because every
 write is only ever a proposal.
 
+**The apply and its undo.** The overlay is the only write surface of a run,
+and the apply is the only thing that writes real files. Before it writes,
+the files it is about to change are snapshotted into
+`~/.aipass/run/checkpoints/<projectKey>/` — outside the project, beside the
+projections, which are outside for the same reason. The snapshot holds the
+bytes that were on the disk (read at that moment, not remembered from the
+overlay) and the bytes about to be written. The answer to the apply carries
+the checkpoint's id, so the apply can be taken back: a restore puts the old
+bytes back through the shared atomic swap and removes a file that did not
+exist before. It is the undo of an apply, not a general undo — anything a
+run changed outside an apply is not in the store — and twenty checkpoints
+are kept per project.
+
+**The media path.** The account does more than chat, and the harness can
+reach the rest of it: the window asks the backend for the media models with
+the options each one accepts, for the presets the service publishes, and for
+a generation (`media.models`, `media.options`, `media.styles`,
+`media.generate`), and the backend talks to the local bridge. Three rules
+shape it. The served values win over a table of our own, so a model that
+stops offering 720p stops being asked for it — and an option the model does
+not declare is dropped BEFORE the request, because the upstream accepts a
+value it will not use and refuses it later, once the credits are gone. A
+generation waits for the media timeout, not the idle one: a render sits
+quiet for minutes, and the idle clock killed images that had already been
+paid for. And the bytes are kept locally, under `~/.aipass/media/` — a
+signed storage link is short-lived and public, so the answer points at it
+but the file the person wants is here.
+
 ## The guards a run passes through
 
 Every one of these is live now, and each names the piece that enforces it. The
@@ -116,7 +156,9 @@ check.
 |---|---|---|---|
 | context budget | against the message about to go out | over budget → summarise → rotate to a fresh conversation → re-seed it with the summary and the memory facts | `compact.mjs` |
 | shape check | every call, before dispatch | an empty `RUN`, a blank `NEED`/`SEARCH` or an uninstalled marker answers with one `err:` sentence | `validate.mjs` |
+| VERIFY dispatch | the model asks for a check (`VERIFY`), and the run was given `allowVerify` | the declared check runs first — the run's `verifyCommand`, or the project's `.aipass/check.txt` — and the checker is the fallback; the answer is an ordinary tool result, and it is a shell call, so it rides the shell gate | `tools.mjs`, `loop.mjs`, `protocol.mjs` |
 | permission gate | every write, shell call and network fetch | classify → rules → mode → ask; path rules outrank the mode, reads included, and no listener means deny | `permissions.mjs` |
+| git write | a `GIT stage` / `commit` / `branch`, and only when the run was given `allowGitWrite` | argv arrays (never a shell string), a path that leaves the root is refused, an empty message or an empty index is refused — and the call is classified as a WRITE, so `ask` asks before it runs | `git.mjs`, `tools.mjs`, `permissions.mjs` |
 | safety set | a config or lockfile mutation, a destructive `RUN` body | a question in every mode, ahead of grants; a shell-risk command inside the checker denies at once | `permissions.mjs`, `settings.mjs` |
 | projection | every `RUN` with something staged | the staged tree is copied into `~/.aipass/run/<project>/run-*` and the command runs there; heavy dirs are junctioned, the output is scrubbed back to the project root, the copy is deleted afterwards | `sandbox.mjs` |
 | repeat guard | a third identical call with nothing staged in between | refused with an `err:` that says what to change first | `loop.mjs` |
@@ -279,10 +321,12 @@ The contract every tool keeps — new tools included:
 
 | tool | class | notes |
 |---|---|---|
-| `list`, `read`, `search`, `glob`, `git`, `skill` | read | local; async where it shells out, gitignore- and size-aware where it walks |
+| `list`, `read`, `search`, `glob`, `skill`, `recall` | read | local; async where it shells out, gitignore- and size-aware where it walks; `recall` reads this project's own sessions, and the question rides the secret floor like any other read |
+| `git` | read, or write | `status` / `diff` / `log` read; `stage` / `commit` / `branch` write, and they are off unless the run was given `allowGitWrite` — the argument says which it is, so the gate sees the right risk |
 | `fetch`, `web` | read, network | fetch guards private hosts and caps the body; `web` spends the conversation's context and appears in the account's chat history, and its `sources:` block is read out and its redirects resolved (`harness/web-sources.mjs`) so the model is given the article's own address |
 | `write`, `replace`, `delete`, `move` | write | overlay only; `replace` requires a unique FIND match |
 | `run` | shell | disabled unless `allowRun` |
+| `verify` | shell | the model asks for a check; the declared check runs first, the checker is the fallback; disabled unless `allowVerify`, and the preamble that teaches it is behind the same switch |
 | `plan`, `todo`, `subagent` | control | handled by the loop, not the gate |
 | plugin markers | plugin's own | registered at runtime, never shadow a built-in |
 | `attach` | read | queues a part for the next message; announced only behind `--attach` |
@@ -820,6 +864,7 @@ defaults — it does now. The map, then what each gap was worth:
 | Stop — tests fail, keep working | Verify | R4's one soft nudge (`verifyPrompts`); the checker at DONE — a read-only child runs the project's own check, the verdict computed from what it ran, one continuation on fail (`loop.mjs`, `harness.mjs#makeChecker`); `verifyCommand` names that check for a run without `.aipass/check.txt`; `requireCheck` refuses a later DONE over a failing verdict as `done-unverified` | done — advisory by default, strict gate opt-in; `checks`/`checkVerdict`/`checkCommand` and `doneUnverified` recorded |
 | PreToolUse — count calls, log every event | Budget + trace | one `run_stats` line per run + one session JSONL entry per tool call, 20 000-char result and all; `run_stats.tools` carries `{n, fail, ms}` per kind and `stats` prints the mean latency | done — a hard per-run cap is still not recorded (the budget stops a run with its reason instead) |
 | PreToolUse — destructive commands, config files, red-test commits | Safety gates | modes + the H9 rule engine: path rules outrank the mode, reads included; no listener means deny; `classifyRun` asks about hazardous `RUN` bodies in every mode, ahead of grants; `SAFETY_RULES` ask about config/lockfile mutations (`permissions.mjs`, `settings.mjs`); the declared check (`.aipass/check.txt`, or `verifyCommand` when set) arms the red-test commit gate: a `git commit` RUN is refused until it passed at the current tree state, and `run_stats.commitBlocks` counts the refusals | done — the gate names the command and its source (`--verify-command` or `.aipass/check.txt`) |
+| the person's own commands — `afterWrite`, `beforeCommit`, `done` | the action, after it and before it; the stop | command lines the person wrote (`settings.json` → `hooks`): an argv array (never a shell string), the run's root as cwd, a 30 s timeout, the output screened for secrets. The verdict comes back to the model after a change and to the person as a note when the run ends; a failing hook is reported and the run continues, except a failing `beforeCommit`, which refuses the commit (`harness/hooks.mjs`, `harness/tools.mjs`) | done — the person's command, so it asks nobody for permission; the secret floor still refuses a command that names a secret file |
 
 Worth closing, in roughly the order the table reads — all of them closed since,
 and each entry says when:
@@ -895,6 +940,13 @@ fail open would move the wrong thing. The observable event surface, though, is
 already rich (every harness event reaches the window over SSE), so the cheap
 win is making that surface subscribable in-process for plugins too — after
 which "hooks" are just events with better names.
+
+The person's own hooks landed after this review (the row above), and they are
+the other kind of hook: a command line the person configured, not an event the
+harness invents. It runs inside the project and behind the same secret floor,
+it never asks the model for permission — the person configured it — and the
+gate-class checks above stayed core, because a hook that can fail open would
+move the wrong thing.
 
 The queue, in dependency order — closed, all four:
 

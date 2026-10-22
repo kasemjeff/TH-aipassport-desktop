@@ -46,7 +46,7 @@ export const SAFETY_FLOOR = [
 /** The markers this harness knows. A candidate that teaches a marker the
  *  parser does not have produces replies nothing can read. */
 export const KNOWN_MARKERS = new Set([
-  'NEED', 'SEARCH', 'GLOB', 'SYMBOLS', 'DEF', 'REFS', 'SKILL', 'GIT', 'FETCH', 'WEB',
+  'NEED', 'SEARCH', 'GLOB', 'SYMBOLS', 'DEF', 'REFS', 'RECALL', 'SKILL', 'GIT', 'VERIFY', 'FETCH', 'WEB',
   'DELETE', 'MOVE', 'EDIT', 'CREATE', 'ATTACH', 'FIND', 'NEW', 'END', 'RUN', 'PLAN',
   'TODO', 'SUBAGENT', 'TASK', 'ASK', 'JOBS', 'DONE',
 ]);

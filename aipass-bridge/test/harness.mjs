@@ -330,11 +330,17 @@ export class FakeExtension {
     this.existingAssistants = assistants;
     this.videoOptions = videoOptions;
     this.loaders = [];     // every loader url received
+    this.aborts = [];      // every abort event received
+    this.token = '';       // the per-run token, handed over in the ready frame
   }
 
   post(p, body) {
+    const headers = { 'content-type': 'application/json', ...authHeaders() };
+    // The bridge refuses a post that does not carry the per-run token, so the
+    // fake carries it exactly like the worker does.
+    if (this.token) headers['x-aipass-token'] = this.token;
     return fetch(`${this.base}${p}`, {
-      method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify(body),
+      method: 'POST', headers, body: JSON.stringify(body),
     }).catch(() => {});
   }
 
@@ -348,10 +354,14 @@ export class FakeExtension {
   // registered, and round-robin hands it the wrong scripted reply.
   async connect() {
     const before = await this.count();
+    this.gone = false;        // a reconnect is a live client again
     this.controller = new AbortController();
     const res = await fetch(`${this.base}/ext/events`, { signal: this.controller.signal, headers: { ...authHeaders() } });
     this.reading = this.#read(res.body.getReader());
     await waitFor(async () => (await this.count()) > before);
+    // The bridge hands the per-run token over in the ready frame, and every
+    // post needs it — so a post cannot go out before the token is known.
+    await waitFor(() => Boolean(this.token), { timeout: 3000 }).catch(() => {});
     return this;
   }
 
@@ -379,8 +389,14 @@ export class FakeExtension {
             if (l.startsWith('event:')) name = l.slice(6).trim();
             else if (l.startsWith('data:')) data.push(l.slice(5).trim());
           }
-          if (!data.length || name !== 'job') continue;
-          this.#handle(JSON.parse(data.join('\n')));
+          if (!data.length) continue;
+          const parsed = JSON.parse(data.join('\n'));
+          // The ready frame carries the per-run token every post has to carry.
+          if (name === 'ready') this.token = parsed.token ?? '';
+          // The abort frame is how a timed-out job tells the page to stop.
+          if (name === 'abort') this.aborts.push(parsed.jobId);
+          if (name !== 'job') continue;
+          this.#handle(parsed);
         }
       }
     } catch { /* aborted */ }

@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import { startBridge, FakeExtension, scripted, waitFor } from './harness.mjs';
 
 let bridge;
-before(async () => { bridge = await startBridge(); });
+// The dispatch grace is short here: this file has tests that ask for a job
+// with nothing attached, and the production default (5 s) would make each of
+// them wait out a window nobody is testing. The grace itself is pinned in
+// bridge-hardening.test.mjs, on bridges that ask for it.
+before(async () => { bridge = await startBridge({ AIPASS_DISPATCH_GRACE_MS: '800' }); });
 after(() => bridge.stop());
 
 const post = (body) => fetch(`${bridge.base}/v1/chat/completions`, {
@@ -1188,15 +1192,12 @@ test('a media frame with no payload does not strand the job', async (t) => {
   await waitFor(() => ext.chats.length > 0);
   const jobId = ext.chats.at(-1).jobId;
 
-  const chunk = await fetch(`${quick.base}/ext/chunk`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ jobId, parts: [{ kind: 'video' }] }),   // no payload at all
-  });
+  // The extension's own post: it carries the per-run token the bridge handed
+  // it on connect, and a post without it is somebody else talking to the
+  // bridge.
+  const chunk = await ext.post('/ext/chunk', { jobId, parts: [{ kind: 'video' }] });   // no payload at all
   assert.equal(chunk.status, 200, 'the bridge must answer the extension, not fall over');
-  await fetch(`${quick.base}/ext/done`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ jobId, finishReason: 'stop' }),
-  });
+  await ext.post('/ext/done', { jobId, finishReason: 'stop' });
 
   const raw = await (await pending).text();
   assert.match(raw, /"finish_reason":"stop"/, 'the job must settle on the done, not on a timeout');

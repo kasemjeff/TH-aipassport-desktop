@@ -18,6 +18,8 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { restoreTable } from '../harness/waf.mjs';
+import { MARKER_LINE } from '../harness/protocol.mjs';
+import { MARKER_KEYWORDS } from '../../desktop/ui/markers.js';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const APP_BASE = pathToFileURL(path.join(repo, 'desktop', 'ui', 'app.js')).href;
@@ -159,6 +161,38 @@ const bubbleHtml = (msg) => (msg?.children?.[0]?.children ?? [])
 const settle = async () => {
   await new Promise((r) => setTimeout(r, 260));
   await new Promise((r) => setTimeout(r, 5));
+};
+
+/** Every button under a node, in the order they sit on the page. */
+const buttonsIn = (root) => {
+  const out = [];
+  const walk = (n) => {
+    if (n.tagName === 'BUTTON') out.push(n);
+    for (const c of n.children ?? []) walk(c);
+  };
+  walk(root);
+  return out;
+};
+
+/** The first button whose text matches. */
+const buttonIn = (root, re) => buttonsIn(root).find((b) => re.test(b.textContent));
+
+/** Every input under a node, in the order they sit on the page. */
+const inputsIn = (root) => {
+  const out = [];
+  const walk = (n) => {
+    if (n.tagName === 'INPUT' || n.tagName === 'SELECT' || n.tagName === 'TEXTAREA') out.push(n);
+    for (const c of n.children ?? []) walk(c);
+  };
+  walk(root);
+  return out;
+};
+
+/** The page of a settings sheet, by its tab id. */
+const sheetPage = (node, id) => {
+  const shell = node('modal-body').children.find((c) => /settings/.test(c.className));
+  const pages = shell?.children.find((c) => /settings-pages/.test(c.className));
+  return pages?.children.find((p) => p.dataset.page === id) ?? null;
 };
 
 /**
@@ -361,7 +395,7 @@ test('typing "/" opens the palette and filters it as you type', async (t) => {
   task.dispatch('keydown', { key: 'm' });
   await tick();
   const shown = node('slash-list').children.map((li) => li.children[0].textContent);
-  assert.deepEqual(shown, ['/model', '/models', '/mode', '/memory', '/mcp'], 'commands sharing a prefix all show');
+  assert.deepEqual(shown, ['/model', '/models', '/mode', '/memory', '/mcp', '/media'], 'commands sharing a prefix all show');
   assert.equal(node('slash').classList.contains('hidden'), false, 'palette stays visible while a command is typed');
 });
 
@@ -1003,6 +1037,155 @@ test('a malformed todo frame is dropped, not a crash', async () => {
   assert.equal(findById(node('chat'), 'todo-panel'), null, 'nothing junk is rendered');
 });
 
+test('the history rail groups the sessions by day', async () => {
+  // A history of 99 rows with no groups is a wall of clocks; the groups turn it
+  // into a handful of questions ("today", "this week", "older"). Each group
+  // opens when the list walks into it, so the reader asks "what was today?"
+  // instead of reading ninety timestamps.
+  const daysAgo = (n) => new Date(Date.now() - n * 86_400_000).toISOString();
+  const backend = {
+    ...BACKEND,
+    'session.list': () => [
+      { id: 'd0', title: 'today', updated: daysAgo(0) },
+      { id: 'd1', title: 'yesterday', updated: daysAgo(1) },
+      { id: 'd3', title: 'three days', updated: daysAgo(3) },
+      { id: 'd10', title: 'ten days', updated: daysAgo(10) },
+      { id: 'd90', title: 'long ago', updated: daysAgo(90) },
+    ],
+  };
+  const { node, tick } = await bootApp(backend);
+  await tick(); await tick();
+  const text = node('sessions').textContent;
+  for (const word of ['วันนี้', 'เมื่อวาน', 'สัปดาห์นี้', 'เดือนนี้', 'เก่ากว่านั้น']) {
+    assert.match(text, new RegExp(word), `the rail groups by "${word}"`);
+  }
+});
+
+test('an archived session can be put back', async () => {
+  // "เก็บ" moves a session out of the picker's way, into the project's
+  // archive/. Until the archive had a way out, it was a one-way door: nothing
+  // could bring one back. The row says how many are in there, and each of them
+  // can be put back where it was.
+  const backend = {
+    ...BACKEND,
+    'session.archived': () => [{ id: 'a1', title: 'เก่า', updated: '2026-10-01T09:00:00Z' }],
+    'session.unarchive': () => ({ ok: true, id: 'a1' }),
+  };
+  const { node, sent, tick } = await bootApp(backend);
+  await tick(); await tick();
+  const bar = node('sessions').children.find((li) => /archive-bar/.test(li.className ?? ''));
+  assert.ok(bar, 'the archive bar is on screen');
+  const open = bar.children.find((c) => c.tagName === 'BUTTON');
+  assert.ok(open, 'with the way back in');
+  open.dispatch('click');
+  await tick();
+  const back = node('sessions').children
+    .flatMap((li) => li.children ?? [])
+    .flatMap((c) => c.children ?? [])
+    .find((c) => c.tagName === 'BUTTON' && /คืน/.test(c.textContent ?? ''));
+  assert.ok(back, 'the drawer lists what it holds');
+  back.dispatch('click');
+  await tick(); await tick();
+  const call = sent.find((c) => c.method === 'session.unarchive');
+  assert.ok(call, 'the session was put back');
+  assert.equal(call.params.id, 'a1', 'the one the row names');
+});
+
+test('the window names the worktree it is running in', async () => {
+  // The worktree list is where the person finds the folder: a worktree is a
+  // second checkout on their disk, and a person who cannot find it cannot
+  // merge it. The window says what it is, where it lives and what changed.
+  const backend = {
+    ...BACKEND,
+    'worktree.list': () => ({
+      worktrees: [{ path: 'C:/wt/one', branch: 'aipass/one', main: false }],
+      root: 'C:/proj',
+      home: 'C:/home/worktrees',
+    }),
+    'worktree.status': () => ({ path: 'C:/wt/one', branch: 'aipass/one', clean: false, files: ['a.txt'], added: 2, removed: 1 }),
+  };
+  const { node, tick } = await bootApp(backend);
+  const task = node('task');
+  task.value = '/worktree';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  const body = node('modal-body').textContent;
+  assert.match(body, /C:\/wt\/one/, 'the window names the folder');
+  assert.match(body, /aipass\/one/, 'and the branch');
+  assert.match(body, /2/, 'and what changed inside it');
+});
+
+test('the window offers to work in a worktree and to make one', async () => {
+  // Two buttons, and the person has to be able to reach both: enter the
+  // checkout a worktree already made, and ask for a new one.
+  const backend = {
+    ...BACKEND,
+    'worktree.list': () => ({ worktrees: [], root: 'C:/proj', home: 'C:/home/worktrees' }),
+    'worktree.create': ({ name }) => ({ path: `C:/wt/${name}`, name, branch: `aipass/${name}` }),
+    'worktree.status': () => ({ clean: true, files: [] }),
+  };
+  const { node, sent, tick } = await bootApp(backend);
+  const task = node('task');
+  task.value = '/worktree';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  const buttons = node('modal-body').children.flatMap((c) => c.children ?? []).filter((c) => c.tagName === 'BUTTON');
+  assert.ok(buttons.length >= 1, 'the window offers the button that makes one');
+  const make = buttons.find((b) => /สร้าง/.test(b.textContent ?? ''));
+  assert.ok(make, 'the create button is there');
+  const input = node('modal-body').children.flatMap((c) => c.children ?? []).find((c) => c.tagName === 'INPUT');
+  assert.ok(input, 'with a name field');
+  input.value = 'ทดลอง';
+  make.dispatch('click');
+  await tick(); await tick();
+  assert.ok(sent.some((c) => c.method === 'worktree.create'), 'the worktree was asked for');
+});
+
+test('the window can enter a worktree and take one away', async () => {
+  // The two things a person does with a worktree: work in it, and throw it
+  // away. Both are the person's call — a worktree is a checkout on their disk.
+  const backend = {
+    ...BACKEND,
+    'worktree.list': () => ({
+      worktrees: [{ path: 'C:/wt/one', branch: 'aipass/one', main: false }],
+      root: 'C:/proj',
+      home: 'C:/home/worktrees',
+    }),
+    'worktree.status': () => ({ clean: true, files: [] }),
+    'worktree.remove': () => ({ ok: true, path: 'C:/wt/one' }),
+  };
+  const { node, sent, tick } = await bootApp(backend);
+  const task = node('task');
+  task.value = '/worktree';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  const deep = (n) => [n, ...(n.children ?? []).flatMap(deep)];
+  const buttons = deep(node('modal-body')).filter((c) => c.tagName === 'BUTTON');
+  const drop = buttons.find((b) => /ลบ/.test(b.textContent ?? ''));
+  assert.ok(drop, 'the window offers to take one away');
+  drop.dispatch('click');
+  await tick(); await tick();
+  assert.ok(sent.some((c) => c.method === 'worktree.remove'), 'the worktree was removed');
+});
+
+test('a session row can export its transcript without opening it', async () => {
+  // The row opens the session; the button inside it exports. The button stops
+  // the click that would open it — a button inside a row is that button's own
+  // business — and the export asks where the file goes before it writes one.
+  const { node, sent, tick } = await bootApp(BACKEND);
+  await tick();
+  const row = sessionRows(node('sessions'))[0];
+  const button = row.children.find((c) => c.tagName === 'BUTTON');
+  assert.ok(button, 'the row carries the export button');
+  button.dispatch('click');
+  await tick();
+  assert.equal(sent.some((c) => c.method === 'session.open'), false, 'the row did not open the session');
+  const deep = (node_) => [node_, ...(node_.children ?? []).flatMap(deep)];
+  const input = deep(node('modal-body')).find((c) => c.tagName === 'INPUT');
+  assert.ok(input, 'the export asks where the file goes');
+  assert.match(input.value, /session-s1/, 'and names the session it is about');
+});
+
 test('opening a second session wins over a load still in flight', async () => {
   // Two quick clicks used to interleave: the slow session's entries landed on
   // top of the newer one's, in one log that belonged to neither. The newest
@@ -1277,6 +1460,16 @@ test('a run with no chat tab gets a banner with a one-click fix', async () => {
   open.dispatch('click');
   await tick();
   assert.ok(calls.includes('browser.open'), 'clicking it opens the tab');
+});
+
+test('the window says it lost frames', async () => {
+  // The backend's fan-out drops the oldest frames when a window stops reading
+  // and counts what it dropped. A window that showed a run it did not fully
+  // see, without saying so, would be lying about the run.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('fell_behind', { dropped: 7 });
+  await tick();
+  assert.match(node('log').textContent, /7/, 'the window names how many it lost');
 });
 
 test('a finished run releases the composer', async () => {
@@ -2998,6 +3191,25 @@ test('the update check does not nag when there is nothing new', async () => {
   assert.equal(bar, undefined, 'no notice when there is nothing to say');
 });
 
+test('the help lists every command the palette has', async () => {
+  // The help used to be written out by hand, and it drifted: the window grew
+  // commands the help never mentioned. The help reads the palette now, so a
+  // command that exists is a command the help names.
+  const { node, tick } = await bootApp(BACKEND);
+  await tick();
+  const task = node('task');
+  task.value = '/';
+  task.dispatch('keydown', { key: '/' });
+  await tick();
+  const cmds = node('slash-list').children.map((li) => li.children[0].textContent);
+  assert.ok(cmds.length > 20, `the palette has commands (${cmds.length})`);
+  node('help-btn').dispatch('click');
+  await tick();
+  const help = node('modal-body').textContent;
+  const missing = cmds.filter((c) => !help.includes(c));
+  assert.deepEqual(missing, [], 'every command in the palette is named in the help');
+});
+
 test('the status line names both halves of the build', async () => {
   // "Which build is running" has to have an answer, and the build is two
   // things: the binary and the content. The shell's version and the content's
@@ -3020,4 +3232,475 @@ test('the status line names both halves of the build', async () => {
   assert.match(log, /0\.2\.1/, 'the content version is named');
   assert.match(log, /0\.2\.0/, 'and the shell version');
   assert.match(log, /อัปเดตที่ติดตั้งไว้/, 'and where the code came from');
+});
+
+/* ------------------------------------------------- the new work surfaces */
+
+test('the checkpoint list names the files it can bring back', async () => {
+  // The undo of a write is a list of what was written and when — a point you
+  // can go back to. A point that does not say which files it covers is a
+  // point nobody dares use.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'checkpoints.list': () => ({
+      root: '/tmp/proj',
+      checkpoints: [
+        { id: 'cp-1', createdAt: Date.now(), files: [{ path: 'src/app.js' }, { path: 'README.md' }] },
+      ],
+    }),
+  });
+  await tick();
+  const list = node('checkpoint-list');
+  const row = list.children[0];
+  assert.ok(row, 'the checkpoint is on screen');
+  assert.match(row.textContent, /src\/app\.js/, 'the row names the file it can bring back');
+  assert.match(row.textContent, /README\.md/, 'and the other one');
+  assert.equal(node('checkpoints').classList.contains('hidden'), false, 'the undo area is open');
+  assert.ok(buttonIn(row, /ย้อนกลับ/), 'and the way back is a button on the row');
+});
+
+test('a restore says what came back and what was removed', async () => {
+  // "Restored" alone does not tell a person whether the tree is the tree they
+  // wanted: the answer names what came back and what was taken away.
+  const asked = [];
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'checkpoints.list': () => ({ checkpoints: [{ id: 'cp-1', createdAt: 1, files: [{ path: 'a.js' }] }] }),
+    'checkpoints.restore': (params) => {
+      asked.push(params);
+      return { id: params.id, restored: ['a.js'], removed: ['b.js'], skipped: ['c.js'] };
+    },
+  });
+  await tick();
+  const row = node('checkpoint-list').children[0];
+  buttonIn(row, /ย้อนกลับ/).dispatch('click');
+  await tick(); await tick();
+  assert.deepEqual(asked, [{ id: 'cp-1' }], 'the backend was asked for that checkpoint');
+  const log = node('log').textContent;
+  assert.match(log, /กลับมา 1 ไฟล์/, 'the reader is told what came back');
+  assert.match(log, /ถูกลบออก 1 ไฟล์/, 'and what was removed');
+  assert.match(log, /ข้าม 1 ไฟล์/, 'and what could not be touched');
+});
+
+test('the apply says the write can be taken back', async () => {
+  // The apply keeps the bytes that were there before it, so the way back is
+  // on screen right after the write — not in a terminal with `git restore`.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    apply: () => ({ written: 1, deleted: 0, files: ['a.js'], checkpoint: { id: 'cp-9', createdAt: 1, files: ['a.js'] } }),
+  });
+  globalThis.__stream.emit('diff_update', { changes: [{ file: 'a.js', added: 1, removed: 0 }] });
+  await tick();
+  node('apply').dispatch('click');
+  await tick(); await tick();
+  assert.match(node('log').textContent, /ย้อนกลับได้ที่จุด #cp-9/, 'the window names the way back');
+});
+
+test('the git page commits with a message, and refuses an empty one', async () => {
+  // A commit is a person clicking, not a model asking — so the mode of a run
+  // has nothing to do with it — and git refuses a commit without a message.
+  const committed = [];
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'git.status': () => ({ branch: 'main', entries: [], staged: [], unstaged: ['a.js'], untracked: [], clean: false, output: '' }),
+    'git.commit': (params) => { committed.push(params); return { commit: 'abc1234', message: params.message, files: ['a.js'], output: '' }; },
+  });
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  const page = sheetPage(node, 'git');
+  assert.ok(page, 'the sheet has a git page');
+  assert.match(page.textContent, /main/, 'the page names the branch');
+  assert.match(page.textContent, /unstaged \(1\)/, 'and the unstaged files');
+
+  const commit = buttonIn(page, /^commit$/);
+  assert.ok(commit, 'the commit button is there');
+  commit.dispatch('click');
+  await tick();
+  assert.equal(committed.length, 0, 'an empty message never reaches the backend');
+  assert.match(page.textContent, /ต้องมีข้อความ/, 'and the page says why');
+
+  const fields = inputsIn(page);
+  fields[0].value = 'แก้ README';
+  commit.dispatch('click');
+  await tick(); await tick();
+  assert.deepEqual(committed, [{ message: 'แก้ README' }], 'the commit carries the message the person wrote');
+  assert.match(node('log').textContent, /commit แล้ว/, 'and the window says the commit is done');
+});
+
+test('the git page makes a branch without leaving the one it is on', async () => {
+  const made = [];
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'git.status': () => ({ branch: 'main', entries: [], staged: [], unstaged: [], untracked: [], clean: true, output: '' }),
+    'git.branch': (params) => { made.push(params); return { branch: params.name, output: '' }; },
+  });
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  const page = sheetPage(node, 'git');
+  const fields = inputsIn(page);
+  fields[1].value = 'feature/งานใหม่';
+  buttonIn(page, /สร้าง branch/).dispatch('click');
+  await tick(); await tick();
+  assert.deepEqual(made, [{ name: 'feature/งานใหม่' }], 'the branch is created with the name the person typed');
+});
+
+test('the media page shows only the options the chosen model takes', async () => {
+  // The backend drops an option a model does not declare, and it says which
+  // ones it dropped — so the page must not offer what the model will refuse.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'media.models': () => ({
+      source: 'live',
+      at: 1,
+      image: [{ id: 'img-1', name: 'ภาพวาด', kind: 'image', options: {} }],
+      video: [],
+      music: [],
+    }),
+    'media.options': () => ({
+      model: 'img-1',
+      kind: 'image',
+      options: { aspectRatio: true, aspectRatios: ['1:1', '16:9'], style: true, styles: ['photo'] },
+    }),
+  });
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  const page = sheetPage(node, 'media');
+  assert.ok(page, 'the sheet has a media page');
+  assert.match(page.textContent, /รูป: ภาพวาด/, 'the catalog is on screen');
+  assert.match(page.textContent, /อัตราส่วน/, 'the option the model takes is offered');
+  assert.match(page.textContent, /สไตล์/, 'and the other one');
+  assert.equal(/ความละเอียด/.test(page.textContent), false, 'the option the model does not take is not offered');
+});
+
+test('the media page says what the render dropped', async () => {
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'media.models': () => ({ source: 'live', at: 1, image: [{ id: 'img-1', name: 'ภาพวาด', kind: 'image', options: {} }], video: [], music: [] }),
+    'media.options': () => ({ model: 'img-1', kind: 'image', options: {} }),
+    'media.generate': () => ({
+      ok: true, model: 'img-1', kind: 'image', path: '/home/me/.aipass/media/aipass-image-1.png',
+      bytes: 2048, mime: 'image/png', files: [], dropped: ['ratio=21:9'], text: '',
+    }),
+  });
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  const page = sheetPage(node, 'media');
+  const fields = inputsIn(page);
+  fields[1].value = 'ภาพหนังสือเก่าใต้ฝน';   // the prompt (the first field is the model)
+  buttonIn(page, /สร้าง$/).dispatch('click');
+  await tick(); await tick(); await tick();
+  const text = page.textContent;
+  assert.match(text, /aipass-image-1\.png/, 'the file it wrote is named');
+  assert.match(text, /ตัดทิ้ง/, 'and the option that was dropped is said out loud');
+  assert.match(text, /ratio=21:9/, 'by name');
+});
+
+test('the schedule page lists the tasks and runs what is due', async () => {
+  // The backend ticks nothing by itself: the window asks it to run what is
+  // due, and the page is where a person sets that up.
+  const added = [];
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'schedule.list': () => ({ entries: [{ id: 's1', task: 'สรุปงานวันนี้', at: '09:00', kind: 'daily', root: '/tmp/proj' }] }),
+    'schedule.add': (params) => { added.push(params); return { id: 's2', ...params }; },
+    'schedule.runDue': () => ({ ran: [{ id: 's1' }], count: 1, at: 1 }),
+  });
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  const page = sheetPage(node, 'schedule');
+  assert.ok(page, 'the sheet has a schedule page');
+  assert.match(page.textContent, /สรุปงานวันนี้/, 'the task is on screen');
+  assert.match(page.textContent, /09:00/, 'with its time');
+  assert.match(page.textContent, /proj/, 'and the project it works in');
+  assert.match(page.textContent, /แท็บ de\.aipass\.net/, 'and the page says what a scheduled task needs');
+
+  const fields = inputsIn(page);
+  fields[0].value = 'สรุปไฟล์ที่แก้เมื่อวาน';
+  fields[1].value = '21:30';
+  buttonIn(page, /เพิ่มงาน/).dispatch('click');
+  await tick(); await tick();
+  assert.equal(added.length, 1, 'the task was sent to the backend');
+  assert.equal(added[0].at, '21:30', 'with the time the person typed');
+  assert.equal(added[0].task, 'สรุปไฟล์ที่แก้เมื่อวาน', 'and the task');
+
+  buttonIn(page, /รันที่ครบเวลาแล้ว/).dispatch('click');
+  await tick(); await tick();
+  assert.match(page.textContent, /เริ่ม 1 งาน/, 'and the page says what ran');
+});
+
+test('a schedule list that cannot be read says so, not "no tasks"', async () => {
+  // An unreachable list is not an empty one: the person may have tasks, and
+  // the bridge simply did not answer. "No tasks" would be a lie that reads
+  // like the schedule was wiped.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'schedule.list': () => { throw new Error('bridge offline'); },
+  });
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  const page = sheetPage(node, 'schedule');
+  assert.match(page.textContent, /อ่านตารางเวลาไม่ได้/, 'the page names the failure');
+  assert.equal(/ยังไม่มีงานที่ตั้งเวลาไว้/.test(page.textContent), false, 'and does not claim the schedule is empty');
+
+  const task = node('task');
+  task.value = '/schedule';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.match(node('log').textContent, /อ่านตารางเวลาไม่ได้/, 'the command says the same thing');
+});
+
+test('the export writes the transcript where the person says', async () => {
+  const sent = [];
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'session.export': (params) => {
+      sent.push(params);
+      return { id: params.id, format: params.format, path: `/tmp/proj/${params.path}` };
+    },
+  });
+  globalThis.__stream.emit('session', { id: 's1', title: 'บทสนทนาหนึ่ง' });
+  await tick();
+  const task = node('task');
+  task.value = '/export';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  const body = node('modal-body');
+  assert.match(node('modal-title').textContent, /ส่งออกบทสนทนา/, 'the export dialog is open');
+  const fields = inputsIn(body);
+  fields[1].value = 'exports/out.md';
+  buttonIn(node('modal-actions'), /ส่งออก/).dispatch('click');
+  await tick(); await tick();
+  assert.equal(sent.length, 1, 'the backend was asked once');
+  assert.equal(sent[0].id, 's1', 'for that session');
+  assert.equal(sent[0].format, 'md', 'in the shape the person chose');
+  assert.equal(sent[0].path, 'exports/out.md', 'at the path the person typed');
+  assert.match(node('log').textContent, /\/tmp\/proj\/exports\/out\.md/, 'and the window says where the file is');
+});
+
+test('a session row exports without opening the session', async () => {
+  // The row opens the session; the button beside it exports it. A click on
+  // the button must not open the session as well — the row's own business and
+  // the button's own business are two different things.
+  const exported = [];
+  const { node, calls, tick } = await bootApp({
+    ...BACKEND,
+    'session.list': () => [{ id: 's1', title: 'one' }, { id: 's2', title: 'two' }],
+    'session.export': (params) => { exported.push(params); return { id: params.id, format: 'md', path: '/tmp/proj/out.md' }; },
+  });
+  const row = node('sessions').children.find((li) => /one/.test(li.textContent));
+  const out = buttonIn(row, /ส่งออก/);
+  assert.ok(out, 'the row carries an export button');
+  out.dispatch('click');
+  await tick(); await tick();
+  assert.equal(calls.includes('session.open'), false, 'the session was not opened');
+  assert.match(node('modal-title').textContent, /ส่งออกบทสนทนา/, 'the export dialog is open instead');
+
+  const fields = inputsIn(node('modal-body'));
+  fields[1].value = 'exports/one.md';
+  buttonIn(node('modal-actions'), /ส่งออก/).dispatch('click');
+  await tick(); await tick();
+  assert.equal(exported.length, 1, 'the export happened once');
+  assert.equal(exported[0].id, 's1', 'for that session');
+  assert.equal(exported[0].path, 'exports/one.md', 'at the path the person typed');
+});
+
+test('the tree lists the sessions of the project, grouped by day', async () => {  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'session.tree': () => ({
+      root: '/tmp/proj',
+      count: 2,
+      days: [{ day: '2026-10-21', sessions: [{ id: 's1', title: 'งานวันนี้', entryCount: 3 }] }],
+      sessions: [],
+    }),
+  });
+  const task = node('task');
+  task.value = '/tree';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  const body = node('modal-body');
+  assert.match(body.textContent, /2026-10-21/, 'the day is named');
+  assert.match(body.textContent, /งานวันนี้/, 'and the session under it');
+  assert.match(body.textContent, /2 บทสนทนา/, 'and how many there are');
+});
+
+test("the window's marker list is the harness's, keyword for keyword", async () => {
+  // The protocol grew VERIFY and TASK: once, and the window's mirror did not
+  // — so a VERIFY line showed up in the bubble as the raw wire it is. The
+  // window's keyword list is compared with the harness's own, keyword for
+  // keyword, so the next marker cannot drift in quietly.
+  const harness = [...new Set([...MARKER_LINE.source.matchAll(/\b([A-Z]{2,})\b/g)].map((m) => m[1]))].sort();
+  assert.deepEqual([...MARKER_KEYWORDS].sort(), harness, 'the window knows every keyword the protocol knows');
+  assert.ok(MARKER_KEYWORDS.includes('VERIFY'), 'VERIFY is one of them');
+  assert.ok(MARKER_KEYWORDS.includes('TASK'), 'and so is TASK');
+});
+
+test('a VERIFY line is wire, never prose in the bubble', async () => {
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('assistant_delta', { text: 'ขอเช็คก่อน\nVERIFY node test.mjs\nผ่านแล้ว' });
+  await tick(); await tick();
+  const bubble = node('log').children.find((c) => c.className.includes('assistant'));
+  const html = bubbleHtml(bubble);
+  assert.equal(/VERIFY/.test(html), false, 'the marker never renders');
+  assert.match(html, /ขอเช็คก่อน/, 'the prose around it does');
+
+  // And the call itself is a row, labelled with a word like every other row.
+  globalThis.__stream.emit('tool', { kind: 'verify', arg: 'node test.mjs', ok: true, head: 'ผ่าน' });
+  await tick();
+  const row = node('log').children.find((c) => c.className.includes('tool'));
+  assert.ok(row, 'the call has its own row');
+  assert.match(row.textContent, /Verify/, 'labelled with a word, not the wire kind');
+  assert.match(row.textContent, /node test\.mjs/, 'and it says what it ran');
+});
+
+test('the panels a plugin draws are on screen while the window works', async () => {
+  // The panels used to be drawn only while the settings sheet was open — the
+  // sheet releases its panel area when it closes — so a plugin's scratchpad
+  // was invisible exactly when the window was working.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'plugins.list': () => ({ dir: '/tmp/plugins', loaded: [{ name: 'notes' }], failed: [], tools: [], panels: [{ id: 'notes', title: 'scratchpad' }] }),
+    'panel.render': () => ({ html: '<ul><li>note one</li></ul>' }),
+  });
+  await tick();
+  const holder = node('plugin-panels');
+  assert.ok(holder.children.length, 'the rail carries the panel');
+  assert.match(holder.textContent, /scratchpad/, 'with the title the plugin gave it');
+  assert.equal(node('panels-section').classList.contains('hidden'), false, 'and the section is open');
+});
+
+test('the sheet offers the git-write and the verify switches', async () => {
+  // Two switches the harness option sheet grew: the model may write to git,
+  // and it may ask for the project's check. Both are off by default, and both
+  // say what they mean.
+  const { node, tick } = await bootApp(BACKEND);
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  const body = node('modal-body');
+  assert.match(body.textContent, /ให้โมเดลเขียน git ได้ \(ปิดไว้เป็นค่าเริ่มต้น\)/, 'the git switch is offered');
+  assert.match(body.textContent, /ให้โมเดลใช้ marker VERIFY ได้ \(ปิดไว้เป็นค่าเริ่มต้น\)/, 'and the verify switch');
+});
+
+test('the sheet offers the hooks the person configured', async () => {
+  // The person's own commands, at the moments that matter: after a change is
+  // staged, before a commit, and when the run ends. The sheet is where they
+  // are written — a command nobody can reach is a command nobody writes.
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'settings.get': () => ({ ...BACKEND['settings.get'](), hooks: { afterWrite: ['npm run lint'], beforeCommit: [], done: [] } }),
+  });
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  const body = node('modal-body');
+  assert.match(body.textContent, /afterWrite/, 'the after-write hook is offered');
+  assert.match(body.textContent, /beforeCommit/, 'and the one before a commit');
+  assert.match(body.textContent, /npm run lint/, 'and what is already configured shows');
+});
+
+test('a run started from the window carries the two switches', async () => {
+  // The switches are the machine's, not the window's: a run started here must
+  // carry them, or the sheet would be describing a run that never sees them.
+  const { node, sent, tick } = await bootApp({
+    ...BACKEND,
+    'settings.get': () => ({ ...BACKEND['settings.get'](), allowGitWrite: true, allowVerify: true }),
+  });
+  const task = node('task');
+  task.value = 'ทำอะไรสักอย่าง';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  const run = sent.find((s) => s.method === 'run');
+  assert.ok(run, 'the run reached the backend');
+  assert.equal(run.params.allowGitWrite, true, 'the git switch rides the run');
+  assert.equal(run.params.allowVerify, true, 'and the verify switch');
+});
+
+test('the window asks the backend to run what is due, on its own clock', async () => {
+  // The backend ticks nothing by itself: the window is what asks. The ask
+  // rides the header's poll — a second timer would be a second thing to keep
+  // alive.
+  const { calls, tick } = await bootApp(BACKEND);
+  await tick();
+  assert.ok(calls.includes('schedule.runDue'), 'the window asked what was due');
+});
+
+test('the window names the worktree it is running in', async () => {
+  // A worktree is a SECOND checkout of the same repository: the run works in
+  // it, so the files it writes are not the files the person is editing
+  // ("if two Cascades edit the same file at the same time, the edits can
+  // race … consider using worktrees" — Devin).
+  //
+  // Two things have to be true, and both are about the person: the window
+  // says WHERE the worktree is (a person who cannot find the folder cannot
+  // merge it), and the run actually lands in it.
+  const WT = 'C:\\Users\\me\\.aipass\\run\\worktrees\\ทดลอง';
+  const { node, sent, tick } = await bootApp({
+    ...BACKEND,
+    'worktree.list': () => ({
+      home: 'C:\\Users\\me\\.aipass\\run\\worktrees',
+      worktrees: [
+        { path: '/tmp/proj', branch: 'main', main: true, ours: false },
+        { path: WT, branch: 'aipass/work', main: false, ours: true },
+      ],
+    }),
+    'worktree.status': () => ({
+      path: WT, branch: 'aipass/work', clean: false, files: ['src/app.js'], added: 3, removed: 1,
+    }),
+  });
+  await tick();
+
+  const task = node('task');
+  task.value = '/worktree';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick(); await tick();
+
+  const body = node('modal-body').textContent;
+  assert.match(body, /worktree คือโฟลเดอร์สำเนา/, 'the window says what a worktree is');
+  assert.ok(body.includes(WT), 'and it names the folder the person has to find');
+  assert.match(body, /src\/app\.js/, 'and what changed inside it');
+
+  const enter = buttonIn(node('modal-body'), /ทำงานในนี้/);
+  assert.ok(enter, 'and there is a way into it');
+  enter.dispatch('click');
+  await tick(); await tick(); await tick();
+
+  assert.equal(node('worktree-bar').classList.contains('hidden'), false, 'the bar is up');
+  assert.equal(node('worktree-path').textContent, WT, 'and it names the worktree the window is in');
+
+  task.value = 'ลองแก้อะไรสักอย่างในโฟลเดอร์แยก';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  const run = sent.find((s) => s.method === 'run');
+  assert.ok(run, 'the run reached the backend');
+  assert.equal(run.params.project, WT, 'and it lands in the worktree, not in the project');
+});
+
+test('the window does not switch worktrees under a live run', async () => {
+  // A run is tied to the root it started in: leaving the worktree mid-run
+  // would make the run's frames foreign and the window would go quiet until
+  // the run ended.
+  const WT = 'C:\\Users\\me\\.aipass\\run\\worktrees\\หนึ่ง';
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'worktree.list': () => ({
+      home: 'C:\\Users\\me\\.aipass\\run\\worktrees',
+      worktrees: [{ path: WT, branch: 'aipass/one', main: false, ours: true }],
+    }),
+    'worktree.status': () => ({ path: WT, branch: 'aipass/one', clean: true, files: [] }),
+    run: () => ({ ok: true, session: 's1' }),
+  });
+  await tick();
+  const task = node('task');
+  task.value = '/worktree';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick(); await tick();
+  buttonIn(node('modal-body'), /ทำงานในนี้/).dispatch('click');
+  await tick(); await tick(); await tick();
+  assert.equal(node('worktree-bar').classList.contains('hidden'), false, 'the window is in the worktree');
+
+  task.value = 'งานที่ยังรันอยู่';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+  node('worktree-back').dispatch('click');
+  await tick(); await tick();
+  assert.equal(node('worktree-bar').classList.contains('hidden'), false, 'the live run keeps the worktree');
+  assert.match(node('log').textContent, /รันอยู่/, 'and the window says why it did not leave');
 });

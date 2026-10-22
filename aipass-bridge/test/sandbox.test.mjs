@@ -20,7 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Overlay } from '../harness/overlay.mjs';
 import { createTools } from '../harness/tools.mjs';
-import { createSandbox, materializeTree, sweepSandboxes, sandboxRoot } from '../harness/sandbox.mjs';
+import { createSandbox, materializeTree, sweepSandboxes, sandboxRoot, sharedWriteRefusal } from '../harness/sandbox.mjs';
 import { scrubOutput, isSecretName } from '../harness/output-scrub.mjs';
 import { aipassHome } from '../harness/settings.mjs';
 
@@ -199,6 +199,44 @@ test('the projection leaves out a link that points outside the project', async (
     assert.equal(fs.existsSync(path.join(sandbox, 'sub', 'away', 'secret.txt')), false,
       'the outside file is not projected');
     assert.equal(fs.existsSync(path.join(sandbox, 'a.txt')), true, 'and the project is');
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test('a write into a linked heavy directory does not land in the real tree', async () => {
+  // The projection LINKS the heavy folders (a copy of a node_modules costs a
+  // minute per RUN), so a write through that link lands in the real project.
+  // The rule the repo holds itself to is that the overlay is the only write
+  // surface of a run — so the write is refused, the folder stays a link, and
+  // the reads still work.
+  const dir = tempDir({ 'a.txt': 'hello\n' });
+  fs.mkdirSync(path.join(dir, 'node_modules', 'dep'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'node_modules', 'dep', 'index.js'), 'the real one\n');
+  const overlay = new Overlay(dir);
+  overlay.set(path.join(dir, 'node_modules', 'dep', 'index.js'), 'the staged one\n');
+
+  const refused = [];
+  const sandbox = createSandbox(dir);
+  try {
+    await materializeTree(dir, overlay, sandbox, {
+      onRefuse: (rel, shared) => refused.push({ rel, shared }),
+    });
+
+    assert.equal(fs.readFileSync(path.join(dir, 'node_modules', 'dep', 'index.js'), 'utf8'), 'the real one\n',
+      'the real tree is untouched');
+    assert.ok(fs.lstatSync(path.join(sandbox, 'node_modules')).isSymbolicLink(),
+      'and the heavy folder is linked, not copied');
+    assert.equal(fs.readFileSync(path.join(sandbox, 'node_modules', 'dep', 'index.js'), 'utf8'), 'the real one\n',
+      'the reads still work through the link');
+    assert.deepEqual(refused, [{ rel: 'node_modules/dep/index.js', shared: 'node_modules' }],
+      'the write was refused, and the folder is named');
+
+    // The refusal itself is the house shape, and it names the directory.
+    const refusal = sharedWriteRefusal(dir, path.join(dir, 'node_modules', 'dep', 'index.js'));
+    assert.match(refusal, /^err: /, 'a tool failure starts with err:');
+    assert.match(refusal, /node_modules/, 'and it names the directory');
+    assert.equal(sharedWriteRefusal(dir, path.join(dir, 'a.txt')), null, 'an ordinary path may be written');
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

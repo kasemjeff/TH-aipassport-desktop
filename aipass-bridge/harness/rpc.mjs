@@ -26,6 +26,10 @@ import { createSessionMethods } from './rpc/session.mjs';
 import { createFilesMethods } from './rpc/files.mjs';
 import { createPluginMethods } from './rpc/plugins.mjs';
 import { createUpdateMethods } from './rpc/update.mjs';
+// The media surface: the account does more than chat (images, video, music),
+// and the window asks the backend for the models, the options and the file
+// that came back.
+import { createMediaMethods } from './rpc/media.mjs';
 import { SessionStore } from './session.mjs';
 import { SKIP, posix } from './overlay.mjs';
 // The permission rules own the name of a secret file: the file index skips
@@ -40,7 +44,7 @@ import {
 // The MCP switch: turning a server on or off is a config edit and a reload,
 // and both belong to the manager that owns the clients.
 import { setServerEnabled } from './mcp.mjs';
-import { Emitter } from './events.mjs';
+import { Emitter, EventFanout } from './events.mjs';
 // The provider registry: which provider the runs talk to, where it lives and
 // where its key comes from. The specs and the keys are two files, and neither
 // of them is settings.json.
@@ -250,7 +254,11 @@ export function createRpc({
   // (a test) says so; the default is the one a real window needs.
   maxBody = MAX_BODY,
 } = {}) {
-  const listeners = new Set();
+  // The windows, and the frames they have not taken yet. A window that stops
+  // reading must not make the backend's memory grow: the frames wait in a
+  // bounded queue, the oldest go when it overflows, the losses are counted,
+  // and the window is told it fell behind.
+  const fanout = new EventFanout();
   // Every frame carries a monotonic `seq` and an SSE `id:` of the same value,
   // and the last REPLAY_LIMIT of them stay in a buffer. Two things need that:
   //   - a window that reloaded mid-run has an empty DOM and needs the recent
@@ -282,23 +290,38 @@ export function createRpc({
       replayBytes -= Buffer.byteLength(replay.shift().data);
     }
     const frame = `event: ${type}\nid: ${seq}\ndata: ${data}\n\n`;
-    // A listener whose socket died between frames must be dropped, not written
-    // to — one dead window must not take down the backend for the live ones.
-    //
-    // A listener that cannot keep up is dropped as well: `write` answers
-    // false when the socket's buffer is full, and everything after that is
-    // queued in THIS process, so a window that stops reading (a backgrounded
-    // one, a suspended laptop) grows the backend's memory with the transcript
-    // it never read. The window's EventSource reconnects on its own and the
-    // replay fills the gap, so ending the stream is the cheap way out.
-    for (const res of [...listeners]) {
-      try {
-        if (!res.write(frame)) { res.end(); listeners.delete(res); }
-      } catch { listeners.delete(res); }
-    }
+    // The windows, through the fan-out: a subscriber that stops reading must
+    // not make the backend's memory grow. The frames wait in a bounded queue,
+    // the oldest go when it overflows, the losses are counted, and the window
+    // is told it fell behind (harness/events.mjs).
+    fanout.publish(frame);
   };
 
   const appSettings = settings ?? new Settings();
+  // The "finished" frame of a project whose run is one attempt of several.
+  // The key is the project; the value is the frame to publish when the last
+  // attempt is done (null while none has arrived yet).
+  const heldFinished = new Map();
+  /**
+   * Hold a project's "finished" frame, or publish the one that was held.
+   *
+   * The attempts loop (see rpc/session.mjs) is ONE run from the window's
+   * point of view: it must not hear "finished" after the first attempt, or it
+   * puts its working bar away and clears the staged attachments while the
+   * next attempt is still going.
+   *
+   * @param {string} abs the project's folder
+   * @param {boolean} on true to hold, false to publish
+   */
+  const holdFinished = (abs, on) => {
+    if (on) {
+      if (!heldFinished.has(abs)) heldFinished.set(abs, null);
+      return;
+    }
+    const frame = heldFinished.get(abs);
+    heldFinished.delete(abs);
+    if (frame) bus.emit('finished', frame);
+  };
   // The provider registry lives beside the settings: same home, same
   // AIPASS_HOME override, so a test that moves the home moves both.
   const providers = providerStore ?? new ProviderStore(appSettings.dir ?? aipassHome());
@@ -324,7 +347,11 @@ export function createRpc({
   /** Start the bridge if nothing is answering, and wait for it. */
   const ensureBridge = async () => {
     if (!autostartBridge) return;
-    const up = () => fetch(bridgeURL, { signal: AbortSignal.timeout(1200) }).then((r) => r.ok).catch(() => false);
+    // The bridge's /status is the one route that needs no token. Asking the
+    // root instead answers 401 (the bearer gate) and reads as "no bridge" —
+    // so every backend started a second bridge of its own, which then fought
+    // for the port and held the log file open.
+    const up = () => fetch(`${bridgeURL}/status`, { signal: AbortSignal.timeout(1200) }).then((r) => r.ok).catch(() => false);
     if (await up()) return;
     const script = bridgeScript();
     if (!script) return;
@@ -479,6 +506,11 @@ export function createRpc({
       options: {
         mode: appSettings.get('mode'),
         allowRun: appSettings.get('allowRun'),
+        // The two powers a run is given, not powers it takes: the write side
+        // of git and the VERIFY marker. Both are off unless the person turned
+        // them on in the settings sheet.
+        allowGitWrite: appSettings.get('allowGitWrite'),
+        allowVerify: appSettings.get('allowVerify'),
         maxSteps: appSettings.get('maxSteps'),
         maxResult: appSettings.get('maxResult'),
         maxToolCalls: appSettings.get('maxToolCalls'),
@@ -491,6 +523,8 @@ export function createRpc({
         searchI: appSettings.get('searchI'),
         attach: appSettings.get('attach'),
         webScratch: appSettings.get('webScratch'),
+        // The RECALL marker: the model may ask what this project said before.
+        recall: appSettings.get('recall'),
         parallelHelpers: appSettings.get('parallelHelpers'),
         // The window's bootstrap start: the same git status + package.json
         // snapshot the CLI asks for with `--snapshot`. On by default here
@@ -521,11 +555,19 @@ export function createRpc({
     // Every frame carries its project and, when there is one, its session:
     // `runSessions` while a run is in flight (the run's own session, whatever
     // the window is looking at), the harness's current session otherwise.
-    h.events.on('*', (type, payload) => bus.emit(type, {
-      project: abs,
-      session: runSessions.get(abs) ?? h.session?.id ?? null,
-      ...payload,
-    }));
+    h.events.on('*', (type, payload) => {
+      const frame = { project: abs, session: runSessions.get(abs) ?? h.session?.id ?? null, ...payload };
+      // A run that is one attempt of several: the window hears "finished"
+      // once, after the LAST attempt. The frame is held, not dropped — the
+      // last attempt's is the one that counts, and a window that hears it
+      // after the first attempt takes its working bar down while the next
+      // attempt is already streaming into it.
+      if (type === 'finished' && heldFinished.has(abs)) {
+        heldFinished.set(abs, frame);
+        return;
+      }
+      bus.emit(type, frame);
+    });
     harnesses.set(abs, h);
     return h;
   };
@@ -565,7 +607,15 @@ export function createRpc({
     // would keep running yesterday's temperature, budgets and path rules
     // while every window shows the new ones. One small file, once per run.
     appSettings.reload();
-    h.setPolicy({ mode: appSettings.get('mode'), allowRun: appSettings.get('allowRun'), allowFetch: appSettings.get('allowFetch') });
+    h.setPolicy({
+      mode: appSettings.get('mode'),
+      allowRun: appSettings.get('allowRun'),
+      allowFetch: appSettings.get('allowFetch'),
+      // The two powers a run is GIVEN, and they live in the settings file
+      // like every other switch — the window's sheet edits them.
+      allowGitWrite: appSettings.get('allowGitWrite'),
+      allowVerify: appSettings.get('allowVerify'),
+    });
     Object.assign(h.options, {
       maxSteps: appSettings.get('maxSteps'),
       maxResult: appSettings.get('maxResult'),
@@ -881,6 +931,11 @@ export function createRpc({
     return entries;
   }
 
+  // The startup plugin load, as a promise the methods can wait for. It starts
+  // further down — the load has to come after the routes exist — and it is
+  // declared here so the context can hand it out.
+  let pluginsReady = Promise.resolve();
+
   // One context for the domain modules: the state they share, written down.
   // `current` is a getter because the person may switch the project under a
   // live backend, and `methods` is a getter because the domains call each
@@ -891,8 +946,14 @@ export function createRpc({
     activeProviderId, modelFor, clientForProvider, skillLibraryFor,
     decoratedPlugins, pluginSetEnabled, mcpListing, mcpSetEnabled,
     stageAttachment, dropAttachment, partsFor, dropIndex, fileIndex,
-    checkForUpdates, emit,
+    checkForUpdates, emit, holdFinished,
     bridgeURL, root, model, APP_ROOT,
+    // The startup plugin load, as a promise. It is assigned further down (the
+    // load has to come after the routes exist), so it is read through a
+    // getter: a window that asks for the plugin list in the first moments
+    // after the backend came up would otherwise be told "no plugins" and
+    // paint an empty list for the life of the window.
+    get pluginsReady() { return pluginsReady; },
     get current() { return current; },
     get methods() { return methods; },
   };
@@ -904,6 +965,7 @@ export function createRpc({
     ...createFilesMethods(ctx),
     ...createPluginMethods(ctx),
     ...createUpdateMethods(ctx),
+    ...createMediaMethods(ctx),
   };
 
   const server = http.createServer(async (req, res) => {
@@ -967,14 +1029,23 @@ export function createRpc({
         }
       }
       res.write(`event: hello\ndata: ${JSON.stringify({ seq })}\n\n`);
-      listeners.add(res);
+      // The window is a subscriber of the fan-out now: its sink answers
+      // whether it is still keeping up (`write` answers false when the
+      // socket's buffer is full), and the fan-out stops writing to it until
+      // the socket drains. The frames it missed wait in a bounded queue, and
+      // the ones that did not fit are counted and named to it.
+      const sub = fanout.subscribe((f) => {
+        try { return res.write(f) !== false; } catch { return false; }
+      });
+      // The socket drained: the window can take the frames it missed.
+      res.on('drain', () => sub.flush());
       // A named frame, never a bare `: keepalive` comment: comments are
       // invisible to EventSource, so the window's watchdog (no event for 20 s
       // ⇒ run lost) fired on any long RUN or SEARCH while the backend was
       // perfectly alive. It carries no id — a reconnect's Last-Event-ID still
       // points at the last real frame.
       const ping = setInterval(() => { try { res.write('event: ping\ndata: {}\n\n'); } catch { /* closed */ } }, 15_000);
-      req.on('close', () => { clearInterval(ping); listeners.delete(res); });
+      req.on('close', () => { clearInterval(ping); fanout.unsubscribe(sub); });
       return;
     }
 
@@ -1098,7 +1169,11 @@ export function createRpc({
 
   // Plugins load last: they may call anything above, and they register the
   // methods the window can then use.
-  plugins.load().catch((err) => process.stderr.write(`plugin load failed: ${err.message}\n`));
+  //
+  // The promise is kept: the methods that answer about the plugins wait for
+  // it, so a window that asks in the first moments after the backend came up
+  // is told the truth about the plugins instead of "none yet".
+  pluginsReady = plugins.load().catch((err) => process.stderr.write(`plugin load failed: ${err.message}\n`));
 
   // A run that cannot proceed because no chat tab is open is a one-click fix, so
   // the backend offers the click (and takes it when settings allow). This hangs
@@ -1124,6 +1199,9 @@ export function createRpc({
     events: bus,
     get port() { return boundPort(); },
     get url() { return `http://127.0.0.1:${boundPort()}`; },
+    // The replay buffer's own counters: the budget is in BYTES, and a test
+    // needs to see that the buffer counts the way the limit is written.
+    get replay() { return { frames: replay.length, bytes: replayBytes }; },
   };
 }
 

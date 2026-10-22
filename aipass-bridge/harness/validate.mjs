@@ -17,8 +17,8 @@
 /** The markers the loop itself owns plus the built-in tool table. */
 export const BUILTIN_KINDS = new Set([
   'skill', 'list', 'read', 'write', 'replace', 'search', 'run', 'glob', 'git',
-  'fetch', 'delete', 'move', 'attach', 'web', 'symbols', 'def', 'refs',
-  'plan', 'todo', 'subagent', 'jobs', 'done', 'ask',
+  'fetch', 'delete', 'move', 'attach', 'web', 'symbols', 'def', 'refs', 'recall',
+  'plan', 'todo', 'subagent', 'jobs', 'done', 'ask', 'verify',
 ]);
 
 /**
@@ -38,6 +38,7 @@ const ARG_GUARDS = {
   web: 'err: give me a query to search for.',
   def: 'err: DEF needs a name — DEF foo',
   refs: 'err: REFS needs a name — REFS foo',
+  recall: 'err: RECALL needs something to look for — RECALL <what you want to remember>',
 };
 
 /**

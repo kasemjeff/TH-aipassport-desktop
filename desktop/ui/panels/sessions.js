@@ -178,6 +178,14 @@ async function refreshSessions() {
     li.append(el('span', 'name', label));
     if (named && clock) li.append(el('span', 'sub', clock));
     li.title = `${s.title ?? '(untitled)'}\n${s.id}\n${when ? when.toLocaleString() : ''}`;
+    // Export: the transcript as a file the person can keep or send to
+    // somebody else. The row itself opens the session, so the button stops the
+    // click that would do that — a button inside a row is that button's own
+    // business.
+    const out = el('button', 'mini', 'ส่งออก');
+    out.title = 'ส่งออกบทสนทนานี้เป็นไฟล์ md หรือ html';
+    out.onclick = (ev) => { ev.stopPropagation?.(); void ctx.exportSession(s.id, s.title); };
+    li.append(out);
     clickable(li, () => void ctx.openSession(s.id));
     ul.append(li);
   }

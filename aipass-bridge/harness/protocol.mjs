@@ -32,11 +32,13 @@ export const REMINDER = REMINDER_HEAD + REMINDER_WAF + REMINDER_TAIL;
 
 /**
  * The turn-1 instructions. `plan` adds the PLAN/TODO markers used by the
- * desktop harness; `subagent` adds the SUBAGENT marker; `plugins` adds one line
- * per marker a plugin registered. Both opt-ins so the CLI's first message stays
- * byte-identical to the protocol it was tuned against.
+ * desktop harness; `subagent` adds the SUBAGENT marker; `verify` adds the
+ * VERIFY marker; `plugins` adds one line per marker a plugin registered. All
+ * opt-ins so the CLI's first message stays byte-identical to the protocol it
+ * was tuned against — the recorded replay in evals/fixtures/ is pinned to
+ * those bytes.
  */
-export const preamble = ({ allowRun = false, plan = false, subagent = false, searchI = false, attach = false, plugins = [], lang = 'th' } = {}) => {
+export const preamble = ({ allowRun = false, plan = false, subagent = false, searchI = false, attach = false, verify = false, recall = false, plugins = [], lang = 'th' } = {}) => {
   let text = `I am reading through a project with you. The files are open in front of me, and I will paste you anything you want to look at.
 
 So just tell me what you want to see next, and put that on its own line in this shape, because my editor watches for these markers:
@@ -128,6 +130,30 @@ When the piece to hand over is a check rather than a task, name a role on its ow
 A helper normally waits for its result before you continue. To let it run beside you instead, add a line \`background: true\` inside the SUBAGENT block — it starts and hands back a job id at once, and you keep working. Poll with \`JOBS\` on its own line to see which finished and read their summaries.`;
   }
 
+  if (verify) {
+    text += `
+
+When you want the work checked before you go on, ask for the check and I will run it and paste the result back:
+
+VERIFY
+
+That runs this project's own check — the one the project declares, or a read-only checker. You can also name the command yourself:
+
+VERIFY node test.mjs
+
+The result comes back like any other result: the output of the command, or a verdict.`;
+  }
+
+  if (recall) {
+    text += `
+
+The past of this project is searchable. When the answer may be in what was said before, ask for it in one line:
+
+RECALL what we decided about the login flow
+
+I will look through this project's past sessions and paste back what was said, each line with its date and the session it came from. It is a word match, so ask with the words the past would carry.`;
+  }
+
   if (plugins.length) {
     const lines = plugins.map((t) => `${t.marker}${t.takesBody ? '\nwhatever the tool needs\nEND' : ' the arguments on the same line'}    — ${t.description || 'no description'}`);
     text += `
@@ -200,7 +226,7 @@ const markerRe = (marker) => {
 
 // The model usually writes its answer as prose and then a bare DONE, so fall
 // back to that prose rather than reporting an empty result.
-export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|list|ls|file)\b|[^\s]+(?: [\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+)?\s*$)|SEARCH\b|GLOB\b|SYMBOLS\b|DEF\b|REFS\b|SKILL\b|GIT\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|ASK\b|(?:\*{1,3}|#{1,6}\s*)?DONE\b|JOBS\s*$)/i;
+export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|list|ls|file)\b|[^\s]+(?: [\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+)?\s*$)|SEARCH\b|GLOB\b|SYMBOLS\b|DEF\b|REFS\b|RECALL\b|SKILL\b|GIT\b|VERIFY\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|ASK\b|(?:\*{1,3}|#{1,6}\s*)?DONE\b|JOBS\s*$)/i;
 export const prose = (reply, plugins = []) => {
   const re = proseRe(plugins);
   let inFence = false;
@@ -214,7 +240,7 @@ export const prose = (reply, plugins = []) => {
 // recorded replies wrote "NEED list desktop" and bare "RUN" as broken markers,
 // while prose that merely starts with the word ("Need to check the logs") must
 // never count as an attempt.
-const MARKER_ATTEMPT = /^\s*(?:\*{1,3}|#{1,6}\s*)?(?:NEED|SEARCH|GLOB|SYMBOLS|DEF|REFS|SKILL|GIT|FETCH|WEB|DELETE|MOVE|EDIT|CREATE|ATTACH|FIND|NEW|END|RUN|PLAN|TODO|SUBAGENT|JOBS|TASK|ASK|DONE)\b/;
+const MARKER_ATTEMPT = /^\s*(?:\*{1,3}|#{1,6}\s*)?(?:NEED|SEARCH|GLOB|SYMBOLS|DEF|REFS|RECALL|SKILL|GIT|VERIFY|FETCH|WEB|DELETE|MOVE|EDIT|CREATE|ATTACH|FIND|NEW|END|RUN|PLAN|TODO|SUBAGENT|JOBS|TASK|ASK|DONE)\b/;
 
 /**
  * Did the reply try to speak the protocol — even in a shape parse() cannot
@@ -235,11 +261,12 @@ export function attemptedMarker(reply) {
 
 /** Tool kinds that mean "the model is still gathering", never a stopping point.
  *  ATTACH is here because a queued attachment only rides the NEXT message —
- *  a DONE in the same reply would silently drop it. GLOB, GIT, FETCH, WEB and
- *  SUBAGENT are reads in the same sense: their result travels with the NEXT
- *  message too, so a DONE beside one of them used to end the run and throw
- *  the payoff away unread (a listing, a fetched page, a helper's summary). */
-export const READING = new Set(['list', 'read', 'search', 'glob', 'symbols', 'def', 'refs', 'skill', 'attach', 'git', 'fetch', 'web', 'subagent', 'jobs']);
+ *  a DONE in the same reply would silently drop it. GLOB, GIT, VERIFY, FETCH,
+ *  WEB and SUBAGENT are reads in the same sense: their result travels with
+ *  the NEXT message too, so a DONE beside one of them used to end the run and
+ *  throw the payoff away unread (a listing, a fetched page, a check's
+ *  verdict, a helper's summary). */
+export const READING = new Set(['list', 'read', 'search', 'glob', 'symbols', 'def', 'refs', 'recall', 'skill', 'attach', 'git', 'verify', 'fetch', 'web', 'subagent', 'jobs']);
 
 export function parse(reply, { plugins = [] } = {}) {
   const lines = reply.split('\n');
@@ -305,11 +332,22 @@ export function parse(reply, { plugins = [] } = {}) {
     m = /^\s*REFS\s+(.+?)\s*$/i.exec(line);
     if (m) { i++; calls.push({ kind: 'refs', arg: m[1].trim() }); continue; }
 
+    // RECALL — the model asks what this project said before. The argument is
+    // the question, on one line, like every other marker.
+    m = /^\s*RECALL\s+(.+?)\s*$/i.exec(line);
+    if (m) { i++; calls.push({ kind: 'recall', arg: m[1].trim() }); continue; }
+
     m = /^\s*SKILL\s+(.+?)\s*$/i.exec(line);
     if (m) { i++; calls.push({ kind: 'skill', arg: m[1].trim() }); continue; }
 
     m = /^\s*GIT\s+(.+?)\s*$/i.exec(line);
     if (m) { i++; calls.push({ kind: 'git', arg: m[1].trim() }); continue; }
+
+    // VERIFY — the model asks for a check. The command is optional: with one
+    // it is the command to run, without one the run's declared check (or the
+    // checker) decides. The argument is one line, like every other marker.
+    m = /^\s*VERIFY\s*(.*?)\s*$/i.exec(line);
+    if (m) { i++; calls.push({ kind: 'verify', arg: m[1].trim() }); continue; }
 
     m = /^\s*FETCH\s+(.+?)\s*$/i.exec(line);
     if (m) { i++; calls.push({ kind: 'fetch', arg: m[1].trim() }); continue; }

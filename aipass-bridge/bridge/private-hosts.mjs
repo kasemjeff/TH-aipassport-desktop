@@ -120,17 +120,29 @@ const dnsCache = new Map(); // host → { at, addresses, private }
  * them and the attacker picks which, so a name that answers with both a
  * public and a private address is refused.
  *
+ * The resolver is a parameter so the guard can be driven without a network —
+ * the same trick `pinnedGet` plays for the request. A caller that brings its
+ * own resolver gets no cache unless it asks for one: the cache is shared
+ * state, and a test's stub must never be what the next caller reads.
+ *
+ * A failure is never cached. The throw happens before the entry is written,
+ * so a name that could not be resolved a moment ago can be resolved now —
+ * and a name that could be resolved must not stay private for the TTL.
+ *
  * @param {string} host
+ * @param {{ lookup?: (host: string, opts: { all: true }) => Promise<{ address: string, family: number }[]>, cache?: boolean }} [opts]
  * @returns {Promise<VettedHost>}
  */
-export async function resolveVetted(host) {
+export async function resolveVetted(host, { lookup = dnsLookup, cache = lookup === dnsLookup } = {}) {
   const key = String(host).toLowerCase();
-  const hit = dnsCache.get(key);
-  if (hit && Date.now() - hit.at < DNS_TTL_MS) return hit;
-  const answers = await dnsLookup(key, { all: true });
+  if (cache) {
+    const hit = dnsCache.get(key);
+    if (hit && Date.now() - hit.at < DNS_TTL_MS) return hit;
+  }
+  const answers = await lookup(key, { all: true });
   const addresses = (answers ?? []).map((a) => ({ address: a.address, family: a.family }));
   const entry = { at: Date.now(), addresses, private: addresses.some((a) => isPrivateHost(a.address)) };
-  dnsCache.set(key, entry);
+  if (cache) dnsCache.set(key, entry);
   return entry;
 }
 
@@ -291,6 +303,19 @@ export async function pinnedGet(url, { addresses = null, headers = {}, timeoutMs
         if (status < 200 || status > 599) {
           incoming.destroy();
           reject(new Error(`unexpected status ${status}`));
+          return;
+        }
+        // The announced size is enough to refuse on. A server that says it is
+        // sending 2 GB is refused before a byte of it is read, so a hostile
+        // URL cannot turn the bridge into a memory hose — the streaming cap
+        // below is the backstop for a body that lies about its size.
+        const declared = Number(incoming.headers['content-length'] ?? 0);
+        if (Number.isFinite(declared) && declared > maxBytes) {
+          incoming.destroy();
+          reject(Object.assign(
+            new Error(`response too large: ${declared} bytes over the ${maxBytes} byte limit`),
+            { code: 'BODY_TOO_LARGE' },
+          ));
           return;
         }
         readBody(incoming, maxBytes).then(({ body, truncated }) => {
