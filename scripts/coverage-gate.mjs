@@ -286,6 +286,11 @@ export async function runGate({ repo: root = repo, floors = FLOORS, argv = [], c
         merged.set(file, existing);
       }
     }
+    const gatesFile = merged.get('aipass-bridge/harness/run/gates.mjs');
+    if (gatesFile) {
+      const missing = [...gatesFile.functions.entries()].filter(([, count]) => !(count > 0)).map(([name]) => name);
+      console.log('gates functions recorded: ' + gatesFile.functions.size + '; missing: ' + (missing.join(', ') || '(none)')));
+    }
     const { rows, failures: under } = check(merged, floors);
     return { ok: failures.length === 0 && under.length === 0, rows, failures: [...failures, ...under], files: merged };
   } finally {
@@ -319,3 +324,5 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToP
   }
   console.log('\nevery floored file is still watched.');
 }
+
+
