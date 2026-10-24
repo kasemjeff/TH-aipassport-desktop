@@ -137,7 +137,7 @@ test('an uncapped parent still bounds its helper at eight steps', async () => {
   const events = new Emitter();
   const h = new Harness({
     root,
-    bridge: new StubBridge([
+    client: new StubBridge([
       'SUBAGENT\nrole: verifier\ntask: check src/app.ts\nEND\n',
       'NEED file src/app.ts\n',
       'DONE checked\n',

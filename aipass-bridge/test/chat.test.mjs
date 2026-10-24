@@ -317,3 +317,20 @@ test('a switch flag does not swallow the question', async (t) => {
   assert.equal(handler.sent.at(-1), 'what is X', 'the question is the one that was given');
   assert.doesNotMatch(out, /^> /m, 'and it did not fall into the interactive mode');
 });
+
+// The media arrives after a paid generation, and the directory it is saved
+// into is named on the command line: a path that does not exist yet must not
+// throw on the save, after the credits are already spent.
+test('a missing --out directory is created on save', async (t) => {
+  const ext = await new FakeExtension(bridge.base, {
+    onChat: async (_j, e) => { await e.image(`data:image/png;base64,${PNG_1X1}`); await e.done(); },
+  }).connect();
+  t.after(() => ext.disconnect());
+
+  const dir = path.join(tempDir({}), 'deep', 'nested', 'new');
+  const { out, code } = await chat(['a cat', '--out', dir]);
+  assert.equal(code, 0, out);
+  assert.match(out, /image saved to/);
+  assert.equal(fs.readdirSync(dir).filter((f) => f.endsWith('.png')).length, 1,
+    'the directory now exists and holds the file');
+});

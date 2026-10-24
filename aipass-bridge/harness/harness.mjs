@@ -25,11 +25,11 @@ import { sweepSandboxes } from './sandbox.mjs';
 import { loadGitignore } from './gitignore.mjs';
 // One address for "where this app keeps its state", shared with the rpc layer:
 // AIPASS_HOME when a surface (a test) names one, ~/.aipass otherwise.
-import { aipassHome, DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_WALL_CLOCK_MS } from './settings.mjs';
+import { aipassHome, harnessOptions } from './settings.mjs';
+
+/** @typedef {import('./settings.mjs').HarnessOptions} HarnessOptions */
 
 const REPO_SKILLS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills');
-
-const home = () => aipassHome();
 
 export class Harness {
   /** Resolves the plan-approval gate; null when nobody is waiting on it. */
@@ -67,13 +67,30 @@ export class Harness {
   #madeThisRun = new Set();
   /** The spill warning is said once per harness, not once per run. */
   #warnedSpill = false;
+  /**
+   * A stop that was asked for and has not been answered by a run yet.
+   *
+   * The abort controller belongs to the run that is in flight, so a stop that
+   * lands between two attempts of the same run has no controller to abort. The
+   * request is kept until the next run starts, and that run is stopped at
+   * once — otherwise the retry carried on with the work the person had just
+   * told it to stop.
+   */
+  #stopAsked = false;
 
   /**
    * @param {object} opts
    * @param {string} opts.root           directory the agent may touch
    * @param {string} opts.bridgeURL      base URL of the local bridge
+   * @param {object} [opts.client]       the client to talk through — a bridge
+   *   client or a provider client. ONE name for both, because a provider is a
+   *   client and not a second loop (rule 14): the harness needs the contract,
+   *   not to know which edge answered it. Without one, it opens a bridge
+   *   client of its own.
    * @param {string} [opts.model]        default model id
-   * @param {object} [opts.options]      {maxSteps, allowRun, mode, slim, plan, subagent, requirePlanApproval, verifyCommand, requireCheck, conversation, reuse, permanent, assistant}
+   * @param {Partial<HarnessOptions>} [opts.options] the run's option sheet —
+   *   its defaults live in `settings.mjs` (`HarnessOptions`), so the harness
+   *   and the loop read one sheet and cannot drift apart.
    * @param {Array}  [opts.rules]        permission path rules
    * @param {Emitter}[opts.events]
    * @param {SessionStore} [opts.store]
@@ -81,49 +98,23 @@ export class Harness {
   constructor(opts = {}) {
     this.root = path.resolve(opts.root ?? process.cwd());
     this.events = opts.events ?? new Emitter();
-    this.options = {
-      maxSteps: 0,   // no cap — settings.mjs ships the same default
-      maxToolCalls: DEFAULT_MAX_TOOL_CALLS,
-      maxWallClockMs: DEFAULT_MAX_WALL_CLOCK_MS,
-      maxCredits: 0,
-      allowRun: false,
-      // A fetch the model invented is a question, not a read. Off by default:
-      // the surface has to say yes on purpose (`--allow-fetch`), because a
-      // page the agent read can talk it into posting the project's contents
-      // somewhere the person never saw.
-      allowFetch: false,
-      mode: 'ask',
-      plan: false,
-      subagent: false,
-      requirePlanApproval: false,
-      conversation: null,
-      reuse: false,
-      permanent: false,
-      assistant: null,
-      searchI: false,
-      attach: false,
-      webScratch: false,
-      parallelHelpers: false,
-      // The declared check (docs/SPEC_CHECKER.md): a caller-named command that
-      // replaces `.aipass/check.txt` when set, and the strict gate that refuses
-      // a DONE while that check is failing. Both off by default — the checker
-      // stays advisory unless a project or a person asks for the gate.
-      verifyCommand: null,
-      requireCheck: false,
-      ...(opts.options ?? {}),
-    };
-    this.bridge = opts.bridge instanceof BridgeClient
-      ? opts.bridge
-      : (opts.client ?? new BridgeClient(opts.bridgeURL ?? DEFAULT_BRIDGE_URL, {
-          model: opts.model ?? this.options.model ?? null,
-          // A 429 wait must read as a pause, not a stuck run: the client's
-          // note rides the same dim-note channel as the firewall notes.
-          onNote: (text) => this.events.emit('firewall_note', { text }),
-          // A mid-reply model switch is the site talking to the person: it
-          // belongs in the transcript as a visible note line, not folded
-          // into the reasoning beside the tool churn.
-          onStreamNote: (text) => this.events.emit('note', { text }),
-        }));
+    // One option sheet, one owner: `settings.mjs` holds the defaults and the
+    // typedef, so a key cannot be defaulted here and read there. The values
+    // themselves are the harness's own — a fetch the model invented is a
+    // question, not a read (off until a surface says yes on purpose), helpers
+    // are off until the caller asks for them, and the declared check stays
+    // advisory until a project or a person names one.
+    this.options = harnessOptions(opts.options);
+    this.bridge = opts.client ?? new BridgeClient(opts.bridgeURL ?? DEFAULT_BRIDGE_URL, {
+      model: opts.model ?? this.options.model ?? null,
+      // A 429 wait must read as a pause, not a stuck run: the client's
+      // note rides the same dim-note channel as the firewall notes.
+      onNote: (text) => this.events.emit('firewall_note', { text }),
+      // A mid-reply model switch is the site talking to the person: it
+      // belongs in the transcript as a visible note line, not folded
+      // into the reasoning beside the tool churn.
+      onStreamNote: (text) => this.events.emit('note', { text }),
+    });
     // Which provider this harness talks to. The client is the thing that
     // knows; this is the label the window and the session header carry.
     this.providerId = this.bridge.providerId ?? 'aipass';
@@ -131,7 +122,7 @@ export class Harness {
     // bridge client does — they are harness events, not client trivia.
     if (opts.client) this.#wireNotes(this.bridge);
     this.skills = opts.skills ?? SkillLibrary.default({ root: this.root, repoDir: REPO_SKILLS });
-    this.store = opts.store === 'off' ? null : (opts.store ?? new SessionStore(path.join(home(), 'sessions')));
+    this.store = opts.store === 'off' ? null : (opts.store ?? new SessionStore(path.join(aipassHome(), 'sessions')));
     this.overlay = new Overlay(this.root);
     /* ------------------------------------------------------------- path rules *
      *
@@ -243,8 +234,12 @@ export class Harness {
    * was queued for, not to the harness. Building here also keeps the table's
    * copy of live options (allowRun's refusal text, the web scratch hook) in
    * step with setPolicy between runs.
+   *
+   * @param {Function|null} [checker] the checker this run may ask for a
+   *   verdict — the same one the DONE gate uses, so a VERIFY and a DONE are
+   *   judged by the same child.
    */
-  #makeTools() {
+  #makeTools(checker = null) {
     return createTools({
       root: this.root,
       overlay: this.overlay,
@@ -252,6 +247,16 @@ export class Harness {
       bridge: this.bridge,
       model: this.bridge.model,
       allowRun: this.options.allowRun,
+      // The write side of git: off unless the run was given the power, so a
+      // run never changes the repository on its own.
+      allowGitWrite: Boolean(this.options.allowGitWrite),
+      // The check a VERIFY runs: the run's declared command, and the checker
+      // that produces a verdict when there is no command to run. The checker
+      // is the run's own — a run that may not use a helper has no checker
+      // either (the DONE gate's rule), so a VERIFY without a declared check
+      // has nothing to fall back on and says so.
+      declaredCheck: this.#declaredCheck().command,
+      checker: this.options.subagent ? checker : null,
       // The CLI's --max-result / --read-lines are per-run knobs: without this
       // plumbing they sat in this.options and the tools kept their defaults,
       // so the flags were notes nobody read.
@@ -390,12 +395,17 @@ export class Harness {
    * have to move together, or a mode switch from the window would change what
    * the UI reports and not what the loop does.
    */
-  setPolicy({ mode = null, allowRun = null, allowFetch = null } = {}) {
+  setPolicy({ mode = null, allowRun = null, allowFetch = null, allowGitWrite = null, allowVerify = null } = {}) {
     if (mode) { this.options.mode = mode; this.permissions.mode = mode; }
     if (allowRun != null) { this.options.allowRun = Boolean(allowRun); this.permissions.allowRun = Boolean(allowRun); }
     // The exfil tier travels with the policy: a fetch the model chose is a
     // question, and the machine may have been told to stop asking.
     if (allowFetch != null) { this.options.allowFetch = Boolean(allowFetch); this.permissions.allowExfil = Boolean(allowFetch); }
+    // The two powers a run is GIVEN: git's write side and the VERIFY marker.
+    // They are options, not permissions — the permission gate still asks about
+    // a git write in 'ask' mode.
+    if (allowGitWrite != null) this.options.allowGitWrite = Boolean(allowGitWrite);
+    if (allowVerify != null) this.options.allowVerify = Boolean(allowVerify);
     return this.options;
   }
 
@@ -483,6 +493,8 @@ export class Harness {
         subagent: Boolean(this.options.subagent),
         searchI: Boolean(this.options.searchI),
         attach: Boolean(this.options.attach),
+        verify: Boolean(this.options.allowVerify),
+        recall: Boolean(this.options.recall),
         plugins: this.options.pluginTools ?? [],
         lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
@@ -594,6 +606,8 @@ export class Harness {
         subagent: Boolean(this.options.subagent),
         searchI: Boolean(this.options.searchI),
         attach: Boolean(this.options.attach),
+        verify: Boolean(this.options.allowVerify),
+        recall: Boolean(this.options.recall),
         plugins: this.options.pluginTools ?? [],
         lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
@@ -681,6 +695,15 @@ export class Harness {
     // went on with a fresh, un-aborted one: the stop was simply lost, and the
     // person watched the work carry on after they had told it to stop.
     this.abort = new AbortController();
+    // A stop that landed between two attempts of the same run (the checker is
+    // running, the next attempt has not started) used to be lost too: it
+    // aborted the controller of the attempt that had just ended, and the next
+    // attempt installed a fresh one. So the request is remembered until the
+    // next run starts, and the run that starts after it is stopped at once.
+    if (this.#stopAsked) {
+      this.#stopAsked = false;
+      this.abort.abort();
+    }
     try {
       this.#warnSpillOnce();
       if (!this.session) await this.startSession();
@@ -732,6 +755,13 @@ export class Harness {
             subagent: Boolean(this.options.subagent),
             searchI: Boolean(this.options.searchI),
             attach: Boolean(this.options.attach),
+            // The VERIFY marker: the model may ask for a check. It is taught
+            // behind an option, because the preamble's bytes are pinned by
+            // the recorded replay (evals/fixtures/).
+            verify: Boolean(this.options.allowVerify),
+            // The RECALL marker: the model may ask what this project said
+            // before. The same reason - the preamble's bytes are pinned.
+            recall: Boolean(this.options.recall),
             plugins: this.options.pluginTools ?? [],
             lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
           }),
@@ -754,6 +784,11 @@ export class Harness {
         ? `Facts carried from earlier sessions (durable; re-check anything that may have gone stale):\n${this.#crossSessionMemory.map((f) => '- ' + f).join('\n')}\n\nTask: ${task}`
         : task;
 
+      // One checker for this run: the DONE gate and a VERIFY ask the SAME
+      // child, so the verdict the model asked for and the verdict the run
+      // accepted cannot come from two different judges.
+      const checker = this.#makeChecker(task);
+
       try {
         return await runTask(effectiveTask, {
           bridge: this.bridge,
@@ -764,13 +799,13 @@ export class Harness {
           // of a temporary conversation has to repeat it.
           conversation: this.conversation,
           conversationTemporary: this.conversation ? this.#conversationTemporary : null,
-          tools: this.#makeTools(),
+          tools: this.#makeTools(checker),
           overlay: this.overlay,
           session: runSession,
           permissions: this.permissions,
           events: this.events,
           subagent: this.options.subagent ? this.#makeHelper() : null,
-          check: this.#makeChecker(task),
+          check: checker,
           runPluginTool: (marker, args) => {
             // The stop rides the call: an MCP tool the person stopped does not
             // keep the run waiting for the server's answer.
@@ -822,6 +857,12 @@ export class Harness {
           this.#conversationTemporary = null;
           this.#conversationBoundTo = null;
         }
+        // The run is over: everything it appended is on the disk. The header
+        // rewrite fsyncs the file once per batch, so without this the last
+        // entries of a finished run would sit in the OS's hands until
+        // something else happened to flush them — and a power cut would take
+        // the end of the conversation with it.
+        try { runSession?.flush?.(); } catch { /* best effort */ }
       }
     } finally {
       // Every failure before the loop - a session that will not open, a
@@ -885,10 +926,33 @@ export class Harness {
     // `running` says whether there was anything to stop: the window shows the
     // difference between "stopped" and "there was no run here".
     const running = this.running;
+    // The request is remembered, not just the abort: a stop that lands
+    // between two attempts of the same run has no controller to abort yet.
+    this.#stopAsked = true;
     this.abort.abort();
     this.answerPlan(false);
     this.permissions.cancelPending();
     this.events.emit('cancelled', { running });
+  }
+
+  /**
+   * Forget a stop that asked for nothing.
+   *
+   * A new message is a new intent: the stop button pressed when no run was in
+   * flight must not stop the run that comes after it.
+   */
+  clearStopRequest() {
+    this.#stopAsked = false;
+  }
+
+  /**
+   * Was a stop asked for that no run has answered yet?
+   *
+   * The attempts loop asks this between two attempts: a stop that landed in
+   * that gap has no controller to abort, and the next attempt must not start.
+   */
+  stopRequested() {
+    return this.#stopAsked;
   }
 
   pendingChanges() {
@@ -1014,6 +1078,34 @@ export class Harness {
   }
 
   /**
+   * The one command that decides correctness, when a run or a project names
+   * it.
+   *
+   * `verifyCommand` (the option sheet) wins over the project's own
+   * `.aipass/check.txt`, and the file is read from DISK — not the overlay — so
+   * a value staged in this run cannot bend the command that judges it. One
+   * owner, because the DONE gate, the red-test commit gate and the VERIFY
+   * marker must all mean the same command by the same rule.
+   *
+   * @returns {{command: string|null, source: 'run'|'project'|null}}
+   */
+  #declaredCheck() {
+    const configured = String(this.options.verifyCommand ?? '').trim();
+    if (configured) {
+      return { command: configured.split('\n')[0].trim().slice(0, 300), source: 'run' };
+    }
+    try {
+      const declaredFile = path.join(this.root, '.aipass', 'check.txt');
+      if (fs.existsSync(declaredFile)) {
+        const line = fs.readFileSync(declaredFile, 'utf8').split('\n')
+          .map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
+        if (line) return { command: line.slice(0, 300), source: 'project' };
+      }
+    } catch { /* no declared check — the checker infers one */ }
+    return { command: null, source: null };
+  }
+
+  /**
    * The checker (docs/SPEC_CHECKER.md): one read-only child run over the staged
    * tree — the piece that puts a verdict behind a DONE. Its tools read a
    * snapshot of the parent's staged files, so `read` and `run` see the tree
@@ -1061,22 +1153,7 @@ export class Harness {
       // not the overlay, so a value staged in this run cannot bend the command
       // that judges it. Absent both, the checker infers the project's checks
       // the way it always has.
-      let declared = null;
-      let declaredSource = null;
-      const configured = String(this.options.verifyCommand ?? '').trim();
-      if (configured) {
-        declared = configured.split('\n')[0].trim().slice(0, 300);
-        declaredSource = 'run';
-      } else {
-        try {
-          const declaredFile = path.join(this.root, '.aipass', 'check.txt');
-          if (fs.existsSync(declaredFile)) {
-            const line = fs.readFileSync(declaredFile, 'utf8').split('\n')
-              .map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
-            if (line) { declared = line.slice(0, 300); declaredSource = 'project'; }
-          }
-        } catch { declared = null; declaredSource = null; }
-      }
+      const { command: declared, source: declaredSource } = this.#declaredCheck();
       // The parent's path rules travel, as they do to a helper. The engine is
       // permissive because the readOnly tools are the real gate: the checker
       // cannot write even where a rule would have allowed it. The event bus

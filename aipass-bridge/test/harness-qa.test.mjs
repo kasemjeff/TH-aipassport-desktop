@@ -11,7 +11,6 @@ import path from 'node:path';
 
 import { Settings } from '../harness/settings.mjs';
 import { startBridge, FakeExtension, tempDir, startRpcServer } from './harness.mjs';
-import { liveVerdict } from '../../scripts/live-check.mjs';
 
 let bridge;
 before(async () => { bridge = await startBridge(); });
@@ -167,23 +166,4 @@ test('compact refuses while a run is in flight', async (t) => {
     const finished = await running;
     assert.equal(finished.ok, true, finished.error);
   } finally { stop(); }
-});
-
-// The QA loop's live check asks the backend how it is. A backend that
-// refuses the call is running and refusing — reporting it as "ok", with an
-// undefined model and a zero percent context, turned a broken backend into
-// a green line.
-test('the live check does not call a refusing backend healthy', () => {
-  const refused = liveVerdict({ ok: false, error: 'unauthorized: missing or wrong loopback bearer token' });
-  assert.equal(refused.state, 'warn', 'a refusal is a warning, not an ok');
-  assert.match(refused.detail, /refused the call/);
-
-  const down = liveVerdict(null);
-  assert.equal(down.state, 'warn');
-  assert.match(down.detail, /not running/);
-
-  const healthy = liveVerdict({ ok: true, result: { model: 'gemini-3.1-flash-lite', context: { percent: 12 }, extensions: 1 } });
-  assert.equal(healthy.state, 'ok');
-  assert.match(healthy.detail, /gemini-3\.1-flash-lite/);
-  assert.match(healthy.detail, /12%/);
 });

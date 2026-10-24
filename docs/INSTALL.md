@@ -50,7 +50,8 @@ somewhere:
 3. **One version number.** `package.json`, `Cargo.toml` and `tauri.conf.json`
    must say the same string; `scripts/build-desktop.mjs` refuses to build when
    they do not. An installer that names 0.2.0 and ships 0.2.1 cannot be
-   rolled back.
+   rolled back. A *release* still has one version; an *installation* has a
+   shell version and a content version, and both are shown (rule 6).
 4. **One artifact per platform and architecture**, named
    `aipass-desktop-<version>-<platform>-<arch>.<ext>`, with a
    `SHA256SUMS` file and a `manifest.json` beside it. The manifest says what
@@ -59,8 +60,13 @@ somewhere:
    check the source checkout runs, and the same one the installed CLI would
    run (`aipass doctor`) — proves the chain end to end: Node, the bridge, the
    extension, the model list.
-6. **No self-update.** The app never replaces itself in the background, so
-   "which build is running" is always a fact somebody chose.
+6. **No shell self-update.** The app never replaces its own binary in the
+   background. The *content* — the harness, the bridge and the window's own
+   files — is replaced only when a person asks for it, only from a pack whose
+   hash is in a **signed** feed, and only when no run is in flight; the
+   previous content tree is kept, so it can be put back. Both versions are
+   always on screen, so "which build is running" is still a fact somebody
+   can read. The design is in [`UPDATE_DESIGN.md`](UPDATE_DESIGN.md).
 7. **An unsigned artifact says so.** The manifest records it; the download
    page must too.
 
@@ -313,6 +319,13 @@ npm run desktop:install-ladder -- --new dist/aipass-desktop-0.2.0-windows-x64-se
   build reads it with the same merge rules the old one did.
 - **Rollback** is the previous artifact, installed the same way. The
   previous artifacts stay downloadable — that *is* the rollback target.
+- **The content updates on its own, the shell does not.** The app checks a
+  signed feed, and when the feed names a newer content tree it offers it as a
+  banner with one button. The click is the consent; the pack is verified
+  against the hash in that signed feed before a single file is written, and
+  the previous content tree is kept so it can be put back (`/update` in the
+  window shows the state, and `update.rollback` in the backend does the
+  putting back). The shell still waits for a person and the installer.
 - **The ladder** (`scripts/install-ladder.mjs`) is that procedure, scripted:
   it installs the artifact, checks the installed build is the one that was
   shipped (its version) and that it actually runs (its backend answers),
@@ -334,7 +347,17 @@ npm run desktop:install-ladder -- --new dist/aipass-desktop-0.2.0-windows-x64-se
 
 ## What this deliberately does not do
 
-- **No auto-updater.** The app never replaces itself in the background.
+- **No shell self-update.** The app never replaces its own binary in the
+  background — the installer still does that, and a person still chooses it.
+  (The *content* does update in place, under rule 6: the design is in
+  [`UPDATE_DESIGN.md`](UPDATE_DESIGN.md).)
+- **No self-replacing installer, ever, until the installer is signed.** The
+  handover — the app exits, the installer runs, the app comes back — is
+  wired (Phase 3 of `UPDATE_DESIGN.md`), and its **gate is closed**: it
+  refuses to run an unsigned installer, and the Windows installer is
+  unsigned. The gate is the signed feed's own word about the artifact, so
+  only the release key can open it. An app that downloads and runs an
+  unsigned installer on its own is the worm shape.
 - **No Windows code signing yet.** The manifest says `unsigned`, and the
   release notes say so. A signed installer needs a certificate and a
   reputation; pretending otherwise is worse than saying it.

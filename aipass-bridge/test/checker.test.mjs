@@ -51,7 +51,7 @@ function makeHarness({ root, bridge, options = {} }) {
   const store = new SessionStore(tempDir());
   const events = new Emitter();
   const h = new Harness({
-    root, bridge, store, events,
+    root, client: bridge, store, events,
     options: { mode: 'yolo', allowRun: true, subagent: true, maxSteps: 6, ...options },
   });
   return { h, events, store };

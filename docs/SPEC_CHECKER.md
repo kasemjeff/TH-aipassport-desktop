@@ -188,9 +188,21 @@ asserted separately; `Emitter` for events.
 
 ## 5. Open questions
 
-1. **Model-invocable?** v1 is loop-only. Should a `VERIFY` marker let the model
-   ask for exactly this mid-run? The generic SUBAGENT cannot be told "verify",
-   which is the gap this design is built around.
+1. **Model-invocable?** Answered 2026-10-21: yes, through the `VERIFY`
+   marker. The marker is one line — `VERIFY` on its own line, or `VERIFY
+   node test.mjs` to name the command. The declared check runs FIRST (the
+   run's `verifyCommand`, or the project's `.aipass/check.txt`), and the
+   checker is the fallback when there is no command to run: a run that
+   declares nothing and has no checker answers `err: … nothing to verify
+   with` instead of inventing a pass. The result goes back to the model as
+   an ordinary tool result — a failing check comes back as a failing check
+   with its output, not as a bare `err:` — and the same checker child the
+   DONE gate uses is the one that answers, so a VERIFY and a DONE are
+   judged by the same judge. It is a shell call, so it rides the shell gate
+   (a question in `ask` mode), and it is OFF by default: `allowVerify`
+   decides both whether the marker runs and whether the preamble teaches
+   it, so a run that cannot use it is never told about it. See "As shipped
+   (2026-10-21)" below.
 2. **One continuation, or a hard gate?** Answered 2026-10-20 as an opt-in:
    `requireCheck` refuses a DONE over a declared check that is still failing and
    ends the run as `done-unverified`. The default stays advisory — a fail earns
@@ -267,3 +279,36 @@ The two open questions above closed, with the default behavior left alone:
    runs before every built-in, plugin and MCP call, so an empty `RUN` or a
    blank `SEARCH` is one `err: …` sentence no matter which surface would have
    handled it. Pinned in `test/validate.test.mjs`.
+
+## As shipped (2026-10-21)
+
+The first open question above closed: the model may ask for a check.
+
+1. **The `VERIFY` marker.** One line, one call: `VERIFY` alone asks for
+   the run's check, `VERIFY node test.mjs` names one. The grammar lives in
+   `harness/protocol.mjs` (the marker is stripped from the prose and a
+   misspelt one still counts as an attempt), the dispatch in
+   `harness/loop.mjs` and the answer in `harness/tools.mjs#verify`.
+2. **The declared check first, the checker as the fallback.** The command
+   is the one `Harness#declaredCheck` returns — `verifyCommand` wins over
+   `.aipass/check.txt`, and the file is read from the DISK, so a value
+   staged in this run cannot bend the command that judges it. With no
+   command, the checker answers, and the checker is the run's own: the DONE
+   gate and the VERIFY ask the SAME child, so the verdict the model asked
+   for and the verdict the run accepted cannot come from two judges. With
+   neither, the answer says so — `err: this run declares no check and has
+   no checker …` — and never invents a pass.
+3. **The result is evidence, not a failure.** A check that fails comes back
+   as a tool result that says the check did not pass and shows what the
+   command printed; the model reads the diagnosis instead of a bare `err:`.
+   The command that ran is named in the result, so a verdict about one
+   command is never read as a verdict about another.
+4. **It is a shell call, and it is off by default.** The check runs a
+   command, so it rides the shell gate — a question in `ask` mode, the same
+   question a `RUN` draws. `allowVerify` is the switch: it decides whether
+   the marker does anything AND whether the preamble teaches it, so the
+   recorded turn-1 bytes do not move for a run that never uses it. The
+   shape check knows the kind (`validate.mjs`), and the one VERIFY-specific
+   rule sits above it: a second line in the argument is a second call, not
+   a longer command.
+   Pinned in `test/verify-marker.test.mjs`.

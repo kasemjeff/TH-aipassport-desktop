@@ -1,0 +1,130 @@
+name: release
+
+# The release lane: the artifacts, the content pack, and the SIGNED feed.
+#
+# The feed is the one file the app fetches, so it is the one file that has
+# to come from a trusted machine. It is signed here with a secret
+# (`AIPASS_RELEASE_KEY`); the public half is in the app's source
+# (`aipass-bridge/harness/update-keys.mjs`) and lands in the app's next
+# build. A release without a signed feed is not a release the app can update
+# from — and a feed signed by a key the app does not know is refused, which
+# is the point of the whole arrangement.
+#
+# The key must be in the keyring BEFORE the feed that names it is published.
+# The keyring ships with the app, so the order is: land the key in the
+# source, build an app that trusts it, and only then publish the feed.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      sequence:
+        description: 'the feed sequence number (must only go up)'
+        required: false
+        default: '1'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows x64
+            artifact: aipass-desktop-windows
+          - os: macos-latest
+            label: macos
+            artifact: aipass-desktop-macos
+          - os: ubuntu-latest
+            label: linux x64
+            artifact: aipass-desktop-linux
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Install dev dependencies
+        run: npm ci
+      - name: Install the Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.artifact }}-cargo-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+      - name: Build the artifact
+        run: npm run desktop:build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish the feed
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Install dev dependencies
+        run: npm ci
+
+      - name: Collect every platform's artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # The content pack is the same tree on every platform — it is the code,
+      # not the binary — so it is built once, here.
+      - name: Build the content pack
+        run: npm run desktop:content-pack
+
+      # The signing key is a secret and never in the repository. The public
+      # half is in the source; this is the private one.
+      - name: Sign the feed
+        env:
+          AIPASS_RELEASE_KEY: ${{ secrets.AIPASS_RELEASE_KEY }}
+          AIPASS_RELEASE_KEY_ID: ${{ secrets.AIPASS_RELEASE_KEY_ID || 'aipass-release-2026' }}
+          AIPASS_RELEASE_SEQUENCE: ${{ github.event.inputs.sequence || '1' }}
+          AIPASS_RELEASE_NOTES: ${{ github.event.release.body || '' }}
+        run: npm run desktop:feed
+
+      # The feed is signed, and the app verifies it — so the public key in the
+      # source has to be the one that signed this. `npm run desktop:feed`
+      # checks that with the app's own verifier and refuses to write a feed
+      # the app would turn down, so a mismatch stops the release here rather
+      # than at the first person whose app fetches the feed.
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true

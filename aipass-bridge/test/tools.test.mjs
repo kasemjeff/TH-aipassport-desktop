@@ -90,7 +90,7 @@ test('GIT is async, and shell punctuation cannot ride behind an allowed subcomma
 test('failures carry the err: prefix the loop keys on', async () => {
   const dir = mkTracked({ 'a.txt': 'hello\n' });
   const tools = toolsIn(dir, { skills: new SkillLibrary([]) });
-  assert.match(tools.read('missing.txt'), /^err: no such file/);
+  assert.match(await tools.read('missing.txt'), /^err: no such file/);
   assert.match(await tools.replace('a.txt', ['', 'x']), /^err: the text to change was empty/);
   assert.match(await tools.replace('a.txt', ['not there at all', 'x']), /^err: the text to change was not found/);
   assert.match(await tools.search('   '), /^err: give me some text/);
@@ -100,7 +100,7 @@ test('failures carry the err: prefix the loop keys on', async () => {
   assert.match(tools.move('a.txt'), /^err: usage/);
   assert.match(tools.skill('no-such-playbook'), /^err: no such skill/);
   // Successes stay bare text — the prefix marks failure, nothing else.
-  assert.match(tools.read('a.txt'), /^1 \| hello/);
+  assert.match(await tools.read('a.txt'), /^1 \| hello/);
 });
 
 // `$$`, `$&` and `` $` `` are replacement patterns in String.replace. The
@@ -113,7 +113,7 @@ test('an edit does not expand $ patterns in the replacement', async () => {
   const out = await tools.replace('script.sh', ['echo hi', 'echo $$HOME and $&']);
   assert.match(out, /^updated script\.sh \(1 change\)/, 'the edit is applied');
   assert.equal(
-    tools.read('script.sh').split('\n')[0],
+    (await tools.read('script.sh')).split('\n')[0],
     '1 | echo $$HOME and $&',
     'the bytes are the ones the model wrote',
   );
@@ -126,7 +126,7 @@ test('an edit does not expand $ patterns in the replacement', async () => {
 test('a range past the end of the file says so, instead of reading nothing', async () => {
   const dir = mkTracked({ 'small.txt': 'one\ntwo\n' });
   const tools = toolsIn(dir);
-  const out = tools.read('small.txt 500-600');
+  const out = await tools.read('small.txt 500-600');
   assert.match(out, /^err: small\.txt has 2 line\(s\)/);
   assert.match(out, /past the end/);
   assert.doesNotMatch(out, /lines 500-/, 'and no nonsensical range');
@@ -138,7 +138,7 @@ test('a range past the end of the file says so, instead of reading nothing', asy
 test('a range that starts at zero is refused, not read backwards', async () => {
   const dir = mkTracked({ 'small.txt': 'one\ntwo\n' });
   const tools = toolsIn(dir);
-  const out = tools.read('small.txt 0-2');
+  const out = await tools.read('small.txt 0-2');
   assert.match(out, /^err: small\.txt has 2 line\(s\)/);
   assert.match(out, /counted from 1/);
   assert.doesNotMatch(out, /\|/, 'and no lines at all');
@@ -150,7 +150,7 @@ test('a range that starts at zero is refused, not read backwards', async () => {
 test('a file that ends with a newline has no phantom last line', async () => {
   const dir = mkTracked({ 'notes.txt': 'one\ntwo\n' });
   const tools = toolsIn(dir);
-  const out = tools.read('notes.txt');
+  const out = await tools.read('notes.txt');
   assert.match(out, /1 \| one/);
   assert.match(out, /2 \| two/);
   assert.doesNotMatch(out, /3 \|/, 'there is no third line');
@@ -284,7 +284,7 @@ test('CREATE over an existing file requires a read first', async () => {
   assert.match(refused, /^err: notes\.txt already exists on disk and has not been read/);
   assert.match(refused, /NEED file notes\.txt/, 'the way out is named');
   assert.equal(fs.readFileSync(`${dir}/notes.txt`, 'utf8'), 'original text\n', 'the disk was never touched');
-  assert.match(tools.read('notes.txt'), /original text/, 'reading clears the gate');
+  assert.match(await tools.read('notes.txt'), /original text/, 'reading clears the gate');
   assert.match(await tools.write('notes.txt', 'replacement\n'), /^wrote notes\.txt/);
   // A file the run staged itself can be rewritten — it is the run's own work.
   assert.match(await tools.write('fresh.txt', 'one\n'), /^wrote fresh\.txt/);
@@ -333,14 +333,14 @@ test('a brace pattern that expands too wide is refused, not silently cut', async
 
 // `read` had no ceiling at all: a multi-GB file answered with an
 // out-of-memory crash instead of with a page.
-test('read refuses a file past the cap instead of loading it', () => {
+test('read refuses a file past the cap instead of loading it', async () => {
   const dir = mkTracked({});
   // A sparse file: the size is what the guard reads.
   const fd = fs.openSync(path.join(dir, 'huge.txt'), 'w');
   fs.ftruncateSync(fd, 2 * 1024 * 1024);
   fs.closeSync(fd);
   const tools = toolsIn(dir);
-  const out = tools.read('huge.txt');
+  const out = await tools.read('huge.txt');
   assert.match(out, /^err: huge\.txt is 2 MB — the read cap is 1 MB/);
   assert.match(out, /Search it with SEARCH/, 'and the way out is named');
 });

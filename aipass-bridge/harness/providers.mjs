@@ -96,7 +96,37 @@ export function sanitizeSpec(raw = {}) {
     }
   }
   const label = String(raw.label ?? id).trim().slice(0, 80) || id;
-  return { id, label, kind, baseUrl, apiKeyEnv, models, defaultModel, headers };
+  // The fields the provider client READS have to survive the spec, or the
+  // client silently falls back to its defaults: a provider that wants its
+  // key under `x-api-key` without the `Bearer ` prefix, a provider with its
+  // own token ceiling, an Anthropic endpoint on another version.
+  //
+  // A header NAME is a token, and a token with a newline in it is a header
+  // injection — so it is kept only if it is one. The PREFIX is free text on
+  // purpose: '' means "no prefix at all", and only a missing field means
+  // "Bearer ".
+  const apiKeyHeader = typeof raw.apiKeyHeader === 'string' ? raw.apiKeyHeader.trim() : '';
+  if (apiKeyHeader && !/^[A-Za-z0-9-]+$/.test(apiKeyHeader)) {
+    throw new Error(`"${raw.apiKeyHeader}" is not a usable header name`);
+  }
+  // A missing field is null, not an empty string: the client reads
+  // `spec.apiKeyHeader ?? 'authorization'`, and an empty string would be a
+  // header with no name.
+  const header = apiKeyHeader || null;
+  const apiKeyPrefix = typeof raw.apiKeyPrefix === 'string' ? raw.apiKeyPrefix : null;
+  const maxTokens = Number(raw.maxTokens) > 0 ? Math.floor(Number(raw.maxTokens)) : null;
+  const anthropicVersion = typeof raw.anthropicVersion === 'string' && raw.anthropicVersion.trim()
+    ? raw.anthropicVersion.trim().slice(0, 40)
+    : null;
+  // The deadline for this provider's model list, when it needs longer than
+  // the default. The client reads it, so the spec has to KEEP it — a row
+  // that loses the field falls back to the default deadline silently.
+  const modelsTimeoutMs = Number(raw.modelsTimeoutMs) > 0 ? Math.floor(Number(raw.modelsTimeoutMs)) : null;
+  return {
+    id, label, kind, baseUrl, apiKeyEnv, models, defaultModel, headers,
+    apiKeyHeader: header, apiKeyPrefix, maxTokens, anthropicVersion,
+    modelsTimeoutMs,
+  };
 }
 
 /** A spec without the fields the UI never needs to see. */
@@ -109,6 +139,13 @@ export function publicSpec(spec) {
     apiKeyEnv: spec.apiKeyEnv,
     models: spec.models ?? [],
     defaultModel: spec.defaultModel ?? null,
+    // The shape of the key's header is not a secret — the key itself is —
+    // and the sheet says how a provider is reached.
+    apiKeyHeader: spec.apiKeyHeader ?? '',
+    apiKeyPrefix: spec.apiKeyPrefix ?? null,
+    maxTokens: spec.maxTokens ?? null,
+    anthropicVersion: spec.anthropicVersion ?? null,
+    modelsTimeoutMs: spec.modelsTimeoutMs ?? null,
     builtin: Boolean(spec.builtin),
   };
 }

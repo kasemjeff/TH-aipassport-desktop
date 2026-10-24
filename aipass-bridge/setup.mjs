@@ -60,8 +60,8 @@ function info(msg) { console.log(`  ${dim(msg)}`); }
 // 1. Node
 step(1, 'Node');
 const major = Number(process.versions.node.split('.')[0]);
-if (major < 22) {
-  warn(`need Node >= 22 (have ${process.versions.node}) — https://nodejs.org`);
+if (major < 20) {
+  warn(`need Node >= 20 (have ${process.versions.node}) — https://nodejs.org`);
   process.exit(1);
 }
 ok(`Node ${process.versions.node}`);
@@ -163,7 +163,8 @@ if (!noBridge) {
     const child = spawn(process.execPath, [path.join(BRIDGE_DIR, 'bridge', 'server.mjs')], { detached: true, stdio: 'ignore', env: process.env });
     child.unref();
     fs.mkdirSync(STATE, { recursive: true });
-    fs.writeFileSync(path.join(STATE, 'bridge.pid'), `${child.pid}\n`);
+    // The pid file is the bridge's: the bridge writes it when it binds, so it
+    // always names the process that is really answering.
     const deadline = Date.now() + 15000;
     let up = false;
     while (Date.now() < deadline) {

@@ -60,6 +60,7 @@
       "../../aipass-bridge/scale.mjs": "aipass-bridge/scale.mjs",
       "../../aipass-bridge/setup.mjs": "aipass-bridge/setup.mjs",
       "../../aipass-bridge/setup-assistant.mjs": "aipass-bridge/setup-assistant.mjs",
+      "../../aipass-bridge/sessions.mjs": "aipass-bridge/sessions.mjs",
       "../../aipass-bridge/stats.mjs": "aipass-bridge/stats.mjs",
       "../main.mjs": "main.mjs",
       "../ui": "ui/"

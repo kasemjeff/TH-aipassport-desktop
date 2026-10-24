@@ -7,6 +7,25 @@ reason, and the event contract everything above the loop (the window, a
 terminal, the tests) reads. The same loop drives all three because it emits
 events instead of printing.
 
+## The shape of the code
+
+`loop.mjs` is the step itself: the order the stages run in, and the guards
+that read the step's evidence. The stages live in `aipass-bridge/harness/run/`,
+one module each, and they share one object — `RunContext` — that holds what
+the run was given and what it has done so far:
+
+| module | what it owns |
+|---|---|
+| `run/context.mjs` | `RunContext`: the wiring, the counters, the verdict, the conversation |
+| `run/options.mjs` | the option sheet, clamped once before a run touches state |
+| `run/send.mjs` | the send pipeline: the message, the rewrite ladder, the recovery waits |
+| `run/gates.mjs` | the DONE gates: the checker, the strict gate, the plan checkpoint, the language hook |
+| `run/budgets.mjs` | the budgets: the tool count, the wall clock, the credit cap |
+
+A stage is a module so it can be read — and pinned — on its own: the budget
+policy is three functions, and the DONE gates are four, and neither needs a
+bridge, a tool set or a session to be exercised.
+
 For the whole harness — the review, the findings, the open designs — see
 [`HARNESS_DESIGN.md`](HARNESS_DESIGN.md). For the architecture around it,
 [`TECH_STACK.md`](TECH_STACK.md) and
@@ -35,34 +54,55 @@ runTask(task):
   overlay.clear()                    ← writes land here, never on disk
   pre-flight: the model catalog      ← a saved model that left it fails the
                                        run, before the first send
-  say(preamble + task)               ← turn 1 only
   │
   ▼  repeat, at most maxSteps (default: no cap — until DONE, a guard, a budget)
   ┌──────────────────────────────────────────────────────────────┐
-  │ say(results of the last reply)   ← ONE message, whatever the  │
-  │                                    reply carried              │
-  │ reply → prose() + parse()        ← the whole text is scanned  │
-  │   no calls   → nudge ×2, then the stall path                  │
-  │   calls      → execute in order, behind the permission gate   │
-  │                 plan gate · diff_update · budgets             │
-  │   DONE       → checker → plan checkpoint → language check →   │
-  │                done_line → stop                               │
-  │ guards: repeat · stagnation · verify-nudge · compaction       │
+  │ send — one pass is one send and the parse of its own reply:  │
+  │   pass 1   → preamble + task                                 │
+  │   pass 2+  → the results of the last reply — ONE message,    │
+  │              whatever that reply carried                     │
+  │ reply → prose() + parse()      ← the whole text is scanned   │
+  │   no calls   → nudge ×2, then the stall path                 │
+  │   calls      → execute in order, behind the permission gate  │
+  │                 plan gate · diff_update · budgets            │
+  │   DONE       → after the calls: checker → plan checkpoint →  │
+  │                 language check → done_line → stop            │
+  │ guards: repeat · stagnation · verify-nudge · compaction      │
   └──────────────────────────────────────────────────────────────┘
   │
   ▼
-run_stats + finished: summary, stopReason, changes, credits spent,
+run_stats + finished: summary, stopReason, changes, credits + spent,
                        the final checklist (todo)
 ```
 
+One pass is a send **and** the parse of that send's reply — the loop never
+sends a message whose answer it has not read. The first pass carries the
+preamble with the task; every later pass carries the results of the last
+reply as one message. A DONE is therefore read in the pass that asked for it,
+not a pass later.
+
+A run's root is the folder the call names: the project, or the worktree it
+works in (`harness/worktree.mjs`) — and every path the run touches is
+confined to it.
+
 The loop returns `{ summary, stopReason, steps, changes, credits, spent,
-check, todo }`, records a `run_stats` line into the session, and emits
+check, todo }`. The two credit fields are not two views of one number:
+`credits` is the quota **after** the run (`quota(true)` — `available`,
+`limit`, `used`, …), the allowance that is left; `spent` is what this run
+cost — the difference between the two readings
+(`creditsBefore.available - creditsAfter.available`, `null` when either
+reading is missing). So `credits` answers "how much is left" and `spent`
+answers "what did this run use"; both are `null` when the quota could not be
+read at all. (`steps` counts the executed marker calls; the replies the run
+took are a separate number, `run_stats.turns`.)
+The run then records a `run_stats` line into the session, and emits
 `finished` (whose `todo` carries the run's final checklist state — `[]` when
 no plan was written — so the window can re-tally the plan card without
-replaying the run's todo events).
+replaying the run's todo events). `run_stats` carries `spent` alone;
+`finished` carries both `credits` and `spent`.
 `npm run stats` aggregates those lines: refusal rates, nudges, stagnation
 corrections, err-loop corrections, chain skips, verification nudges, firewall
-notes, the closing context estimate (`estTokens`), step timings, credits.
+notes, the closing context estimate (`estTokens`), step timings, credit spend.
 
 ## Who wires what
 
@@ -129,7 +169,14 @@ chain the loop keeps one bounded recovery of its own (`RECOVER_WAITS_MS` —
 connection-cycle shapes, a tab still loading, a rate window, a 403 the chain
 could not clear — is paused and given the same message again
 (`sendRecoverable` names the shapes; `run_stats.sendRecoveries` counts it),
-so `error` is what stays once even those waits run out. The user pressing
+so `error` is what stays once even those waits run out.
+
+**The refusal reaches that chain at once.** The page re-sends an identical
+refused message only for a client that has no rewrite to offer. The harness
+says on every send that it has one (`rewrite_on_refusal`), so the extension
+hands the 403 back instead of probing the same bytes for 75 seconds first —
+the chain above then redacts, shortens or halves the message on the next
+request, and the run continues. The user pressing
 stop surfaces as `AbortError` — an ending, not a failure — and the transcript
 must not read "error" for it: `cancelled`. The stop reaches every wait, not
 only the send: the loop checks the signal between the tools of a reply and
@@ -145,6 +192,7 @@ Stops: `cancelled`, `error`.
 when they start their own line, and fenced code is skipped. `done` and `ask`
 are pulled out; everything else is `work`. The first real prose line becomes
 `thinking` — the window's "what is it doing" line.
+Stops: none — the parse only classifies the reply; step 4 reads what it means.
 
 **4. Nothing actionable?** Three branches:
 
@@ -159,12 +207,26 @@ are pulled out; everything else is `work`. The first real prose line becomes
   way), then the language check, then `done_line`. Stops: `done`;
 - otherwise the nudge pipeline: streaks 1–2 emit `nudge` and send a
   marker-shaped reminder; the third consecutive blank reply is the stall path
-  — one last checker attempt if it can help, then `give_up`. Stops: `stalled`.
+  — one last checker attempt, and the verdict decides where the loop goes:
+  - no verdict (the checker cannot run: nothing staged, no child to run it,
+    the run's two-verdict bound spent, or the tree unchanged since the last
+    verdict) or a `none` verdict (it ran and could not judge) → `give_up` →
+    `stalled`;
+  - a `fail` verdict → the failure report rides back as the next message, the
+    streak resets to 0, and the model gets a full step to fix the staged
+    files — as long as the step cap leaves one. A check that still fails over
+    a tree that moved gives one more step the same way; over a tree that did
+    not move the checker cannot run again, and the run ends `stalled`.
+  - a `pass` verdict → the staged tree is the evidence: the run ends `done`
+    ("check passed after a stalled step"), not `stalled`.
+  Stops: `stalled` — or `done` when the check passes.
 
 **5. Helpers fan out** (when `parallelHelpers` and the reply carries
 `SUBAGENT`). Capacity is checked *before* the fan-out — a reply with a hundred
 helpers must trip the tool budget before it starts a hundred child loops —
 then `Promise.all`; results re-assemble in marker order.
+Stops: `tools-limited`, `time-limited`, `credit-limited` (the capacity check
+runs before the fan-out, so a hundred helpers never start).
 
 **6. Execute, in order.** Every call goes through `guarded()`:
 
@@ -172,6 +234,13 @@ then `Promise.all`; results re-assemble in marker order.
   built-in, a plugin marker and an MCP tool all answer a malformed call with
   the same `err: …` sentence, so no implementation has to own the parser's
   contract and no malformed call reaches a tool that might throw;
+- **VERIFY dispatch** — a `VERIFY` from the model is a shell call: the
+  run's declared check runs first (`verifyCommand`, or the project's
+  `.aipass/check.txt`), and the checker — the read-only child — is the
+  fallback when there is no command to run. The answer comes back as an
+  ordinary tool result (a check that fails is a failing check with its
+  output, not a bare `err:`), and it rides the permission gate below like
+  any other call. Off unless the run was given `allowVerify`;
 - **red-test gate** — a `git commit` RUN while the run's declared check
   (`.aipass/check.txt`, or the `verifyCommand` option) has not passed at the
   current tree state is refused with the exact command that un-bars it and the
@@ -184,7 +253,17 @@ then `Promise.all`; results re-assemble in marker order.
   More than `repeatGuardMax` refusals in one run stop it (see the table);
 - **permission gate** — `permissions.request()`: `deny` answers the model with
   `err: the person watching declined …`; `always` records a grant for the
-  project;
+  project. A read never asks: `RECALL` is a read — it searches this
+  project's own sessions — so its question rides the secret floor like any
+  other read and no mode pre-answers it;
+- **git write** — `GIT stage` / `commit` / `branch` is classified as a
+  WRITE, because the argument says which subcommand it is (`GIT status`
+  reads, `GIT commit` writes) — a write classified as a read would go
+  through the gate without a question. The tool refuses the write outright
+  unless the run was given `allowGitWrite`; the wrapper uses argv arrays
+  (never a shell string), refuses a path that leaves the project (lexically
+  and through a link), and refuses a commit with no message or nothing
+  staged;
 - **arg guard** — a path call refused for a missing file is retried once with
   invisible characters stripped and non-ASCII digits normalised, and the
   result says so;
@@ -201,24 +280,56 @@ then `Promise.all`; results re-assemble in marker order.
 
 Every executed call emits `tool` (kind, label, ok, first line — a RUN's label
 is its command) and is recorded into the session with the `err:` flag.
+Stops: `tools-limited`, `time-limited`, `credit-limited` (a budget spent
+before a call — the calls still queued in the reply do not run), `stalled`
+(the repeat guard or the err-loop streak past `repeatGuardMax`), `cancelled`
+(the person stopped the run).
 
-**7. Plan gate, and the todo card.** If the reply carried `PLAN` and the run
-is not approved yet, `approvePlan()` runs: the facade emits `plan_request` and
-the run waits — however long the human takes. A decline stops the run **before
-anything is applied** (`plan-rejected`); an approve is remembered for the rest
-of the run. `PLAN`/`TODO` bodies update the todo card live (`todo`, merged per
-item — one row per distinct text, a tick sticking); items tick in the ordinary
-markdown shapes (`- [x] text`, `* [x] text`,
-bare `[x] text`) — the bullet comes off before the checkbox is judged, or a
-ticked line parses as open forever. Control markers never pass the permission
-gate.
+The calls of a reply run in marker order, and the plan gate is asked **after**
+them (step 7), not before: a reply that carries a `PLAN` beside its edits
+stages the edits first and asks second. Staging is not applying — nothing
+reaches the disk until the window's Apply.
+
+**7. Plan gate, and the todo card.** The gate is asked after the reply's calls
+have run (step 6), and only when the run needs it: plan approval on, the reply
+carried a `PLAN`, and the run is not approved yet. Then `approvePlan()` runs:
+the facade emits `plan_request` and the run waits — however long the human
+takes. A decline stops the run **before anything is applied**
+(`plan-rejected`): the staged changes stay staged — the overlay is the only
+place they are, and the window's Apply is the only writer — and the run takes
+no further step. An approve is remembered for the rest of the run.
+`PLAN`/`TODO` bodies update the todo card live (`todo`, merged per item — one
+row per distinct text, a tick sticking); items tick in the ordinary markdown
+shapes (`- [x] text`, `* [x] text`, bare `[x] text`) — the bullet comes off
+before the checkbox is judged, or a ticked line parses as open forever.
+Control markers never pass the permission gate.
+Stops: `plan-rejected` (the human declined — the run ends before anything is
+applied), `cancelled` (the person stopped the run while the gate was open:
+the gate is released, not declined).
 
 **8. After the calls.** A changed overlay emits `diff_update`. A budget spent
 mid-step stops here — before the DONE handling, so a `DONE` riding the same
-reply cannot mask why the run stopped; whatever was staged is still staged. A
-DONE with reads still in flight is deferred (`ignore_done`) so the reads
+reply cannot mask why the run stopped; whatever was staged is still staged.
+
+With no read in flight, the reply's own ending is taken here — through the
+same finish pipeline step 4 uses, at the same order: the checker
+(`finishCheck`, when code is staged) → the plan checkpoint (a DONE with
+plan/TODO items still open names them and asks for a ticked TODO) → the
+language check (a reply that carried calls is judged on its closing line
+alone) → `done_line`. The run stops with `done`. An ASK takes the same turn
+without the checker and without the checkpoint — the language check applies to
+the question, and the run pauses on it (`ask`). A failing check or an open
+checklist does not end the run: its message rides the next step instead, and
+the DONE is honoured there. The strict `requireCheck` gate is the exception — a
+DONE over a declared check that is still failing is refused outright
+(`done-unverified`).
+
+A DONE with reads still in flight is deferred (`ignore_done`) so the reads
 execute and their results go out first. An ASK with reads in flight waits the
 same way — the read's result goes out, and the question lands a step later.
+Stops: `done`, `ask`, `done-unverified` (the finish pipeline above),
+`tools-limited`, `time-limited`, `credit-limited` (a budget spent mid-step),
+`cancelled`.
 
 **9. Stagnation guard.** A step signature (kind + arg + first 2000 chars of
 each result) is kept for the last six steps:
@@ -234,6 +345,8 @@ each result) is kept for the last six steps:
 - one strike short of either → a `stagnation` warning rides the next message
   ("do something different — or say DONE and tell me what is still open").
 
+Stops: `stagnation` — one strike short of it is a warning, not an ending.
+
 The evidence side of the same question: once most of a run's results are
 repeats (`repeatedResults / (novelResults + repeatedResults)`, at least four
 results and two repeats), the run is hearing itself, and the guard stops on
@@ -244,6 +357,7 @@ since the last change, the next message asks for proof — once. Running a check
 or reading a staged file back in the same step counts as the proof;
 `finishCheck` pre-empts the nudge when the checker can run. R4's "verified"
 only silences the reminder — the exit check runs regardless.
+Stops: none — the nudge asks once and the run continues.
 
 **11. Compaction.** Checked against the assembled message the way the server
 will receive it (after `outbound()` rewrites). Over budget: summarise in the
@@ -251,25 +365,49 @@ conversation that still holds the history → rotate → `compacted`; the seed
 the loop sends next pins the staged files, the last failing check, and the
 merged memory facts. If the compaction itself fails, the results still go
 out (`error` emitted) — losing a step to a summariser fault would be worse.
+Stops: `cancelled` (the person stopped the run during the summary). A failed
+compaction is not a stop — the `error` event says what failed and the results
+still go out.
 
 **12. Loop end.** `step_limit` when a set cap's last step runs; a spent budget becomes
-the stop reason; credits are diffed (`quota(true)`); `run_stats` and
+the stop reason; credits are re-read (`quota(true)`) and diffed into `spent`
+(the quota that is left is `credits`); `run_stats` and
 `finished` go out — `finished.todo` carrying the run's final checklist state
 (empty when no plan was written), so the window can re-tally the plan card and
 say what a completed run left open; the loop returns.
+Stops: `steps` (a set cap ran out), `tools-limited`, `time-limited`,
+`credit-limited` (a budget spent).
+
+**The moments the person's own commands fire at.** A hook is a command line
+the person configured, bound to a moment (`settings.json` → `hooks`):
+
+| moment | when | what the verdict does |
+|---|---|---|
+| `afterWrite` | after a change is staged — a write or an edit | rides back to the model with the tool result; a failing hook is reported and the change stays staged |
+| `beforeCommit` | before the model's `GIT commit` goes through | a failing hook refuses the commit, and the run continues: the model is told what the hook said |
+| `done` | when the run ends | comes back to the person as a note, after the run's own answer — it does not change the result |
+
+Each hook runs as an argv array (never a shell string), with the run's root
+as its cwd and a timeout on it, and its output is screened for secrets
+before it becomes part of a transcript. A hook is the person's command, so it
+never asks the model — or the person — for permission. The `beforeCommit`
+moment rides the model's `GIT commit`; the window's own commit button is the
+person's, and it does not consult the hooks.
 
 ## Guards at a glance
 
 | guard | watches | first response | stop |
 |---|---|---|---|
-| nudge | a reply with no actionable marker | `nudge` + reminder (×2) | 3rd: checker's last chance, then `give_up` → `stalled` |
+| nudge | a reply with no actionable marker | `nudge` + reminder (×2) | 3rd: the checker's last chance — a `fail` gives one more step (the streak resets), a `pass` ends `done`, no verdict → `give_up` → `stalled` |
+| VERIFY dispatch | the model asked for a check (`VERIFY`) | the declared check runs first, the checker is the fallback; the answer is a tool result | — (it is a shell call: the gate asks, and the run's `allowVerify` decides whether the marker exists at all) |
+| git write | a `GIT stage` / `commit` / `branch` | classified as a write, so the gate asks; refused outright unless the run was given `allowGitWrite` | — (a refusal is the tool's `err:`, not a stop) |
 | repeat guard | identical call, 3rd time, nothing staged in between | refusal text as the result, `repeat_block` | > `repeatGuardMax` (4) refusals → `stalled` |
 | err loop | the same failure (kind + masked error line) on calls in a row | correction on the third result, `errLoops` | streak > `repeatGuardMax` → `stalled` |
 | chain guard | a failed change, mid-reply | the reply's later changes/RUNs skipped and stated, `chainSkips`; reads still run | — |
 | red-test gate | a `git commit` RUN while the declared check (`.aipass/check.txt`, or `verifyCommand` when set) has not passed at the current state | refusal naming the exact command and its source, `commitBlocks`; any later change re-arms | — (run the check first; a commit is never the way around it) |
 | stagnation | same step ×3, two trading places ×2, or a longer round twice | `stagnation` warn + "do something different" | `stagnation` |
 | budgets | tool count (300) and wall clock (30 min) — the only bound when no step cap is set; plus credits, only when set (`maxCredits`, 0 = off, checked against the cached quota) | `budget` event | `tools-limited` / `time-limited` / `credit-limited` |
-| plan gate | `PLAN` and no approval yet | `plan_request`, wait however long | decline → `plan-rejected` |
+| plan gate | `PLAN` and no approval yet — asked after the reply's calls ran | `plan_request`, wait however long | decline → `plan-rejected` (nothing applied, no further step) |
 | plan checkpoint | DONE with plan/TODO items still open | one nudge naming them and asking for a ticked TODO (`todoPrompts`); the finish pipeline reads: checker → checkpoint → language | — (the next DONE is honored either way) |
 | checker | DONE (or a stalled step) with staged code | read-only verifier runs it; a self-run does not stand it down; a re-check only when the tree moved; `verifyCommand` names the check | fail → a correcting step; pass → `done`; with `requireCheck`, a later DONE over the failing tree → `done-unverified`; two verdicts a run, the last recorded |
 | verify nudge | staged code, nothing verified since the change | `verify_prompt` (once per run) | — |
@@ -281,7 +419,8 @@ cannot move; the chain guard narrows one step after a failed change; the
 verify nudge and language check ask once and let the model finish. All of them
 correct *evidence*, never intent: a call runs as written first — with two
 deliberate exceptions, the red-test gate and the opt-in `requireCheck` gate,
-which are hard bars and only exist where the run declared its check.
+which are hard bars. The red-test gate exists only where the run declared a
+check command; `requireCheck` exists wherever the checker can run.
 
 ## Stop reasons
 
@@ -311,7 +450,9 @@ which are hard bars and only exist where the run declared its check.
    failing.
 3. **Writes stop at the overlay.** Tools never touch the disk;
    `applyOverlay(overlay, accepted)` is the only writer — driven by the
-   window's Apply — and emits `applied`.
+   window's Apply — and emits `applied`. It snapshots the files it is about
+   to write first (a checkpoint, kept outside the project), so an approved
+   change can be taken back; the answer carries the checkpoint's id.
 4. **WAF once, at assembly.** Tools return real text; `outbound()` is applied
    when the loop assembles the results, so bytes on disk are exactly the
    file's.
@@ -372,6 +513,12 @@ the helper keeps its original behaviour.
 | `test/run-overlay.test.mjs` | the staged tree projected into RUN; the disk untouched until Apply |
 | `test/gates.test.mjs` · `test/permissions.test.mjs` | the decisions the gate consumes — yolo still asks about destructive RUNs |
 | `test/checker.test.mjs` | verdicts pass/fail/none, the read-only child, the always-run exit check bounded at two verdicts, the declared check command (`.aipass/check.txt` / `verifyCommand`) and the `requireCheck` gate |
+| `test/verify-marker.test.mjs` | the VERIFY marker: the model can ask for a check, the answer is a tool result, and a VERIFY with no declared check says so instead of inventing a pass |
+| `test/checkpoints.test.mjs` | the checkpoint before the apply, the bytes back exactly, the store outside the project, and the newest-first list with the oldest pruned |
+| `test/git.test.mjs` | the git write side: it asks before it runs, it refuses a path outside the project, and it is refused outright until the run is given `allowGitWrite` |
+| `test/media.test.mjs` | the media surface: the option surface a model declares, an undeclared option dropped before the request, the media timeout, and the file kept where it was asked to go |
+| `test/export.test.mjs` | the export keeps every entry, the HTML escapes what the page would have executed, and the tree groups the sessions by day |
+| `test/schedule.test.mjs` | a due entry runs once and is then spent, a disabled one never runs, and the store keeps its file owner-only |
 | `test/ask.test.mjs` | the ASK pause: closing line, no check, deferral beside a NEED |
 | `test/lang-guard.test.mjs` | path variants (invisibles, Thai digits), the Thai reply policy, the repeat / err-loop / chain guards up to `stalled` |
 | `test/harness-fixes.test.mjs` · `test/harness-research.test.mjs` | the stagnation guard's warn-then-stop |

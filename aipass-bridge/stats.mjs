@@ -239,7 +239,14 @@ function main() {
 
   const rows = [];
   for (const meta of store.list(root)) {
-    const session = store.load(meta.id);
+    // Only the run_stats lines are wanted here, and the transcript around
+    // them is 95% tool output: a report over a store of a thousand sessions
+    // must not hold a thousand transcripts at once. One session that cannot
+    // be read — too large, or half-written — is skipped, not fatal: a report
+    // is a report about the sessions that are readable.
+    let session = null;
+    try { session = store.open(meta.id, { types: ['run_stats'] }); }
+    catch { session = null; }
     if (session) rows.push(...collectRuns(session));
   }
   rows.sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0));

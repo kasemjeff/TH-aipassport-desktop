@@ -33,7 +33,7 @@ so you can finish the one-time browser steps. Re-run it any time — it is
 idempotent. The manual steps below are what it automates.
 
 There is nothing to build and nothing to `npm install` to run it. Everything
-under `aipass-bridge/` is `node:*` builtins, so on **any machine with Node ≥ 22**
+under `aipass-bridge/` is `node:*` builtins, so on **any machine with Node ≥ 20**
 the same three steps apply — copy the repo over and run them again.
 
 ### 1. Get the `aipass` command on your PATH
@@ -75,7 +75,7 @@ for everything except the health probes; `AIPASS_REQUIRE_AUTH=0` disables it.
 ### Check it
 
 ```bash
-aipass status     # node ≥ 22? bridge up? extension connected?
+aipass status     # node ≥ 20? bridge up? extension connected?
 ```
 
 Then:

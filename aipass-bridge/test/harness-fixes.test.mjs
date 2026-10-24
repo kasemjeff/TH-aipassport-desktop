@@ -74,13 +74,13 @@ test('the spill directory is out of every listing, but still readable', async ()
   assert.ok(search.includes('a.ts'), 'the real file is still found');
   assert.ok(!search.includes('.aipass'), `an earlier run's spill is not searchable:\n${search}`);
 
-  const listing = tools.list('.').split('\n');
+  const listing = (await tools.list('.')).split('\n');
   assert.ok(listing.includes('a.ts'));
   assert.ok(!listing.some((n) => n.startsWith('.aipass')), `.aipass is skipped: ${listing.join(', ')}`);
 
   // SKIP governs listing/search/glob only. The locator spill() returns points
   // the model straight back at one of these files, so that path must survive.
-  const back = tools.read('.aipass/spill/x.txt');
+  const back = await tools.read('.aipass/spill/x.txt');
   assert.ok(back.includes('needle from an earlier run'), 'NEED file still reads the spill');
 
   const globbed = await tools.glob('**/*.txt');
@@ -137,7 +137,7 @@ test('git refuses the forms that delete, write or reach another repository', asy
 
   for (const bad of DANGEROUS) {
     const out = await tools.git(bad);
-    assert.match(out, /^err: only read-only git subcommands are allowed/, `refused: ${bad}`);
+    assert.match(out, /^err: (?:only read-only git subcommands are allowed|git write subcommands are not allowed)/, `refused: ${bad}`);
     assert.ok(out.includes(bad), `the message names what was tried: ${out}`);
   }
 
@@ -147,7 +147,7 @@ test('git refuses the forms that delete, write or reach another repository', asy
     assert.ok(!/^err: only read-only git subcommands/.test(await tools.git(ok)), `allowed: ${ok}`);
   }
   for (const refused of ['stash', 'stash apply', 'branch -a', 'tag -l', 'remote -v']) {
-    assert.match(await tools.git(refused), /^err: only read-only git subcommands are allowed/, `refused: ${refused}`);
+    assert.match(await tools.git(refused), /^err: (?:only read-only git subcommands are allowed|git write subcommands are not allowed)/, `refused: ${refused}`);
   }
 });
 
@@ -184,9 +184,15 @@ test('append batches the header rewrite, and rename still fixes it at once', (t)
   // breadcrumb write that precedes an in-place rewrite reads as a second
   // rewrite, and one batched rewrite reads as two.
   let inWriteFile = false;
+  // The caller that matters is `writeHeader` — the function that writes the
+  // header line — and not `rewriteHeader`: the rewrite takes a LOCK first, and
+  // that lock is a file of its own. A spy that cannot tell the two apart
+  // counts every lock write as a header rewrite, and the bound this test
+  // checks (one rewrite per batch) reads as broken. The look-behind is what
+  // tells them apart: "rewriteHeader" ends in "writeHeader" too.
   const count = (file) => {
     const target = String(file) === session.file || String(file) === `${session.file}.tmp`;
-    if (target && /rewriteHeader/.test(new Error().stack)) rewrites.push(String(file));
+    if (target && /(?<!re)writeHeader/.test(new Error().stack)) rewrites.push(String(file));
   };
   fs.writeFileSync = function spied(file, ...rest) {
     inWriteFile = true;
@@ -256,7 +262,7 @@ test('a helper run that edits a denied path is declined, and nothing is staged',
   const events = new Emitter();
   const h = new Harness({
     root,
-    bridge: new StubBridge([
+    client: new StubBridge([
       'SUBAGENT\ntask: change the secret\nEND\n',
       'EDIT .env\nFIND\nSECRET=1\nNEW\nSECRET=2\nEND\nDONE helper done\n',
       'DONE parent done\n',
@@ -319,7 +325,7 @@ test('a denied read is refused with a reason before the file is opened (H9)', as
   const events = new Emitter();
   const h = new Harness({
     root,
-    bridge: new StubBridge(['NEED file .env\n', 'DONE kept it local\n']),
+    client: new StubBridge(['NEED file .env\n', 'DONE kept it local\n']),
     store: new SessionStore(tempDir()),
     rules: [{ pattern: '.env*', decision: 'deny' }],
     events,
@@ -703,7 +709,7 @@ test('a roled helper is read-only: its edit is refused and nothing is staged', a
   const events = new Emitter();
   const h = new Harness({
     root,
-    bridge: new StubBridge([
+    client: new StubBridge([
       'SUBAGENT\nrole: verifier\ntask: check src/app.ts\nEND\n',
       'EDIT src/app.ts\nFIND\nconst a = 1;\nNEW\nconst a = 2;\nEND\nDONE ran the check\n',
       'DONE parent done\n',
@@ -748,7 +754,7 @@ test("a helper reads the parent staged edit, not the disk", async () => {
   events.on('tool', (p) => seen.push(p));
   const h = new Harness({
     root,
-    bridge: new StubBridge([
+    client: new StubBridge([
       `EDIT notes.md
 FIND
 two
@@ -809,7 +815,7 @@ test("parallel helpers editing one file: the first version lands and the other i
   events.on('helper_end', (p) => helperEnds.push(p));
   const h = new Harness({
     root,
-    bridge: new StubBridge([
+    client: new StubBridge([
       `SUBAGENT
 task: write A
 END
@@ -868,7 +874,7 @@ test("a read in an earlier run does not license a blind CREATE in the next", asy
   events.on('tool', (p) => seen.push(p));
   const h = new Harness({
     root,
-    bridge: new StubBridge([
+    client: new StubBridge([
       'NEED file notes.txt\n',
       'DONE noted\n',
       'CREATE notes.txt\nreplacement\nEND\n',
@@ -918,7 +924,7 @@ test("a rotation keeps the conversation its create returned, not the shared poin
   events.on('compacted', (p) => compacted.push(p));
   const h = new Harness({
     root,
-    bridge,
+    client: bridge,
     store: new SessionStore(tempDir()),
     events,
     options: { mode: 'yolo', allowRun: false, maxSteps: 3 },
@@ -972,7 +978,7 @@ END
   events.on('compacted', (p) => compacted.push(p));
   const h = new Harness({
     root,
-    bridge,
+    client: bridge,
     store: new SessionStore(tempDir()),
     events,
     compaction: { contextTokens: 60, reserveTokens: 0, keepRecentBytes: 0 },
@@ -1018,7 +1024,7 @@ test("a run's max-result and read-lines options reach the tools (H11)", async ()
   const bridge = new StubBridge(['NEED file big.txt\nNEED file lines.txt\n', 'DONE read both\n']);
   const h = new Harness({
     root,
-    bridge,
+    client: bridge,
     store: new SessionStore(tempDir()),
     events: new Emitter(),
     options: { mode: 'auto', maxSteps: 3, maxResult: 500, readLines: 3 },

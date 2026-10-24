@@ -33,6 +33,7 @@ test('every built-in marker the protocol can produce passes its shape check', ()
     { kind: 'jobs', arg: '' },
     { kind: 'done', arg: 'finished' },
     { kind: 'ask', arg: 'which one?' },
+    { kind: 'verify', arg: '' },
   ];
   for (const call of valid) {
     assert.equal(validateCall(call), null, `${call.kind} should pass its shape check`);

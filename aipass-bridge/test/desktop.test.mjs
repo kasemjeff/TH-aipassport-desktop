@@ -6,13 +6,19 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { startBridge, FakeExtension, scripted, tempDir, freePort, startRpcServer } from './harness.mjs';
 import { createRpc, staticFileFor } from '../harness/rpc.mjs';
 import { Settings } from '../harness/settings.mjs';
 import { SessionStore } from '../harness/session.mjs';
 import { backendIsUp } from '../harness/backend-probe.mjs';
-import { UNAUTHORIZED } from '../harness/authtoken.mjs';
+import { UNAUTHORIZED, loadOrMintToken } from '../harness/authtoken.mjs';
+import { windowContract } from '../../scripts/window-contract.mjs';
+
+// The repository, for the two places a test has to run a real process: the
+// backend, standalone, and the probe the desktop shell asks.
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 let bridge;
 let ext;
@@ -25,23 +31,14 @@ before(async () => {
   // previous one's replies. The handler is swapped per test instead.
   ext = await new FakeExtension(bridge.base, { onChat: (job, emit) => onChat(job, emit) }).connect();
 });
-// The shell's readiness probe asks the backend whether it is there. The
-// backend refuses every /rpc call without the loopback token (auth.test.mjs
-// pins the gate), so a probe that went in bare was answered "unauthorized"
-// — which is not the same as "not running": the shell then took the busy
-// port as a free one, and the backend `tauri dev` waits for never came up.
-test('the desktop shell\'s readiness probe presents the loopback token', () => {
-  const src = fs.readFileSync(new URL('../../desktop/main.mjs', import.meta.url), 'utf8');
-  const probe = src.slice(src.indexOf('const backendUp'), src.indexOf('const wait ='));
-  assert.match(probe, /authHeaders\(\)/, 'the probe carries the token the backend asks for');
-});
-
 after(() => { ext.disconnect(); bridge.stop(); });
 
 /** RPC on a free port, rooted at a temp project, answering through `ext`. */
-async function startRpc({ files = {}, replies, rpcOptions = {}, ...rest } = {}) {
+async function startRpc({ files = {}, replies, handler = null, rpcOptions = {}, ...rest } = {}) {
   const root = rest.root ? path.resolve(rest.root) : tempDir(files);
-  onChat = scripted(replies);
+  // A test that needs to answer DIFFERENTLY to different turns (the checker
+  // is a run of its own) brings its own handler; the rest use the script.
+  onChat = handler ?? scripted(replies);
   const rpc = await startRpcServer({
     root,
     bridgeURL: bridge.base,
@@ -500,6 +497,8 @@ test('the static file guard serves ui/ and nothing beside it', async (t) => {
 
   assert.equal(staticFileFor(ui, '/'), path.join(ui, 'index.html'));
   assert.equal(staticFileFor(ui, '/app.js'), path.join(ui, 'app.js'));
+  assert.equal(staticFileFor(ui, '/my%20file.js'), path.join(ui, 'my file.js'), 'a name that needs encoding is the decoded name on disk');
+  assert.equal(staticFileFor(ui, '/%zz'), path.join(ui, '%zz'), 'a malformed escape is not a name, and is taken as it came');
   assert.equal(fs.existsSync(sibling), true, 'the sibling really is outside ui');
   assert.equal(staticFileFor(ui, '/../ui-x/secret.txt'), null, 'a `..` into the sibling must not resolve');
   assert.equal(staticFileFor(ui, '/..'), null, 'the parent of ui is not served either');
@@ -544,6 +543,26 @@ test('settings are read, changed and persisted', async (t) => {
   assert.equal(reloaded.get('maxSteps'), 4);
 });
 
+test('asking for the models does not force a fetch unless the caller says so', async (t) => {
+  // The window polls the status every ten seconds and reads the list when
+  // the catalog's stamp moves. If every read of the list were a fetch, the
+  // window would poke the site's tab forever — so `force` is the caller's
+  // business.
+  const env = await startRpc({ replies: ['DONE nothing'] });
+  t.after(() => env.stop());
+  // One fetch first, so the cache is warm and the TTL can do its job.
+  await env.call('models', { force: true });
+  const before = (await env.call('status')).cache.models.fetches;
+
+  await env.call('models');
+  const after = (await env.call('status')).cache.models.fetches;
+  assert.equal(after, before, 'a plain read rode the cache');
+
+  await env.call('models', { force: true });
+  const forced = (await env.call('status')).cache.models.fetches;
+  assert.equal(forced, after + 1, 'and only the caller that asked for a fresh one fetched');
+});
+
 test('projects are listed, added and switched, each with its own sessions', async (t) => {
   const settings = new Settings(tempDir(), 'settings.json');
   const first = tempDir({ 'a.txt': 'one' });
@@ -570,6 +589,62 @@ test('projects are listed, added and switched, each with its own sessions', asyn
   await env.call('apply');
   assert.equal(fs.readFileSync(path.join(second, 'b.txt'), 'utf8'), 'made in the second');
   assert.equal(fs.existsSync(path.join(first, 'b.txt')), false);
+});
+
+test('the file panel can search the project, and a secret file is not a result', async (t) => {
+  // The search and the grep walk the real tree, and the walk skips the files
+  // the permission rules name as secrets. The window's own tests stub both, so
+  // a broken index looked like an empty result instead of a failure — this is
+  // the test that asks the backend for real.
+  const root = tempDir({
+    'notes.md': 'the answer is 42\n',
+    'docs/guide.md': 'a guide to the thing\n',
+    '.env': 'SECRET=1\n',
+  });
+  const env = await startRpc({ root, replies: ['DONE nothing'] });
+  t.after(() => env.stop());
+
+  const hits = await env.call('fs.search', { query: 'notes' });
+  assert.ok(hits.some((e) => e.path === 'notes.md'), 'the search finds the file');
+  assert.equal(hits.some((e) => e.path === '.env'), false, 'and a secret file is not a result');
+
+  const found = await env.call('fs.grep', { query: 'answer' });
+  assert.ok(found.some((e) => e.path === 'notes.md' && e.line === 1), 'the grep finds the line');
+});
+
+test('the MCP list answers for the project the call is about', async (t) => {
+  // Two windows on two projects must not read each other's MCP servers: the
+  // listing, the enable switch and the test all act on the project the call
+  // names, not on the one the backend happens to be on.
+  const mcp = (name) => JSON.stringify({ servers: [{ name, command: 'node', args: [`${name}.js`] }] });
+  const first = tempDir({ '.aipass/mcp.json': mcp('alpha') });
+  const second = tempDir({ '.aipass/mcp.json': mcp('beta') });
+  const env = await startRpc({ root: first, replies: ['DONE nothing'] });
+  t.after(() => env.stop());
+
+  const mine = await env.call('mcp.list', { project: first });
+  assert.ok(mine.servers.some((s) => s.name === 'alpha'), 'the project answers with its own server');
+
+  const other = await env.call('mcp.list', { project: second });
+  assert.ok(other.servers.some((s) => s.name === 'beta'), 'and the other project with its own');
+  assert.equal(other.servers.some((s) => s.name === 'alpha'), false, 'the first project is not in it');
+});
+
+test('a method nobody has is a 404, not an inherited one', async (t) => {
+  // `methods['toString']` is a function — the inherited one — so a call for
+  // it answered 200 with "[object Undefined]" instead of the 404 that says
+  // "there is no such method here".
+  const env = await startRpc({ files: {}, replies: ['DONE nothing'] });
+  t.after(() => env.stop());
+
+  const res = await fetch(`http://127.0.0.1:${env.rpc.port}/rpc`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ method: 'toString' }),
+  });
+  const body = await res.json();
+  assert.equal(res.status, 404, 'the call nobody made is refused');
+  assert.match(body.error, /no such method/, 'and it says so');
 });
 
 test('an image or a video is staged, listed and dropped', async (t) => {
@@ -951,6 +1026,83 @@ test('the launcher finds a backend that is already running', async (t) => {
   assert.equal(await backendIsUp(port), true, 'our own 401 is still our backend');
 });
 
+test('every method the window calls exists on the backend', async () => {
+  // The window is a plain page with no types, so a method it calls that the
+  // backend does not have is a 404 in the window's own log — in front of a
+  // person who only wanted to use the app. The contract module is where the
+  // rule lives, so the QA loop and the suite ask the same question and get
+  // the same answer.
+  const contract = windowContract({ repo: REPO });
+  assert.deepEqual(
+    contract.missing,
+    [],
+    `the window calls methods the backend does not have: ${contract.missing.join(', ')}`,
+  );
+});
+
+test('the window says what it is to a screen reader', async () => {
+  // The sheet is a dialog: it says so, it is named, and it is modal — so a
+  // reader is told that the keyboard has moved. The transcript is a live
+  // log, so a reply is announced as it grows. The hint is a status. The
+  // decorative marks are hidden, so they are not read out with the text they
+  // sit in.
+  const html = fs.readFileSync(path.join(REPO, 'desktop', 'ui', 'index.html'), 'utf8');
+  assert.match(html, /id="log"[^>]*role="log"/, 'the transcript is a log');
+  assert.match(html, /id="log"[^>]*aria-live="polite"/, 'and it is announced as it grows');
+  assert.match(html, /id="modal"[^>]*role="dialog"/, 'the sheet is a dialog');
+  assert.match(html, /id="modal"[^>]*aria-modal="true"/, 'and it is modal');
+  assert.match(html, /id="modal"[^>]*aria-labelledby="modal-title"/, 'and it is named');
+  assert.match(html, /id="hint"[^>]*role="status"/, 'the hint is a status');
+  assert.match(html, /id="slash-list"[^>]*role="listbox"/, 'the palette is a listbox');
+});
+
+test('every control in the window carries a name a screen reader can read', async () => {
+  // A title is a tooltip, not a name: a screen reader does not read it when
+  // the control takes focus, so an icon button with only a title is an
+  // unnamed control — and so is a select whose only label is a title. Half
+  // the window's buttons were named and half were not; this says they all
+  // are, the same way.
+  const html = fs.readFileSync(path.join(REPO, 'desktop', 'ui', 'index.html'), 'utf8');
+  // The text a control shows: the icons are pictures, not words.
+  const shown = (inner) => inner.replace(/<svg[\s\S]*?<\/svg>/g, '').replace(/<[^>]+>/g, '').trim();
+
+  const buttons = [...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)];
+  const unnamed = buttons
+    .filter(([, attrs, inner]) => !/aria-label\s*=/.test(attrs) && !shown(inner))
+    .map(([, attrs]) => attrs.match(/id="([^"]+)"/)?.[1] ?? attrs.trim());
+  assert.deepEqual(unnamed, [], `these buttons have no name: ${unnamed.join(', ')}`);
+
+  const selects = [...html.matchAll(/<select\b([^>]*)>/g)].map(([, attrs]) => attrs);
+  const nameless = selects
+    .filter((attrs) => !/aria-label\s*=/.test(attrs))
+    .map((attrs) => attrs.match(/id="([^"]+)"/)?.[1] ?? attrs.trim());
+  assert.deepEqual(nameless, [], `these selects have no name: ${nameless.join(', ')}`);
+
+  // A <label> is not a widget: a control drawn as one is unreachable by the
+  // keyboard and unnamed to a screen reader, whatever its aria-label says.
+  const labels = [...html.matchAll(/<label\b([^>]*)>/g)].map(([, attrs]) => attrs);
+  const impostors = labels.filter((attrs) => /aria-label\s*=/.test(attrs));
+  assert.deepEqual(impostors, [], `these labels pretend to be controls: ${impostors.join(' ')}`);
+});
+
+test('the transcript says when it is busy, and the page loads each module once', async () => {
+  // The log is a live region and the answer is painted frame by frame: a
+  // region that announced every frame read the same half-written sentence
+  // again and again. aria-busy holds the announcements until the run ends.
+  //
+  // md.js is imported by the module graph (transcript.js); the page loaded it
+  // a second time as well, which was harmless but said the same thing twice.
+  const html = fs.readFileSync(path.join(REPO, 'desktop', 'ui', 'index.html'), 'utf8');
+  assert.match(html, /id="log"[^>]*aria-busy="false"/, 'the transcript starts quiet');
+
+  const scripts = [...html.matchAll(/<script\b[^>]*src="([^"]+)"/g)].map(([, src]) => src);
+  assert.deepEqual(
+    scripts.filter((src) => src.endsWith('/md.js')),
+    [],
+    'md.js is imported by the module graph — the page must not load it twice',
+  );
+});
+
 test('the launcher does not adopt somebody else\'s server', async (t) => {
   // A 401 that is not ours means the port belongs to something else. The
   // launcher has to say "the port is busy", not adopt a stranger.
@@ -960,6 +1112,419 @@ test('the launcher does not adopt somebody else\'s server', async (t) => {
     res.end(JSON.stringify({ ok: false, error: 'not our backend' }));
   });
   await new Promise((r) => stranger.listen(port, '127.0.0.1', r));
-  t.after(() => stranger.close());
+  t.after(() => { stranger.closeAllConnections?.(); stranger.close(); });
   assert.equal(await backendIsUp(port), false, 'a foreign server is not our backend');
+});
+
+test('a stranger that answers 200 is not our backend either', async (t) => {
+  // A 200 on its own proves nothing: something that is not our backend can
+  // hold the port and answer 200 to anything. A probe that believed every
+  // 200 would adopt it, and the window would talk to a program that has
+  // never heard of aipass. The answer has to carry our own shape.
+  const port = await freePort();
+  const stranger = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('this is not aipass');
+  });
+  await new Promise((r) => stranger.listen(port, '127.0.0.1', r));
+  t.after(() => { stranger.closeAllConnections?.(); stranger.close(); });
+  assert.equal(await backendIsUp(port), false, 'a 200 that is not our answer is not ours');
+});
+
+test('a busy port is a named condition, not a crash', async (t) => {
+  // The desktop shell has to tell "the port was taken" apart from "the
+  // backend broke", because the two need opposite answers: one of our
+  // backends is already answering there (adopt it), or something else holds
+  // it (restarting cannot help). A busy port that looked like any other
+  // crash put the shell in a restart loop that could never win, and the
+  // window sat on a dead port for as long as the loop ran.
+  const port = await freePort();
+  const taken = http.createServer((_req, res) => { res.writeHead(200); res.end('taken'); });
+  await new Promise((r) => taken.listen(port, '127.0.0.1', r));
+  t.after(() => { taken.closeAllConnections?.(); taken.close(); });
+  const ran = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [
+      path.join(REPO, 'aipass-bridge', 'harness', 'rpc.mjs'),
+      '--port', String(port), '--root', process.cwd(),
+    ], {
+      // The same port for the bridge: the backend asks whether a bridge is
+      // already answering before it starts one, and the answer here is yes.
+      // So the test starts no bridge, and leaves none behind.
+      env: { ...process.env, AIPASS_REQUIRE_AUTH: '0', AIPASS_PORT: String(port) },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { out += d; });
+    child.on('exit', (code) => resolve({ code, out }));
+  });
+  assert.equal(ran.code, 43, 'the backend named the busy port with its own exit code');
+  assert.match(ran.out, /busy/, 'and said so on the way out');
+});
+
+test('the shell and the launcher ask the port the same question', async (t) => {
+  // The desktop shell has no HTTP client of its own — it is a window, a tray
+  // and a supervisor — so it asks the app's own Node, running the SAME probe
+  // module the launcher uses. One implementation of the question: the window
+  // and the launcher cannot drift apart, because the shell IS the launcher.
+  const probe = path.join(REPO, 'aipass-bridge', 'harness', 'backend-probe.mjs');
+  // Asynchronous, not spawnSync: the servers below live in THIS process, and
+  // a blocking call would stop them from answering the probe that is asking.
+  const ask = (port) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [probe, String(port)], {
+      env: { ...process.env, AIPASS_REQUIRE_AUTH: '0' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { out += d; });
+    child.on('exit', (status) => resolve({ status, out }));
+  });
+
+  const strangerPort = await freePort();
+  const stranger = http.createServer((_req, res) => {
+    res.writeHead(401, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'not our backend' }));
+  });
+  await new Promise((r) => stranger.listen(strangerPort, '127.0.0.1', r));
+  t.after(() => { stranger.closeAllConnections?.(); stranger.close(); });
+  const aboutStranger = await ask(strangerPort);
+  assert.equal(aboutStranger.status, 0, 'the probe answered');
+  assert.equal(aboutStranger.out.trim(), 'other', 'a stranger is not ours');
+
+  const oursPort = await freePort();
+  const ours = http.createServer((_req, res) => {
+    res.writeHead(401, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: UNAUTHORIZED }));
+  });
+  await new Promise((r) => ours.listen(oursPort, '127.0.0.1', r));
+  t.after(() => { ours.closeAllConnections?.(); ours.close(); });
+  const aboutOurs = await ask(oursPort);
+  assert.equal(aboutOurs.status, 0, 'the probe answered');
+  assert.equal(aboutOurs.out.trim(), 'ours', 'our own backend is ours');
+
+  // And the same, with the gate open: a 200 has to carry our own answer.
+  const openPort = await freePort();
+  const open = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, result: { root: 'C:/somewhere', extensions: 1 } }));
+  });
+  await new Promise((r) => open.listen(openPort, '127.0.0.1', r));
+  t.after(() => { open.closeAllConnections?.(); open.close(); });
+  const aboutOpen = await ask(openPort);
+  assert.equal(aboutOpen.status, 0, 'the probe answered');
+  assert.equal(aboutOpen.out.trim(), 'ours', 'our own 200 is ours');
+});
+
+/* --------------------------------------------------- the backend's own edges */
+
+test('a UI file that is gone is a 404, and the backend lives through it', async (t) => {
+  // The window's files are served from disk while the backend runs, and the
+  // content update replaces that tree under it. A file that vanished between
+  // the check and the read used to throw inside the request handler — an
+  // unhandled rejection, which ends this process for every window that is
+  // open. A file that is not there is a 404, and the backend keeps serving.
+  const env = await startRpc({ files: {}, replies: [] });
+  t.after(() => env.stop());
+
+  const missing = await fetch(`http://127.0.0.1:${env.rpc.port}/not-here.js`);
+  assert.equal(missing.status, 404, 'a file that is not there is a 404');
+
+  // The race, made deterministic: the file is gone by the time it is stat'ed,
+  // which is exactly what the update does to the tree under the backend.
+  const real = fs.statSync;
+  fs.statSync = (target, ...rest) => {
+    if (String(target).includes(`desktop${path.sep}ui`)) {
+      const err = new Error(`ENOENT: no such file or directory, stat '${target}'`);
+      err.code = 'ENOENT';
+      throw err;
+    }
+    return real(target, ...rest);
+  };
+  try {
+    const gone = await fetch(`http://127.0.0.1:${env.rpc.port}/index.html`);
+    assert.equal(gone.status, 404, 'and a file that vanished is a 404 too');
+  } finally {
+    fs.statSync = real;
+  }
+
+  // The backend is still there to answer.
+  const status = await env.call('status');
+  assert.equal(status.root, env.root, 'the backend is still answering');
+});
+
+test('an attachment rides the first message of every run, not only the first of the session', async (t) => {
+  // The picture belongs to the message the person sent it with. The gate used
+  // to be the session's own first run, which is a different thing: from the
+  // second run of a session onward the file was read, encoded and then
+  // dropped on the floor — the model was asked about a picture it had never
+  // seen, and the window reported the send as a success.
+  const env = await startRpc({ files: { 'a.txt': 'x' }, replies: ['DONE one', 'DONE two'] });
+  t.after(() => env.stop());
+
+  // A 1x1 transparent PNG, the smallest legal payload.
+  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const staged = await env.call('attachment.stage', { name: 'pixel.png', dataUrl: png });
+  const carries = (chats) => chats.some((c) => (c.parts ?? []).some((p) => p.type === 'image'));
+
+  const first = env.ext.chats.length;
+  await env.call('run', { task: 'look at the picture', mode: 'auto', attachments: [staged.id] });
+  assert.ok(carries(env.ext.chats.slice(first)), 'the first run carries the picture');
+
+  const second = env.ext.chats.length;
+  await env.call('run', { task: 'and now this one', mode: 'auto', attachments: [staged.id] });
+  assert.ok(carries(env.ext.chats.slice(second)), 'and the second run of the session carries it too');
+});
+
+test('a session of another project is not opened, renamed or deleted', async (t) => {
+  // Two windows on two projects, one store. A session id from one of them
+  // must not reach the other: the store resolves a project whose folder is
+  // gone (the folder moved), but a project that is still sitting there is a
+  // live neighbour, and its sessions are its own.
+  const other = tempDir({ 'b.txt': 'b' });
+  const env = await startRpc({ files: { 'a.txt': 'a' }, replies: ['DONE nothing'] });
+  t.after(() => env.stop());
+
+  await env.call('run', { task: 'a task in the other project', mode: 'auto' }, { 'x-aipass-project': other });
+  const list = await env.call('session.list', {}, { 'x-aipass-project': other });
+  assert.equal(list.length, 1, 'the other project has a session of its own');
+  const id = list[0].id;
+
+  await assert.rejects(() => env.call('session.open', { id }), /another project/, 'it is not opened here');
+  await assert.rejects(() => env.call('session.rename', { id, title: 'mine now' }), /another project/, 'nor renamed');
+  await assert.rejects(() => env.call('session.delete', { id }), /another project/, 'nor deleted');
+
+  const after = await env.call('session.list', {}, { 'x-aipass-project': other });
+  assert.equal(after.length, 1, 'and it is still there, in its own project');
+  assert.equal(after[0].title, list[0].title, 'with the name it had');
+});
+
+test('a session of another project is not opened by its path either', async (t) => {
+  // The window lists sessions with their path, and a path names a session at
+  // least as precisely as an id does — so the path is held to the same rule.
+  // A guard on the id spelling alone is a guard on one spelling.
+  const other = tempDir({ 'b.txt': 'b' });
+  const env = await startRpc({ files: { 'a.txt': 'a' }, replies: ['DONE nothing'] });
+  t.after(() => env.stop());
+
+  await env.call('run', { task: 'a task in the other project', mode: 'auto' }, { 'x-aipass-project': other });
+  const list = await env.call('session.list', {}, { 'x-aipass-project': other });
+  const file = list[0].file;
+  assert.ok(file, 'the listing carries the path of the session');
+
+  await assert.rejects(() => env.call('session.open', { id: file }), /another project/, 'it is not opened here');
+  await assert.rejects(() => env.call('session.rename', { id: file, title: 'mine now' }), /another project/, 'nor renamed');
+  await assert.rejects(() => env.call('session.delete', { id: file }), /another project/, 'nor deleted');
+
+  const after = await env.call('session.list', {}, { 'x-aipass-project': other });
+  assert.equal(after.length, 1, 'and it is still there, in its own project');
+});
+
+test('an archived session comes back through the window', async (t) => {
+  // The archive is a place a session can be put AND a place it can be taken
+  // from: without the way back, "archive" was a one-way door.
+  const env = await startRpc({ files: { 'a.txt': 'a' }, replies: ['DONE nothing'] });
+  t.after(() => env.stop());
+
+  await env.call('run', { task: 'a task to archive', mode: 'auto' });
+  const first = await env.call('session.list');
+  assert.equal(first.length, 1, 'the project has a session');
+  const id = first[0].id;
+  // The live session is never archived, so the one that moves is a second
+  // session the window has walked away from.
+  await env.call('session.new', { title: 'the live one' });
+
+  const out = await env.call('session.archive', { olderThanDays: 0 });
+  assert.ok(out.archived.includes(id), 'it is archived');
+  assert.equal((await env.call('session.list')).some((s) => s.id === id), false, 'and it left the picker');
+
+  const archived = await env.call('session.archived');
+  assert.equal(archived.some((s) => s.id === id), true, 'the archive holds it');
+
+  await env.call('session.unarchive', { id });
+  const back = await env.call('session.list');
+  assert.equal(back.some((s) => s.id === id), true, 'and it is back in the picker');
+});
+
+test('a session whose project moved still opens by id, and a live one does not', () => {
+  // The one case where an id from another directory is this project's work:
+  // the folder moved and nobody ran the relocate. The old path is gone, so
+  // the session belongs to the person who is working there now — and it must
+  // still open. A project that is still sitting on disk is a different
+  // matter: its sessions are its own, and the refusal names it.
+  const dir = tempDir();
+  const store = new SessionStore(path.join(dir, 'sessions'));
+
+  const movedRoot = path.join(dir, 'before');
+  fs.mkdirSync(movedRoot);
+  const moved = store.create({ root: movedRoot, title: 'moved with me' });
+  fs.rmSync(movedRoot, { recursive: true, force: true });
+  const here = path.join(dir, 'after');
+  fs.mkdirSync(here);
+  assert.ok(store.load(moved.id, { root: here }), 'the session opens by id after the move');
+  assert.equal(store.foreignFor(moved.id, { root: here }), null, 'and it is not another project’s');
+
+  const liveRoot = path.join(dir, 'neighbour');
+  fs.mkdirSync(liveRoot);
+  const theirs = store.create({ root: liveRoot, title: 'theirs' });
+  assert.equal(store.load(theirs.id, { root: here }), null, 'a session of a project that is still there does not open here');
+  assert.equal(store.foreignFor(theirs.id, { root: here })?.root, path.resolve(liveRoot),
+    'and the refusal names the project it belongs to');
+});
+
+/* ------------------------------------------------- the stream and the budget */
+
+test('a window that stops reading loses no frame', async (t) => {
+  // A window that is backgrounded stops reading its stream. The frames used
+  // to pile up in the BACKEND's memory then — a long run's transcript is big
+  // enough to matter — and nothing ever noticed, because the socket was
+  // alive. The listener is paused instead, and caught up from the replay
+  // buffer when the socket drains: nothing is lost, and nothing is queued.
+  const env = await startRpc({ files: {}, replies: [] });
+  t.after(() => env.stop());
+
+  const req = http.get(`http://127.0.0.1:${env.rpc.port}/events`);
+  t.after(() => req.destroy());
+  const res = await new Promise((resolve, reject) => {
+    req.on('response', resolve);
+    req.on('error', reject);
+  });
+  await new Promise((r) => setTimeout(r, 50));
+
+  // The window is not reading: the frames go out while nobody takes them.
+  const frames = 600;
+  for (let i = 0; i < frames; i++) env.rpc.events.emit('note', { text: `frame ${i}` });
+
+  // Now it reads. The stream is NOT ended — the listener was paused, not
+  // dropped — and every frame must arrive, in order, with no hole: it was
+  // caught up from the replay buffer when the socket drained.
+  let body = '';
+  res.on('data', (chunk) => { body += chunk; });
+  const until = Date.now() + 10_000;
+  const count = () => [...body.matchAll(/"text":"frame (\d+)"/g)].map((m) => Number(m[1]));
+  while (count().length < frames && Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  const notes = count();
+  assert.equal(notes.length, frames, `every frame arrived (${notes.length} of ${frames}) — dupes: ${JSON.stringify(notes.filter((n, i) => i > 0 && n === notes[i - 1]))} first: ${JSON.stringify(notes.slice(0, 3))} last: ${JSON.stringify(notes.slice(-3))}`);
+  for (let i = 1; i < notes.length; i++) {
+    assert.equal(notes[i], notes[i - 1] + 1, 'and they arrived in order, with no hole');
+  }
+  const ids = [...body.matchAll(/^id: (\d+)$/gm)].map((m) => Number(m[1]));
+  assert.ok(ids.length >= frames, 'and every one of them carried its sequence number');
+});
+
+test('the replay buffer counts bytes, not characters', async (t) => {
+  // The budget is 4 MB — of BYTES. The frames are counted in UTF-16 code
+  // units, and Thai text is three bytes a character in UTF-8, so the "4 MB"
+  // buffer really held twelve megabytes: a long run's transcript cost three
+  // times the memory it said it did.
+  const env = await startRpc({ files: {}, replies: [] });
+  t.after(() => env.stop());
+
+  const thai = 'ก'.repeat(1000); // 1000 characters, 3000 bytes
+  for (let i = 0; i < 2000; i++) env.rpc.events.emit('note', { text: thai });
+  const stats = env.rpc.replay;
+  assert.ok(stats.bytes <= 4 * 1024 * 1024 + 200_000, `the buffer is inside its byte budget (${stats.bytes} bytes)`);
+  // 4 MB of bytes is about 1400 of these frames. The old count kept 4000.
+  assert.ok(stats.frames < 1600, `the frames that fit are the ones the bytes allow (${stats.frames})`);
+  assert.ok(stats.frames > 1000, `and it did not throw the buffer away (${stats.frames})`);
+});
+
+test('the window hears the end of a run once, after the last attempt', async (t) => {
+  // Attempts are one run from the window's point of view. The frame used to
+  // arrive after EVERY attempt, so the window took its working bar down and
+  // cleared the staged attachments while the next attempt was streaming into
+  // it.
+  const settings = new Settings(tempDir(), 'settings.json');
+  // The declared check: the one command that decides this run, and the strict
+  // gate that refuses a DONE while it is failing.
+  settings.set({ verifyCommand: 'node check.mjs', requireCheck: true });
+  const env = await startRpc({
+    files: { 'a.txt': 'x', 'check.mjs': 'process.exit(1);\n' },
+    settings,
+    // The checker is a run of its own, and it is asked to run the command
+    // that fails — so the answer depends on WHO is talking: the checker runs
+    // the check, everything else stages a file and says DONE.
+    handler: (job, emit) => {
+      const checker = /you are the checker/i.test(String(job.text ?? ''));
+      emit.text(checker
+        ? 'RUN\nnode check.mjs\nEND'
+        : 'CREATE app.js\nexport const x = 1;\nEND\nDONE first');
+      emit.done();
+    },
+  });
+  t.after(() => env.stop());
+
+  // The bus is what the window hears: the harness's own frame still goes out
+  // per attempt (the CLI reads it), but the window's stream carries one.
+  const heard = [];
+  env.rpc.events.on('finished', (payload) => heard.push(payload));
+  const result = await env.call('run', { task: 'a task that keeps failing', mode: 'yolo', allowRun: true, attempts: 3 });
+  assert.equal(result.attempts, 3, `all three attempts ran (${result.attempts})`);
+  assert.equal(heard.length, 1, `the window heard "finished" once (${heard.length} times)`);
+});
+
+test('a settings save writes only the keys the file knows', async (t) => {
+  // A form that typed `modde` instead of `mode` used to leave the typo in
+  // the settings file for ever, where it read like a setting nobody could
+  // change and the sheet never showed it.
+  const env = await startRpc({ files: {}, replies: ['DONE nothing'] });
+  t.after(() => env.stop());
+
+  await env.call('settings.set', { mode: 'auto', modde: 'yolo' });
+  const after = await env.call('settings.get');
+  assert.equal(after.mode, 'auto', 'the key that was meant to be there is');
+  assert.equal('modde' in after, false, 'and the typo is not');
+});
+
+test('a home that cannot be written does not take the backend down', async (t) => {
+  // The token is minted inside a request handler, and a throw there is an
+  // unhandled rejection — which ends the backend for every window that is
+  // open. A home that cannot be written must not be able to do that.
+  const home = tempDir();
+  const blocked = path.join(home, 'blocked');
+  fs.mkdirSync(blocked);
+  fs.chmodSync(blocked, 0o500); // read-only: the token cannot be created
+  t.after(() => { try { fs.chmodSync(blocked, 0o700); } catch { /* windows */ } });
+
+  const token = loadOrMintToken(blocked);
+  assert.ok(token && token.length >= 32, 'a token is still minted');
+  assert.equal(loadOrMintToken(blocked), token, 'and it is the SAME one every call');
+});
+
+test('the checkpoints of a project are listed, restored and forgotten', async (t) => {
+  // The undo of an apply: the backend takes a copy of what an apply is about
+  // to write, and the window asks for it afterwards. The three methods are
+  // the RPC surface of that store — and they were the one part of it with no
+  // test at all.
+  const env = await startRpc({
+    files: { 'notes.md': 'line one\nline two\n' },
+    replies: ['EDIT notes.md\nFIND\nline two\nNEW\nline 2\nEND', 'DONE patched the notes'],
+  });
+  t.after(() => env.stop());
+
+  const before = await env.call('checkpoints.list');
+  assert.equal(before.root, env.root, 'the listing names the project it is about');
+  assert.deepEqual(before.checkpoints, [], 'and nothing is in it before an apply');
+
+  await env.call('run', { task: 'fix the second line', mode: 'auto' });
+  await env.call('apply', { files: ['notes.md'] });
+  assert.equal(fs.readFileSync(path.join(env.root, 'notes.md'), 'utf8'), 'line one\nline 2\n', 'the apply wrote the change');
+
+  const after = await env.call('checkpoints.list');
+  assert.equal(after.checkpoints.length, 1, 'and it left a checkpoint behind');
+  const id = after.checkpoints[0].id;
+  assert.ok(after.checkpoints[0].files.some((f) => f.path === 'notes.md'), 'the checkpoint names the file it holds');
+
+  // Put it back: the file is what it was before the apply.
+  await env.call('checkpoints.restore', { id });
+  assert.equal(fs.readFileSync(path.join(env.root, 'notes.md'), 'utf8'), 'line one\nline two\n', 'the checkpoint put the file back');
+
+  // And forget it: a checkpoint nobody asked for is litter.
+  await env.call('checkpoints.remove', { id });
+  assert.deepEqual((await env.call('checkpoints.list')).checkpoints, [], 'and it can be forgotten');
+
+  // A name that is not a checkpoint is refused, not guessed at.
+  await assert.rejects(() => env.call('checkpoints.restore', {}), /which checkpoint/, 'a restore with no name says so');
 });

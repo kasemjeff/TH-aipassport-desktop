@@ -13,6 +13,144 @@ use tauri::menu::{Menu, MenuItem};
 
 const MARKER: &str = "aipass-bridge/bridge/server.mjs";
 
+/// The exit code that means "restart me on purpose".
+///
+/// The backend promotes a new content tree and exits with this, because the
+/// new tree needs a new process to run it. The supervisor reads it as a
+/// deliberate restart and not as a crash to answer with backoff.
+const RESTART_EXIT: i32 = 42;
+
+/// The exit code that means "the port was taken".
+///
+/// A busy port is not a crash: it is a fact about the machine. The two facts
+/// that can cause it need opposite answers — one of OUR backends answering
+/// there means adopt it, something else holding it means restarting cannot
+/// help — and the supervisor can only tell them apart if the backend says
+/// which one it was.
+const PORT_BUSY_EXIT: i32 = 43;
+
+/// Who is answering on the backend's port.
+#[derive(PartialEq, Eq, Debug)]
+enum PortOwner {
+    /// One of our backends, from this app or another one.
+    Ours,
+    /// Something that is not our backend holds the port.
+    Stranger,
+    /// Nothing is listening.
+    Empty,
+    /// The probe could not say — the content tree it needs is missing, say.
+    Unknown,
+}
+
+/// What the supervisor does with a backend that could not bind its port.
+#[derive(PartialEq, Eq, Debug)]
+enum BusyOutcome {
+    /// One of our backends is answering there: adopt it, and stop restarting.
+    Adopt,
+    /// Something else holds the port: name it once, and keep the backoff.
+    Name,
+    /// Nothing to say — the ordinary backoff is the answer.
+    Backoff,
+}
+
+/// The decision, apart from the talking: what a busy port means.
+///
+/// Split out from the supervisor so the rule can be tested without a window,
+/// a backend and a machine. The two answers are opposites: one of our
+/// backends is already there (adopt it — the window is pointed at that port
+/// and is already talking to the right one), or something else is holding it
+/// (restarting cannot help, so say so and back off).
+fn busy_outcome(owner: PortOwner) -> BusyOutcome {
+    match owner {
+        PortOwner::Ours => BusyOutcome::Adopt,
+        PortOwner::Stranger => BusyOutcome::Name,
+        PortOwner::Empty | PortOwner::Unknown => BusyOutcome::Backoff,
+    }
+}
+
+/// Does this exit count towards "the content tree is broken"?
+///
+/// A busy port is not the tree's fault. The rollback exists for a promoted
+/// tree that breaks the backend, and rolling back because the port was taken
+/// threw away good content for nothing — the app put the previous tree back
+/// while the port stayed busy, and the backend kept failing.
+fn counts_against_the_content(code: Option<i32>) -> bool {
+    code != Some(PORT_BUSY_EXIT)
+}
+
+/// The command the backend leaves for the shell.
+///
+/// The backend cannot replace the app's own binary — it is the child of it,
+/// and the app is what has to be closed for the installer to do its work. So
+/// the backend writes a command and the shell, which outlives it, reads it.
+struct InstallCommand {
+    version: String,
+    /// A NAME, not a path. The shell builds the path itself, from its own
+    /// downloads directory, so a command file cannot make the app run
+    /// anything anywhere else.
+    file: String,
+    sha256: String,
+}
+
+/// The artifact's SHA-256, computed by the app's own Node.
+///
+/// The shell has no SHA-256 of its own and the repository carries no
+/// dependencies — but the app SHIPS a Node, and `node:crypto` is a builtin.
+/// So the hash is computed by the same runtime that runs the harness, and
+/// the script is written beside the app's own state and taken away again.
+fn hash_with_node(node: &str, artifact: &std::path::Path, home: &std::path::Path) -> Option<String> {
+    let script = home.join("app").join("verify-sha256.mjs");
+    let code = "import crypto from 'node:crypto';\nimport fs from 'node:fs';\nconst h = crypto.createHash('sha256');\nh.update(fs.readFileSync(process.argv[2]));\nprocess.stdout.write(h.digest('hex'));\n";
+    std::fs::create_dir_all(home.join("app")).ok()?;
+    std::fs::write(&script, code).ok()?;
+    let out = Command::new(node).arg(&script).arg(artifact).output().ok();
+    let _ = std::fs::remove_file(&script);
+    let out = out?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if text.len() == 64 {
+        Some(text)
+    } else {
+        None
+    }
+}
+
+/// Read the handover command, if the backend left one.
+///
+/// A name that carries a path separator or a `..` is refused: the command
+/// names a file, it does not choose one.
+fn read_install_command(home: &std::path::Path) -> Option<InstallCommand> {
+    let file = home.join("app").join("commands").join("install.json");
+    let text = std::fs::read_to_string(&file).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let version = json.get("version")?.as_str()?.to_string();
+    let name = json.get("file")?.as_str()?.to_string();
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains(':')
+    {
+        return None;
+    }
+    let sha256 = json.get("sha256")?.as_str()?.to_string();
+    Some(InstallCommand {
+        version,
+        file: name,
+        sha256,
+    })
+}
+
+/// Where the command lives, and where the artifact it names does.
+fn command_paths(home: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    (
+        home.join("app").join("commands").join("install.json"),
+        home.join("app").join("downloads"),
+    )
+}
+
 /// The plain form of a path.
 ///
 /// Windows hands back the long-path form (`\\?\C:\…`) for anything the
@@ -33,19 +171,32 @@ fn plain(path: PathBuf) -> PathBuf {
 
 /// Where the app finds the files it runs.
 ///
-/// Four layouts, tried in order:
-///   1. the packaged resource dir            — an installed build
-///   2. next to the binary                   — some installers relocate these
-///   3. the repo, walking up                 — `tauri dev` from target/debug
-///   4. the Tauri dir, two up                — `tauri dev` resource resolution
+/// The candidates, in the order they are tried:
 ///
-/// The installed build always comes first: an app that runs the *repository's*
-/// files when a checkout happens to sit on the same machine is not the build
-/// that was installed, and the difference shows up as a bug that only the
-/// person who made the build can see.
-fn find_root(app: &tauri::App, exe_dir: &std::path::Path) -> PathBuf {
-    let mut candidates: Vec<PathBuf> = Vec::new();
+///   1. the CONTENT OVERLAY — a promoted content tree under
+///      `~/.aipass/app/`, put there by the update system from a pack whose
+///      hash is in a signed feed. It is not a checkout: it is the newest
+///      thing a person deliberately chose, and the only candidate here that
+///      was checked against a signature.
+///   2. the packaged resource dir — an installed build.
+///   3. the binary's own directory — some installers relocate these.
+///   4. the repository, walking up — `tauri dev` from target/debug.
+///
+/// The installed build comes before the repository for the reason the old
+/// comment gave: an app that runs the *repository's* files when a checkout
+/// happens to sit on the same machine is not the build that was installed,
+/// and the difference shows up as a bug that only the person who made the
+/// build can see.
+///
+/// The Node side implements the same rule (`harness/app-root.mjs`), because
+/// the two cannot import each other. A test says they agree.
+fn root_candidates(app: &tauri::App, exe_dir: &std::path::Path) -> Vec<(PathBuf, &'static str)> {
+    let mut candidates: Vec<(PathBuf, &'static str)> = Vec::new();
 
+    // The overlay comes first: it is a verified release of the content.
+    if let Some(root) = overlay_root_in(&aipass_home()) {
+        candidates.push((root, "overlay"));
+    }
     // The resource dir is the install dir on Windows and `Contents/Resources`
     // on macOS; the marker sits three levels under it (aipass-bridge/bridge/
     // server.mjs), so the root is three parents up.
@@ -55,30 +206,62 @@ fn find_root(app: &tauri::App, exe_dir: &std::path::Path) -> PathBuf {
             .and_then(|p| p.parent())
             .and_then(|p| p.parent())
         {
-            candidates.push(root.to_path_buf());
+            candidates.push((root.to_path_buf(), "bundle"));
         }
     }
     // Next to the binary: where the bundler puts a sidecar and, on some
     // layouts, the resources too.
-    candidates.push(exe_dir.to_path_buf());
+    candidates.push((exe_dir.to_path_buf(), "bundle"));
     // The repo, from where this crate was compiled — what `tauri dev` needs.
     if let Some(tauri_dir) = PathBuf::from(env!("AIPASS_TAURI_DIR")).parent().and_then(|p| p.parent()) {
-        candidates.push(tauri_dir.to_path_buf());
+        candidates.push((tauri_dir.to_path_buf(), "repo"));
     }
     let mut up = exe_dir.to_path_buf();
     for _ in 0..6 {
         if let Some(parent) = up.parent() {
             up = parent.to_path_buf();
-            candidates.push(up.clone());
+            candidates.push((up.clone(), "repo"));
         }
     }
+    candidates
+}
 
-    for candidate in candidates {
-        if candidate.join(MARKER).exists() {
-            return candidate;
+/// The first candidate that is really an app root.
+///
+/// The root is resolved on every spawn, not once at startup: a content
+/// update promotes a new tree, and the backend that runs it has to be
+/// started from there.
+fn pick_root(candidates: &[(PathBuf, &'static str)]) -> (PathBuf, &'static str) {
+    for (root, source) in candidates {
+        if root.join(MARKER).exists() {
+            return (root.clone(), *source);
         }
     }
-    exe_dir.to_path_buf()
+    (
+        candidates.first().map(|c| c.0.clone()).unwrap_or_default(),
+        "none",
+    )
+}
+
+/// The content overlay: the promoted content tree, if one is active.
+///
+/// `~/.aipass/app/active.json` names it. A pointer that names a directory
+/// without the marker in it is ignored — a half-written pointer must not
+/// send the app looking for files that are not there.
+///
+/// The lookup is split so a test can name a home without touching the real
+/// one.
+fn overlay_root_in(home: &std::path::Path) -> Option<PathBuf> {
+    let active = home.join("app").join("active.json");
+    let text = std::fs::read_to_string(&active).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let root = json.get("current")?.get("root")?.as_str()?;
+    let root = PathBuf::from(root);
+    if root.join(MARKER).exists() {
+        Some(root)
+    } else {
+        None
+    }
 }
 
 /// Node runs everything: the packaged build ships it as a sidecar beside the
@@ -208,6 +391,75 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// Write a file by the atomic route: a temp name beside it, then a rename.
+///
+/// The rename replaces the destination on both platforms, so a crash leaves
+/// either the old bytes or the new ones — never half of each. The Node side
+/// has the same rule in `harness/atomic-write.mjs`.
+fn write_atomic(file: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let tmp = file.with_extension("json.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, file)
+}
+
+/// Put the previous content tree back, when a promotion is what broke the app.
+///
+/// The shape that calls for it: the backend died three times in a row, and
+/// the content was promoted recently. The previous tree is still on disk, so
+/// the app heals itself instead of sitting there unable to start — which is
+/// the difference between a bad release costing one restart and costing the
+/// person their app.
+///
+/// A tree promoted long ago is not what broke just now, so the promotion has
+/// to be recent for this to fire.
+fn roll_content_back() -> bool {
+    roll_content_back_in(&aipass_home())
+}
+
+/// The same, against a named home — so a test can drive it.
+fn roll_content_back_in(home: &std::path::Path) -> bool {
+    let active = home.join("app").join("active.json");
+    let Ok(text) = std::fs::read_to_string(&active) else {
+        return false;
+    };
+    let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let Some(previous) = json.get("previous").cloned() else {
+        return false;
+    };
+    if previous.is_null() {
+        return false;
+    }
+    let Some(root) = previous.get("root").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let root = PathBuf::from(root);
+    if !root.join(MARKER).exists() {
+        return false;
+    }
+    let updated = json.get("updatedAt").and_then(|v| v.as_u64()).unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if now.saturating_sub(updated) > 10 * 60 * 1000 {
+        return false;
+    }
+    let broken = json.get("current").cloned();
+    json["current"] = previous;
+    json["previous"] = broken.unwrap_or(serde_json::Value::Null);
+    json["updatedAt"] = serde_json::Value::from(now);
+    let Ok(written) = serde_json::to_string_pretty(&json) else {
+        return false;
+    };
+    if write_atomic(&active, &written).is_err() {
+        return false;
+    }
+    note("the content tree broke the backend three times in a row — the previous one is back");
+    true
+}
+
 /// Take the backend down with the app.
 ///
 /// The child runs in its own process group on unix (set when it is spawned),
@@ -263,21 +515,44 @@ struct Backend {
     child: Mutex<Option<std::process::Child>>,
     quitting: AtomicBool,
     fails: Mutex<u32>,
+    /// The failures that are not the port's fault. The content rollback is
+    /// about a broken tree, and a busy port is not a broken tree: rolling
+    /// back because the port was taken threw away good content for nothing.
+    content_fails: Mutex<u32>,
     next_try: Mutex<Instant>,
+    /// Set once the port has been found to be held by something that is not
+    /// our backend, so the situation is named once instead of on every retry.
+    port_busy: AtomicBool,
     node: String,
-    entry: PathBuf,
+    /// Where the app's files may be, in the order they are tried. The root
+    /// is picked on every spawn, so a promoted content tree is picked up
+    /// without reinstalling anything.
+    candidates: Vec<(PathBuf, &'static str)>,
     port: u16,
     cwd: PathBuf,
+    /// The app itself, for the handover: the shell is what has to close for
+    /// the installer to do its work.
+    handle: tauri::AppHandle,
 }
 
 impl Backend {
     fn spawn(&self) -> std::io::Result<std::process::Child> {
+        // The root is resolved HERE, not once at startup: a content update
+        // promotes a new tree, and the backend that runs it has to be
+        // started from there.
+        let (root, source) = pick_root(&self.candidates);
+        let entry = root.join("aipass-bridge").join("harness").join("rpc.mjs");
         let mut command = Command::new(&self.node);
         command
-            .arg(&self.entry)
+            .arg(&entry)
             .args(["--port", &self.port.to_string()])
             .args(["--root", self.cwd.to_str().unwrap_or(".")])
-            .current_dir(&self.cwd);
+            .current_dir(&self.cwd)
+            // The two halves of a build, named for the backend so the window
+            // can answer "which build is this?" without asking the machine.
+            .env("AIPASS_SHELL_VERSION", env!("CARGO_PKG_VERSION"))
+            .env("AIPASS_CONTENT_SOURCE", source)
+            .env("AIPASS_NODE_PATH", &self.node);
         if let Some(log) = backend_log_file() {
             if let Ok(dup) = log.try_clone() {
                 command.stdout(log).stderr(dup);
@@ -293,9 +568,62 @@ impl Backend {
         command.spawn()
     }
 
+    /// Who is answering on our port.
+    ///
+    /// A bare TCP connect is not the question: something that is NOT our
+    /// backend can hold the port, and adopting it would point the window at a
+    /// stranger's server. The launcher asks the real question — is this our
+    /// backend? — through `harness/backend-probe.mjs`, and the shell asks the
+    /// SAME module, through the app's own Node: one implementation of the
+    /// question, so the window and the launcher cannot drift apart.
+    ///
+    /// The probe is asked, not guessed. A content tree that is broken enough
+    /// to take the probe with it answers `Unknown`, and the caller decides
+    /// what to do about not knowing — it does not decide it means "not ours".
+    fn port_owner(&self) -> PortOwner {
+        let (root, _) = pick_root(&self.candidates);
+        let probe = root
+            .join("aipass-bridge")
+            .join("harness")
+            .join("backend-probe.mjs");
+        match Command::new(&self.node)
+            .arg(&probe)
+            .arg(self.port.to_string())
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if text.trim() == "ours" {
+                    return PortOwner::Ours;
+                }
+            }
+            Ok(_) => {
+                // The probe ran and could not answer — a non-zero exit is "I
+                // could not say", not "nothing is there". The probe's own
+                // contract says so, and the enum has a word for it: the
+                // content tree it needs is missing, so the caller is told it
+                // does not know rather than handed a guess.
+                return PortOwner::Unknown;
+            }
+            Err(_) => return PortOwner::Unknown,
+        }
+        // It answered "other": something is there, and it is not ours.
+        if std::net::TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
+            PortOwner::Stranger
+        } else {
+            PortOwner::Empty
+        }
+    }
+
     /// One watch tick: a dead child is replaced, a live one resets the backoff.
     fn tick(&self) {
         if self.quitting.load(Ordering::SeqCst) {
+            return;
+        }
+        // A command from the backend: the shell is the one that has to close
+        // for the installer to do its work, so the handover starts here.
+        if let Some(command) = read_install_command(&aipass_home()) {
+            self.handover(command);
             return;
         }
         let mut guard = self.child.lock().unwrap();
@@ -317,8 +645,63 @@ impl Backend {
             // A live child clears the episode: the next crash starts from the
             // first backoff step, not from wherever the last one left off.
             *self.fails.lock().unwrap() = 0;
+            *self.content_fails.lock().unwrap() = 0;
             *self.next_try.lock().unwrap() = Instant::now();
+            self.port_busy.store(false, Ordering::SeqCst);
             return;
+        }
+        // A backend that asked to be restarted is not a crash: it promoted a
+        // new content tree and needs a new process to run it. The backoff
+        // does not apply, and the note says why — a log line that reads
+        // "restart attempt 1 of a crash" is a lie about what happened.
+        if status.map(|s| s.code() == Some(RESTART_EXIT)).unwrap_or(false) {
+            *self.fails.lock().unwrap() = 0;
+            *self.next_try.lock().unwrap() = Instant::now();
+            note("backend asked for a restart (a new content version) — starting it again");
+            match self.spawn() {
+                Ok(kid) => *guard = Some(kid),
+                Err(err) => note(&format!("backend restart failed: {err}")),
+            }
+            return;
+        }
+        // A busy port is not a crash either, and the two facts it can mean
+        // need opposite answers.
+        if status.map(|s| s.code() == Some(PORT_BUSY_EXIT)).unwrap_or(false) {
+            match busy_outcome(self.port_owner()) {
+                BusyOutcome::Adopt => {
+                    // One of our backends is already answering there — a second
+                    // window, a browser `aipass desktop`, an instance this app
+                    // started and lost track of. The window is pointed at that
+                    // port, so it is already talking to the right backend:
+                    // adopt it, and stop starting another one that could only
+                    // die on the same port.
+                    *self.fails.lock().unwrap() = 0;
+                    *self.content_fails.lock().unwrap() = 0;
+                    *self.next_try.lock().unwrap() = Instant::now();
+                    *guard = None;
+                    self.port_busy.store(false, Ordering::SeqCst);
+                    note("another aipass backend is answering on the port — it is adopted, and no second one is started");
+                    return;
+                }
+                BusyOutcome::Name => {
+                    // Something that is not ours holds the port. Restarting
+                    // cannot fix that, and a loop that cannot win is what made
+                    // the app look broken: name it once, with the fix, and
+                    // keep the polite backoff so the port is picked up again
+                    // if it is freed.
+                    if !self.port_busy.swap(true, Ordering::SeqCst) {
+                        note(&format!(
+                            "port {} is held by something that is not an aipass backend — close it, or start the app with AIPASS_DESKTOP_PORT=<other>",
+                            self.port
+                        ));
+                    }
+                }
+                BusyOutcome::Backoff => {
+                    // Nothing is there, or the probe could not say. Either
+                    // way the ordinary backoff below is the right answer.
+                    self.port_busy.store(false, Ordering::SeqCst);
+                }
+            }
         }
         let mut fails = self.fails.lock().unwrap();
         let mut next = self.next_try.lock().unwrap();
@@ -326,6 +709,21 @@ impl Backend {
             return;
         }
         *fails += 1;
+        // A busy port is not the content's fault, so it does not count towards
+        // the rollback below: a tree that is fine was thrown away once because
+        // the port was taken.
+        if counts_against_the_content(status.and_then(|s| s.code())) {
+            *self.content_fails.lock().unwrap() += 1;
+        }
+        // Three deaths in a row, right after a content promotion, is the
+        // shape of a broken content tree. The previous one is still on disk,
+        // so the app puts it back instead of sitting there unable to start.
+        if *self.content_fails.lock().unwrap() == 3 && roll_content_back() {
+            *fails = 0;
+            *self.content_fails.lock().unwrap() = 0;
+            *next = Instant::now();
+            return;
+        }
         // 2s, doubling to half a minute: a backend that dies on start — a port
         // grabbed by hand, a broken config — retries politely, and a crash
         // loop cannot spin the CPU or flood the log.
@@ -349,6 +747,84 @@ impl Backend {
         match self.spawn() {
             Ok(kid) => *guard = Some(kid),
             Err(err) => note(&format!("backend restart failed: {err}")),
+        }
+    }
+
+    /// Hand the app over to the installer.
+    ///
+    /// The installer replaces the binary, and a running binary is locked on
+    /// Windows — so the app closes, the installer runs, and the app comes
+    /// back. The helper is this same executable with an argument, so
+    /// nothing has to be quoted into a shell and nothing depends on a shell
+    /// being there at all.
+    ///
+    /// The backend verified the artifact against the signed feed before it
+    /// wrote the command. The shell checks it AGAIN, with the app's own Node:
+    /// the file on disk is the thing that runs, and the hash is the only
+    /// thing that says it is the file the release key signed.
+    fn handover(&self, command: InstallCommand) {
+        let home = aipass_home();
+        let (command_file, downloads) = command_paths(&home);
+        let artifact = downloads.join(&command.file);
+        if !artifact.is_file() {
+            note(&format!(
+                "the installer for {} is not where it should be — nothing was started",
+                command.version
+            ));
+            let _ = std::fs::remove_file(&command_file);
+            return;
+        }
+        match hash_with_node(&self.node, &artifact, &home) {
+            Some(digest) if digest.eq_ignore_ascii_case(&command.sha256) => {}
+            Some(digest) => {
+                note(&format!(
+                    "the installer for {} does not match the hash it was handed ({} != {}) — nothing was started",
+                    command.version, digest, command.sha256
+                ));
+                let _ = std::fs::remove_file(&command_file);
+                return;
+            }
+            None => {
+                note(&format!(
+                    "the installer for {} could not be hashed — nothing was started",
+                    command.version
+                ));
+                let _ = std::fs::remove_file(&command_file);
+                return;
+            }
+        }
+        let Ok(exe) = std::env::current_exe() else {
+            note("the app does not know where its own executable is — nothing was started");
+            return;
+        };
+        let mut helper = Command::new(&exe);
+        helper
+            .arg("--install-and-relaunch")
+            .arg(&artifact)
+            .arg(&exe);
+        // Detached: the helper has to outlive this process, which is about to
+        // exit.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            helper.creation_flags(0x0000_0008 | 0x0000_0200);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            helper.process_group(0);
+        }
+        match helper.spawn() {
+            Ok(_) => {
+                note(&format!(
+                    "handing over to the installer for {} — the app will come back",
+                    command.version
+                ));
+                let _ = std::fs::remove_file(&command_file);
+                self.handle.exit(0);
+            }
+            Err(err) => note(&format!("the handover did not start: {err}")),
         }
     }
 
@@ -387,7 +863,44 @@ fn backend_port() -> Result<u16, Box<dyn std::error::Error>> {
     }
 }
 
+/// The handover helper: install, then bring the app back.
+///
+/// It runs BEFORE the app is built: it is not an app, it is the app's own
+/// executable with an argument, and it is what lets the installer run while
+/// the app is closed. Nothing is quoted into a shell, so nothing depends on
+/// a shell being there — the Windows-clean rule holds.
+///
+/// It answers with the exit code of the installer, and it always brings the
+/// app back: a person who asked for an update and got a closed window and no
+/// app is worse off than before.
+fn handover_helper() -> Option<Result<(), Box<dyn std::error::Error>>> {
+    let args: Vec<String> = std::env::args().collect();
+    let at = args.iter().position(|a| a == "--install-and-relaunch")?;
+    let installer = args.get(at + 1)?.clone();
+    let app = args.get(at + 2)?.clone();
+    note(&format!("the handover helper is running {installer}"));
+    // The installer is silent on Windows and does its work; the exit code
+    // says whether it did.
+    let status = Command::new(&installer).arg("/S").status();
+    match status {
+        Ok(s) if s.success() => note("the installer finished"),
+        Ok(s) => note(&format!("the installer exited {s}")),
+        Err(err) => note(&format!("the installer could not be run: {err}")),
+    }
+    // And the app comes back.
+    match Command::new(&app).spawn() {
+        Ok(_) => note("the app is back"),
+        Err(err) => note(&format!("the app could not be started again: {err}")),
+    }
+    Some(Ok(()))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The handover helper runs first: it is the app's own executable with an
+    // argument, and it is not an app.
+    if let Some(result) = handover_helper() {
+        return result;
+    }
     tauri::Builder::default()
         // A second double-click must focus the window that is already there,
         // not open a twin: two windows pointing at one backend is a confusing
@@ -402,7 +915,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let exe = std::env::current_exe()?;
             let exe_dir = exe.parent().ok_or("no executable directory")?.to_path_buf();
             let resource_dir = app.path().resource_dir().ok();
-            let root = find_root(app, &exe_dir);
+            let candidates = root_candidates(app, &exe_dir);
+            let (root, source) = pick_root(&candidates);
             let entry = root.join("aipass-bridge").join("harness").join("rpc.mjs");
             let project_root = last_root().unwrap_or_else(home_dir);
 
@@ -418,25 +932,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // which files the installed build is running, when somebody asks
             // why the app and the checkout disagree.
             note(&format!(
-                "backend: node={} entry={} root={}",
+                "backend: node={} entry={} root={} source={}",
                 node_path(&exe_dir, resource_dir.as_deref()),
                 entry.display(),
-                project_root.display()
+                project_root.display(),
+                source
             ));
             let backend = Arc::new(Backend {
                 child: Mutex::new(None),
                 quitting: AtomicBool::new(false),
                 fails: Mutex::new(0),
+                content_fails: Mutex::new(0),
                 next_try: Mutex::new(Instant::now()),
+                port_busy: AtomicBool::new(false),
                 node: node_path(&exe_dir, resource_dir.as_deref()),
-                entry,
+                candidates,
                 port: backend_port,
                 cwd: project_root.clone(),
+                handle: app.handle().clone(),
             });
             // Adopt a backend that is already answering (a browser `aipass
             // desktop`, say); otherwise start one. An adopted backend is not
             // ours to respawn — the supervisor's child stays None.
-            if std::net::TcpStream::connect(("127.0.0.1", backend_port)).is_err() {
+            //
+            // "Answering" means OUR backend, not just something on the port:
+            // a bare TCP connect would adopt a stranger's server and point
+            // the window at it, and the window would then talk to a program
+            // that has never heard of aipass. The probe asks the question the
+            // launcher asks, through the app's own Node.
+            if backend.port_owner() != PortOwner::Ours {
                 let kid = backend
                     .spawn()
                     .expect("could not start the aipass backend — is Node installed?");
@@ -674,6 +1198,14 @@ fn cli_shim_path() -> PathBuf {
     }
 }
 
+/// The stable link the CLI shim names.
+///
+/// It points at the live content root, so a content update moves the tree
+/// without the shim going stale: the CLI and the window run the same code.
+fn cli_link() -> PathBuf {
+    aipass_home().join("app").join("current")
+}
+
 /// The shim's text: the app's own Node, running the app's own CLI.
 ///
 /// The shim does not need Node on PATH — the app ships one — so a machine
@@ -800,11 +1332,24 @@ fn install_cli_shim<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<Path
     let resource_dir = app.path().resource_dir().ok();
     let node = find_node(&exe_dir, resource_dir.as_deref())
         .ok_or_else(|| "the app's own Node is not beside it".to_string())?;
-    let cli = app
-        .path()
-        .resolve("aipass-bridge/bin/aipass.mjs", tauri::path::BaseDirectory::Resource)
-        .map(plain)
-        .map_err(|err| format!("the CLI is not in the bundle: {err}"))?;
+    let cli = {
+        // The CLI is named through the STABLE link, not through a versioned
+        // directory: a content update promotes a new tree, and a shim that
+        // named the old path would keep running yesterday's code while the
+        // window runs today's. The link is made by the Node side
+        // (`harness/app-root.mjs`), which can make a junction on Windows
+        // without an administrator; the bundle is the fallback for a
+        // machine whose backend never came up.
+        let linked = cli_link().join("aipass-bridge").join("bin").join("aipass.mjs");
+        if linked.exists() {
+            linked
+        } else {
+            app.path()
+                .resolve("aipass-bridge/bin/aipass.mjs", tauri::path::BaseDirectory::Resource)
+                .map(plain)
+                .map_err(|err| format!("the CLI is not in the bundle: {err}"))?
+        }
+    };
     let shim = cli_shim_path();
     if let Some(parent) = shim.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
@@ -1037,9 +1582,221 @@ mod tests {
         }
     }
 
+    /// A content tree with the marker in it — what an overlay root looks like.
+    fn scratch_content(home: &std::path::Path, version: &str) -> PathBuf {
+        let root = home.join("app").join("content").join(version);
+        let marker = root.join(MARKER);
+        std::fs::create_dir_all(marker.parent().expect("marker dir")).expect("content tree");
+        std::fs::write(&marker, "//\n").expect("marker");
+        root
+    }
+
+    /// The pointer the Node side writes.
+    fn write_active(
+        home: &std::path::Path,
+        current: Option<(&str, &std::path::Path)>,
+        previous: Option<(&str, &std::path::Path)>,
+        updated_at: u64,
+    ) {
+        let dir = home.join("app");
+        std::fs::create_dir_all(&dir).expect("app dir");
+        let entry = |pair: Option<(&str, &std::path::Path)>| match pair {
+            Some((version, root)) => serde_json::json!({
+                "version": version,
+                "root": root.to_string_lossy(),
+            }),
+            None => serde_json::Value::Null,
+        };
+        let json = serde_json::json!({
+            "schema": 1,
+            "current": entry(current),
+            "previous": entry(previous),
+            "updatedAt": updated_at,
+        });
+        std::fs::write(
+            dir.join("active.json"),
+            serde_json::to_string_pretty(&json).expect("json"),
+        )
+        .expect("active");
+    }
+
     #[test]
-    fn the_tray_template_is_the_mark_and_not_a_block() {
-        // The menu bar draws a template image as a mask, so only the alpha
+    fn the_overlay_wins_over_the_bundle() {
+        // The overlay is a verified release of the content, so it is the
+        // first candidate — the same order the Node side uses.
+        let home = scratch_home();
+        let overlay = scratch_content(&home, "0.3.0");
+        let bundle = home.join("bundle");
+        std::fs::create_dir_all(bundle.join("aipass-bridge").join("bridge")).expect("bundle");
+        std::fs::write(bundle.join(MARKER), "//\n").expect("marker");
+
+        write_active(&home, Some(("0.3.0", &overlay)), None, 1);
+        assert_eq!(overlay_root_in(&home), Some(overlay.clone()));
+
+        let candidates = vec![
+            (overlay.clone(), "overlay"),
+            (bundle.clone(), "bundle"),
+        ];
+        let (root, source) = pick_root(&candidates);
+        assert_eq!(root, overlay, "the overlay is the root");
+        assert_eq!(source, "overlay");
+    }
+
+    #[test]
+    fn a_pointer_that_names_nothing_is_ignored() {
+        // A half-written pointer must not send the app looking for files
+        // that are not there: the bundle is the root instead.
+        let home = scratch_home();
+        let missing = home.join("app").join("content").join("gone");
+        write_active(&home, Some(("0.3.0", &missing)), None, 1);
+        assert_eq!(overlay_root_in(&home), None);
+    }
+
+    #[test]
+    fn one_of_our_backends_on_the_port_is_adopted() {
+        // The window is pointed at that port, and it is already talking to
+        // the backend that is answering there. Starting another one could
+        // only die on the same port, so the supervisor stops starting one.
+        assert_eq!(busy_outcome(PortOwner::Ours), BusyOutcome::Adopt);
+    }
+
+    #[test]
+    fn a_stranger_on_the_port_is_named_and_not_retried_harder() {
+        // Restarting cannot fix a stranger on the port. The situation is
+        // named once, with the fix, and the polite backoff continues — so
+        // the port is picked up again if it is freed.
+        assert_eq!(busy_outcome(PortOwner::Stranger), BusyOutcome::Name);
+    }
+
+    #[test]
+    fn a_port_nobody_holds_is_just_a_backoff() {
+        // Nothing there, or the probe could not say: the ordinary backoff is
+        // the answer either way.
+        assert_eq!(busy_outcome(PortOwner::Empty), BusyOutcome::Backoff);
+        assert_eq!(busy_outcome(PortOwner::Unknown), BusyOutcome::Backoff);
+    }
+
+    #[test]
+    fn the_busy_exit_code_is_not_the_restart_one() {
+        // The supervisor reads the two apart: one means "a new content tree
+        // needs a new process", the other means "the port was taken". A
+        // collision would make a busy port look like a deliberate restart.
+        assert_ne!(PORT_BUSY_EXIT, RESTART_EXIT);
+        assert_eq!(PORT_BUSY_EXIT, 43);
+    }
+
+    #[test]
+    fn a_busy_port_is_not_a_broken_content_tree() {
+        // The content rollback is about a tree that breaks the backend. A
+        // port that is taken is not the tree's fault, and rolling back
+        // because of it threw away good content for nothing — the app put
+        // the previous tree back while the port stayed busy, and the backend
+        // kept failing on the same port.
+        assert_eq!(counts_against_the_content(Some(PORT_BUSY_EXIT)), false);
+        assert_eq!(counts_against_the_content(Some(RESTART_EXIT)), true);
+        assert_eq!(counts_against_the_content(Some(1)), true);
+        assert_eq!(counts_against_the_content(None), true);
+    }
+
+    #[test]
+    fn the_content_rolls_back_when_the_promotion_was_recent() {
+        // Three deaths in a row right after a promotion is the shape of a
+        // broken content tree. The previous one is still on disk, so the app
+        // heals itself.
+        let home = scratch_home();
+        let current = scratch_content(&home, "0.3.0");
+        let previous = scratch_content(&home, "0.2.9");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        write_active(
+            &home,
+            Some(("0.3.0", &current)),
+            Some(("0.2.9", &previous)),
+            now,
+        );
+        assert!(roll_content_back_in(&home), "the rollback happened");
+        let after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join("app").join("active.json")).expect("active"),
+        )
+        .expect("json");
+        assert_eq!(
+            after["current"]["root"].as_str(),
+            Some(previous.to_string_lossy().as_ref()),
+            "the previous content is live again"
+        );
+        assert_eq!(
+            after["previous"]["root"].as_str(),
+            Some(current.to_string_lossy().as_ref()),
+            "and the broken one is kept, so a second rollback is possible"
+        );
+    }
+
+    #[test]
+    fn the_content_does_not_roll_back_after_a_stale_promotion() {
+        // A tree promoted an hour ago has been fine since; it is not what
+        // broke just now, so nothing is rolled back.
+        let home = scratch_home();
+        let current = scratch_content(&home, "0.3.0");
+        let previous = scratch_content(&home, "0.2.9");
+        let hour_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+            - 60 * 60 * 1000;
+        write_active(
+            &home,
+            Some(("0.3.0", &current)),
+            Some(("0.2.9", &previous)),
+            hour_ago,
+        );
+        assert!(!roll_content_back_in(&home), "nothing was rolled back");
+    }
+
+    #[test]
+    fn the_handover_command_names_a_file_and_not_a_path() {
+        // The command names a file in the app's own downloads directory. A
+        // name that carries a path would let a command file make the app run
+        // anything anywhere else, so it is refused.
+        let home = scratch_home();
+        let commands = home.join("app").join("commands");
+        std::fs::create_dir_all(&commands).expect("commands");
+
+        let write = |_label: &str, file: &str| {
+            std::fs::write(
+                commands.join("install.json"),
+                format!(
+                    "{{\"version\":\"0.3.0\",\"file\":\"{}\",\"sha256\":\"{}\"}}",
+                    file,
+                    "a".repeat(64)
+                ),
+            )
+            .expect("command");
+            read_install_command(&home).map(|c| c.file)
+        };
+
+        assert_eq!(
+            write("good", "aipass-desktop-0.3.0-windows-x64-setup.exe").as_deref(),
+            Some("aipass-desktop-0.3.0-windows-x64-setup.exe"),
+            "a plain name is read"
+        );
+        assert_eq!(write("slash", "../evil.exe"), None, "a path is refused");
+        assert_eq!(write("windows", "C:\\evil.exe"), None, "a drive is refused");
+        assert_eq!(write("up", "..\\evil.exe"), None, "a way up is refused");
+        assert_eq!(write("empty", ""), None, "an empty name is refused");
+    }
+
+    #[test]
+    fn there_is_no_handover_without_a_command() {
+        // The shell does not go looking for an installer on its own: it acts
+        // on a command the backend wrote, and there is no command.
+        let home = scratch_home();
+        assert!(read_install_command(&home).is_none());
+    }
+
+    #[test]
+    fn the_tray_template_is_the_mark_and_not_a_block() {        // The menu bar draws a template image as a mask, so only the alpha
         // channel matters: the mark is opaque and the rest is transparent.
         // A filled square would be a solid blob in the menu bar.
         let total = (TEMPLATE_EDGE * TEMPLATE_EDGE) as usize;

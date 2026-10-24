@@ -18,8 +18,8 @@ Four programs, none of which share a runtime:
 | program | runtime | owns |
 |---|---|---|
 | the window | WebView2, in a Tauri 2 shell | pixels only |
-| the backend | Node ≥ 22 sidecar (`desktop/main.mjs`) | `/rpc` + `/events`, sessions, the harness |
-| the bridge | Node ≥ 22 (`aipass-bridge/bridge/server.mjs`) | an OpenAI-compatible API on 8787 |
+| the backend | Node ≥ 20 sidecar (`desktop/main.mjs`) | `/rpc` + `/events`, sessions, the harness |
+| the bridge | Node ≥ 20 (`aipass-bridge/bridge/server.mjs`) | an OpenAI-compatible API on 8787 |
 | the relay | Chrome MV3 extension | the actual request, inside your logged-in tab |
 
 ## The four constraints that chose everything
@@ -54,10 +54,10 @@ Four programs, none of which share a runtime:
 |---|---|---|---|
 | window shell | **Tauri 2** (Rust ≥ 1.77) | ~3 MB binary, uses the OS webview, tray + sidecar support built in; the Rust is ~a page of code | Electron (ships a whole Chromium for a page of HTML; ~10× the installer for zero benefit — the heavy part of this app is Node, which we ship anyway) |
 | webview | **WebView2** (offline installer) | guaranteed present on Windows 10/11 via the installer; Evergreen updates come from the OS | CEF (another Chromium to ship), Firefox/Gecko (no Windows guarantee) |
-| backend | **Node ≥ 22, zero npm deps** | the CLI is the same code; `node:http`, SSE, `node:crypto` and `fetch` cover every need; nothing to audit, nothing to break | Express/Fastify (a dependency for a router we don't need — the surface is two endpoints), Bun/Deno (the bridge predates them and the sidecar fetch story is Node's) |
+| backend | **Node ≥ 20, zero npm deps** | the CLI is the same code; `node:http`, SSE, `node:crypto` and `fetch` cover every need; nothing to audit, nothing to break | Express/Fastify (a dependency for a router we don't need — the surface is two endpoints), Bun/Deno (the bridge predates them and the sidecar fetch story is Node's) |
 | wire protocol | **POST `/rpc` + GET `/events` (SSE)** | one request/response channel for commands, one push channel for streams; SSE needs no client library and survives WebView2 | WebSockets (a second protocol to implement on both sides for no capability we use — the window never talks to the bridge directly), Tauri IPC commands (would weld the harness to the shell and break `npm run desktop` in a plain browser) |
-| UI | **vanilla HTML/CSS/JS, no build step** | the served files are the source files; a fix is a reload; `app.js` (~2,200 lines) stays hand-editable — and the JSDoc + `tsc --checkJs` pass is the documented next move before any framework is considered | React/Vue/Svelte (a node_modules tree, a bundler, and a source/served split — all three violate constraint 4 for a single-window app) |
-| agent core | **shared harness modules** (`loop`, `tools`, `permissions`, `session`, `compact`, `skills`, `protocol`, `waf`) | constraint 2; the CLI tests (37) passing unchanged is the proof of the split | reimplementing in the backend (drift), porting to Rust (rewrites the working agent for no user-visible gain) |
+| UI | **vanilla HTML/CSS/JS, no build step** | the served files are the source files; a fix is a reload; `app.js` is the entry and the parts beside it (`ui/rpc.js`, `ui/state.js`, `ui/transcript.js`, `ui/settings.js`, `ui/commands.js`, `ui/panels/`) stay hand-editable — and the JSDoc + `tsc --checkJs` pass is the documented next move before any framework is considered | React/Vue/Svelte (a node_modules tree, a bundler, and a source/served split — all three violate constraint 4 for a single-window app) |
+| agent core | **shared harness modules** (`loop`, `tools`, `permissions`, `session`, `compact`, `skills`, `protocol`, `waf`) | constraint 2; the CLI's own tests (58 of them, `aipass-bridge/test/agent.test.mjs`) passing unchanged is the proof of the split | reimplementing in the backend (drift), porting to Rust (rewrites the working agent for no user-visible gain) |
 | agent–model protocol | **text markers in the message stream** (`protocol.mjs`) + a WAF-adaptation layer (`waf.mjs`) | the upstream offers no native tool calls and rejects system prompts and multi-message transcripts; markers ride the one channel that works, and `waf.mjs` is the single place that knows the filter's moods | native function-calling (does not exist upstream), a WebSocket to the page (the extension's SSE path already works and keeps credentials in the tab) |
 | sessions | **JSONL files with a tree** (`session.mjs`) | append-only, human-readable, diffable, forkable by copying lines; no daemon to corrupt them | SQLite (a native dep and a format you can't read in an editor, for queries we never run), a database server (absurd at this scale) |
 | compaction | **summarise, then rotate to a fresh conversation** | the upstream owns history and it cannot be trimmed — rotation is the only move the API allows | dropping old messages (there is no local array to drop; the server remembers everything anyway) |
@@ -76,8 +76,10 @@ Saying the quiet parts out loud, since a stack is a set of tradeoffs:
   zone the JSDoc types + `tsc --checkJs` pass exists for — a
   devDependency-only check (nothing ships with it; the runtime stays
   dependency-free), run wherever there is a `node_modules`. esbuild after
-  that, and only if the type check is not enough.
-- **The sidecar must match the platform.** `fetch-node.ps1` pins a Node
+  that, and only if the type check is not enough. The page is now a set of
+  modules (`ui/rpc.js`, `ui/state.js`, `ui/transcript.js`, `ui/settings.js`,
+  `ui/commands.js`, `ui/panels/`) — the ceiling moved down, not up.
+- **The sidecar must match the platform.** `fetch-node.mjs` pins a Node
   build per release; a macOS/Linux port needs the same for each target.
 - **The relay's reliability is Chrome's mood.** An extension page can be
   discarded, an update can reload the tab. The bridge surfaces this
@@ -125,7 +127,7 @@ the whole wire.
 
 | trigger | change |
 |---|---|
-| `app.js` passes ~2,000 lines (it has — 2,200+) or two people edit the UI in parallel | JSDoc types + `tsc --checkJs` first; a bundler only if the type check is not enough |
+| a module passes ~2,000 lines or two people edit the same module in parallel | JSDoc types + `tsc --checkJs` first; a bundler only if the type check is not enough |
 | macOS/Linux users show up | cross-compile targets in `tauri.conf.json` + per-platform sidecar fetch; the harness needs nothing |
 | a real release channel exists | `tauri-plugin-updater` with signed artifacts |
 | the upstream ever offers native tool calls / system prompts | `protocol.mjs` and `waf.mjs` shrink or vanish; the harness gets simpler, not different |

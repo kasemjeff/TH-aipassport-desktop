@@ -2,7 +2,7 @@
 # Chromium under Xvfb, viewable over noVNC. The bridge and extension are mounted
 # from the parent directory at runtime (see docker-compose.yml), so this image
 # carries only the desktop/browser plumbing — the core is never copied or forked.
-FROM node:22-bookworm-slim
+FROM node:20-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 

@@ -14,17 +14,29 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { SKIP, binaryKind, posix, stripGutter, realPath } from './overlay.mjs';
-import { createSandbox, materializeTree, removeSandbox, restorePaths, sharedDirs } from './sandbox.mjs';
+import { SKIP, binaryKind, posix, stripGutter, realPath, DELETED } from './overlay.mjs';
+import { createSandbox, materializeTree, removeSandbox, restorePaths, sharedDirs, sharedWriteRefusal } from './sandbox.mjs';
 import { outbound, inbound } from './waf.mjs';
 import { withResolvedSources } from './web-sources.mjs';
 import { secretHit, scrubSecretDiff } from './permissions.mjs';
 import { scrubOutput } from './output-scrub.mjs';
+// The person's own commands (harness/hooks.mjs): a command line the person
+// configured, bound to a moment — after a staged change, before a commit,
+// when a run ends. It is not the model's command, so it never asks the model
+// for permission; it does respect the secret floor and the project root.
+import { runHooks } from './hooks.mjs';
+// The recall: what this project said before (harness/memory-store.mjs).
+import { recallEntries } from './memory-store.mjs';
+import { dayKey } from './export.mjs';
 import { isPrivateHost, pinnedGet, resolveVetted } from '../bridge/private-hosts.mjs';
 import { loadGitignore } from './gitignore.mjs';
 import { stripInvisibles } from './lang.mjs';
 import { extractSymbols, indexProject, listSymbols, findDefinition, findReferences, formatSymbols, formatDefs, formatRefs } from './symbols.mjs';
 import { MAX_ATTACHMENT_BYTES, mimeOf, isAllowedAttachment } from '../bridge/attachment-types.mjs';
+// The write side of git, and the grammar both the tool and the permission
+// engine read (harness/git.mjs): one owner, so a write cannot be a read for
+// one of them and a write for the other.
+import { parseGitArg, stage as gitStage, commit as gitCommit, branch as gitBranch } from './git.mjs';
 
 // A file past this size is data, not source: SEARCH used to read 500 MB logs
 // line by line, synchronously, in the backend's process.
@@ -52,30 +64,62 @@ const MAX_SPILL_READ = 2 * MAX_READ_FILE;
 // it on every single spill made a tool-heavy run pay for the same listing over
 // and over, so it runs every SPILL_PRUNE_EVERY writes — the directory stays
 // bounded within that slack whatever the process does.
-export const SPILL_KEEP = Number(process.env.AIPASS_SPILL_KEEP ?? 200);
+//
+// A bad environment value must never become a deletion order. `Number('')`
+// is 0 and `Number('nonsense')` is NaN; `files.slice(0)` clears the directory
+// and `files.slice(NaN)` returns every file. Only a finite positive number is
+// a cap; anything else falls back to the documented default.
+const positiveInt = (value, fallback) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+};
+
+export const SPILL_KEEP = positiveInt(process.env.AIPASS_SPILL_KEEP, 200);
 
 /** How many writes between sweeps; see SPILL_KEEP. */
-const SPILL_PRUNE_EVERY = Number(process.env.AIPASS_SPILL_PRUNE_EVERY ?? 25);
+const SPILL_PRUNE_EVERY = positiveInt(process.env.AIPASS_SPILL_PRUNE_EVERY, 25);
 let spillsSincePrune = 0;
 
-export function pruneSpill(dir, keep = SPILL_KEEP) {
+/**
+ * Delete all but the newest `keep` spill files in `dir`.
+ *
+ * Async, like every other filesystem path in the tool layer: a readdir plus a
+ * stat per file on a directory with thousands of spills would freeze every
+ * window call while it ran. A missing or unreadable directory is not an
+ * error — there is simply nothing to sweep.
+ */
+export async function pruneSpill(dir, keep = SPILL_KEEP) {
+  // An explicit 0 is a caller asking to clear the directory (the test pins
+  // that). A NaN or a negative from anywhere else is not a cap; fall back.
+  const limit = Number.isFinite(keep) && keep >= 0 ? Math.floor(keep) : SPILL_KEEP;
   try {
-    const files = fs.readdirSync(dir, { withFileTypes: true })
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    const files = await Promise.all(entries
       .filter((e) => e.isFile() && e.name.endsWith('.txt'))
-      .map((e) => { const p = path.join(dir, e.name); return { p, mtime: fs.statSync(p).mtimeMs }; })
-      .sort((a, b) => b.mtime - a.mtime);
-    for (const f of files.slice(keep)) fs.rmSync(f.p, { force: true });
+      .map(async (e) => {
+        const p = path.join(dir, e.name);
+        const stat = await fs.promises.stat(p);
+        return { p, mtime: stat.mtimeMs };
+      }));
+    files.sort((a, b) => b.mtime - a.mtime);
+    await Promise.all(files.slice(limit).map((f) => fs.promises.rm(f.p, { force: true })));
   } catch { /* missing or unreadable: nothing to sweep */ }
 }
 
-function spill(text, cap, root, tailShare = 0) {
+async function spill(text, cap, root, tailShare = 0) {
   const id = Math.random().toString(16).slice(2, 10);
   const dir = path.join(root, '.aipass', 'spill');
   try {
-    fs.mkdirSync(dir, { recursive: true });
+    await fs.promises.mkdir(dir, { recursive: true });
     const file = path.join(dir, `${id}.txt`);
-    fs.writeFileSync(file, text);
-    if (++spillsSincePrune >= SPILL_PRUNE_EVERY) { spillsSincePrune = 0; pruneSpill(dir); }
+    await fs.promises.writeFile(file, text);
+    // The sweep runs behind the spill that triggered it: the result the model
+    // is waiting for does not pay for the listing, and a failed sweep is not
+    // a failed read. pruneSpill swallows its own filesystem errors.
+    if (++spillsSincePrune >= SPILL_PRUNE_EVERY) {
+      spillsSincePrune = 0;
+      void pruneSpill(dir);
+    }
     const rel = `.aipass/spill/${id}.txt`;
     const lines = text.split('\n').length;
     if (tailShare > 0) {
@@ -398,6 +442,56 @@ function gitAllowed(sub) {
 }
 
 /**
+ * The message of a commit, as the model wrote it.
+ *
+ * `GIT commit fix the thing` and `GIT commit -m "fix the thing"` are the same
+ * request; the message is one string, and it is handed to git as ONE argv
+ * element (`--message=<text>`), so it can never be read as a flag and there
+ * is no shell to split it on spaces.
+ */
+function commitMessageOf(args) {
+  const rest = [...args];
+  if (rest[0] === '-m' || rest[0] === '--message') rest.shift();
+  else if (rest[0]?.startsWith('--message=')) rest[0] = rest[0].slice('--message='.length);
+  const text = rest.join(' ').trim();
+  return /^".*"$/.test(text) ? text.slice(1, -1).trim() : text;
+}
+
+/**
+ * The write side of GIT: stage, commit, branch.
+ *
+ * The argv is an ARRAY all the way down (harness/git.mjs) — no shell, so a
+ * message with a space in it is a message and not two arguments, and a path
+ * that leaves the project is refused before git ever sees it.
+ */
+async function gitWrite(root, parsed) {
+  try {
+    if (parsed.op === 'stage') {
+      const paths = parsed.args.filter((a) => a !== '--');
+      const out = await gitStage({ root, paths });
+      return `staged ${out.staged.length} file(s):\n${out.staged.join('\n')}`;
+    }
+    if (parsed.op === 'commit') {
+      const message = commitMessageOf(parsed.args);
+      if (!message) return 'err: a commit needs a message — GIT commit <what you changed>';
+      const out = await gitCommit({ root, message });
+      return `committed ${out.commit} — ${out.message}\n${out.files.join('\n')}`;
+    }
+    if (parsed.op === 'branch') {
+      const name = parsed.args.join(' ').replace(/^"(.*)"$/, '$1').trim();
+      const out = await gitBranch({ root, name });
+      return `created branch ${out.branch}`;
+    }
+    return `err: ${parsed.op} is not a git write this harness knows.`;
+  } catch (err) {
+    // The refusals of the git layer are facts about the repository ("nothing
+    // is staged", "outside the project") and they answer the model as one
+    // err: sentence, like every other tool failure.
+    return `err: ${String(err?.message ?? err)}`;
+  }
+}
+
+/**
  * Expand glob brace alternation ({a,b}, including nested) into a list of
  * patterns. Standard glob shells and the libraries models mimic do this; the
  * old implementation escaped the braces, so a pattern like `*.{js,css,html}` answered
@@ -485,6 +579,16 @@ export function createTools(ctx) {
     allowRun = false,
     readOnly = false,
     readOnlyNote = null,
+    // The write side of git: OFF unless the run was told it may change the
+    // repository. A run never gains power on its own (the same rule the
+    // overlay lives by), and the permission gate asks on top of it.
+    allowGitWrite = false,
+    // The run's declared check (`verifyCommand` or the project's own
+    // `.aipass/check.txt`) and the checker that can produce a verdict when
+    // there is no command to run. Both are the facade's business — the tool
+    // only asks for them.
+    declaredCheck = null,
+    checker = null,
     maxResult = 3000,
     readLines = 250,
     bridge = null,
@@ -494,6 +598,10 @@ export function createTools(ctx) {
     webConversation = null,
     onReasoning = () => {},
     log = () => {},
+    // The harness's own event bus (one emitter per harness). The `done`
+    // moment rides it: a run's end is an event, and the person's command
+    // belongs to the harness that ran.
+    events = null,
     // (stop) The run's stop switch. A RUN in flight when the person pressed
     // stop is killed with its tree instead of running to its own timeout.
     signal = null,
@@ -501,20 +609,65 @@ export function createTools(ctx) {
     // driven without a network in a test; the default is the pinned request
     // from private-hosts.mjs, which connects to the address that was vetted.
     fetchTransport = pinnedGet,
+    // The person's own commands (harness/hooks.mjs). They are read from the
+    // settings file when a hook fires, so a hook configured in the window
+    // works on the next write without a restart; a caller that holds them
+    // already may pass them in.
+    hooks = null,
+    // The session store the recall reads (harness/session.mjs). The default
+    // is the store the desktop and the CLI keep their sessions in.
+    store = null,
   } = ctx;
 
   // A result past the inline cap is spilled to disk rather than truncated: the
   // head still rides the message, and the locator tells the model how to read
   // the rest with the tool it already has.
-  const clip = (s) => (s.length > maxResult ? spill(s, maxResult, root) : s);
-  // Command output gets the split view instead — head and tail, middle on
+  const clip = async (s) => (s.length > maxResult ? await spill(s, maxResult, root) : s);
+  // Command output gets the split view instead - head and tail, middle on
   // disk (spill's tailShare). The last lines of a failing command are the
   // diagnosis; the first are where it went wrong first.
-  const clipRun = (s) => (s.length > maxResult ? spill(s, maxResult, root, 0.6) : s);
+  const clipRun = async (s) => (s.length > maxResult ? await spill(s, maxResult, root, 0.6) : s);
   const safe = (p) => overlay.safe(p);
   const trySafe = (p) => overlay.trySafe(p);
+  // A write into a directory the projection SHARES with the real project
+  // (node_modules, dist) would land in the user's own tree, not in the run's
+  // copy — the overlay is the only write surface of a run, and that promise
+  // has to hold for a linked folder too. Reads keep working: the model may
+  // read a dependency, it may not write one.
+  const refuseSharedWrite = (abs) => sharedWriteRefusal(root, abs);
   const existsAt = (abs) => overlay.existsAt(abs);
   const readAt = (abs) => overlay.readAt(abs);
+
+  // The person's own command for a moment, and what it said.
+  //
+  // The hook runs inside the tool, AFTER the permission gate has answered
+  // for the CALL: a hook is the person's command, not the model's, so it
+  // never asks for permission again — and it still runs inside the project
+  // and still respects the secret floor (harness/hooks.mjs).
+  const hookVerdict = async (moment) => {
+    try {
+      const { text } = await runHooks(moment, { root, hooks, signal });
+      return text;
+    } catch (err) {
+      return `hook (${moment}) could not run: ${String(err?.message ?? err)}`;
+    }
+  };
+
+  // The `done` moment: the person's own command when the run ends. It rides
+  // the harness's own event bus — one emitter per harness, so this is this
+  // project's run and no other. A helper's and the checker's tables are not
+  // the person's run (they carry `temporary`), and a run of theirs ending is
+  // not the run ending.
+  if (events?.on && !readOnly && !temporary) {
+    const off = events.on('finished', () => {
+      // One shot: the subscription belongs to this run, and a table that
+      // outlived it would fire the command once per finished run.
+      off();
+      hookVerdict('done')
+        .then((text) => { if (text) events.emit('note', { text }); })
+        .catch(() => { /* a hook that cannot run is not the run's end */ });
+    });
+  }
 
   // The file a link really is. A link inside the project can name a file
   // outside it, and the secret screen has to see the TARGET: a link called
@@ -579,19 +732,22 @@ export function createTools(ctx) {
       if (found.error) return `err: ${found.error}`;
       return found.text;
     },
-    list(arg) {
+    async list(arg) {
       const abs = safe(arg || '.');
-      const names = new Set(
-        (fs.existsSync(abs) ? fs.readdirSync(abs, { withFileTypes: true }) : [])
-          .filter((e) => !SKIP.has(e.name))
-          .map((e) => (e.isDirectory() ? `${e.name}/` : e.name)));
+      // A missing directory is an empty listing, not a throw — the old
+      // existsSync guard was also the one blocking call left in this path.
+      let entries = [];
+      try { entries = await fs.promises.readdir(abs, { withFileTypes: true }); } catch { entries = []; }
+      const names = new Set(entries
+        .filter((e) => !SKIP.has(e.name))
+        .map((e) => (e.isDirectory() ? `${e.name}/` : e.name)));
       // A file the agent has written this run is readable by `read` and reported
       // by `exists`, so a listing that omits it tells the model its own write
       // failed — issue #32.
       overlay.mergeIntoListing(abs, names);
-      return clip([...names].sort().join('\n') || '(empty)');
+      return await clip([...names].sort().join('\n') || '(empty)');
     },
-    read(arg) {
+    async read(arg) {
       // Accept an optional trailing line range, e.g. `NEED file src/app.ts 200-320`.
       const parts = String(arg).trim().split(/\s+/);
       let range = null;
@@ -608,7 +764,7 @@ export function createTools(ctx) {
       // The existsSync guard matters: a staged file lives in the overlay and
       // is not on disk yet, and statSync would throw on it.
       if (fs.existsSync(abs) && fs.statSync(abs).isDirectory()) {
-        return `${TOOLS.list(rel)}\n(${rel} is a directory, so here is its listing — NEED dir lists a folder, NEED file reads one file.)`;
+        return `${await TOOLS.list(rel)}\n(${rel} is a directory, so here is its listing — NEED dir lists a folder, NEED file reads one file.)`;
       }
       // A file past the cap is refused, not read. `read` had no ceiling at
       // all, so a multi-GB log answered with an out-of-memory crash instead
@@ -680,13 +836,15 @@ export function createTools(ctx) {
       // thing to disk and hands the model a locator — but the note that says
       // how to continue is appended after, because losing it strands the model
       // on half a file.
-      return clip(numbered) + note;
+      return (await clip(numbered)) + note;
     },
     async write(arg, rawBody) {
       // (stop) A stopped run stages no more edits: the person said stop, and
       // a half-finished change is worse than none.
       if (signal?.aborted) return 'err: the run was stopped before this change was staged';
       const abs = safe(arg);
+      const sharedRefusal = refuseSharedWrite(abs);
+      if (sharedRefusal) return sharedRefusal;
       // (read-first, Claude Code's rule) CREATE over a file that already
       // exists is the accidental-overwrite shape: allowed once this run has
       // read the file, or when the run staged it itself. A blind replace is
@@ -708,11 +866,18 @@ export function createTools(ctx) {
       const readBack = first
         ? `\nread-back: 1: ${first}${last && last !== first ? ` | ${wrote.length}: ${last}` : ''}`
         : '';
-      return `wrote ${arg}, ${wrote.length} lines${note ? '\n' + note : ''}${readBack}`;
+      // The `afterWrite` moment: the person's own check on what was staged.
+      // Its verdict rides the result — a hook that fails is REPORTED, and the
+      // change stays staged: the overlay is the only write surface of a run,
+      // and a failed check never undoes the work the person is watching.
+      const hook = await hookVerdict('afterWrite');
+      return `wrote ${arg}, ${wrote.length} lines${note ? '\n' + note : ''}${readBack}${hook ? '\n' + hook : ''}`;
     },
     async replace(arg, rawBody) {
       if (signal?.aborted) return 'err: the run was stopped before this change was staged';
       const abs = safe(arg);
+      const sharedRefusal = refuseSharedWrite(abs);
+      if (sharedRefusal) return sharedRefusal;
       if (!existsAt(abs)) return `err: no such file: ${arg}`;
       const before = inbound(stripGutter(rawBody[0]));
       const after = inbound(rawBody[1]);
@@ -759,7 +924,11 @@ export function createTools(ctx) {
       const updated = text.replace(before, () => after);
       overlay.set(abs, updated);
       const note = await syntaxNote(arg, updated);
-      return `updated ${arg} (1 change)${note ? '\n' + note : ''}`;
+      // The `afterWrite` moment, for an edit as much as for a new file: the
+      // person configured "after every change", and a hook that fired on a
+      // CREATE only would be a half-feature they have to discover.
+      const hook = await hookVerdict('afterWrite');
+      return `updated ${arg} (1 change)${note ? '\n' + note : ''}${hook ? '\n' + hook : ''}`;
     },
     async search(arg) {
       const raw = String(arg).trim();
@@ -890,7 +1059,7 @@ export function createTools(ctx) {
         // of the command. The platform shell is picked for us: /bin/sh on
         // POSIX, cmd.exe on Windows.
         const { stdout } = await runShell(body, { cwd: sandbox ?? root, timeoutMs: 120_000, signal });
-        return clipRun(scrubSecretDiff(scrub(scrubOutput(stdout)))) + sharedNote(sandbox, root) + skippedNote();
+        return (await clipRun(scrubSecretDiff(scrub(scrubOutput(stdout))))) + sharedNote(sandbox, root) + skippedNote();
       } catch (err) {
         // A stop that killed the command says so: "exit SIGTERM" would read as
         // the command's own failure, and the person did ask for it.
@@ -901,6 +1070,53 @@ export function createTools(ctx) {
       } finally {
         if (sandbox) removeSandbox(sandbox);
       }
+    },
+    /**
+     * VERIFY — the model asks for a check.
+     *
+     * Three answers, in this order: the command the model named, the run's
+     * declared check (`verifyCommand`, or the project's own `.aipass/check.txt`),
+     * and the checker — the read-only child that runs the project's checks
+     * and returns a verdict (docs/SPEC_CHECKER.md). With none of them there
+     * is nothing to verify with, and the answer says so instead of inventing
+     * a pass.
+     *
+     * The result is EVIDENCE, not a tool failure: a check that fails comes
+     * back as a failing check with its output, so the model reads what the
+     * command said instead of a bare `err:`.
+     */
+    async verify(arg) {
+      const wanted = String(arg ?? '').trim();
+      const command = wanted || String(declaredCheck ?? '').trim();
+      if (command) {
+        if (!allowRun) return 'err: a check needs the shell, and shell commands are disabled for this run';
+        // The secret floor covers tool args; the same screen the RUN body
+        // gets, because a check can name a file just as easily.
+        const secret = secretHit(command);
+        if (secret) return `err: the check names ${secret.token} (${secret.pattern}) — secret files stay on this machine.`;
+        // The same machinery as RUN: the command sees the staged tree in a
+        // projection, and the disk is never written by it. The command is
+        // named in the result, so the model and the person both see WHICH
+        // check ran — a verdict about one command is not a verdict about
+        // another.
+        const out = String(await TOOLS.run('', command));
+        const failed = /^err:/i.test(out.trimStart());
+        return clip(`${failed ? 'the check did not pass' : 'the check passed'} (${command}):\n${out}`);
+      }
+      if (!checker) {
+        return 'err: this run declares no check and has no checker — there is nothing to verify with. Name the command to run (VERIFY node test.mjs), or ask the person which check this project uses.';
+      }
+      const files = overlay.entries().map(([abs, value]) => ({
+        path: posix(path.relative(root, abs)),
+        deleted: value === DELETED,
+      }));
+      let verdict = null;
+      try {
+        verdict = await checker({ files });
+      } catch (err) {
+        return `err: the check could not run: ${String(err?.message ?? err)}`;
+      }
+      return clip(`verdict: ${verdict?.verdict ?? 'none'}\n${String(verdict?.text ?? '')}`);
     },
     async glob(pattern) {
       if (!pattern) return 'err: give me a glob pattern, e.g. **/*.ts';
@@ -993,11 +1209,37 @@ export function createTools(ctx) {
       // reaches the shell could ride a second command on the platform shell.
       // Newlines/NUL ride along in tool args, so they are punctuation too.
       if (/[;&|`$<>\r\n\0]/.test(sub))
-        return `err: one read-only git subcommand, no shell punctuation. Got: ${sub}`;
+        return `err: one git subcommand, no shell punctuation. Got: ${sub}`;
       // Same screen as RUN, applied to the argument: `show HEAD:.env` names a
       // secret inside the repository, which the file floor never sees.
       const secret = secretHit(sub);
       if (secret) return `err: git may not name ${secret.token} (${secret.pattern}) — secret files stay on this machine.`;
+      // The write side (stage / commit / branch). Two gates, in this order:
+      // the run must have been GIVEN the power (allowGitWrite), and then the
+      // permission engine asks the person — the loop classifies a git write
+      // as a write (permissions.mjs#classify), so it rides the same gate
+      // every other write rides.
+      const parsed = parseGitArg(sub);
+      if (parsed?.kind === 'write') {
+        if (!allowGitWrite) {
+          return `err: git write subcommands are not allowed in this run - the harness option allowGitWrite is off, so a run cannot change the repository on its own. Got: ${sub}`;
+        }
+        // The `beforeCommit` moment: the person's own command runs BEFORE the
+        // commit goes through, and a hook that fails refuses the commit —
+        // that is what "before a commit" means, and a check that only
+        // reported itself would let the very commit it was meant to stop
+        // happen. The run continues either way: the model is told what the
+        // hook said and may fix the work and ask again.
+        if (parsed.op === 'commit') {
+          const before = await runHooks('beforeCommit', { root, hooks, signal });
+          if (!before.ok) {
+            return clip(`err: the beforeCommit hook did not pass, so nothing was committed.\n${before.text}`);
+          }
+          const out = await gitWrite(root, parsed);
+          return clip(before.text ? `${before.text}\n${out}` : out);
+        }
+        return clip(await gitWrite(root, parsed));
+      }
       if (!gitAllowed(sub))
         return `err: only read-only git subcommands are allowed (status, diff, log, show, branch, ls-files, …). Got: ${sub}`;
       try {
@@ -1111,6 +1353,8 @@ export function createTools(ctx) {
       const rel = arg.trim();
       if (!rel) return 'err: give me a file path to delete.';
       const abs = safe(rel);
+      const sharedRefusal = refuseSharedWrite(abs);
+      if (sharedRefusal) return sharedRefusal;
       if (!existsAt(abs)) return `err: no such file: ${rel}`;
       if (!fs.existsSync(abs)) {
         overlay.discard(abs);
@@ -1126,6 +1370,8 @@ export function createTools(ctx) {
       const [fromRel, toRel] = parts;
       const fromAbs = safe(fromRel);
       const toAbs = safe(toRel);
+      const sharedRefusal = refuseSharedWrite(fromAbs) || refuseSharedWrite(toAbs);
+      if (sharedRefusal) return sharedRefusal;
       if (!existsAt(fromAbs)) return `err: no such file: ${fromRel}`;
       if (existsAt(toAbs)) {
         // Landing on an existing file would read as success while one file's
@@ -1257,6 +1503,34 @@ export function createTools(ctx) {
       const name = String(arg ?? '').trim();
       if (!name) return 'err: REFS needs a name — REFS foo';
       return formatRefs(findReferences(root, name));
+    },
+    // RECALL — what this project said before. A read of the person's own
+    // past: the sessions of this project, scored against the query, each hit
+    // with its session and its date. It is a word match, and it says so:
+    // no embedding, no network, and nothing the person did not say.
+    async recall(query) {
+      const q = String(query ?? '').trim();
+      if (!q) return 'err: RECALL needs something to look for — RECALL <what you want to remember>';
+      let result;
+      try {
+        result = await recallEntries(q, { root, store });
+      } catch (err) {
+        return `err: the past could not be read: ${String(err?.message ?? err)}`;
+      }
+      // A question of one letter matches half of everything, so it is not a
+      // question: it is refused with the shape to copy.
+      if (!result.words.length) {
+        return 'err: RECALL needs a word of two letters or more — RECALL <what you want to remember>';
+      }
+      if (!result.hits.length) {
+        return `nothing in this project's past mentions "${q}" — ${result.sessions} session(s) searched, no match.`;
+      }
+      const lines = result.hits.map((h) => {
+        const day = dayKey(h.ts) || 'an unknown day';
+        const at = h.ts ? new Date(h.ts).toTimeString().slice(0, 5) : '';
+        return `${day}${at ? ' ' + at : ''} · "${h.title}" (${h.session}) · ${h.type}\n${h.excerpt}`;
+      });
+      return clip(`${result.hits.length} of ${result.matches} past entries about "${q}" (${result.sessions} session(s) searched):\n${lines.join('\n\n')}`);
     },
   };
 

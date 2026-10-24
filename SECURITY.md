@@ -123,6 +123,28 @@ Then restart the bridge and reload the extension.
   `session.rename` rewrote its first line. A handle may only name a file
   inside the store, checked with `path.relative` — a string prefix would also
   match a sibling whose name merely begins with the store's.
+- **A path is a handle too, and it is held to the same rule** (hardened Oct
+  2026, `harness/session.mjs` `resolveFile` + `foreignFor`). The window
+  lists sessions with their absolute path, so a path is a legitimate handle —
+  and the guard that refused another project's session only recognised the
+  *id* spelling. A path to another project's session was accepted: it opened,
+  it was renamed, it was deleted. A path names a session at least as precisely
+  as an id does, so it is asked the same question, and the refusal names the
+  project it belongs to.
+- **The directory is a bucket, not a boundary** (hardened Oct 2026,
+  `harness/session.mjs` `list`/`resolveFile`/`reassign`). A session lives in
+  a directory named after its project's path, and that name is a lossy slug:
+  `C:\a b` and `C:\a-b` are the same slug, and a long path is cut at 60
+  characters. Two projects could therefore share one directory, and each
+  picker showed the other's conversations. The header's own `root` is the
+  authority on which project a session belongs to now: the picker, the
+  handle and the relocation all ask the file, not the folder it sits in.
+- **A session id is a file name, so it is a real one** (hardened Oct 2026,
+  `harness/session.mjs`). It was eight hex digits of `Math.random()` — 32
+  bits — and a collision was not a key that got refused: `writeFileAtomic`
+  replaced the session that was there, and the whole conversation was gone
+  without a word. 48 bits from the crypto module, and a collision can no
+  longer destroy anything.
 - **The suite never touches your bridge port** (hardened Oct 2026,
   `aipass-bridge/test/harness.mjs`). The suite turns the no-token escape hatch
   on for its own bridges, and a CLI the suite runs auto-starts a bridge —
@@ -214,9 +236,11 @@ Then restart the bridge and reload the extension.
   `harness/authtoken.mjs`): a 256-bit token is minted once to `~/.aipass/.token`
   (owner-only intent) and required on the bridge (8787) and the desktop
   backend (8790) for everything except `/status`/`/health`. The extension popup
-  stores it once; the CLI and the desktop backend read the file themselves; the
-  window bootstraps it from a same-origin-only `/token` endpoint. `AIPASS_TOKEN`
-  overrides, `AIPASS_REQUIRE_AUTH=0` disables (with a boot warning).
+  stores it once; the CLI, the desktop backend and the harness's own bridge
+  client read the file themselves and present it to the bridge (to loopback and
+  nowhere else); the window bootstraps it from a same-origin-only `/token`
+  endpoint. `AIPASS_TOKEN` overrides, `AIPASS_REQUIRE_AUTH=0` disables (with a
+  boot warning).
 - **Plugins and MCP servers are trusted, not sandboxed** (Oct 2026,
   `harness/install.mjs`, `harness/mcp.mjs`): installing a plugin, or adding an
   MCP server, means running someone else's code in the backend process with the
@@ -283,6 +307,51 @@ Three classes, one rule each:
   `SECRET_RULES` floor above, plus `~/.aipass/.token`. The token is a
   credential: same-user processes can read it — the boundary is other users,
   sandboxed apps and browser pages.
+
+## Updates
+
+The app checks a **signed feed** to learn what is out there. This is the
+part of the app that a hostile release host could attack, so it is worth
+being exact about what stands between a compromised host and your machine.
+
+- **The feed is signed.** ed25519, verified with `node:crypto` — a builtin,
+  so the check costs no dependency. The **public** half is in
+  `aipass-bridge/harness/update-keys.mjs`, in the source; the private half is
+  a release secret and has never been in git. A feed that does not verify is
+  refused and is not cached, and the app keeps using the feed it verified
+  earlier. A feed is not allowed to carry its own keys: a feed that could
+  introduce a key would be a feed that could be replaced wholesale.
+- **The pack's hash is inside that signed feed**, so "the download matches
+  itself" is never the check — the check is "the download matches what the
+  release key signed". Every file in the pack carries its own hash too, and
+  a pack that names a path outside the tree is refused.
+- **The sequence number goes one way.** An old signed feed replayed at you
+  is refused, so a captured feed cannot pull the app back to an old build.
+- **Nothing is applied on its own.** The content is replaced when a person
+  clicks, and never while a run is in flight. The shell — the binary — is
+  replaced by the installer, and only when a person clicks that too.
+- **The handover refuses an unsigned installer.** The feed records each
+  artifact's signature state, and the feed is signed — so the gate opens
+  only when the release key says the artifact is signed. The Windows
+  installer is unsigned today, so the path is closed; it is not a flag in a
+  settings file that anything can turn on. **An unsigned app that
+  downloads and runs an unsigned installer is the worm shape**, and that is
+  why the handover is gated rather than merely documented.
+- **The shell checks the artifact again before it runs it.** The backend
+  verifies the download against the signed feed; the shell then hashes the
+  file on disk — with the app's own Node, `node:crypto` being a builtin —
+  and refuses to start anything whose hash is not the one it was handed. The
+  command that names the artifact names a **file**, not a path: the shell
+  builds the path itself, inside its own downloads directory.
+- **The check sends nothing about the machine.** It is one GET of a static
+  file from a pinned URL. No identifier, no telemetry.
+- **The content lives in `~/.aipass/app/`, beside your data.** A local
+  process that can write into `~/.aipass` can already get code execution
+  through the app — the plugin directory holds code the harness loads and
+  runs — so the update system's own directory does not raise that ceiling.
+  It does not lower it either: the app's feed URL is compiled in, not a
+  setting, so a tampered `settings.json` cannot point the app at somebody
+  else's feed.
 
 ## Owners
 

@@ -31,6 +31,44 @@ const EFFORT = { low: 'low', medium: 'medium', high: 'high', max: 'high' };
 const ANTHROPIC_BUDGET = { low: 1024, medium: 4096, high: 8192, max: 16384 };
 
 /**
+ * How long the provider's catalog may take.
+ *
+ * The catalog is asked for at the start of every run and by the sheet's
+ * one-click check, so a provider that accepts the connection and never
+ * answers must not be able to hang either of them.
+ */
+const MODELS_TIMEOUT_MS = 10_000;
+
+/**
+ * The deadline for one provider's catalog.
+ *
+ * The spec's own field wins (a provider that is slow on purpose says so),
+ * then the environment (a machine behind a slow link says so once), then
+ * the default. A value that is not a positive number is ignored: a broken
+ * setting must never take the deadline away — that is the hang this exists
+ * to end.
+ *
+ * @param {object} [spec]
+ * @returns {number} milliseconds
+ */
+export function modelsTimeoutMs(spec = null) {
+  const fromSpec = Number(spec?.modelsTimeoutMs);
+  if (Number.isFinite(fromSpec) && fromSpec > 0) return Math.floor(fromSpec);
+  const fromEnv = Number(process.env.AIPASS_PROVIDER_MODELS_TIMEOUT_MS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv);
+  return MODELS_TIMEOUT_MS;
+}
+
+/**
+ * Did the deadline fire?
+ *
+ * Node's timeout aborts with a TimeoutError; a fetch that was aborted for
+ * any other reason says AbortError. Both mean the same thing here: the
+ * provider did not answer in time.
+ */
+const isTimeout = (err) => err?.name === 'TimeoutError' || err?.name === 'AbortError';
+
+/**
  * The two endpoints of a provider, from its base URL.
  *
  * The OpenAI-compatible shape carries its version in the base (`…/v1`), and a
@@ -204,9 +242,24 @@ export class ApiProviderClient {
     const spec = this.spec;
     const fallback = (spec.models ?? []).map((id) => ({ id, name: id }));
     if (!this.key) return { data: fallback, source: fallback.length ? 'spec' : 'none' };
+    const timeoutMs = modelsTimeoutMs(spec);
+    // A deadline that holds the loop while it waits. Node's timeout timer is
+    // unref'd, so a process whose only pending work is this fetch — the CLI
+    // asking a provider for its catalog — would end with an unsettled promise
+    // instead of the message that names the silent provider.
+    const deadline = new AbortController();
+    const timer = setTimeout(
+      () => deadline.abort(new DOMException('the provider did not answer in time', 'TimeoutError')),
+      timeoutMs,
+    );
     try {
       const res = await fetch(endpointsFor(spec).models, {
         headers: { accept: 'application/json', ...authHeaders(spec, this.key) },
+        // A deadline: a provider that takes the connection and never answers
+        // would otherwise leave this promise pending for ever — and the loop
+        // asks for the catalog at the START of every run, so one silent
+        // endpoint hangs every run in the project before the first message.
+        signal: deadline.signal,
       });
       if (!res.ok) throw new Error(`provider returned ${res.status}`);
       const body = await res.json();
@@ -220,13 +273,27 @@ export class ApiProviderClient {
       if (!rows.length) throw new Error('the provider returned no models');
       // A model the person wrote down by hand stays in the list even when the
       // provider's own catalog does not name it — some gateways answer with a
-      // subset, and the loop refuses a run whose model it cannot find.
-      for (const id of fallback) {
-        if (!rows.some((r) => r.id === id)) rows.push({ id, name: id });
+      // subset, and the loop refuses a run whose model it cannot find. The
+      // written model is a row like any other: an entry whose id is an object
+      // reaches the window as "[object Object]" and is sent to the provider
+      // as the model to run.
+      for (const row of fallback) {
+        if (!rows.some((r) => r.id === row.id)) rows.push(row);
       }
       return { data: rows, source: 'live' };
     } catch (err) {
-      return { data: fallback, source: fallback.length ? 'spec' : 'none', error: err.message };
+      // The deadline fired: the answer says WHICH provider stayed silent and
+      // how long it was given, so the sheet's one-click check and the run
+      // that asked for the catalog say the same thing. The list the person
+      // wrote down is still the answer — a timeout is not a broken provider.
+      const error = isTimeout(err)
+        ? `provider "${this.providerId}" did not answer the model list within ${timeoutMs} ms`
+        : err.message;
+      return { data: fallback, source: fallback.length ? 'spec' : 'none', error };
+    } finally {
+      // The deadline's timer ends with the fetch, answered or not: a timer
+      // left running would hold the loop open for the rest of the process.
+      clearTimeout(timer);
     }
   }
 

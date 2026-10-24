@@ -76,6 +76,19 @@ const pause = (ms) => {
 };
 
 /**
+ * A synchronous pause, in milliseconds.
+ *
+ * The store that locks a file has to wait for the lock without giving up the
+ * thread it is on: a session header is written from a synchronous call site
+ * (an append), and an `await` there would mean every caller had to become
+ * async. `Atomics.wait` is the one wait Node offers that does not spin the
+ * CPU, and a runtime without a SharedArrayBuffer simply does not wait.
+ *
+ * @param {number} ms
+ */
+export const sleepSync = (ms) => pause(ms);
+
+/**
  * The swap, tried again when the platform says "not right now".
  *
  * On Windows a rename onto a file that is being replaced at the same moment

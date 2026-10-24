@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!-- The policy of the panel. A webview is a page, and a page that drives an
+     agent that writes files gets as little as it needs: its own script (by
+     nonce), its own styles, and no way to open a socket of its own. The
+     host fills the placeholder — a webview's headers are not ours to set, so
+     the policy rides in the page. -->
+<meta http-equiv="Content-Security-Policy" content="{{csp}}" />
+<title>aipass</title>
+<!-- The panel's own files. No framework, no build step — the same rule the
+     desktop window follows (desktop/AGENTS.md, "plain ES modules, no
+     framework, no build step"). -->
+<link rel="stylesheet" href="{{styleUri}}" />
+</head>
+<body>
+<!-- The bar: what this panel is looking at, and whether the machine behind it
+     is answering. The credit meter lives here because it is the number a
+     reader checks before starting a long run. -->
+<header id="bar">
+  <span class="brand">aipass</span>
+  <span id="project" class="dim" title="โปรเจกต์ที่แผงนี้ดูแล"></span>
+  <span class="grow"></span>
+  <span id="model" class="chip"></span>
+  <span id="credits" class="chip" title="เครดิตที่เหลือ"></span>
+  <span id="backend" class="chip" role="status" aria-live="polite"></span>
+</header>
+
+<!-- The transcript. A live region, because a streaming answer has to reach a
+     screen reader; aria-busy holds the announcements back while a run is in
+     flight, so the answer is read once when it ends instead of frame by
+     frame (desktop/ui/app.js, the same rule). -->
+<main id="log" role="log" aria-live="polite" aria-relevant="additions text" aria-busy="false"></main>
+
+<!-- The staged changes. A run never writes to disk: every change is a
+     proposal, and only the Apply button makes it real (root law 1). -->
+<section id="pending" class="hidden">
+  <div class="pending-head">
+    <strong id="pending-count">0 การเปลี่ยนแปลง</strong>
+    <span class="dim">ติ๊กอย่างที่อยากเขียน</span>
+    <span class="grow"></span>
+    <button type="button" id="apply" class="primary">เขียนเลย</button>
+    <button type="button" id="discard">ทิ้ง</button>
+  </div>
+  <ul id="pending-list"></ul>
+</section>
+
+<form id="composer">
+  <textarea id="task" rows="3" placeholder="บอกงานที่ต้องทำ…" aria-label="งานที่ต้องทำ" aria-describedby="hint"></textarea>
+  <div class="composer-row">
+    <span id="hint" class="hint" role="status" aria-live="polite"></span>
+    <span class="grow"></span>
+    <button type="submit" id="send" class="primary">ส่ง</button>
+  </div>
+</form>
+
+<!-- The sheet is a dialog: the backend asks, the client answers, and the
+     answer goes back to the run that asked (desktop/ui/app.js, the same
+     three doors: deny, always, allow). -->
+<div id="ask" class="hidden" role="dialog" aria-modal="true" aria-labelledby="ask-title">
+  <div class="sheet">
+    <h3 id="ask-title"></h3>
+    <div id="ask-body"></div>
+    <div id="ask-actions" class="ask-actions"></div>
+  </div>
+</div>
+
+<script nonce="{{nonce}}" src="{{scriptUri}}"></script>
+</body>
+</html>

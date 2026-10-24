@@ -180,3 +180,92 @@ test('a hostname that resolves private is refused; a DNS failure fails open', as
   // check above already ran).
   assert.equal(await hostResolvesPrivate('definitely-not-a-host.invalid'), false, 'DNS failure must not block a fetch');
 });
+
+// A bare domain pointing at loopback or at the cloud metadata service is the
+// way past a literal-IP guard, so the name is resolved and EVERY answer is
+// checked before the fetch. The resolver is injected here — the same seam the
+// request has — so the case is driven without a network.
+test('a name that resolves to a private address is refused before anything is fetched', async () => {
+  const transport = stub(() => new Response(null, { status: 200 }));
+  try {
+    await fetchRemoteAsDataUri('http://rebind.example/x.png', 'image', {
+      transport,
+      resolve: async () => ({ addresses: [{ address: '169.254.169.254', family: 4 }], private: true }),
+    });
+    assert.fail('a name resolving into the metadata range must be refused');
+  } catch (err) {
+    assert.match(err.message, /resolves to a private\/internal address/);
+    assert.equal(transport.seen.length, 0, 'nothing was fetched');
+  }
+});
+
+test('a name with one private answer among public ones is refused', async () => {
+  // The connection picks one of the answers and the attacker picks which, so
+  // a name that answers with both is refused — not just a name whose FIRST
+  // answer is private.
+  const transport = stub(() => new Response(null, { status: 200 }));
+  try {
+    await fetchRemoteAsDataUri('http://mixed.example/x.png', 'image', {
+      transport,
+      resolve: async () => ({
+        addresses: [{ address: '93.184.216.34', family: 4 }, { address: '127.0.0.1', family: 4 }],
+        private: true,
+      }),
+    });
+    assert.fail('a name with a private answer among public ones must be refused');
+  } catch (err) {
+    assert.match(err.message, /resolves to a private\/internal address/);
+    assert.equal(transport.seen.length, 0, 'nothing was fetched');
+  }
+});
+
+test('a name that resolves public is fetched, and every answer is vetted', async () => {
+  const transport = stub(() => new Response(new Uint8Array([1]), { headers: { 'content-type': 'image/png' } }));
+  const uri = await fetchRemoteAsDataUri('http://public.example/x.png', 'image', {
+    transport,
+    resolve: async () => ({
+      addresses: [{ address: '93.184.216.34', family: 4 }, { address: '2606:2800:220:1::1', family: 6 }],
+      private: false,
+    }),
+  });
+  assert.equal(uri, 'data:image/png;base64,AQ==');
+  assert.equal(transport.seen.length, 1, 'the name was fetched once');
+});
+
+test('a name that could not be resolved is not remembered as one', async () => {
+  // A failure is never cached: the throw happens before the entry is written,
+  // so a name that could not be resolved a moment ago can be resolved now.
+  let fail = true;
+  const lookup = async () => {
+    if (fail) throw new Error('ENOTFOUND');
+    return [{ address: '10.9.8.7', family: 4 }];
+  };
+  await assert.rejects(() => resolveVetted('flaky.example', { lookup, cache: true }), 'the failure is the answer');
+  fail = false;
+  const second = await resolveVetted('flaky.example', { lookup, cache: true });
+  assert.equal(second.private, true, 'the name was asked again — the failure was never cached');
+});
+
+// The announced size is enough to refuse on: a server that says it is
+// sending 50 MB is refused before a byte of it is read, so a hostile URL
+// cannot turn the bridge into a memory hose.
+test('a hostile content-length is refused before the body is read', async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'image/png', 'content-length': String(50 * 1024 * 1024) });
+    res.end('x');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  try {
+    await assert.rejects(
+      () => pinnedGet(`http://public.invalid:${port}/huge.png`, {
+        addresses: [{ address: '127.0.0.1', family: 4 }],
+        maxBytes: 1024,
+      }),
+      /too large/,
+    );
+  } finally {
+    server.close();
+    server.closeAllConnections?.();
+  }
+});

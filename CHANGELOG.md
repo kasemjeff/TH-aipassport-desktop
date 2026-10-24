@@ -5,8 +5,227 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ## [Unreleased]
 
+### Changed
+
+- **Node 20 is enough to run this.** The floor was Node 22, and it was never a
+  technical requirement: the runtime imports `node:*` builtins that all exist
+  in Node 20, and the `node:test` features the suite uses — the `lcov`
+  reporter, `suite()` — are in 20 as well. So `engines`, the installers,
+  `aipass status`, the setup doctor, the README badge, the deploy image and
+  the docs all say 20 now, and CI runs the floor beside the maintained LTS
+  lines. The packaged desktop is unaffected either way: it ships its own Node
+  as the sidecar, so the machine that installs it needs none.
+- **The backend stops asking the bridge a question that cannot be answered.**
+  The check that decided whether a bridge was already running asked the
+  bridge's **root** path — a path behind the bearer gate, so the answer was
+  always 401 and always read as "no bridge". Every backend therefore started a
+  bridge of its own: a second process fighting for the port, holding
+  `<home>/logs/bridge.log` open, and a log file nothing could delete while
+  that process lived. The check asks `/status`, the one route that needs no
+  token.
+- **The window's plugin list is the truth even in its first second.** The
+  backend loads the installed plugins in the background when it comes up, and
+  a window that asked for the list in that window was told "no plugins" and
+  painted an empty list for the life of the window. The listing now waits for
+  the load that is already on its way.
+- **A provider's catalog deadline holds the loop it waits on.** The deadline
+  was Node's own timeout signal, whose timer does not keep the event loop
+  alive: a process whose only pending work was the catalog fetch ended with an
+  unsettled promise (exit code 13) instead of the message that names the
+  provider that stayed silent. The deadline is now a timer the process holds,
+  and it is cleared when the fetch answers.
+- **The window is a set of modules, not one file.** `desktop/ui/app.js` was
+  four thousand lines holding the transport, the transcript, the panels, the
+  settings sheet, the commands and the theme. It is now the entry: the shared
+  context and the wiring. The parts are `ui/rpc.js` (the backend client),
+  `ui/state.js` (what the window remembers), `ui/transcript.js` (the
+  conversation), `ui/settings.js` (the sheet), `ui/commands.js` (the slash
+  palette and its handlers) and `ui/panels/` (the files and the sessions
+  rail). Nothing changed for the person using the app; what changed is that a
+  change in one part no longer has to be read against the whole page.
+- **The settings sheet is one page per tab, and each page saves its own
+  fields.** The sheet was one function of nine hundred lines with every
+  category's code inside it and one validation block at the bottom. Each tab
+  now renders its own page and answers for itself: what it would write, and
+  what is wrong with what was typed. A tab that has nothing to write says so,
+  and the sheet asks all of them before it writes anything.
+- **The backend's methods live in one module per domain.** The window's
+  backend was a single file with a `methods` object that held the provider
+  registry, the project switch, the attachments, the plugins, the update
+  service, the file index and the session — all in one closure. They are now
+  `aipass-bridge/harness/rpc/{core,settings,session,files,plugins,update}.mjs`,
+  sharing one context, and the contract between the window and the backend
+  reads all of them.
+- **The run's own state is one object, and the stages of a run are modules.**
+  The loop was one function of more than a thousand lines: the send pipeline,
+  the DONE gates and the budgets shared a handful of variables that existed
+  nowhere else. They live in `aipass-bridge/harness/run/` now — the state in
+  `RunContext`, the stages in `send.mjs`, `gates.mjs` and `budgets.mjs` — so
+  the policy of a stage can be read, and pinned, without a run around it.
+
 ### Added
 
+- **The person's own commands, at the moments that matter.** A hook is a
+  command line the person wrote, run by the harness at a named moment: after a
+  run stages a change (`afterWrite`), before the model's own git commit
+  (`beforeCommit`), and when the run ends (`done`). The command's verdict
+  comes back — to the model after a change, to the person as a note at the end
+  — so "run the linter after every edit" is a setting, not a habit. A hook
+  that fails is REPORTED and the run continues; a failing `beforeCommit` hook
+  refuses the commit, because a check that only reported itself would let the
+  commit it was meant to stop happen. A hook is the person's command, so it
+  is not put to the model for permission — but its output is screened for
+  secrets and it may not read a secret file.
+  (`harness/hooks.mjs`, `test/hooks.test.mjs`)
+- **The model can ask what this project said before.** A new `RECALL` marker
+  searches the project's own sessions — a plain word match over the newest
+  ones, with the newest first and a cap on what comes back. It is a search
+  over what was already said, not a summary and not a guess, and it says how
+  many sessions it looked at. The question rides the secret floor like any
+  other read.
+  (`harness/memory-store.mjs`, `harness/protocol.mjs`, `test/recall.test.mjs`)
+- **A run can work in its own checkout.** Two runs — or a run and the person —
+  editing one repository fight over the same files, and the category says so
+  out loud. `/worktree` makes a git worktree for the project **outside** it
+  (`~/.aipass/run/worktrees/<name>`, the same rule the sandbox projection
+  follows: nothing lands inside the person's project), and the window works in
+  it from then on: the harness, the overlay and the apply are all confined to
+  that folder, so the files the run writes are not the files the person is
+  editing. The window names the worktree and its path, shows what changed
+  inside each one, can take one away, and sweeps the ones nobody wants (clean,
+  older than a fortnight). The merge is the person's: the window names the
+  branch and the path.
+  (`harness/worktree.mjs`, `test/worktree.test.mjs`)
+- **The archive has a way back.** "เก็บ" (archive) moves an idle session out
+  of the picker's way into `<project>/archive/` — nothing was deleted, but
+  nothing could bring one back either, so the archive was a one-way door. The
+  **session rail** now says how many are in there, lists them, and puts any
+  of them back where it was; the **CLI** does the same from
+  `aipass sessions restore <id>`. Beside it, `aipass sessions prune` (and a
+  button in the rail) deletes what has sat in the archive for months — the
+  one thing in the store that deletes, deliberately narrow: only the archive,
+  only what is past the threshold, only as many as the limit says.
+- **`aipass sessions`** — the conversations this project keeps on disk, from
+  the terminal: `list`, `archived`, `archive`, `restore`, `prune`, `path`. No
+  bridge needed; the store is local.
+
+- **The window says it is working.** A run takes minutes — a model that reads
+  twenty files does not answer in a second — and the window used to say so
+  once: a pulsing dot under the composer, and then nothing for the rest of
+  the run. There is now a **bar over the foot of the transcript**: bouncing
+  dots and a clock that counts the seconds, on screen however far up the
+  reader has scrolled, and gone the moment the run ends. A stop, an update
+  that reloads the window, and a window that came back to a run still in
+  flight all say what they are waiting for.
+- **A reloaded window comes back with its conversation.** Ctrl+R is still a
+  reload — a wedged page needs its escape hatch — but what came back used to
+  be the welcome card over an empty screen: the boot paints that card, and
+  the card said "there is nothing here" over a run that was still going. The
+  card is the note for an *empty* window now: a reloaded window restores the
+  conversation it left, and the welcome card never comes back over it.
+- **The model list heals itself, and says what it is.** The catalog is fetched
+  by the Chrome extension, in the page, from the site — so a window that could
+  not reach a tab used to show a two-model stub with no explanation, and the
+  only way to get the real list was to reload the whole window. The bridge now
+  publishes what the catalog **is** (`/status` → `catalog`: the source, the
+  stamp of the last change, and the last failure) and retries its own stub
+  while an extension is attached. The window rebuilds the dropdown when that
+  stamp moves, names the list it is showing when that list is not the site's,
+  and a failed refresh no longer takes the list away. A **refresh button**
+  beside the model asks for a fresh catalog, and **Ctrl+R inside the model
+  picker** refreshes it where it stands.
+- **The desktop shell's own tests run in CI now.** The Rust side of the app —
+  the tray, the sidecar, the settings migration, the PATH handling — had
+  fourteen unit tests that nothing ever asked for, so a broken one merged
+  green. A CI lane runs `cargo test` for them on both platforms (half of
+  those tests only exist on one side), and the lint runs beside them without
+  being a gate. The window's contract with the backend is checked there too:
+  every RPC method the window calls has to exist on the backend, which is the
+  one thing a page with no types cannot catch for itself.
+- **A floor under the coverage of the code the window runs.** A file whose
+  coverage fell through the floor is a file nobody is testing any more, and
+  the suite stays green while that happens. The gate measures the whole
+  suite — every test file with its own report, merged — and the floors are
+  the numbers the suite measures today (`npm run coverage:gate`).
+- **The desktop launcher's rules are in one file now, and they are tested.**
+  The launcher decides which backend the window talks to, and it was the one
+  file no test could touch: an entry script runs its top level on import.
+  The rules moved to `aipass-bridge/harness/launcher.mjs`, so the port rule,
+  the project rule, the bridge probe, the spawn, the adoption and the busy
+  port are all covered by the suite
+  (`aipass-bridge/test/launcher.test.mjs`).
+
+- **The rail tells you what is where, and lets you arrange it.**
+  The sidebar was two fixed lists: the history and the folder you are in. The
+  **file panel** is a tree you can walk now. A **trail** under the heading
+  walks back to any folder above the one you are in, and the **field** under
+  it searches the **whole project** — a folder with a hundred files is a list
+  nobody scrolls, and a project with a thousand is a tree nobody can walk in
+  their head; each result says which folder it lives in, and the keyboard
+  opens it (Enter) or walks into the list (↓). Every row carries the **type
+  of the file** (a folder, code, an image, a document) and its **size**, the
+  heading says how many there are, and a button reads the folder again — the
+  list is a picture of the disk, and a picture goes stale while you work. A
+  folder that cannot be read **says so** and offers to read it again, instead
+  of looking like an empty one. The **history is grouped by day** — today,
+  this week, this month — so 99 conversations are a few questions and not a
+  wall of clocks, and a session somebody **named** shows its name (the clock
+  face was the name of every session that had none). The **rail folds**: the
+  history and the file list each have a chevron, the reader decides which one
+  gets the 264 pixels, and the window remembers the answer. The rows answer
+  the **arrow keys** too, and show where the keyboard is
+  (`desktop/ui/index.html`, `desktop/ui/app.js`, `desktop/ui/styles.css`,
+  `aipass-bridge/harness/rpc.mjs`).
+- **Finding a file is a filter, not a walk.** The backend keeps an index of
+  the project's paths for a minute and answers `fs.search` from it, so the
+  search keeps up with the keyboard; the index is built by the same rules
+  the tools walk by — the skipped folders, `.gitignore`, the secret files,
+  and the links that point out of the project — and it is dropped when the
+  tree changes (`aipass-bridge/harness/rpc.mjs`).
+- **The search finds the file you meant, and the line inside it.**
+  The quick-open of the window is a **fuzzy** one now: "apjs" finds
+  `desktop/ui/app.js`, "app" ranks `app.js` above `apply.mjs`, and the letters
+  that matched are **picked out in the result** — the reader sees why the row
+  is in the list, not only that it is. The rules live in one module
+  (`harness/fuzzy.mjs`): the file name beats a folder name, the start of a
+  word beats the middle of one, a run of letters beats the same letters
+  scattered. The match is a small **dynamic program**, not a walk: every
+  position of the text is tried against every letter of the word, and the
+  best path wins — so in "xa_ab" the word "ab" fits the "a" that begins a
+  word, not the one buried inside "xa", which is the one a greedy matcher
+  takes and never looks past. The same field has a **second mode**: the
+  button at its end, or **Ctrl+Shift+F**, searches **inside** the files — the
+  answer is the line, where the word was found, and one click opens the file
+  **on that line**. The lines of the files are **kept for a minute**, so the
+  second search is a filter over memory instead of a walk over the disk
+  (`aipass-bridge/harness/fuzzy.mjs`, `aipass-bridge/harness/rpc.mjs`
+  (`fs.search`, `fs.grep`), `desktop/ui/{index.html,app.js,styles.css}`).
+- **The app can update its own code now — the parts that are not the binary.**
+  The window checks a **signed** release feed: the signature is verified
+  against a public key that is compiled into the app, so a compromised
+  release host cannot hand the app something to run, and an old feed
+  replayed at you is refused. When the feed names a newer content tree — the
+  harness, the bridge and the window's own files — the app shows it as a
+  banner with one button; the click is the consent, nothing is applied while
+  a run is in flight, and the pack is checked against the hash inside that
+  signed feed before a single file is written. The new tree is promoted
+  atomically and the previous one is kept, so a rollback is a click and not a
+  reinstall. The **binary is not touched**: the shell still waits for a
+  person and the installer, and both version numbers are on screen — the
+  binary's and the content's — so "which build am I running" still has an
+  answer. `/update` in the window shows the state
+  (`docs/UPDATE_DESIGN.md`).
+- **The shell can be handed over to the installer — and the gate is closed.**
+  The window now offers the new *installer* as well as the new content: the
+  click asks the backend to fetch the installer, check it against the signed
+  feed, and leave a command; the shell reads the command, hashes the
+  installer again with the app's own Node, starts the handover (the app
+  closes, the installer runs, the app comes back) and refuses anything whose
+  hash is not the one it was handed. **It refuses to run an unsigned
+  installer**, and the Windows installer is unsigned today, so the path
+  cannot run yet — the gate is the signed feed's own word about the
+  artifact, so only the release key opens it. The button says that the app
+  will close, and a refusal is said on screen instead of the app vanishing.
 - **The links a web search brings back are links again.**
   A search answers with prose and a `sources:` block, and until now that block
   held addresses nobody could use: the search edge answers with opaque
@@ -247,6 +466,97 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 - **Build version in the window.** `status()` carries `app` (the build that
   wrote the backend), shown in `/status` and the health page — a stale
   install reads as a version instead of a mystery.
+- **An applied change can be taken back.** The only way back from an apply
+  used to be `git restore` by hand — and the person who never asked for git
+  had none. Before an apply writes, the files it is about to change are
+  snapshotted into `~/.aipass/run/checkpoints/<projectKey>/`, outside the
+  project, and the answer to the apply carries the checkpoint's id
+  (`checkpoints.list`, `checkpoints.restore`, `checkpoints.remove` over the
+  RPC). A restore puts the old bytes back — the same bytes, not a
+  re-encoding: a BOM, CRLF and Thai survive the round trip — and a file
+  that did not exist before the apply is removed again. What it is NOT: a
+  general undo. It undoes one apply, and only the files that apply touched;
+  anything a run changed outside an apply is not in the store. Twenty
+  checkpoints are kept per project, and the oldest go. The window lists them
+  (the pending panel, and `/checkpoints` for the whole list) and has the
+  button that puts the old bytes back
+  (`harness/checkpoints.mjs`, `test/checkpoints.test.mjs`).
+- **`GIT` can write — when you give it the power.** `stage`, `commit` and
+  `branch` exist now, and they are OFF until the run was given
+  `allowGitWrite` (a settings key, off by default, so a run never rewrites
+  the repository's history on its own; the CLI's `--allow-git-write` is the
+  same consent from a terminal, and `--allow-verify` is for the marker
+  below). A git write is classified as a
+  WRITE, so `ask` mode asks before it runs — the same gate every write
+  rides. The wrapper uses argv arrays and never a shell string, refuses a
+  path that leaves the project (lexically and through a symlink), and a
+  commit refuses an empty message or an empty index. The window has
+  `git.status|stage|commit|branch` as the human's own buttons — they live on
+  the sheet's **git** page, act on the project and report what changed, and
+  they do not consult the model's permission mode, because a person clicking
+  a button is the consent
+  (`harness/git.mjs`, `test/git.test.mjs`).
+- **The model can ask for a check.** A new `VERIFY` marker lets the model
+  ask for a check mid-run, instead of waiting for the DONE gate to run one
+  on its own. The declared check runs first — the run's `verifyCommand`, or
+  the project's `.aipass/check.txt` — and the checker (the read-only child
+  that runs the project's own checks) is the fallback. The result comes back
+  as an ordinary tool result, so the model reads what the command said. It
+  is a shell call, so it rides the shell gate — and it needs the shell to be
+  on at all — and it is off by default
+  (`allowVerify`): the preamble that teaches the marker is behind the same
+  switch, so a run that cannot use it is never told about it
+  (`harness/protocol.mjs`, `harness/tools.mjs`, `harness/loop.mjs`,
+  `test/verify-marker.test.mjs`).
+- **The account does more than chat, and the harness can reach it.** The
+  live catalog carries image, video and music models, and the service
+  publishes presets for them (tones, formats, image styles, video styles).
+  The harness can list the media models with the options each one accepts,
+  resolve a preset by its English name, its Thai name, its code or its id,
+  run a generation, and KEEP the file — under `~/.aipass/media/` by
+  default, outside the project, because a render must not land in a
+  repository by accident. An option the model does not declare is dropped
+  BEFORE the request: the upstream takes a value it will not use and
+  refuses it later, once the credits are gone. A generation waits for the
+  media timeout, not the idle one — a render sits quiet for minutes, and the
+  idle clock killed images that had already spent the credits. The window's
+  sheet has the page that makes one: only the options the chosen model
+  accepts are on screen, and the answer names the file it wrote and the
+  options it dropped
+  (`harness/media.mjs`, `harness/rpc/media.mjs`, `test/media.test.mjs`).
+- **A session can be kept, and the history can be browsed.** A session
+  exports as markdown or as one self-contained HTML page — no script, no
+  external asset, everything escaped, because a transcript holds the model's
+  own words and words can carry markup. Nothing is dropped: an entry type a
+  newer build wrote is still in the file, so it is still in the export, with
+  its type named. The project's sessions can also be browsed as a tree
+  grouped by day — the same grouping the window's history rail uses, as
+  data. The window has both: `/export` keeps the open session as markdown
+  or HTML, `/tree` opens the sessions by day
+  (`session.export`, `session.tree`; `harness/export.mjs`,
+  `test/export.test.mjs`).
+- **Work can be scheduled for a time of day.** A task is a local time
+  (`HH:MM`), a project folder and something to do; it lives in
+  `~/.aipass/schedule.json` (owner-only) and runs through the CLI, so a
+  scheduled run is a run like any other. A due entry runs once and is then
+  spent; a disabled entry never runs. The limits are honest ones: the
+  backend ticks nothing by itself — the window asks it to run what is due —
+  and a scheduled run needs the bridge and a logged-in tab like any other
+  run. The window's sheet has the page that adds one: what to do, at what
+  local time, every day or once
+  (`schedule.list|add|remove|runDue`; `harness/schedule.mjs`,
+  `test/schedule.test.mjs`).
+- **An editor surface.** `ide-extension/` is a VS Code extension that drives
+  the SAME local backend contract the window uses (`POST /rpc` and
+  `GET /events`, behind the loopback token). It does not talk to the
+  bridge's OpenAI-compatible endpoint, and cannot: that endpoint refuses
+  an agent-style system prompt and owns the conversation server-side, which
+  is why the harness sends its markers as user messages. The panel runs a
+  task, streams the run, answers the permission and plan questions, shows
+  the staged changes, stops the run and shows the credit meter. It is a
+  client, not a second app: it never starts the agent, and the settings
+  sheet, the plugin installer and the update service stay in the window
+  (`ide-extension/README.md`, `ide-extension/protocol.md`).
 - **An empty credit pool names itself.** The welcome card gains a fourth
   readiness row (credits available/limit) only when the quota is known: 0
   reads as "รอรอบถัดไป หรือใช้โมเดล free-credit" instead of a blank window,
@@ -278,6 +588,423 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **The review pass on the window's work surfaces.** A live run whose
+  transcript trimmed for the first time kept its cursor one row early, so the
+  fold swallowed the trim marker and the row before the run; the marker now
+  moves the cursor with the rows (`desktop/ui/transcript.js`,
+  `test/transcript-bound.test.mjs`). The archive bar's buttons were invisible
+  because `#sessions li > button` outranked the bar's own rule
+  (`desktop/ui/styles.css`). A schedule list that could not be read said "no
+  tasks" in both the sheet and `/schedule`; it now names the failure. The new
+  git, media, schedule and export controls carry accessible names, and a
+  worktree cannot be switched or removed under a live run.
+- **A failed edit no longer lets a commit ride behind it.** After an edit fails
+  in a reply, the chain guard skipped another edit or a RUN, but it let `GIT`,
+  `VERIFY` and plugin markers keep running — so a commit could record a tree
+  the reply had already broken, and a check could pass against it. The guard
+  now asks the same classifier the permission gate asks: only reads and
+  fetches survive a failure, and the GIT tool's own commit meets the same
+  red-test gate as a RUN that spells `git commit`.
+- **Git's subcommand grammar has one owner, and an unknown subcommand is a
+  write.** The permission engine, the commit gate and the GIT tool each
+  parsed global options their own way; `-C`, `-c`, `--git-dir` and
+  `--work-tree` could hide the subcommand from one reader and not another.
+  All three read `harness/git.mjs` now. The old write blocklist is an explicit
+  read allowlist: `update-ref`, `filter-branch`, `worktree` and `config` are
+  writes, not reads, and the branch/tag/remote/stash forms that only list are
+  still reads. The GIT tool refuses a write with the subcommand it saw.
+- **The bootstrap snapshot keeps git's status column, and a bad spill limit
+  is not a deletion order.** `git status --short` prints a leading space for
+  an unstaged change; trimming both ends of the snapshot removed it, so the
+  model could not tell ` M file` from `?? file`. The snapshot trims only the
+  end now. Separately, `AIPASS_SPILL_KEEP` went through `Number()` unguarded:
+  an empty value became `0` and cleared every spill, and `NaN` silently kept
+  them all. Only a finite positive number is a cap now, and anything else
+  uses the documented default. Spill files are written with `fs.promises`,
+  and the sweep runs in the background instead of blocking the result the
+  model is waiting for.
+- **The bridge's extension channel has a token.** Any local process that
+  learned a job id could post as the extension. The bridge now mints a
+  random token per run, hands it to the extension in the `ready` frame, and
+  refuses every `/ext/*` post that does not carry it — so the extension and
+  everything else on the machine are told apart. The token changes with
+  every bridge run, so nothing about it is worth carrying around, and the
+  loopback bearer gate still comes first.
+- **A chat that lands in the extension's reconnect gap waits for it.** The
+  MV3 service worker cycles its SSE stream every few minutes, and in that
+  ~3 s gap there is briefly nobody attached — a chat that landed there
+  failed outright. A job now waits a grace window (5 s,
+  `AIPASS_DISPATCH_GRACE_MS`) for the extension to come back. The cache
+  refreshes do not wait: nobody is blocked on them, so they fail at once.
+- **A timeout tells the extension to stop.** A video job that outlived its
+  timeout used to keep polling in the page and keep spending the account's
+  quota. A job that fails now sends the same `abort` an abort sends. A
+  reconnecting extension also adopts the job its predecessor left behind,
+  so a later abort still reaches it.
+- **The bridge's attachment path is bounded on both sides of the wire.** The
+  SSRF guard resolves the name and checks EVERY answer it gets — a name
+  that answers with one private address among public ones is refused — and
+  a `data:` URI or a hostile `content-length` is refused before a byte is
+  buffered. A `null` JSON body is a 400 (it is a client mistake, not a
+  server fault) and a body over the limit is a 413 (the old reader
+  destroyed the socket, so the client saw ECONNRESET and never learned
+  why). An image model now rides the media timeout like a video does: the
+  idle clock was killing renders that had already spent the credits.
+- **The MCP manager's close() takes its tools with it.** The tool table
+  outlived the clients, so a project switch told the model about the same
+  MCP markers twice — once for the tools that are there and once for the
+  servers that are gone — and the table grew for the life of the backend.
+- **A window that stops reading cannot grow the backend without bound.** The
+  event fan-out kept every frame for every subscriber, so a window that
+  stopped reading (a laptop lid, a machine asleep) made the backend's
+  memory grow for as long as it stayed away. Each subscriber now has a
+  bounded queue — by frames and by bytes — and when it overflows the OLDEST
+  frames go: the newest ones are the ones the window can still use. The
+  losses are counted, and the subscriber is told it fell behind
+  (`fell_behind`, with the number). The window does not show that notice
+  yet, so the gap is still silent on screen.
+- **A provider that never answers cannot hang a run.** The catalog deadline
+  is now a timer the process holds (Node's own timeout signal does not keep
+  the loop alive, so a CLI whose only pending work was the catalog fetch
+  ended with an unsettled promise instead of a message naming the silent
+  provider), it is cleared when the fetch answers, and it can be given
+  more room per provider (`modelsTimeoutMs`) or once for the machine
+  (`AIPASS_PROVIDER_MODELS_TIMEOUT_MS`, default 10 s). The answer names the
+  provider that stayed silent.
+- **A staged write into a linked heavy directory cannot land in the real
+  project.** The projection SHARES `node_modules`, `dist` and the rest with
+  the real tree instead of copying them, so a write staged into one of them
+  would land in the person's project rather than in the run's copy. It does
+  not: a staged path inside a shared directory is left out of the
+  projection — every segment of the path is checked, so a nested
+  `packages/app/node_modules` is caught too — and the file in the real
+  project keeps its bytes. The refusal itself is the house shape (`err:`,
+  naming the directory) and it is exported (`sharedWriteRefusal`); the model
+  is told at the moment it stages the change, and an apply refuses it again
+  at the last gate before the disk — for a change staged before the rule
+  existed — and names the folder either way.
+- **The window's transcript no longer grows without bound.** Every row the
+  window ever painted stayed in the DOM, so a long run made the page heavy
+  and the scroll slow. The oldest rows go after 300 and a line says how
+  many went — a window that silently drops what it showed is a window that
+  lies about what it did. The rows are the VIEW; the record is the session
+  file on disk, and it still holds everything.
+- **`/help` reads the palette.** The command list in the help was written
+  out by hand, and it had gone stale — the window had commands the help
+  never mentioned, and a command that exists but is not in the help is a
+  command nobody finds. The help now lists the palette itself, so the two
+  cannot disagree.
+- **A session of another project is not reachable by its path.** The window
+  lists sessions with their path, and a path names a session at least as
+  precisely as an id does — but the guard that refused another project's
+  session only recognised the *id* spelling, so a path went straight past it.
+  `session.open`, `session.rename` and `session.delete` accepted a path to
+  another project's session: it opened, it was renamed, and it was deleted.
+  The path is held to the same rule as the id now, and the refusal names the
+  project it belongs to (`aipass-bridge/harness/session.mjs`,
+  `aipass-bridge/harness/rpc/session.mjs`).
+- **Two projects whose paths slugify the same no longer share a picker.** The
+  directory a session lives in is named after the path, and the name is
+  lossy: `C:\a b` and `C:\a-b` are the same slug, and a long path is cut at
+  60 characters. The two projects therefore shared one directory, and the
+  picker showed each of them the other's conversations. The header's own
+  `root` is the authority on which project a session belongs to now — so the
+  picker, the handle and the relocation all ask the file rather than the
+  folder it sits in.
+- **A relocation no longer carries another project's sessions with it.** The
+  same slug collision, one step further: moving a project re-keyed every
+  session in its directory, including a neighbour's, and the neighbour's
+  history was re-stamped to the wrong project.
+- **Two writers on one session no longer lose each other's changes.** The
+  desktop backend and the CLI share one store, and a window can be open on a
+  project while a command line runs in it. The header rewrite was a
+  read-modify-write with no lock, so the second writer put back a copy of
+  the header that was older than the file's: a rename was undone, and the
+  conversation binding — the thing that keeps one session's messages out of
+  another session's history — was rolled back. The rewrite takes a lock and
+  merges against the header on disk now, so a rename in one writer survives
+  an append in the other.
+- **A session id is no longer a birthday collision waiting to happen.** It
+  was eight hex digits of `Math.random()` — 32 bits, and a session id is a
+  FILE NAME, so a collision was not a key that got refused: the new session
+  replaced the old one and the whole conversation was gone without a word.
+  48 bits from the crypto module, and a collision can no longer destroy
+  anything.
+- **A long session no longer takes the window down with it.** A session file
+  was read whole and split into an array of lines — twice the file, in a
+  desktop app that also holds a browser. It is walked in chunks now, and
+  past 64 MB (`AIPASS_MAX_SESSION_BYTES`) the session is refused with a
+  reason rather than loaded.
+- **A command is screened in the transcript the way its output is.** The
+  output of a command was scrubbed of credentials before it entered the
+  session; the command line itself was not, so a credential written into a
+  command (`curl -H "Authorization: Bearer …"`) sat in the transcript on disk
+  in the clear, and was sent back to the model on the next resume. The
+  permission prompt still shows the real command — a person consents to what
+  they can read.
+- **A finished conversation is on the disk.** The entries of a session were
+  appended but never flushed: the header rewrite did not fsync the file, and
+  nothing flushed it at the end of a run either. A power cut could take the
+  end of a conversation — and the header that said how many entries it had —
+  with it. The rewrite now puts the entries and the header on the disk
+  together, and a run that has ended flushes its session once more.
+- **The picker does not read 64 KB to get 2 KB.** Every session's header was
+  read with a 64 KB buffer, and the store has hundreds of sessions. The read
+  is sized to the header now, and the headers the store has read are memoized
+  on the file's mtime+size — the same pair the overlay memoizes its texts on.
+  The picker over 500 sessions went from a quarter of a second to a fortieth
+  of one, and a renamed session is still shown under its new name.
+- **A window file that is gone is a 404, and the backend lives through it.**
+  The window's files are served from disk while the backend runs, and the
+  content update replaces that tree under it — so the file can vanish between
+  the check and the read. The read threw inside the request handler, and a
+  throw there is an unhandled rejection: the backend ended, for every window
+  that was open. A file that is not there is a 404 now, and the read has an
+  error handler of its own. A name that needs percent-encoding is served too.
+  (`aipass-bridge/harness/rpc.mjs`)
+- **The window's stream is bounded, and a slow window loses nothing.** A window
+  that stopped reading grew the backend's memory with the transcript it never
+  read: the frames were queued in this process, with nothing to notice. The
+  fan-out that was written for exactly this (`harness/events.mjs`, with its
+  bounded queue and its "fell behind" notice) was never wired in — it is now.
+  The replay buffer counts BYTES, not UTF-16 code units, so the "4 MB" budget
+  is four megabytes and not twelve of Thai text. And a frame the sink took
+  while it was behind is no longer written a second time on the next flush.
+  (`aipass-bridge/harness/rpc.mjs`, `aipass-bridge/harness/events.mjs`)
+- **The window hears the end of a run once.** The attempts are one run from the
+  window's point of view, and the "finished" frame arrived after EVERY one of
+  them: the window took its working bar down and cleared the staged
+  attachments while the next attempt was still streaming into it. The frame is
+  held now, and published once, after the last attempt.
+  (`aipass-bridge/harness/rpc.mjs`, `aipass-bridge/harness/rpc/session.mjs`)
+- **A stop that lands between two attempts is not lost.** The abort controller
+  belongs to the run in flight, so a stop pressed while the checker was running
+  had no controller to abort — the retry installed a fresh one and carried on
+  with the work the person had told it to stop. The request is remembered until
+  the next run answers it. (`aipass-bridge/harness/harness.mjs`)
+- **A settings save writes only the keys the file knows.** Every key the caller
+  sent was persisted, so a form that typed `modde` instead of `mode` left the
+  typo in `settings.json` for ever, where it read like a setting nobody could
+  change and the sheet never showed it. (`aipass-bridge/harness/rpc/settings.mjs`)
+- **An added provider keeps its own model.** The model the caller pinned
+  belongs to the AiPASS catalog, and another provider was handed it: the run
+  failed with a model that provider had never heard of. The explicit model is
+  the AiPASS provider's; every other provider keeps its own.
+  (`aipass-bridge/harness/rpc.mjs`)
+- **The MCP markers are not duplicated when the project changes.** The tool
+  table outlived the clients it belonged to, so every project switch pushed the
+  same tools in again: the preamble listed each MCP tool once per switch, and a
+  tool whose server was gone was still offered to the model.
+  (`aipass-bridge/harness/mcp.mjs`)
+- **A home that cannot be written does not take the backend down.** The
+  loopback token is minted inside a request handler, and the write was outside
+  any try: a read-only home threw there, and a throw there is an unhandled
+  rejection, which ends this process for every window that is open. The token
+  is written best effort now, and a home that cannot hold it keeps it in
+  memory — the same one on every call.
+  (`aipass-bridge/harness/authtoken.mjs`)
+- **An attachment rides the message it was sent with.** The parts belong to
+  the first message of the RUN; the gate was the session's own first run,
+  which is a different thing. From the second run of a session onward the
+  picture was read, encoded and then dropped: the model was asked about a file
+  it had never seen, and the window reported the send as a success.
+  (`aipass-bridge/harness/run/context.mjs`)
+- **A save no longer undoes the change another surface made.** The settings
+  file is shared by the window, the CLI and the backend, and two of them can
+  write it. A save merged into the copy the process happened to be holding and
+  wrote every other key back unchanged, so a project that had been moved landed
+  back under its old path, with no trace of who undid it. The file is read
+  again before the merge, and a harness picks a side-door change up instead of
+  running yesterday's temperature. (`aipass-bridge/harness/settings.mjs`,
+  `aipass-bridge/harness/rpc.mjs`)
+- **A session of another project is not opened, renamed or deleted.** The
+  lookup fell back to every project's directory, so an id learned from another
+  window reached that window's sessions: one project's Apply could write
+  another's transcript. The fallback now holds only for a project whose folder
+  is gone — the one case where the session is still this person's work — and a
+  refusal names the project it belongs to.
+  (`aipass-bridge/harness/session.mjs`, `aipass-bridge/harness/rpc/session.mjs`)
+- **The QA pass says which step hung.** A step that never finished — a test
+  file that never exits — was waited on in silence until the suite's own
+  ten-minute ceiling, and the pass said nothing for ten minutes. Each step has
+  a ceiling now, and a killed step is a failed step that names itself. The live
+  check carries the loopback token as well, so a backend that refuses it is
+  reported as refusing it instead of as a green line with no model on it.
+  (`scripts/qa-loop.mjs`)
+- **The window can search its own project again.** The file index skipped the
+  secret files with a rule it had never imported, so every name search and
+  every content search in the file panel answered "cannot read" — the panel's
+  own tests stub the search, so a broken index looked like an empty result
+  instead of a failure. The rule now comes from the one place that owns it
+  (`aipass-bridge/harness/rpc.mjs`), and a test asks the backend for real.
+- **A provider switch rebuilds the model list, even when a refresh is in
+  flight.** The list belongs to the provider, so a switch rebuilds it from
+  scratch. But a refresh already in flight was fetching the OLD provider's
+  list, and the switch joined it instead of asking again: the dropdown kept
+  offering the previous provider's model, and the refresh button did nothing
+  at all. The callers that need a different list are queued behind the one in
+  flight (`desktop/ui/app.js`).
+- **A stop that found nothing takes the working bar down with it.** The bar
+  kept beating "กำลังหยุด…" for the rest of the session when the backend said
+  there was no run to stop, so the window said it was working while nothing
+  was (`desktop/ui/app.js`).
+- **The MCP family answers for the project the call is about.** The servers,
+  the tools and the enable/disable switch read the backend's CURRENT project,
+  so two windows on two projects read each other's MCP servers, and the
+  sheet's switch wrote the other project's config
+  (`aipass-bridge/harness/rpc.mjs`, `aipass-bridge/harness/rpc/plugins.mjs`).
+- **The window hears what the run is waiting for.** The bridge's notes — a
+  rate-limit wait, the pace between sends — were bound to an emitter that was
+  not there, so a run waiting out a 429 looked exactly like a stuck one
+  (`aipass-bridge/harness/rpc.mjs`).
+- **Enter in the file filter opens the line the search found.** A content
+  search answered "notes.md:42" and the row opened there; Enter opened the top
+  of the file instead (`desktop/ui/panels/files.js`).
+- **The update answer says what was scheduled.** A caller that asked for no
+  restart was told a restart happened, and one that waits for the backend to
+  come back waited for a restart that was never set
+  (`aipass-bridge/harness/rpc/update.mjs`).
+- **The update check is on the clock its own comment promised.** The window
+  asked once at startup; the comment said once at startup and then every six
+  hours, so a window left open for days never heard about a new content
+  release (`desktop/ui/app.js`).
+- **Two requests in the same millisecond no longer share one key.** The
+  bridge's in-flight set was keyed by the start time, so the first of two
+  requests to close deleted the entry while the other was still running — the
+  bridge could look idle with a request in flight
+  (`aipass-bridge/bridge/server.mjs`).
+- **An edited provider is live at once.** A provider's client is not rebuilt
+  when the provider did not change — a provider client owns the conversation
+  history, and a settings save must not drop it — but an EDITED provider (a
+  new endpoint, a new model list) was keeping the client that answers for the
+  old spec, so the window kept asking the endpoint the person just changed.
+  The client is rebuilt when the spec changed, and only then.
+- **The shell says "I could not say" instead of guessing.** A probe that
+  could not run was reported as "nothing is listening", the opposite of what
+  the probe's own contract says (`desktop/src-tauri/src/main.rs`).
+- **An attached image is an icon, not a broken picture.** The backend holds
+  the bytes and does not hand them back, so the thumbnail was an empty data
+  URL (`desktop/ui/app.js`).
+- **A method nobody has is a 404.** The lookup found the inherited
+  `Object.prototype` members too, so a call for `toString` answered 200 with
+  "[object Undefined]" instead of the 404 that says "there is no such method
+  here" (`aipass-bridge/harness/rpc.mjs`).
+- **A provider spec keeps the fields the provider client reads.** The spec is
+  sanitized on the way in, and the sanitizer dropped `apiKeyHeader`,
+  `apiKeyPrefix`, `maxTokens` and `anthropicVersion` — so a provider that
+  wanted its key under another header, without the `Bearer ` prefix, or with
+  its own token ceiling, was saved without them and the client fell back to
+  its defaults. They survive now, and a header name that is not a token (a
+  newline in it is a header injection) is refused
+  (`aipass-bridge/harness/providers.mjs`).
+- **The window names its controls, and the transcript stops reading itself
+  twice.** The icon buttons in the header and the rail carried only a `title` —
+  a tooltip, which a screen reader does not read when the control takes focus —
+  so half of them were unnamed, and the header's and the composer's selects
+  were nameless too; the theme button also never said which theme was on.
+  Every icon button and every select now carries an `aria-label`, the theme
+  button names the theme that is on now, the two ☰ controls are real buttons
+  that say whether the rail is open, and the transcript holds its
+  announcements with `aria-busy` while a run streams — the answer is painted
+  frame by frame, so a live region that announced every frame read the same
+  half-written sentence again and again. The pending panel's count reads in
+  Thai like the rest of the window, the theme button keeps the icons the
+  markup draws, and `md.js` is no longer loaded twice (`desktop/ui/index.html`,
+  `desktop/ui/app.js`, `desktop/ui/styles.css`).
+- **The desktop stops restarting a backend it can never start.** A busy port
+  was a crash like any other, so the shell's supervisor answered it with a
+  fresh backend — which bound the same port, failed the same way, and was
+  answered with another fresh backend. The log filled with
+  "backend exited — restart attempt 1" and the window sat on a port nothing
+  was answering. A busy port is now a fact about the machine with its own
+  exit code, and the supervisor asks who is holding it: one of our backends
+  (adopt it — the window already points there) or a stranger (say so, with
+  the fix, and back off). The shell asks the port the same question the
+  launcher asks, through the same probe module, so the two cannot drift
+  (`aipass-bridge/harness/rpc.mjs`,
+  `aipass-bridge/harness/backend-probe.mjs`, `desktop/src-tauri/src/main.rs`).
+- **The window no longer adopts a stranger's server.** The shell decided
+  "a backend is already there" from a bare TCP connect, so anything on the
+  port — a program that has never heard of aipass — was adopted, and the
+  window opened against it. The shell asks the same question the launcher
+  asks now, and only our own backend counts as ours.
+- **The bridge no longer piles up.** The bridge is started detached, so it
+  outlives whatever started it, and nothing could end it: the pid file was
+  written by the starter, so it named a process that had often died, and the
+  next bridge overwrote it. One machine had seventy of them alive, holding
+  3.4 GB, and every app on it was slower for it. The bridge now records its
+  own pid when it binds — the one that is really answering — and it ends
+  itself once nobody has used it for ten minutes. The window keeps it alive
+  by asking for the credits every ten seconds, and the extension by holding
+  its event stream open on a four-minute cycle; a bridge nobody is talking
+  to goes away, and `aipass stop` still ends one at once.
+- **The test suite stops leaving a bridge behind.** The suite starts the
+  bridge detached, on a port of its own, and the bridge outlived the run. The
+  suite now ends it at the end, the way it already ended the browser
+  (`scripts/test.mjs`, `scripts/suite-env.mjs`,
+  `aipass-bridge/harness/bridge-pid.mjs`).
+- **A refused message is no longer probed at the edge.** The chain that can
+  actually fix a refusal — drop the risky lines, shorten it, halve it — lives
+  in the client, and the tab could not see it: so the tab re-sent the
+  identical bytes and waited 15 s, then 60 s, before the client was even told
+  the message had been refused. The run sat in "[403] refused at the edge" for
+  a minute and a quarter while the one request that carried on was available
+  all along (recorded live, Oct 21 2026: a 3,721-byte message refused, the
+  same message at 2,242 bytes accepted). The client now says on every send
+  that it rewrites a refusal, and the tab hands the refusal back at once
+  instead of probing — the client fixes the message on the next request, and
+  the run carries on. A client that does not say so keeps the tab's own
+  ladder, since it has no rewrite to offer
+  (`aipass-bridge/extension/page.js`, `aipass-bridge/bridge/server.mjs`,
+  `aipass-bridge/harness/bridge.mjs`, `aipass-bridge/test/page.test.mjs`,
+  `aipass-bridge/test/run-resilience.test.mjs`).
+- **The step's headline is not said twice.** The window showed the model's
+  first line under the step as well as in the bubble, so every step of a run
+  read the same sentence two times. The bubble holds the prose; the headline
+  is only worth a line when the bubble does not carry the same words
+  (`desktop/ui/app.js`, `aipass-bridge/test/ui.test.mjs`).
+
+- **The desktop port is read the way the shell reads it.** `AIPASS_DESKTOP_PORT`
+  was parsed with `Number`, which reads `0x50` as 80 and `1e3` as 1000 — so
+  the backend and the shell could be handed two different ports by one
+  environment variable, and the window opened a port nothing was listening on.
+  The value is decimal digits now, and anything else is refused on both sides
+  (`aipass-bridge/harness/launcher.mjs`,
+  `aipass-bridge/test/launcher.test.mjs`).
+- **The desktop app starts one bridge, not two.** The backend started a
+  bridge of its own in the background while the launcher started one too: the
+  two raced for the same port, and the loser's fifteen-second retry kept the
+  app's process alive after the window was already up. The launcher owns the
+  bridge — it is the one that says so in the banner — so the backend waits for
+  it instead of starting one
+  (`aipass-bridge/harness/launcher.mjs`).
+- **A busy port is named before anything else happens.** The launcher probed
+  the port, then bound it: a server that took the port in between died with a
+  raw `EADDRINUSE` stack. The launcher waits for the bind now, and says which
+  port is busy and what to do about it
+  (`aipass-bridge/harness/launcher.mjs`).
+
+- **A run in the desktop app is no longer refused by its own bridge.** The
+  bridge gates every route but its health probes, and the harness's own bridge
+  client — the one a window's runs speak through — was not presenting the
+  token it minted. Every run was refused with a 401, and the window turned
+  that refusal into "the extension's token is wrong", which sent the reader to
+  paste a token into the extension's popup: a fix for a problem the extension
+  never had. The client presents the token now, and to a loopback bridge and
+  to nothing else, so a remote bridge never sees it
+  (`aipass-bridge/harness/bridge.mjs`, `aipass-bridge/harness/authtoken.mjs`,
+  `aipass-bridge/test/auth.test.mjs`).
+- **The window does the half of the extension's token that it can.** The
+  extension talks to the bridge, not to the window, and a refusal there
+  arrives as "extensions: 0" — the same number a missing extension gives. The
+  bridge now reports which of the two it is (`/status` carries
+  `extensionToken`), and the window repeats it: the reader is no longer sent
+  to load an extension that is already loaded, and one click puts the token
+  the window already holds on the clipboard, so the step that only the popup
+  can do is a paste. A token refusal on the window's own side no longer
+  points at the extension at all (`aipass-bridge/bridge/server.mjs`,
+  `aipass-bridge/harness/rpc.mjs`, `desktop/ui/app.js`,
+  `aipass-bridge/test/ui.test.mjs`).
 - **The build lane finds the bundler.** The bundler is the Tauri CLI, and this
   repository installs no npm packages (the zero-dependency rule), so nothing
   put `tauri` on PATH and the lane died on every platform with "spawnSync
@@ -308,30 +1035,6 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   lock the owner had put on that folder — so a folder made read-only took the
   write anyway. The mode is set when the store creates the folder and left
   alone afterwards (`aipass-bridge/harness/memory-store.mjs`).
-- **The suite now runs when the code lands.** The workflow's push filter named
-  `master`, but this repository's only branch is `main` — the remote has no
-  `master` at all, and the history holds no pull-request merge either, so
-  every push went in without the suite ever being triggered. The filter names
-  `main` now, and the comment above it says which branch the repository
-  actually uses (`.github/workflows/test.yml`).
-- **The command list is the whole list.** The bridge README's command table
-  carried twelve of the nineteen subcommands the CLI dispatches: `chat`,
-  `providers`, `scale`, `plugin`, `mcp`, `setup` and `stop` were all absent
-  from it, so a reader working from the table alone would not have known they
-  existed. The table now carries every one of them, and `aipass --help`
-  remains the list the CLI itself prints (`aipass-bridge/README.md`).
-- **The docs that describe the repo can be found from the repo.** The README's
-  documentation table listed twelve of the fifteen files in `docs/` —
-  `UX.md` and `PLUGINS_MCP_DESIGN.md` were not in it, so the window's design
-  notes and the plugin/MCP install design were reachable only from the
-  worklog. And the two links that point between the bridge's README and its
-  internals reference aimed one directory too high, so neither resolved from
-  where it was written. All three are listed and both links resolve now.
-- **Node 22 is the floor, stated everywhere.** `engines` has said `>=22` since
-  the type-check seed, while the installers, `aipass status`, the setup doctor
-  and `aipass-bridge/package.json` still said `>=20`. They all say 22 now,
-  matching the CI matrix (22/24) and the September 2026 runner floor. The
-  README badge already said 22.
 - **The desktop app starts in dev.** `npm run tauri:dev` died before the
   window: Tauri runs the `beforeDevCommand` in the directory it was started
   in — the repo root — and the command named `node main.mjs`, which is the
@@ -974,13 +1677,6 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Changed
 
-- **The root package says it is an ES module.** `package.json` had no `type`
-  field, so Node read the window's three scripts (`desktop/ui/app.js`,
-  `markers.js`, `md.js`) as CommonJS and re-parsed them as ES modules on
-  every run, warning each time. Every `.js` file in the repository is already
-  an ES module — the extension's are loaded by Chrome, and the test harness
-  runs them through `new Function` — so the field is simply declared now
-  (`package.json`).
 - **The app's icon is the app's own logo.** The icon was a blue pixel letter
   'a' on a dark square while the window drew a terracotta rounded square with
   a four-point star — two marks for one product, and the pixel one is what
@@ -1128,44 +1824,6 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
-- **The WAF placeholder for `Bypass` matched its own rule.** The table's
-  promise is that a placeholder shares no substring with the original;
-  `BYPASS-ARG` broke it, because the rule matches `Bypass` at any word
-  boundary and `-` is one. A text encoded twice — a tool result, encoded
-  by its caller and again by the message it rides in — came back as
-  `Bypass-ARG`, and an edit that quoted the file as the model had seen it
-  no longer matched. The placeholder is one word now, and the rule that
-  no placeholder matches its own rule is pinned.
-- **A forked session stated the parent's entry count.** A fork's header
-  was a copy of the parent's, so a fork from one entry claimed the
-  parent's whole count — and the count may lag, never overstate. The fork
-  states its own now.
-- **Removing a session said nothing.** `remove()` answered "did I remove
-  it?" with an existence check that ran after the unlink, so the answer
-  was always no.
-- **A range that starts at zero was read backwards.** Lines are counted
-  from 1; a range starting at 0 sliced with a negative index, which
-  means "from the last element". It is named as such instead.
-- **An attachment queued for the next message was lost when the send was
-  retried.** The queue is emptied by handing the parts over, and they
-  were taken again on every attempt, so a refused send went out without
-  the attachment — silently, because the tool had already answered
-  "queued … it goes out with your next message".
-- **The desktop shell's readiness probe went in without the token.** The
-  backend refuses every `/rpc` call without the loopback bearer, so a
-  probe that went in bare was answered "unauthorized" — which the probe
-  read as "not running". The shell took a busy port as a free one, and
-  the backend `tauri dev` waits for never came up.
-- **The QA loop called a refusing backend healthy.** The live check
-  printed its answer as "ok" without looking at it, so a backend that
-  refused every call came back as a green line with an undefined model.
-- **A task's own credit budget was dropped.** A task may cap its own
-  credits; the key was read off the raw spec and lost by the
-  normaliser, so the cap came out as 0 — off — and the row recorded
-  "maxCredits: 0" for a run that was supposed to be capped.
-- **Forty-two em dashes, arrows and ellipses in two files were mojibake** —
-  read as latin-1 and written back as UTF-8. The text was still valid
-  UTF-8, so the check for mangled files never saw them.
 - **Node 22 is the floor, stated everywhere.** `engines` has said `>=22` since
   the type-check seed, while the installers, `aipass status`, the setup doctor
   and `aipass-bridge/package.json` still said `>=20`. They all say 22 now,

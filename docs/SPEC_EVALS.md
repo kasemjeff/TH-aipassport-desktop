@@ -72,7 +72,7 @@ be separate processes:
 2. `process.env.AIPASS_HOME = <attempt>/home` (`harness/settings.mjs`
    `aipassHome`) and pass an explicit `store: new SessionStore(<attempt>/home/sessions)`;
    restore the env after;
-3. `new Harness({ root: <attempt>/tree, bridge, model, store, events, options: {
+3. `new Harness({ root: <attempt>/tree, client: bridge, model, store, events, options: {
    maxSteps, thinking, maxCredits, mode: 'auto', allowRun } })` — `auto` is the
    CLI's own mode (`agent.mjs`): writes stage without asking, shell follows
    `allowRun` (`permissions.mjs` evaluate);

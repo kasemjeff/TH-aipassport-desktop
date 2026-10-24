@@ -37,7 +37,7 @@ const askHarness = (root, queues) => {
   const events = new Emitter();
   const store = new SessionStore(tempDir());
   const h = new Harness({
-    root, bridge, store, events,
+    root, client: bridge, store, events,
     options: { mode: 'yolo', allowRun: false, maxSteps: 6 },
   });
   return { h, bridge, events };

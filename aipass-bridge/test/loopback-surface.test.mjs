@@ -167,7 +167,17 @@ test('the suite does not use the developer\'s bridge port', () => {
 // an empty value was 8790 to one and 0 to the other — so the window opened
 // http://127.0.0.1:0/ with nothing behind it.
 test('the desktop port is validated on both sides', () => {
-  const node = fs.readFileSync(path.join(repo, 'desktop', 'main.mjs'), 'utf8');
+  // The Node side's rule lives where the launcher keeps it. It moved out of
+  // `desktop/main.mjs` into `harness/launcher.mjs` when the launcher's rules
+  // were given a home a test could drive — so the test looks in both places
+  // and insists that ONE of them refuses a value that is not a port. The
+  // rule is the point, not the file it is written in.
+  const node = [
+    fs.readFileSync(path.join(repo, 'desktop', 'main.mjs'), 'utf8'),
+    fs.existsSync(path.join(repo, 'aipass-bridge', 'harness', 'launcher.mjs'))
+      ? fs.readFileSync(path.join(repo, 'aipass-bridge', 'harness', 'launcher.mjs'), 'utf8')
+      : '',
+  ].join('\n');
   assert.match(node, /AIPASS_DESKTOP_PORT is not a port/,
     'the backend refuses a value that is not a port');
   assert.match(node, /n < 1 \|\| n > 65535/,

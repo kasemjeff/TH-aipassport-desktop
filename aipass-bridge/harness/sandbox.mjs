@@ -155,6 +155,56 @@ export function sharedDirs(root) {
   });
 }
 
+/**
+ * The heavy directory a path sits in — the one the projection LINKS — or null.
+ *
+ * The projection shares the heavy directories (node_modules, dist, …) with the
+ * real tree instead of copying them, so a write into a linked directory is a
+ * write into the REAL project (SECURITY.md:385). The question has to be asked
+ * before anything is written.
+ *
+ * Every segment is checked, not only the first: a nested `node_modules`
+ * (packages/app/node_modules) is linked exactly like the one at the root.
+ *
+ * @param {string} root the project the projection is made of
+ * @param {string} abs  the path in question
+ * @returns {string|null} the name of the shared directory, or null
+ */
+export function sharedDirFor(root, abs) {
+  const base = path.resolve(root);
+  const rel = path.relative(base, path.resolve(abs));
+  if (!rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return null;
+  let cur = base;
+  for (const part of rel.split(path.sep)) {
+    cur = path.join(cur, part);
+    if (!HEAVY.has(part)) continue;
+    // Only a folder that is really there is linked: a heavy NAME that is not
+    // a directory in this project is an ordinary one.
+    try { if (fs.statSync(cur).isDirectory()) return part; } catch { return null; }
+  }
+  return null;
+}
+
+/**
+ * The refusal for a write into a shared heavy directory.
+ *
+ * The house shape: a tool failure starts with `err:`. The message names the
+ * directory, because the model has to know WHICH folder it may not write to,
+ * and it says what the alternative is — the rule the repo holds itself to is
+ * that the overlay is the only write surface of a run, and the projection
+ * lives OUTSIDE the project so a copy of the source can never be committed.
+ *
+ * @param {string} root the project the projection is made of
+ * @param {string} abs  the path in question
+ * @returns {string|null} the refusal, or null when the path may be written
+ */
+export function sharedWriteRefusal(root, abs) {
+  const dir = sharedDirFor(root, abs);
+  if (!dir) return null;
+  const rel = path.relative(path.resolve(root), path.resolve(abs)).split(path.sep).join('/');
+  return `err: ${rel} is inside ${dir}, which the projection SHARES with the real project — a write into it would land in your project, not in the run's copy. Change the source instead, or copy the file out of ${dir} first.`;
+}
+
 // Copies run a bounded number in flight: a big tree should saturate the disk,
 // not the file-descriptor table.
 const COPY_GATE = 16;
@@ -182,8 +232,10 @@ async function gatedCopy(src, dst) {
 /**
  * Project the tree at `root` into `dest`, overlay applied:
  *   - every staged path (except deletes) is written as its staged content
+ *   - a staged path inside a SHARED heavy directory is refused: the
+ *     projection links those folders, and a write through a link lands in the
+ *     real project
  *   - everything else is copied, except HEAVY dirs, which are junctioned
- *     unless a staged edit lives inside them
  *   - `.aipass` never enters the projection, and neither does `.git` — a
  *     projected run sees a tree with no repository (the marker below explains)
  *
@@ -193,7 +245,7 @@ async function gatedCopy(src, dst) {
  * fixed-width gate, and a command's in-place writes still land in the throwaway
  * copy rather than the project.
  */
-export async function materializeTree(root, overlay, dest, { signal = null, onSkip = null } = {}) {
+export async function materializeTree(root, overlay, dest, { signal = null, onSkip = null, onRefuse = null } = {}) {
   // (stop) The projection is the longest wait a RUN has before its command
   // even starts, and the copy used to run to the end while the window said
   // the run was stopping. A stop ends it here, mid-walk.
@@ -205,7 +257,6 @@ export async function materializeTree(root, overlay, dest, { signal = null, onSk
   };
   stopped();
   const staged = overlay.keys();
-  const underStaged = (abs) => staged.some((p) => p.startsWith(abs + path.sep));
 
   // Staged paths first, creation order: a staged new file whose directory does
   // not exist on disk yet still has to appear.
@@ -216,6 +267,18 @@ export async function materializeTree(root, overlay, dest, { signal = null, onSk
     if (rel.split(path.sep)[0] === '.git') continue; // never projected: see below
     const target = path.join(dest, rel);
     if (overlay.isDeleted(abs)) continue; // deleted for this run: not projected
+    // A write into a LINKED heavy directory lands in the REAL project: the
+    // projection shares those folders with the tree, because a copy of a
+    // node_modules costs a minute per RUN. The rule the repo holds itself to
+    // is that the overlay is the only write surface of a run — so the write
+    // is refused here, the folder stays a link, and the reads still work.
+    // (The heavy folder used to be copied whole instead, which was slow and
+    // still let the command write into the real tree.)
+    const shared = sharedDirFor(root, abs);
+    if (shared) {
+      onRefuse?.(rel.split(path.sep).join('/'), shared);
+      continue;
+    }
     await fs.promises.mkdir(path.dirname(target), { recursive: true });
     await fs.promises.writeFile(target, overlay.readAt(abs));
   }
@@ -237,7 +300,10 @@ export async function materializeTree(root, overlay, dest, { signal = null, onSk
       const dst = path.join(dstDir, e.name);
       if (skip.has(src)) continue; // projected already
       if (e.isDirectory()) {
-        if (HEAVY.has(e.name) && !underStaged(src)) {
+        if (HEAVY.has(e.name)) {
+          // Linked, never copied — and always: a heavy folder that held a
+          // staged edit used to be copied whole (a minute per RUN), and that
+          // edit is refused above, so there is nothing to copy it for.
           try { fs.symlinkSync(src, dst, 'junction'); continue; } catch { /* copy instead */ }
         }
         jobs.push(walk(src, dst));

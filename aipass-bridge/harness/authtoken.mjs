@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { aipassHome } from './settings.mjs';
+import { formatLogLine } from './log-line.mjs';
 
 export const TOKEN_FILE = '.token';
 
@@ -47,6 +48,12 @@ export function loadOrMintToken(home = aipassHome()) {
   const env = process.env.AIPASS_TOKEN?.trim();
   if (env) return env;
   const file = tokenPath(home);
+  // A token that could not be written to disk is held in memory, and it is
+  // the SAME token for every call: a new one on every call would lock the
+  // window out of the backend it is talking to.
+  if (tokenCache.file === file && tokenCache.stamp.startsWith('memory:') && tokenCache.value !== null) {
+    return tokenCache.value;
+  }
   try {
     const st = fs.statSync(file);
     const stamp = `${st.mtimeMs}:${st.size}`;
@@ -57,19 +64,41 @@ export function loadOrMintToken(home = aipassHome()) {
     if (saved) { tokenCache = { file, stamp, value: saved }; return saved; }
   } catch { /* first run — mint below */ }
   const fresh = crypto.randomBytes(32).toString('hex');
-  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-  try { fs.chmodSync(home, 0o700); } catch { /* best effort on Windows */ }
-  fs.writeFileSync(file, fresh + '\n', { mode: 0o600 });
-  try { fs.chmodSync(file, 0o600); } catch { /* best effort on Windows */ }
+  // The file is written best effort. The mint happens inside a request
+  // handler, and a throw there is an unhandled rejection — which ends this
+  // backend for every window that is open. A home that cannot be written (a
+  // read-only disk, a full one) must not be able to do that: the token still
+  // works for this run, because the window reads it from the backend and not
+  // from the file.
+  let written = false;
+  try {
+    fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(home, 0o700); } catch { /* best effort on Windows */ }
+    fs.writeFileSync(file, fresh + '\n', { mode: 0o600 });
+    try { fs.chmodSync(file, 0o600); } catch { /* best effort on Windows */ }
+    written = true;
+  } catch (err) {
+    // The caught value is unknown to the type checker; the annotation says
+    // what the error is allowed to carry, and changes nothing at runtime.
+    const e = /** @type {{code?: string, message?: string}} */ (err);
+    console.error(formatLogLine({
+      level: 'warn',
+      msg: `the loopback token could not be written to ${file} (${e?.code ?? e?.message}) — it is held in memory for this run`,
+    }));
+  }
   // Cache the token just written, from the recreated file's own stat. Without
   // this the stale pre-delete entry survives with its old mtime:size stamp,
   // and a recreate landing in the same tick (Windows' clock) reports that
   // exact stamp — the next check would then answer "no" to the very token the
   // file now holds (the 2026-10-17 auth flake).
-  try {
-    const st = fs.statSync(file);
-    tokenCache = { file, stamp: `${st.mtimeMs}:${st.size}`, value: fresh };
-  } catch { tokenCache = { file: null, stamp: '', value: null }; }
+  if (written) {
+    try {
+      const st = fs.statSync(file);
+      tokenCache = { file, stamp: `${st.mtimeMs}:${st.size}`, value: fresh };
+    } catch { tokenCache = { file: null, stamp: '', value: null }; }
+  } else {
+    tokenCache = { file, stamp: `memory:${fresh}`, value: fresh };
+  }
   return fresh;
 }
 
@@ -106,6 +135,27 @@ export function isLoopbackUrl(url) {
   return host === 'localhost'
     || host === '::1'
     || /^127(\.\d{1,3}){3}$/.test(host);
+}
+
+/**
+ * The headers a request to `url` carries: the bearer token on loopback, and
+ * nothing anywhere else.
+ *
+ * The bridge gates every route but its health probes, so a client that talks
+ * to it presents the token it minted — chat.mjs and doctor.mjs have always
+ * done this, and the harness's own bridge client did not, so every run the
+ * window started was refused with a 401 that the window blamed on the
+ * extension. One spelling of the rule, so the next client cannot forget it
+ * again.
+ *
+ * The test is about the HOST, not a string prefix: a prefix would be true by
+ * construction and would ship the token to a remote bridge.
+ *
+ * @param {string} url @param {string} [home] @returns {Record<string, string>} */
+export function authHeadersFor(url, home) {
+  if (!authRequired()) return {};
+  if (!isLoopbackUrl(url)) return {};
+  return { authorization: `Bearer ${loadOrMintToken(home)}` };
 }
 
 /** Constant-time bearer check against the active token.

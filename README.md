@@ -5,7 +5,7 @@
 > community bridge that reaches the site through your own logged-in browser tab.
 
 <p align="left">
-  <img src="https://img.shields.io/badge/node-%E2%89%A522-blue?logo=node.js&style=flat-square" alt="Node >= 22" />
+  <img src="https://img.shields.io/badge/node-%E2%89%A520-blue?logo=node.js&style=flat-square" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/dependencies-zero-success?style=flat-square" alt="Zero Dependencies" />
   <img src="https://img.shields.io/badge/tests-npm%20test-blue?style=flat-square" alt="Tests: run npm test" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgray?style=flat-square" alt="Platforms" />
@@ -150,7 +150,7 @@ and the CLI*, below.
 
 | you need | why |
 |---|---|
-| **Node ≥ 22** | the only requirement to run it — the app imports `node:*` builtins and nothing else |
+| **Node ≥ 20** | the only requirement to run it — the app imports `node:*` builtins and nothing else |
 | **Chrome** (or Chromium) | the extension is the only thing that ever touches your session |
 | **A de.aipass.net account** | the site the window talks to; your logged-in browser tab *is* the credential |
 | **Nothing else** | no `npm install` to run it, no build step, no database, no API key |
@@ -421,6 +421,7 @@ The design and operations docs live in [`docs/`](./docs/):
 | [`docs/RELIABILITY.md`](./docs/RELIABILITY.md) | what healthy means: the SLIs and their targets, the error budget, degradation modes |
 | [`docs/RELEASE.md`](./docs/RELEASE.md) | versioning, the release checklist, upgrade and rollback, dependency review |
 | [`docs/INSTALL.md`](./docs/INSTALL.md) | the install system: what an install guarantees, what each platform ships, what macOS needs |
+| [`docs/UPDATE_DESIGN.md`](./docs/UPDATE_DESIGN.md) | the update system: the shell and the content as two versioned halves, the signed feed, the phases |
 | [`docs/MATURITY.md`](./docs/MATURITY.md) | capability status — production vs experimental, owners, what changes a status |
 | [`docs/TEST_PLAN.md`](./docs/TEST_PLAN.md) | the test design: layers L1–L5, cases, pass criteria, what each layer cannot prove |
 | [`docs/WORKLOG.md`](./docs/WORKLOG.md) | the session handoff log: what each working session touched, tested, deferred and left open |

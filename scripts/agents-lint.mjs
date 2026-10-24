@@ -12,12 +12,22 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TEST_DIR = path.join(ROOT, 'aipass-bridge', 'test');
 
-/** Guide files that may carry Verify anchors, with their size budgets. */
+/** Guide files that may carry Verify anchors, with their size budgets.
+ *  A budget is a ceiling, not a wish: the guide is cut to fit, and the
+ *  ceiling goes DOWN when it grows — raising it instead is the thing this
+ *  check exists to catch.
+ *
+ *  `test/CONTRACTS.md` is the INDEX of what the suite holds: it carries the
+ *  anchors, one line each, and no prose to speak of. Its budget moves with the
+ *  contracts — an index that cannot hold them all would be an index that lies
+ *  about what the suite holds — but it stays an index: a line of prose here is
+ *  a line of prose that does not belong. */
 const GUIDE_FILES = [
-  { rel: 'AGENTS.md', budget: 220 },
+  { rel: 'AGENTS.md', budget: 218 },
   { rel: 'aipass-bridge/AGENTS.md', budget: 130 },
   { rel: 'aipass-bridge/test/AGENTS.md', budget: 90 },
-  { rel: 'desktop/AGENTS.md', budget: 90 },
+  { rel: 'aipass-bridge/test/CONTRACTS.md', budget: 108 },
+  { rel: 'desktop/AGENTS.md', budget: 88 },
 ];
 
 /** Thin shim files for tools that do not read AGENTS.md natively. */

@@ -1,0 +1,294 @@
+/* The panel's styles.
+ *
+ * VS Code's own theme variables, so the panel looks like the editor it lives
+ * in: a webview that paints itself a different colour is a webview that
+ * looks like a stranger. No framework, no build step (desktop/AGENTS.md).
+ */
+
+:root {
+  --pad: 10px;
+  --radius: 6px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+}
+
+.grow { flex: 1 1 auto; }
+.dim { color: var(--vscode-descriptionForeground); opacity: 0.9; }
+
+/* ------------------------------------------------------------------- the bar */
+
+#bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px var(--pad);
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  background: var(--vscode-sideBar-background, transparent);
+  font-size: 0.92em;
+}
+
+.brand { font-weight: 600; letter-spacing: 0.02em; }
+
+.chip {
+  padding: 1px 7px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 999px;
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
+.chip.bad {
+  color: var(--vscode-errorForeground);
+  border-color: var(--vscode-inputValidation-errorBorder, rgba(255, 0, 0, 0.4));
+}
+
+/* -------------------------------------------------------------- the transcript */
+
+#log {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--pad);
+  line-height: 1.55;
+}
+
+.msg {
+  margin: 0 0 8px;
+  padding: 6px 9px;
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.msg.task {
+  background: var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.12));
+  border-left: 3px solid var(--vscode-textBlockQuote-border, var(--vscode-focusBorder));
+}
+
+.msg.assistant { background: transparent; }
+
+.note {
+  margin: 2px 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+  white-space: pre-wrap;
+}
+
+.note.bad { color: var(--vscode-errorForeground); }
+
+.cmd-out {
+  margin: 2px 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--vscode-focusBorder);
+  white-space: pre-wrap;
+}
+
+.summary {
+  margin: 4px 0 8px;
+  padding: 6px 9px;
+  border-radius: var(--radius);
+  background: var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.12));
+  white-space: pre-wrap;
+}
+
+/* A tool call is a row, never prose: the marker is wire protocol and the
+ * reader sees what the model asked for and what came back (root law 12). */
+.tool {
+  margin: 3px 0;
+  padding: 3px 8px;
+  border-left: 2px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 3px;
+  font-size: 0.92em;
+}
+
+.tool.bad { border-left-color: var(--vscode-errorForeground); }
+
+.tool summary {
+  cursor: pointer;
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.tool .mark { color: var(--vscode-charts-green, #89d185); }
+.tool.bad .mark { color: var(--vscode-errorForeground); }
+.tool .kind { font-weight: 600; }
+.tool .arg { color: var(--vscode-textLink-foreground); word-break: break-all; }
+.tool .head { color: var(--vscode-descriptionForeground); }
+
+.tool pre {
+  margin: 5px 0 2px;
+  padding: 6px 8px;
+  overflow-x: auto;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.12));
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.9em;
+  white-space: pre;
+}
+
+.thinking {
+  margin: 2px 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+  font-style: italic;
+}
+
+/* ------------------------------------------------------------------ pending */
+
+#pending {
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  padding: 6px var(--pad);
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.pending-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+#pending-list { list-style: none; margin: 0; padding: 0; }
+
+#pending-list li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 0;
+  font-size: 0.92em;
+}
+
+#pending-list .name { flex: 1 1 auto; word-break: break-all; }
+#pending-list .add { color: var(--vscode-charts-green, #89d185); }
+#pending-list .del { color: var(--vscode-charts-red, #f14c4c); }
+
+/* ---------------------------------------------------------------- composer */
+
+#composer {
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  padding: var(--pad);
+}
+
+#task {
+  width: 100%;
+  resize: vertical;
+  min-height: 54px;
+  padding: 6px 8px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: var(--radius);
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.5;
+}
+
+#task:focus { outline: 1px solid var(--vscode-focusBorder); }
+
+.composer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.hint { font-size: 0.88em; color: var(--vscode-descriptionForeground); }
+.hint.busy::before {
+  content: '● ';
+  color: var(--vscode-charts-blue, #3794ff);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+
+button {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: var(--radius);
+  padding: 4px 12px;
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+button:hover { background: var(--vscode-button-hoverBackground); }
+
+button.primary {
+  color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+  background: var(--vscode-button-background);
+}
+
+button:disabled { opacity: 0.55; cursor: default; }
+
+button.mini {
+  padding: 1px 8px;
+  font-size: 0.85em;
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, inherit);
+}
+
+/* ------------------------------------------------------------------- sheet */
+
+#ask {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 10;
+}
+
+#ask.hidden { display: none; }
+
+.sheet {
+  width: min(680px, 92vw);
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: 14px 16px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 8px;
+  background: var(--vscode-editor-background);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+}
+
+.sheet h3 { margin: 0 0 8px; font-size: 1.05em; }
+
+.sheet pre {
+  margin: 8px 0;
+  padding: 7px 9px;
+  overflow-x: auto;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.12));
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.9em;
+  white-space: pre;
+}
+
+.ask-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.diff-line { font-family: var(--vscode-editor-font-family, monospace); white-space: pre; }
+.diff-line.add { color: var(--vscode-charts-green, #89d185); }
+.diff-line.del { color: var(--vscode-charts-red, #f14c4c); }
+.diff-line.hunk { color: var(--vscode-descriptionForeground); }

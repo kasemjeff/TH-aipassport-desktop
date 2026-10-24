@@ -463,7 +463,7 @@ export async function runAttempt(task, {
   try {
     harness = new Harness({
       root: treeDir,
-      bridge: bridge ?? undefined,
+      client: bridge ?? undefined,
       model: used.model,
       store: new SessionStore(path.join(homeDir, 'sessions')),
       events,
