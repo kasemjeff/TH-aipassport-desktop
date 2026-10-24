@@ -63,7 +63,7 @@ const projectDir = (root) => path.join(storeRoot(), projectKey(root));
  * The millisecond stamp leads, so the names sort into the order they were
  * taken in — which is how the pruning knows what is oldest.
  */
-const newId = () => `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+const newId = (stamp = Date.now()) => `${stamp}-${crypto.randomBytes(4).toString('hex')}`;
 
 /** The bytes on the disk right now, or null when there is no file there. */
 const readBytes = (abs) => {
@@ -133,7 +133,10 @@ function checkpointDir(root, id) {
 export function take({ root, changes }) {
   const list = (changes ?? []).filter(Boolean);
   if (!list.length) return null;
-  const id = newId();
+  // One stamp for the name and the answer: list() sorts by name, and
+  // createdAt is the same order, ties included.
+  const stamp = Date.now();
+  const id = newId(stamp);
   const dir = path.join(projectDir(root), id);
   const files = [];
   const blobs = [];
@@ -153,7 +156,7 @@ export function take({ root, changes }) {
     if (before !== null) blobs.push([entry.before, before]);
     if (after !== null) blobs.push([entry.after, after]);
   }
-  const meta = { id, createdAt: Date.now(), root: path.resolve(root), files };
+  const meta = { id, createdAt: stamp, root: path.resolve(root), files };
   fs.mkdirSync(dir, { recursive: true });
   for (const [name, data] of blobs) writeFileAtomic(path.join(dir, name), data);
   writeFileAtomic(path.join(dir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`);

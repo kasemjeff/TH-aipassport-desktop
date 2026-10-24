@@ -6,6 +6,44 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-24 — the rerun that reached the runners, and the path spellings
+
+*Files*: `scripts/build-desktop.mjs` (the bundle search asks cargo in
+`desktop/src-tauri`, where the crate and its target live; the old root call
+failed and fell back to a `target/` the bundler never wrote),
+`aipass-bridge/harness/health.mjs` (the loadability probe compares real paths,
+so a staged tree reached as `/var` is the same script as `/private/var`),
+`aipass-bridge/harness/overlay.mjs` (`realPath` uses the native resolver, which
+expands Windows short names), `aipass-bridge/harness/worktree.mjs` (ownership
+and containment answer on the physical path as well as the lexical one),
+`aipass-bridge/harness/checkpoints.mjs` (the name's stamp is `createdAt` too),
+`aipass-bridge/test/{install-system,worktree,data-integrity}.test.mjs`,
+`desktop/src-tauri/src/main.rs` (the per-user shim test checks system roots by
+prefix; `~/.local/bin` is not `/bin`), `CHANGELOG.md`.
+
+*Tests*: `npm test` — 1178 tests, 1172 pass, 0 fail, 6 skipped;
+`npm run agents:lint` — 154 anchors against 1177 titles; `npm run typecheck`,
+`npm run coverage`, `npm run coverage:gate`, `npm run evals:lint`,
+`npm run smoke:e2e` — ok. `cargo test` — 24 pass. The rerun's failures were
+reproduced from the job logs: Linux checkpoints and the archive restore, macOS
+update promotion and worktree sweep, Windows worktree remove/sweep, the Ubuntu
+shim test, and all three build lanes publishing from the wrong target.
+
+*Deferred*: the workflow rerun is the proof for Linux and macOS — only the
+Windows half can be run on this machine. The case-only re-spelling of a
+project path still gets its own session folder; the worktree fix canonicalizes
+its own comparisons but does not change the session store's project key.
+
+*Open risks*: the health probe and worktree fixes rely on the native real-path
+resolver behaving the same through macOS's `/var` link; the macOS job is the
+first place that will prove it. The build cache still names the repository
+root's `target/`, so a cold crate target is rebuilt even when the cache hits.
+
+*Cleanup*: the old test scratch trees under the C: temp were removed (C: went
+from zero free to about 2.9 GB); new test scratch lives on D:. The running
+desktop from `D:\aipass-build\target\release` was left alone, as were the
+foreign work-in-progress files.
+
 ## 2026-10-24 — the jobs that never started, and the archive one folder over
 
 *Files*: `.github/workflows/test.yml` (the rust job fetches the Node sidecar

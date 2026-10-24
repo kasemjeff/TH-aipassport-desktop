@@ -1577,8 +1577,16 @@ mod tests {
         #[cfg(not(windows))]
         assert!(path.ends_with("aipass"), "the shim is a shell script: {path:?}");
         let text = path.to_string_lossy().to_lowercase();
-        for system in ["/usr/", "/bin/", "c:\\windows", "program files"] {
-            assert!(!text.contains(system), "the shim is not in {system}: {path:?}");
+        // The per-user bin is often `~/.local/bin`, whose name contains
+        // `/bin/` without being the system directory. The check is the
+        // prefix of a system root, not a substring anywhere in the path.
+        #[cfg(unix)]
+        for system in ["/usr/", "/bin/", "/sbin/", "/opt/"] {
+            assert!(!text.starts_with(system), "the shim is not in {system}: {path:?}");
+        }
+        #[cfg(windows)]
+        for system in ["c:\\windows", "c:\\program files", "c:\\program files (x86)"] {
+            assert!(!text.starts_with(system), "the shim is not in {system}: {path:?}");
         }
     }
 

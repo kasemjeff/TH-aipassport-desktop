@@ -105,6 +105,13 @@ test('an archived session can be taken back', () => {
   const root = path.join(dir, 'proj');
   const idle = store.create({ root, title: 'idle' });
   const live = store.create({ root, title: 'live' });
+  // Not "a millisecond ago": create and archive can happen inside one
+  // millisecond, and then the idle session is not idle yet. The test's
+  // subject is the way back, so the session is made old explicitly.
+  const old = Date.now() - 60_000;
+  const loaded = store.load(idle.id);
+  loaded.header.updated = old;
+  fs.writeFileSync(loaded.file, fs.readFileSync(loaded.file, 'utf8').replace(/"updated":\d+/, `"updated":${old}`));
 
   store.archiveIdle(root, { olderThanMs: 1, keepId: live.id });
   assert.equal(store.list(root).some((e) => e.id === idle.id), false, 'it left the picker');
