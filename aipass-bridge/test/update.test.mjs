@@ -379,8 +379,10 @@ test('the window and the CLI run the same content', async () => {
   const promoted = await promote(pack.file, { home });
   assert.equal(promoted.ok, true);
   // The CLI shim names the stable link, not a versioned directory, so it
-  // follows the content and does not go stale at the next update.
-  assert.equal(currentRoot(home), promoted.root, 'the link points at the live content');
+  // follows the content and does not go stale at the next update. The link
+  // resolves through the filesystem, so macOS's /var is /private/var here;
+  // compare the resolved roots, not the spelling the temp directory used.
+  assert.equal(currentRoot(home), fs.realpathSync(promoted.root), 'the link points at the live content');
   const link = path.join(home, 'app', 'current', 'aipass-bridge', 'bin', 'aipass.mjs');
   assert.ok(fs.existsSync(link), 'and the CLI is reachable through it');
 });
