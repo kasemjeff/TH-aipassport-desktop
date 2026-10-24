@@ -588,6 +588,28 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **A build that finished can publish what it built.** The bundle search asked
+  cargo from the repository root, where there is no `Cargo.toml`, and fell
+  back to a root `target/` the bundler never writes; every platform built a
+  real installer and then reported "no bundles under target" and exited 1.
+  The search now asks cargo in `desktop/src-tauri`, where the Tauri crate and
+  its target live, and the fallback points there too.
+- **A staged content tree found through a link is still loadable.** The
+  promotion probe decided whether it was the main script by comparing lexical
+  paths. macOS reaches its temp directory as `/private/var` while the caller
+  spells it `/var` (Windows short names have the same split), so the probe
+  stayed silent, exited 0, and every update was refused as "the staged content
+  did not load". The comparison is on the real path now.
+- **A worktree is ours under either spelling of its folder.** Git reports the
+  path it stored, which can be `/private/var` for macOS's `/var` or the long
+  form of a Windows short name; the lexical ownership test did not recognise
+  it, so the list showed no worktrees of ours, remove could not find one, and
+  the sweep removed nothing. Ownership and containment now answer on the
+  physical path as well.
+- **Two checkpoints in one millisecond keep their order.** The name carried a
+  timestamp and `createdAt` was taken again after the files were copied, so a
+  tie in the name could disagree with the answer `list()` sorted by; the name
+  and `createdAt` now come from one stamp.
 - **The shell test lane can start on a clean checkout.** `tauri-build` asks
   for the Node sidecar while it compiles, not only when the app is bundled,
   and a clean checkout has none — the ~90 MB executable is gitignored. The

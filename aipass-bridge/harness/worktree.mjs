@@ -173,19 +173,22 @@ async function freeBranch(root, wanted) {
 function resolveInside(dir, p) {
   const base = path.resolve(dir);
   const abs = path.resolve(base, String(p ?? ''));
-  const rel = path.relative(base, abs);
-  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-    throw new Error(`outside the worktree folder: ${p} — a worktree of this house lives in ${base}`);
-  }
+  const within = (from, to) => {
+    const rel = path.relative(from, to);
+    return rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel) && rel !== '';
+  };
+  const lexical = within(base, abs);
   const realBase = realPath(base) ?? base;
   const real = realPath(abs);
-  if (real) {
-    const realRel = path.relative(realBase, real);
-    if (realRel === '..' || realRel.startsWith(`..${path.sep}`) || path.isAbsolute(realRel)) {
-      throw new Error(`outside the worktree folder: ${p} — that path leaves it through a link`);
-    }
+  const physical = real ? within(realBase, real) : null;
+  // The lexical answer is the usual one. The physical one makes the long
+  // spelling of a short name (and macOS's /private/var for /var) the same
+  // folder; it also says no when a junction inside the folder leads out.
+  if (physical === false) {
+    throw new Error(`outside the worktree folder: ${p} — that path leaves it through a link`);
   }
-  return abs;
+  if (lexical || physical === true) return abs;
+  throw new Error(`outside the worktree folder: ${p} — a worktree of this house lives in ${base}`);
 }
 
 /** Do two paths name the same place on disk? */
@@ -254,10 +257,23 @@ export async function list({ root } = {}) {
   return { worktrees, root: project, home };
 }
 
-/** Is this path inside the folder this house keeps its worktrees in? */
+/**
+ * Is this path inside the folder this house keeps its worktrees in?
+ *
+ * The answer is physical as well as lexical: git reports a worktree by the
+ * path it stored, and that can be the long spelling of a Windows short name
+ * or `/private/var` for macOS's `/var`. Both name the folder this house made,
+ * so both are ours.
+ */
 function isOurs(target, home = worktreeRoot()) {
-  const base = path.resolve(home);
-  const abs = path.resolve(target);
+  const lexicalBase = path.resolve(home);
+  const lexicalAbs = path.resolve(target);
+  const lexicalRel = path.relative(lexicalBase, lexicalAbs);
+  const lexical = lexicalRel !== '..' && !lexicalRel.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(lexicalRel) && lexicalRel !== '';
+  if (lexical) return true;
+  const base = realPath(lexicalBase) ?? lexicalBase;
+  const abs = realPath(lexicalAbs) ?? lexicalAbs;
   const rel = path.relative(base, abs);
   return rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel) && rel !== '';
 }

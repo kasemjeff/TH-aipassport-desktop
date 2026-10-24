@@ -128,9 +128,14 @@ export function gitState(repo = REPO) {
  * Where cargo puts the build. Asked of cargo itself, because CARGO_TARGET_DIR
  * is only one of the ways the answer can be spelled.
  */
-export function targetDir(repo = REPO) {
-  const meta = spawnSync('cargo', ['metadata', '--format-version', '1', '--no-deps'], {
-    cwd: repo,
+export function targetDir(repo = REPO, { cargo = spawnSync } = {}) {
+  // The Tauri crate is a crate of its own, and the bundler builds it in the
+  // crate's target directory. Asking cargo from the repository root failed
+  // (there is no Cargo.toml there), and the fallback pointed at a `target/`
+  // the bundler never wrote - so a finished build found no bundles to publish.
+  const crate = path.join(repo, 'desktop', 'src-tauri');
+  const meta = cargo('cargo', ['metadata', '--format-version', '1', '--no-deps'], {
+    cwd: crate,
     encoding: 'utf8',
     windowsHide: true,
   });
@@ -141,7 +146,7 @@ export function targetDir(repo = REPO) {
     } catch { /* fall through to the env */ }
   }
   if (process.env.CARGO_TARGET_DIR) return path.resolve(repo, process.env.CARGO_TARGET_DIR);
-  return path.join(repo, 'target');
+  return path.join(crate, 'target');
 }
 
 /**

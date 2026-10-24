@@ -51,7 +51,10 @@ export function realPath(abs) {
   const tail = [];
   for (;;) {
     try {
-      const real = fs.realpathSync(cur);
+      // `.native` is the one that expands the OS's aliases too: a Windows
+      // short name (`RUNNER~1`) is the same folder as its long spelling, and
+      // the plain implementation leaves it short. Both must answer one path.
+      const real = fs.realpathSync.native?.(cur) ?? fs.realpathSync(cur);
       return tail.length ? path.join(real, ...tail) : real;
     } catch {
       const parent = path.dirname(cur);

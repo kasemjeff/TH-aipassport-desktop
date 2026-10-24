@@ -45,8 +45,17 @@ const repo = (files = { 'a.txt': 'hello\n' }) => {
   return { dir, git };
 };
 
+/** The real spelling of a path, even after the leaf has been removed. */
+const canonical = (p) => {
+  try { return fs.realpathSync.native(p); } catch {
+    try { return path.join(fs.realpathSync.native(path.dirname(p)), path.basename(p)); } catch {
+      return path.resolve(p);
+    }
+  }
+};
+
 /** Do two paths name the same place on disk? */
-const samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+const samePath = (a, b) => canonical(a).toLowerCase() === canonical(b).toLowerCase();
 
 test('a worktree is made outside the project, and it is a real checkout', async () => {
   const { dir } = repo();
@@ -126,9 +135,10 @@ test('a worktree nobody wants is swept, and one with work in it is kept', async 
   // keeps the COMMITS, but these bytes are only here.
   fs.writeFileSync(path.join(work.path, 'c.txt'), 'ยังไม่เสร็จ\n');
 
+  const litterPath = canonical(litter.path);
   const out = await sweep({ root: dir, maxAgeMs: 0 });
 
-  assert.deepEqual(out.removed, [litter.path], 'the clean and forgotten one went');
+  assert.deepEqual(out.removed.map(canonical), [litterPath], 'the clean and forgotten one went');
   assert.equal(fs.existsSync(litter.path), false);
   assert.equal(fs.existsSync(work.path), true, 'the one with work in it stayed');
 });

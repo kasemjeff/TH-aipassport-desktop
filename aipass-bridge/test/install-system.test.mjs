@@ -18,6 +18,7 @@ import {
   sidecarUsable,
   signingState,
   bundlerCommand,
+  targetDir,
 } from '../../scripts/build-desktop.mjs';
 import { planFor as ladderPlan, versionFromName } from '../../scripts/install-ladder.mjs';
 import { downloadUrl } from '../../scripts/build-universal-sidecar.mjs';
@@ -39,6 +40,25 @@ test('the bundle plan is the platform\'s, not the config\'s', () => {
   const linux = planFor('linux', 'x64');
   assert.deepEqual(linux.bundles, ['deb', 'appimage']);
   assert.equal(linux.config, 'desktop/src-tauri/tauri.linux.conf.json');
+});
+
+test('the bundle search asks cargo about the Tauri crate, not the repository root', () => {
+  // There is no Cargo.toml at the root; a metadata call there failed and the
+  // fallback looked in `target/`, while the bundler wrote under the crate's
+  // own target. The finished build then reported "no bundles" and published
+  // nothing.
+  const crate = path.join(REPO, 'desktop', 'src-tauri');
+  const want = path.join(crate, 'target');
+  let asked = null;
+  const dir = targetDir(REPO, {
+    cargo: (cmd, args, opts) => {
+      asked = { cmd, args, cwd: opts.cwd };
+      return { status: 0, stdout: JSON.stringify({ target_directory: want }) };
+    },
+  });
+  assert.equal(asked.cmd, 'cargo');
+  assert.equal(asked.cwd, crate, 'cargo is asked in the crate that owns the build');
+  assert.equal(dir, want);
 });
 
 test('a universal macOS build is one artifact, not two', () => {
