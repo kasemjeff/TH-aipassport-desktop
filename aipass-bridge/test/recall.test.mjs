@@ -87,7 +87,12 @@ test('the past is reachable with the RECALL marker', () => {
 test('the recall reads the newest first, and the newest wins a tie', async () => {
   const { dir, store, session } = withPast();
   const second = store.create({ root: dir, model: 'stub', title: 'the second look' });
-  second.append('assistant', { text: 'the login flow is fine now — the fix was the token check' });
+  // The session is newer, and says so explicitly: two creates can land in one
+  // millisecond, and then readdir order would decide a test about newest-first.
+  second.append('assistant', {
+    text: 'the login flow is fine now — the fix was the token check',
+    ts: Date.now() + 1000,
+  });
 
   const result = await recallEntries('login flow', { root: dir, store });
   assert.ok(result.hits.length >= 2, 'both sessions are about it');
