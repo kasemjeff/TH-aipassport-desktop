@@ -6,6 +6,37 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-24 — the jobs that never started, and the archive one folder over
+
+*Files*: `.github/workflows/test.yml` (the rust job fetches the Node sidecar
+before `cargo test`; a clean checkout has none, so the old lane failed in
+`build.rs`), `aipass-bridge/harness/session.mjs` (the archive list, the way
+back and the prune read the current and the pre-hash project archive; restore
+still lands in the current folder), `aipass-bridge/test/{install-system,data-integrity}.test.mjs`,
+`CHANGELOG.md`.
+
+*Tests*: `npm test` — 1177 tests, 1171 pass, 0 fail, 6 skipped;
+`npm run agents:lint` — 154 anchors against 1176 titles; `npm run typecheck`,
+`npm run coverage:gate`, `npm run evals:lint`, `npm run smoke:e2e` — ok.
+Node 20 ran the full mirror suite — 1173 pass, 0 fail; `cargo test` — 21 pass
+after `npm run desktop:sidecar`. The Windows build lane reached a 232 MiB NSIS
+installer; copying it into `dist/` stopped on the machine's full C: drive, not
+on the lane.
+
+*Deferred*: GitHub Actions itself is blocked by the account's billing/spending
+limit — no job can start until that is fixed. A case-only re-spelling of a
+project path on Windows still gets its own session folder: the header filter
+keeps the data honest and opening by id still works, but the picker does not
+merge the two folders. Fixing that is a canonical-path decision, not a
+one-line change.
+
+*Open risks*: the workflow fixes cannot be proven by CI until billing is
+restored; the build lane is still unproven end-to-end on macOS and Linux.
+
+*Cleanup*: temp worktrees, the copied Node runtimes, the D: build target and
+the test logs were removed. The running desktop that held the old sidecar open
+was left alone.
+
 ## 2026-10-23 — the review pass: a cursor that moved, a bar that showed, and names for the controls
 
 *Files*: `desktop/ui/transcript.js` (the first trim inserts the marker at the

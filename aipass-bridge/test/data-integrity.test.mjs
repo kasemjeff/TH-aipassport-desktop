@@ -117,6 +117,49 @@ test('an archived session can be taken back', () => {
   assert.equal(store.listArchived(root).length, 0, 'the archive is empty again');
 });
 
+test('an archive under the old project folder still lists and restores', () => {
+  // The project folder gained a path hash, but the archive an older build left
+  // one directory over is still this project's work. Reading only the new
+  // folder made those sessions look deleted even though their bytes were
+  // intact, and the way back could not find them.
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const root = path.join(dir, 'proj');
+  const old = store.create({ root, title: 'archived before the rename' });
+  const legacyArchive = path.join(store.legacyDirFor(root), 'archive');
+  fs.mkdirSync(legacyArchive, { recursive: true });
+  const legacyFile = path.join(legacyArchive, path.basename(old.file));
+  fs.renameSync(old.file, legacyFile);
+
+  assert.equal(store.list(root).some((e) => e.id === old.id), false, 'it is not a live session');
+  const archived = store.listArchived(root);
+  assert.equal(archived.some((e) => e.id === old.id), true, 'but it is still in the archive');
+  assert.equal(archived.find((e) => e.id === old.id)?.file, legacyFile, 'with its old path');
+
+  assert.equal(store.restore(old.id, { root }), true, 'and the way back finds it');
+  assert.equal(store.list(root).some((e) => e.id === old.id), true, 'it comes back to the picker');
+  assert.equal(fs.existsSync(legacyFile), false, 'the old copy is gone');
+  assert.equal(store.listArchived(root).length, 0, 'the old archive is empty');
+});
+
+test('the old archive is pruned too, so it cannot keep files forever', () => {
+  // Pruning is the one place that deletes. If it reads only the new folder,
+  // sessions archived by an older build can never age out - and nobody can
+  // see them to ask why the disk is growing.
+  const dir = tmp();
+  const store = new SessionStore(path.join(dir, 'store'));
+  const root = path.join(dir, 'proj');
+  const old = store.create({ root, title: 'old archived' });
+  const legacyArchive = path.join(store.legacyDirFor(root), 'archive');
+  fs.mkdirSync(legacyArchive, { recursive: true });
+  const legacyFile = path.join(legacyArchive, path.basename(old.file));
+  fs.renameSync(old.file, legacyFile);
+
+  const out = store.pruneArchived(root, { olderThanMs: -1 });
+  assert.deepEqual(out.pruned, [old.id], 'the old archive entry is pruned');
+  assert.equal(fs.existsSync(legacyFile), false, 'and its file is gone');
+});
+
 test('a session of another project is not reachable by its path either', () => {
   // The window lists sessions with their path, and a path names a session at
   // least as precisely as an id does. The guard on the id branch was a guard

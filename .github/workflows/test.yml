@@ -123,6 +123,17 @@ jobs:
             libssl-dev \
             patchelf
 
+      # `tauri-build` asks for the external Node binary while it compiles, even
+      # for `cargo test`, and a clean checkout has no sidecar: the ~90 MB
+      # executable is gitignored on purpose. Without this the shell tests fail
+      # in `build.rs` before the first test runs.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Put the Node sidecar in place
+        run: npm run desktop:sidecar
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

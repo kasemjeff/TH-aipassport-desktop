@@ -77,6 +77,20 @@ test('every platform in the table ships something', () => {
   }
 });
 
+test('the shell test lane puts the sidecar in place before cargo test', () => {
+  // `tauri-build` reads the external Node binary during the build script, not
+  // only at bundle time. A clean checkout has no sidecar (it is gitignored),
+  // so a lane that jumps straight to `cargo test` fails before its first test
+  // with a build.rs error that has nothing to do with the tests.
+  const workflow = fs.readFileSync(path.join(REPO, '.github', 'workflows', 'test.yml'), 'utf8');
+  const rustJob = workflow.slice(workflow.indexOf('\n  rust:'));
+  assert.notEqual(rustJob, workflow, 'the test workflow has a rust job');
+  const sidecar = rustJob.indexOf('npm run desktop:sidecar');
+  const cargo = rustJob.indexOf('run: cargo test');
+  assert.notEqual(sidecar, -1, 'the rust job fetches the sidecar');
+  assert.ok(sidecar < cargo, 'before cargo test runs');
+});
+
 test('the three version numbers must agree', () => {
   const versions = readVersions(REPO);
   assert.equal(versions.npm, versions.cargo, 'package.json and Cargo.toml disagree');

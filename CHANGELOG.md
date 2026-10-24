@@ -588,6 +588,17 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **The shell test lane can start on a clean checkout.** `tauri-build` asks
+  for the Node sidecar while it compiles, not only when the app is bundled,
+  and a clean checkout has none — the ~90 MB executable is gitignored. The
+  rust job now puts the sidecar in place before `cargo test`, and a workflow
+  test keeps that order from regressing.
+- **A session archived before the folder hash is still a session.** The
+  archive lives inside the project folder, and that folder's name changed;
+  the archive list, the way back and the prune read only the new folder, so
+  sessions an older build had archived looked deleted while their bytes were
+  intact. All three now read the current and the pre-hash archive, and a
+  restored session lands in the current folder.
 - **The review pass on the window's work surfaces.** A live run whose
   transcript trimmed for the first time kept its cursor one row early, so the
   fold swallowed the trim marker and the row before the run; the marker now

@@ -639,6 +639,26 @@ export class SessionStore {
   }
 
   /**
+   * The archive directories this project can have.
+   *
+   * The archive moved with the project folder when the folder name gained a
+   * path hash. A session archived by an older build is still this project's
+   * session - it is one directory over, not gone - so both places are read and
+   * both are pruned. The canonical place is first; restore puts a session back
+   * in the current project directory, not the old one.
+   *
+   * @param {string} root
+   * @returns {string[]}
+   */
+  archiveDirsFor(root) {
+    const dirs = [
+      path.join(this.dirFor(root), 'archive'),
+      path.join(this.legacyDirFor(root), 'archive'),
+    ];
+    return [...new Set(dirs.map((dir) => path.resolve(dir)))];
+  }
+
+  /**
    * Where a session id may live.
    *
    * The project's own directory comes first — a session id is the one thing a
@@ -1073,20 +1093,21 @@ export class SessionStore {
    * @returns {Array<Record<string, any>>}
    */
   listArchived(root) {
-    const dir = path.join(this.dirFor(root), 'archive');
-    let names = [];
-    try { names = fs.readdirSync(dir); } catch { return []; }
     const out = [];
-    for (const name of names) {
-      if (!name.endsWith('.jsonl')) continue;
-      const file = path.join(dir, name);
-      try {
-        const { header } = readSessionHeader(file);
-        if (!header) continue;
-        // The archive is a bucket too: only this project's sessions are ours.
-        if (header.root && !sameRoot(header.root, root)) continue;
-        out.push({ ...header, file, archived: true });
-      } catch { /* a half-written file is skipped, not fatal */ }
+    for (const dir of this.archiveDirsFor(root)) {
+      let names = [];
+      try { names = fs.readdirSync(dir); } catch { continue; }
+      for (const name of names) {
+        if (!name.endsWith('.jsonl')) continue;
+        const file = path.join(dir, name);
+        try {
+          const { header } = readSessionHeader(file);
+          if (!header) continue;
+          // The archive is a bucket too: only this project's sessions are ours.
+          if (header.root && !sameRoot(header.root, root)) continue;
+          out.push({ ...header, file, archived: true });
+        } catch { /* a half-written file is skipped, not fatal */ }
+      }
     }
     return out.sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0));
   }
@@ -1105,13 +1126,13 @@ export class SessionStore {
   restore(idOrFile, { root = null } = {}) {
     if (!root) return false;
     const own = path.resolve(root);
-    const archiveDir = path.join(this.dirFor(root), 'archive');
+    const archiveDirs = this.archiveDirsFor(root);
     let file = null;
     if (idOrFile.includes(path.sep) || idOrFile.includes('/')) {
       const abs = path.resolve(idOrFile);
-      if (abs.startsWith(path.resolve(archiveDir) + path.sep)) file = abs;
+      if (archiveDirs.some((dir) => abs.startsWith(path.resolve(dir) + path.sep))) file = abs;
     } else {
-      file = findById([archiveDir], idOrFile);
+      file = findById(archiveDirs, idOrFile);
     }
     if (!file || !fs.existsSync(file)) return false;
     const { header } = readSessionHeader(file);
@@ -1151,19 +1172,20 @@ export class SessionStore {
    * @returns {{pruned: string[], count: number}}
    */
   pruneArchived(root, { olderThanMs = 90 * 24 * 3600 * 1000, limit = 20 } = {}) {
-    const dir = path.join(this.dirFor(root), 'archive');
-    let names = [];
-    try { names = fs.readdirSync(dir); } catch { return { pruned: [], count: 0 }; }
     const now = Date.now();
     const picked = [];
-    for (const name of names) {
-      if (!name.endsWith('.jsonl')) continue;
-      const file = path.join(dir, name);
-      const { header } = readSessionHeader(file);
-      if (header?.root && !sameRoot(header.root, root)) continue;
-      const updated = header?.updated ?? 0;
-      if (now - updated <= olderThanMs) continue;
-      picked.push({ file, id: header?.id ?? name, updated });
+    for (const dir of this.archiveDirsFor(root)) {
+      let names = [];
+      try { names = fs.readdirSync(dir); } catch { continue; }
+      for (const name of names) {
+        if (!name.endsWith('.jsonl')) continue;
+        const file = path.join(dir, name);
+        const { header } = readSessionHeader(file);
+        if (header?.root && !sameRoot(header.root, root)) continue;
+        const updated = header?.updated ?? 0;
+        if (now - updated <= olderThanMs) continue;
+        picked.push({ file, id: header?.id ?? name, updated });
+      }
     }
     picked.sort((a, b) => (a.updated ?? 0) - (b.updated ?? 0));
     const pruned = [];
