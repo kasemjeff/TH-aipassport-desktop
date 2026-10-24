@@ -44,7 +44,30 @@ export const APP_VERSION = (() => {
  */
 const id = () => crypto.randomBytes(6).toString('hex');
 
-const slug = (s) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'root';
+// A project's sessions live in a directory named after its path, so the same
+// project always lands in the same place.
+//
+// The name used to be the path with everything but letters and digits turned
+// into dashes, cut at 60 characters - and the cut was the bug. macOS puts a
+// temporary directory at /var/folders/<xx>/<hash>/T/<name>, and that path is
+// longer than 60 characters once it is spelled out, so the distinguishing
+// tail was cut off and TWO different projects under one temporary directory
+// ended up sharing ONE session directory: one project's conversations showed
+// up in another project's picker, and a relocation left the other's files
+// behind. The name carries a hash of the whole path now - unique however long
+// the path is - and the readable part stays for the human who looks inside.
+const pathHash = (s) => crypto.createHash('sha1').update(String(s)).digest('hex').slice(0, 12);
+
+const slug = (s) => {
+  const clean = String(s).replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  const hash = pathHash(s);
+  return clean ? `${clean}-${hash}` : hash;
+};
+
+// The name an older build gave the directory. The sessions in it are still
+// this project's sessions, so the picker reads that folder too and a
+// relocation moves the files out of it.
+const legacySlug = (s) => String(s).replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'root';
 
 /**
  * Are two project roots the same folder?
@@ -600,6 +623,17 @@ export class SessionStore {
   }
 
   /**
+   * The directory an older build named for this project.
+   *
+   * The name of a project's folder changed (see slug), so a store written
+   * before the change still keeps its sessions in the old folder. The folder
+   * is not created here - it exists only for a store that already has one.
+   */
+  legacyDirFor(root) {
+    return path.join(this.dir, legacySlug(path.resolve(root)));
+  }
+
+  /**
    * Where a session id may live.
    *
    * The project's own directory comes first — a session id is the one thing a
@@ -713,7 +747,10 @@ export class SessionStore {
    */
   list(root = null) {
     const out = [];
-    const dirs = root ? [this.dirFor(root)] : readDirs(this.dir);
+    // The project's own folder, and the one an older build named for it (see
+    // slug): the sessions in it belong to this project too. A folder that was
+    // never there simply is not read.
+    const dirs = root ? [this.dirFor(root), this.legacyDirFor(root)] : readDirs(this.dir);
     for (const dir of dirs) {
       let files = [];
       try { files = fs.readdirSync(dir); } catch { continue; }
@@ -896,16 +933,19 @@ export class SessionStore {
    * belonged to. This moves every file of `fromRoot` into `toRoot`'s
    * directory — the archive too, breadcrumbs alongside their sessions — and
    * rewrites each header's root. Ids and entries are untouched, so a session
-   * still opens by id from wherever it now sits. Two paths can share one slug
-   * (`a b` and `a-b` slugify the same); then the files are already in the
-   * right directory and only the headers change.
+   * still opens by id from wherever it now sits. The name of a project's
+   * folder carries a hash of the path now, so two different paths never
+   * share one folder; the same path always does, and then the files are
+   * already in the right directory and only the headers change.
    */
   reassign(fromRoot, toRoot) {
     const from = path.resolve(fromRoot);
     const to = path.resolve(toRoot);
-    const fromDir = path.join(this.dir, slug(from));
     const toDir = this.dirFor(to);
-    const same = path.resolve(fromDir) === path.resolve(toDir);
+    // The project's sessions can sit in two folders: the one this build names
+    // for it, and the one an older build named for it (see slug). Both are
+    // this project's, so both are moved out of and both are cleaned up.
+    const fromDirs = [path.join(this.dir, slug(from)), path.join(this.dir, legacySlug(from))];
     // A header read from a breadcrumb (a torn in-place rewrite) is written
     // back to the file here, so a session that was broken before the move is
     // repaired by it. A file with no header at all moves as it is.
@@ -926,47 +966,50 @@ export class SessionStore {
       }
     };
     let moved = 0;
-    for (const [srcDir, dstDir] of [[fromDir, toDir], [path.join(fromDir, 'archive'), path.join(toDir, 'archive')]]) {
-      let names = [];
-      try { names = fs.readdirSync(srcDir); } catch { continue; }
-      for (const name of names) {
-        if (!name.endsWith('.jsonl')) continue; // breadcrumbs move with their file, below
-        const src = path.join(srcDir, name);
-        // The directory is a bucket, not a boundary: another project's session
-        // can sit in the same one (two paths that slugify the same). Only the
-        // sessions that name THIS project move — carrying a neighbour's
-        // transcript along with them would re-key another project's history.
-        const { header } = readSessionHeader(src);
-        if (header?.root && !sameRoot(header.root, from)) continue;
-        let dst = path.join(dstDir, name);
-        if (!same) {
-          fs.mkdirSync(dstDir, { recursive: true, mode: 0o700 });
-          // Only a hand-copied duplicate can collide (ids are per-session);
-          // both survive, the second under a suffixed name.
-          for (let n = 2; fs.existsSync(dst); n++) dst = path.join(dstDir, `${name}.${n}`);
-          move(src, dst);
-          const crumb = hdrPath(src);
-          if (fs.existsSync(crumb)) {
-            try { move(crumb, `${dst}.hdr`); } catch { /* best effort */ }
+    for (const fromDir of fromDirs) {
+      const same = path.resolve(fromDir) === path.resolve(toDir);
+      for (const [srcDir, dstDir] of [[fromDir, toDir], [path.join(fromDir, 'archive'), path.join(toDir, 'archive')]]) {
+        let names = [];
+        try { names = fs.readdirSync(srcDir); } catch { continue; }
+        for (const name of names) {
+          if (!name.endsWith('.jsonl')) continue; // breadcrumbs move with their file, below
+          const src = path.join(srcDir, name);
+          // The directory is a bucket, not a boundary: another project's session
+          // can sit in the same one (two paths that slugify the same). Only the
+          // sessions that name THIS project move — carrying a neighbour's
+          // transcript along with them would re-key another project's history.
+          const { header } = readSessionHeader(src);
+          if (header?.root && !sameRoot(header.root, from)) continue;
+          let dst = path.join(dstDir, name);
+          if (!same) {
+            fs.mkdirSync(dstDir, { recursive: true, mode: 0o700 });
+            // Only a hand-copied duplicate can collide (ids are per-session);
+            // both survive, the second under a suffixed name.
+            for (let n = 2; fs.existsSync(dst); n++) dst = path.join(dstDir, `${name}.${n}`);
+            move(src, dst);
+            const crumb = hdrPath(src);
+            if (fs.existsSync(crumb)) {
+              try { move(crumb, `${dst}.hdr`); } catch { /* best effort */ }
+            }
           }
+          rekey(dst);
+          moved++;
         }
-        rekey(dst);
-        moved++;
       }
-    }
-    // The emptied directories go, the archive before its parent. A directory
-    // still holding something (an orphan breadcrumb, a lock a crashed writer
-    // left behind, a file that was never a session) is left where it is
-    // rather than swept — except for the litter this module owns, which goes.
-    for (const dir of same ? [] : [path.join(fromDir, 'archive'), fromDir]) {
-      try {
-        for (const name of fs.readdirSync(dir)) {
-          if (name.endsWith('.lock') || name.endsWith('.hdr')) {
-            try { fs.rmSync(path.join(dir, name), { force: true }); } catch { /* best effort */ }
+      // The emptied directories go, the archive before its parent. A directory
+      // still holding something (an orphan breadcrumb, a lock a crashed writer
+      // left behind, a file that was never a session) is left where it is
+      // rather than swept — except for the litter this module owns, which goes.
+      for (const dir of same ? [] : [path.join(fromDir, 'archive'), fromDir]) {
+        try {
+          for (const name of fs.readdirSync(dir)) {
+            if (name.endsWith('.lock') || name.endsWith('.hdr')) {
+              try { fs.rmSync(path.join(dir, name), { force: true }); } catch { /* best effort */ }
+            }
           }
-        }
-        if (!fs.readdirSync(dir).length) fs.rmdirSync(dir);
-      } catch { /* not empty, or not ours */ }
+          if (!fs.readdirSync(dir).length) fs.rmdirSync(dir);
+        } catch { /* not empty, or not ours */ }
+      }
     }
     return { moved, dir: toDir };
   }

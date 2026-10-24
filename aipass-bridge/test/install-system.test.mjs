@@ -17,6 +17,7 @@ import {
   sidecarName,
   sidecarUsable,
   signingState,
+  bundlerCommand,
 } from '../../scripts/build-desktop.mjs';
 import { planFor as ladderPlan, versionFromName } from '../../scripts/install-ladder.mjs';
 import { downloadUrl } from '../../scripts/build-universal-sidecar.mjs';
@@ -164,4 +165,34 @@ test('the universal sidecar is built from the two official Node builds', () => {
     downloadUrl('24.0.0', 'x64'),
     'https://nodejs.org/dist/v24.0.0/node-v24.0.0-darwin-x64.tar.gz',
   );
+});
+
+test('the bundler is called under whichever name the machine has', () => {
+  // The Tauri CLI comes in two spellings: the npm shim (`tauri`) and the
+  // cargo one (`cargo tauri` - the `tauri-cli` crate installs `cargo-tauri`,
+  // NOT `tauri`). This repository installs no npm packages, so the build
+  // lane gets the cargo spelling.
+  const saved = process.env.AIPASS_TAURI_CLI;
+  delete process.env.AIPASS_TAURI_CLI;
+  try {
+    assert.deepEqual(
+      bundlerCommand(['build'], { has: (n) => n === 'tauri' }),
+      { cmd: 'tauri', args: ['build'] },
+    );
+    assert.deepEqual(
+      bundlerCommand(['build'], { has: (n) => n === 'cargo' }),
+      { cmd: 'cargo', args: ['tauri', 'build'] },
+    );
+    assert.throws(() => bundlerCommand(['build'], { has: () => false }), /not on PATH/);
+
+    // The override names the binary to run, and it wins over both.
+    process.env.AIPASS_TAURI_CLI = '/opt/tauri';
+    assert.deepEqual(
+      bundlerCommand(['build'], { has: () => true }),
+      { cmd: '/opt/tauri', args: ['build'] },
+    );
+  } finally {
+    if (saved === undefined) delete process.env.AIPASS_TAURI_CLI;
+    else process.env.AIPASS_TAURI_CLI = saved;
+  }
 });

@@ -58,15 +58,22 @@ function projectHash(root) { return crypto.createHash('sha1').update(path.resolv
  * The folder and the file hold what the model learned about the project and
  * what the user told it — user data, not scratch. They are owner-only where
  * the OS has modes, like the session store and the credentials file: the
- * mode is set on creation and pinned again afterwards, because a directory
- * that was already there keeps the permissions it had.
+ * mode is set when the store creates the folder, and a folder that was
+ * already there keeps the permissions it had.
  */
 function storePath(root, dir = defaultDir()) {
+  // The mode belongs to the folder, and it is set once: when the store
+  // creates it. Re-pinning it on every call took the permissions away from
+  // whoever set them - a read-only home, a folder another tool locked, and
+  // the failure drill the suite runs (a read-only folder must make a save
+  // fail) all lost their lock, because the chmod handed the write
+  // permission back before the write.
+  const existed = fs.existsSync(dir);
   try { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch {}
-  // The mode is set on creation and pinned again afterwards: a directory
-  // that was already there keeps the permissions it had. Windows has no
-  // POSIX modes, so the chmod is best effort there.
-  try { fs.chmodSync(dir, 0o700); } catch { /* windows has no POSIX modes */ }
+  if (!existed) {
+    // Windows has no POSIX modes, so the chmod is best effort there.
+    try { fs.chmodSync(dir, 0o700); } catch { /* windows has no POSIX modes */ }
+  }
   return path.join(dir, projectHash(root) + '.json');
 }
 

@@ -249,7 +249,11 @@ test("a server's cwd is where it runs, not where the harness happens to stand", 
   try {
     await manager.ensureLoaded();
     const out = await manager.runTool('MCP__here__pwd', {});
-    assert.equal(path.resolve(out), path.resolve(root, 'work'));
+    // The server reports the directory it really stands in, and macOS spells
+    // a temporary directory two ways: `/var/folders/...` is a link to
+    // `/private/var/folders/...`. The two names are one directory, so the
+    // comparison is made on the real paths.
+    assert.equal(fs.realpathSync(path.resolve(out)), fs.realpathSync(path.resolve(root, 'work')));
   } finally {
     manager.close();
   }

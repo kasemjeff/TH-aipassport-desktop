@@ -137,22 +137,26 @@ test('a session of another project is not reachable by its path either', () => {
   assert.equal(foreign?.root, path.resolve(there), 'the refusal names the project it belongs to');
 });
 
-test('two projects whose paths slugify the same do not share a picker', () => {
-  // The directory is named after the path, and the name is a slug: `a b` and
-  // `a-b` are the same slug, so the two projects share a directory. The
-  // header's own root is the authority on which project a session belongs
-  // to — the directory is a bucket, not a boundary.
+test('two projects whose readable names collide get their own session folders', () => {
+  // The folder name carries a hash of the whole path, so `a b` and `a-b` -
+  // one slug under the old naming - no longer share a bucket, and two long
+  // temporary paths that differ only past the old 60-character cut do not
+  // either.
   const dir = tmp();
   const store = new SessionStore(path.join(dir, 'store'));
   const a = path.join(dir, 'a b');
   const b = path.join(dir, 'a-b');
+  const long = 'a'.repeat(80);
+  const c = path.join(dir, `${long}-one`);
+  const d = path.join(dir, `${long}-two`);
   fs.mkdirSync(a); fs.mkdirSync(b);
   const mine = store.create({ root: a, title: 'mine' });
   const theirs = store.create({ root: b, title: 'theirs' });
 
-  assert.equal(store.dirFor(a), store.dirFor(b), 'the two do share a directory — that is the hazard');
-  assert.deepEqual(store.list(a).map((s) => s.id), [mine.id], 'and the picker is not shared');
-  assert.deepEqual(store.list(b).map((s) => s.id), [theirs.id], 'each project sees its own');
+  assert.notEqual(store.dirFor(a), store.dirFor(b), 'a hash keeps two paths apart when the readable part matches');
+  assert.notEqual(store.dirFor(c), store.dirFor(d), 'and when the difference is past the old 60-character cut');
+  assert.deepEqual(store.list(a).map((s) => s.id), [mine.id], 'each project sees its own');
+  assert.deepEqual(store.list(b).map((s) => s.id), [theirs.id], 'and only its own');
 });
 
 test('a relocation does not carry another project\'s sessions with it', () => {

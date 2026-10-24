@@ -58,6 +58,7 @@ export const FANOUT_BYTES = 4 * 1024 * 1024;
  * notice is not part of the replay stream, so a reconnect's Last-Event-ID
  * still points at the last real frame and the replay skips nothing.
  */
+/** @param {number} dropped */
 const behindFrame = (dropped) => `event: fell_behind\ndata: ${JSON.stringify({ dropped })}\n\n`;
 
 /**
@@ -77,6 +78,7 @@ class Subscriber {
     this.sink = sink;
     this.frames = frames;
     this.bytes = bytes;
+    /** @type {{frame: string, size: number}[]} */
     this.queue = [];        // the frames the sink has not taken yet
     this.queuedBytes = 0;
     this.dropped = 0;       // the frames lost to the bound, since the start
@@ -111,8 +113,9 @@ class Subscriber {
       this.ready = false;
       return true;
     }
-    this.queue.push({ frame, size: Buffer.byteLength(frame) });
-    this.queuedBytes += this.queue.at(-1).size;
+    const queued = { frame, size: Buffer.byteLength(frame) };
+    this.queue.push(queued);
+    this.queuedBytes += queued.size;
     this.trim();
     return true;
   }
@@ -127,6 +130,7 @@ class Subscriber {
   trim() {
     while (this.queue.length > this.frames || (this.queuedBytes > this.bytes && this.queue.length > 1)) {
       const gone = this.queue.shift();
+      if (!gone) break;
       this.queuedBytes -= gone.size;
       this.dropped += 1;
       this.owed = true;
@@ -212,10 +216,16 @@ export class EventFanout {
     return sub;
   }
 
-  /** Take a subscriber away — its window closed. */
+  /**
+   * Take a subscriber away — its window closed.
+   * @param {Subscriber} sub
+   */
   unsubscribe(sub) { this.subscribers.delete(sub); }
 
-  /** One frame to every subscriber. */
+  /**
+   * One frame to every subscriber.
+   * @param {string} frame
+   */
   publish(frame) {
     for (const sub of [...this.subscribers]) {
       if (!sub.push(frame) && sub.dead) this.subscribers.delete(sub);

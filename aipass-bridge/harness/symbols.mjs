@@ -171,6 +171,10 @@ function loadIndex(root) {
 // a broken index reads as "nothing indexed" and the project is re-read. The
 // mode is pinned on the new file, so the index is the owner's alone.
 function saveIndex(root, idx) {
+  // No index, no write: `JSON.stringify(undefined)` is undefined, and
+  // writeFileSync would throw on it - a throw swallowed by the catch below,
+  // so the index silently never landed and every run re-read the project.
+  if (!idx) return;
   try { writeFileAtomic(indexPath(root), JSON.stringify(idx), { mode: 0o600 }); } catch {}
 }
 
@@ -208,7 +212,7 @@ export function indexProject(root) {
     try { text = fs.readFileSync(full, 'utf8'); } catch { continue; }
     idx.files[rel] = { mtime: st.mtimeMs, symbols: extractSymbols(text, rel) };
   }
-  saveIndex(root);
+  saveIndex(root, idx);
   return idx;
 }
 

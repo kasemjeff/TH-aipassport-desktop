@@ -176,10 +176,46 @@ export function sidecarUsable(file) {
 
 const sha256 = (file) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
+/** Whether `name` is on PATH. Windows counts PATHEXT (.cmd, .exe). */
+function onPath(name) {
+  const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const exts = process.platform === 'win32'
+    ? (process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';').filter(Boolean)
+    : [''];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      try {
+        if (fs.statSync(path.join(dir, name + ext)).isFile()) return true;
+      } catch { /* not there */ }
+    }
+  }
+  return false;
+}
+
+/**
+ * How the bundler is called.
+ *
+ * The bundler is the Tauri CLI, and it comes in two spellings: the npm shim
+ * (`tauri`, a .cmd on Windows) and the cargo one (`cargo tauri` — the
+ * `tauri-cli` crate installs `cargo-tauri`, NOT `tauri`). A machine with the
+ * npm shim gets that one; a machine with only Rust gets the cargo one, which
+ * is how the lane that builds the artifact gets it: this repository installs
+ * no npm packages, so the CLI comes from cargo.
+ *
+ * `AIPASS_TAURI_CLI` overrides both and names the binary to run.
+ */
+export function bundlerCommand(args, { has = onPath } = {}) {
+  const override = process.env.AIPASS_TAURI_CLI?.trim();
+  if (override) return { cmd: override, args };
+  if (has('tauri')) return { cmd: 'tauri', args };
+  if (has('cargo')) return { cmd: 'cargo', args: ['tauri', ...args] };
+  throw new Error('the Tauri CLI is not on PATH — install it with `cargo install tauri-cli --version "^2"`, or put the npm shim on PATH');
+}
+
 /** Run a command, inheriting the output. Returns the exit code. */
 function run(cmd, args, cwd) {
   const isWindows = process.platform === 'win32';
-  // Windows resolves `tauri` to the npm shim, which is a .cmd — a shell is
+  // Windows resolves a command to a shim, which is a .cmd — a shell is
   // the only way to run one without carrying its path around. The command is
   // therefore assembled here, quoted once, rather than handed over as an
   // argument list a shell would concatenate unescaped.
@@ -192,7 +228,15 @@ function run(cmd, args, cwd) {
         shell: true,
       })
     : spawnSync(cmd, args, { cwd, stdio: 'inherit', windowsHide: true });
-  if (out.error) throw out.error;
+  if (out.error) {
+    // ENOENT means the command is not on PATH. For the bundler that is the
+    // Tauri CLI, and the fix is one line - so say it, instead of leaving
+    // "spawnSync tauri ENOENT" as the only word in a CI log.
+    if (out.error.code === 'ENOENT') {
+      throw new Error(`"${cmd}" is not on PATH - the Tauri CLI is needed for the build (cargo install tauri-cli --version "^2")`);
+    }
+    throw out.error;
+  }
   return out.status ?? 1;
 }
 
@@ -268,8 +312,9 @@ export function main() {
     '--bundles', plan.bundles.join(','),
   ];
   if (plan.target) args.push('--target', plan.target);
-  console.log(`tauri ${args.join(' ')}`);
-  const code = run(process.env.AIPASS_TAURI_CLI?.trim() || 'tauri', args, repo);
+  const { cmd, args: bundlerArgs } = bundlerCommand(args);
+  console.log(`${cmd} ${bundlerArgs.join(' ')}`);
+  const code = run(cmd, bundlerArgs, repo);
   if (code !== 0) {
     console.error(`the bundler failed (exit ${code})`);
     process.exit(code);
