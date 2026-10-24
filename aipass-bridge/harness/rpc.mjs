@@ -1044,8 +1044,41 @@ export function createRpc({
       // ⇒ run lost) fired on any long RUN or SEARCH while the backend was
       // perfectly alive. It carries no id — a reconnect's Last-Event-ID still
       // points at the last real frame.
-      const ping = setInterval(() => { try { res.write('event: ping\ndata: {}\n\n'); } catch { /* closed */ } }, 15_000);
-      req.on('close', () => { clearInterval(ping); fanout.unsubscribe(sub); });
+      // The ping is also the probe: a write to a dropped socket does not throw,
+      // so a destroyed stream or a write that reports an error ends the
+      // subscriber here, and TCP keepalive lets the kernel notice a peer that
+      // left without a FIN (the same reasoning as the extension's stream in
+      // bridge/server.mjs).
+      req.socket?.setKeepAlive?.(true, 15_000);
+      const ping = setInterval(() => {
+        if (res.destroyed || res.writableEnded) { cleanup(); return; }
+        try { res.write('event: ping\ndata: {}\n\n', (err) => { if (err) cleanup(); }); } catch { cleanup(); }
+      }, 15_000);
+      // One cleanup, from every signal a dropped connection can give.
+      //
+      // `req.on('close')` alone is not enough. A window that is suspended, a
+      // laptop whose lid closes, a proxy that resets the connection — each of
+      // those can leave the response half-open, and the subscriber then stays
+      // in the fan-out with a socket that will never drain again. The frames
+      // it missed keep filling its bounded queue until the oldest are dropped,
+      // and the backend pays for a window that is not there.
+      //
+      // So the cleanup is idempotent and runs on whichever comes first: the
+      // request ending, the response erroring, the response closing, or the
+      // socket going away. The ping stops, the subscriber is taken out of the
+      // fan-out, and nothing is left behind.
+      let closed = false;
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(ping);
+        fanout.unsubscribe(sub);
+      };
+      req.on('close', cleanup);
+      res.on('close', cleanup);
+      res.on('error', cleanup);
+      req.socket?.on('error', cleanup);
+      req.socket?.on('close', cleanup);
       return;
     }
 
@@ -1199,6 +1232,7 @@ export function createRpc({
     events: bus,
     get port() { return boundPort(); },
     get url() { return `http://127.0.0.1:${boundPort()}`; },
+    get fanout() { return fanout; },
     // The replay buffer's own counters: the budget is in BYTES, and a test
     // needs to see that the buffer counts the way the limit is written.
     get replay() { return { frames: replay.length, bytes: replayBytes }; },

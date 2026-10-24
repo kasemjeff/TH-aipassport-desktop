@@ -2442,6 +2442,98 @@ test('the window says it is working while a run is in flight', async () => {
   assert.equal(node('log').classList.contains('busy'), false, 'and the log takes its room back');
 });
 
+/** The silence the watchdog acts on: twenty seconds with no event at all. */
+async function agePastTheWatchdog(t) {
+  // `now` pins the mocked clock to the real present: the run just stamped
+  // lastEventAt with the real clock, and a mocked epoch that starts anywhere
+  // else would make the silence read as negative instead of past the window.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.mock.timers.tick(21_000);
+}
+
+test('a quiet stream with a live backend is not written off', async (t) => {
+  // The stream can go quiet while the run is fine — the laptop slept, the
+  // socket is reconnecting, the backend restarted. The watchdog used to write
+  // the run off AND cancel it upstream after twenty silent seconds, throwing
+  // away work that was going to finish. Now it asks the backend first: an
+  // answer means the run is legitimate, and the window waits for the stream.
+  const backend = { ...BACKEND, status: () => ({ ...BACKEND.status(), running: true }) };
+  const { node, tick, timers } = await bootApp(backend);
+  const task = node('task');
+  task.value = 'a task that keeps going';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+
+  await agePastTheWatchdog(t);
+  for (const fn of [...timers.values()]) await fn();
+  await tick();
+
+  assert.equal(node('send').textContent, 'หยุด', 'the run is still the window\'s');
+  assert.equal(node('working').classList.contains('hidden'), false, 'the bar stays up');
+  assert.match(node('log').textContent, /backend ยังตอบอยู่แต่สตรีมเงียบ/, 'and the silence is explained');
+  assert.doesNotMatch(node('log').textContent, /ถือว่าหยุดแล้ว/, 'and nothing was written off');
+});
+
+test('a run the backend already ended is written off, once', async (t) => {
+  // A closing frame can be lost to a transport that never came back: the
+  // backend is fine and says the run is over, and the window would keep the
+  // bar up for ever. The watchdog asks, hears "ended", and puts the run down.
+  const { node, tick, timers, sent } = await bootApp(BACKEND);
+  const task = node('task');
+  task.value = 'a task whose ending was lost';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+
+  await agePastTheWatchdog(t);
+  for (const fn of [...timers.values()]) await fn();
+  await tick();
+
+  assert.equal(node('send').textContent, 'ส่ง', 'the composer is free again');
+  assert.equal(node('working').classList.contains('hidden'), true, 'the bar is down');
+  assert.match(node('log').textContent, /จบไปแล้วที่ backend/, 'and the note says where the run ended');
+  assert.ok(sent.some((r) => r.method === 'cancel'), 'the backend is told the window let go');
+});
+
+test('a backend that refuses to answer the watchdog ends the run on screen', async (t) => {
+  // A refusal is a fact about the backend, not the transport: the process is
+  // gone, no run can come back, and waiting for it is a spinner for ever.
+  const backend = { ...BACKEND };
+  const { node, tick, timers, sent } = await bootApp(backend);
+  const task = node('task');
+  task.value = 'a task whose backend died';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+
+  backend.status = () => { throw new Error('connection refused'); };
+  await agePastTheWatchdog(t);
+  for (const fn of [...timers.values()]) await fn();
+  await tick();
+
+  assert.equal(node('send').textContent, 'ส่ง', 'the composer is free again');
+  assert.equal(node('working').classList.contains('hidden'), true, 'the bar is down');
+  assert.match(node('log').textContent, /backend ไม่ตอบ/, 'and the note says the backend is gone');
+  assert.ok(sent.some((r) => r.method === 'cancel'), 'the write-off still tells the backend');
+});
+
+test('a quiet stream exceeding the 3-minute hard ceiling writes off the stalled run', async (t) => {
+  const backend = { ...BACKEND, status: () => ({ ...BACKEND.status(), running: true }) };
+  const { node, tick, timers, sent } = await bootApp(backend);
+  const task = node('task');
+  task.value = 'a task that stalled forever';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.mock.timers.tick(181_000);
+  for (const fn of [...timers.values()]) await fn();
+  await tick();
+
+  assert.equal(node('send').textContent, 'ส่ง', 'the composer is reset');
+  assert.equal(node('working').classList.contains('hidden'), true, 'the bar is down');
+  assert.match(node('log').textContent, /เงียบเกิน 3 นาที/, 'the hard ceiling note is shown');
+  assert.ok(sent.some((r) => r.method === 'cancel'), 'cancel is called upstream');
+});
+
 test('a reloaded window comes back with its conversation, not the welcome card', async () => {
   // Ctrl+R reloads the window. What came back used to be the welcome card
   // over an empty screen: the boot paints the card, and the card says

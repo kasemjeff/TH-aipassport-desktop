@@ -5,6 +5,28 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ## [Unreleased]
 
+### Fixed
+
+- **SSE cleanup catches half-open connections through the ping probe.** A connection
+  that drops silently without sending a TCP FIN (such as a sleeping laptop or proxy drop)
+  no longer hangs in the bridge client set or fanout subscriber list forever. The 15s ping
+  acts as a probe via write callback error detection and stream destruction checks, TCP
+  keepalive is enabled on the socket, and cleanup runs reliably across close, error, and socket events.
+- **Concurrent jobs no longer open duplicate chat tabs.** When multiple jobs arrive
+  before any browser tab is open, tab acquisition in `background.js` shares a single
+  in-flight promise lock (`tabPromise`), ensuring all concurrent jobs run in the same tab
+  and preventing conflicting browser sessions. `popup.js` delegates tab opening to the
+  background worker to reuse any existing open tab.
+- **The desktop window watchdog asks the exact project and bounds silent streams.**
+  The watchdog probe passes `{ root: state.root }` to `rpc('status')` to inspect the actual
+  active project instead of assuming the default. If the run has completed at the backend
+  (`st.running === false`), the window stops immediately. If the stream remains continuously
+  silent for over 3 minutes despite the backend answering, the window writes off the stalled
+  run honestly instead of spinning indefinitely.
+- **IDE extension test suite runs on every `npm test`.** `ide-extension/selftest.mjs` is
+  integrated into the suite via `aipass-bridge/test/ide-extension.test.mjs`, ensuring the
+  protocol mirror and marker grammar never drift undetected.
+
 ### Changed
 
 - **Node 20 is enough to run this.** The floor was Node 22, and it was never a
@@ -588,6 +610,35 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **A Ctrl+C no longer rolls the content back.** The backend used to inherit
+  the app's console, so a console-wide Ctrl+C ended it with
+  STATUS_CONTROL_C_EXIT, and the supervisor read that as the content tree
+  breaking the backend — three of those in a row rolled back a perfectly good
+  tree, and the rollback is what kept the crash loop going. The backend is
+  spawned detached now (its own console, control events cannot reach it), the
+  code is still read apart from a crash for builds that predate the fix, and a
+  death with no exit code at all — a signal on unix: the OOM killer, a closed
+  terminal, a person's kill — is not blamed on the tree either.
+- **A quiet stream asks before the run is written off.** The window used to
+  cancel a run upstream after twenty silent seconds, so a laptop that slept or
+  a stream that was reconnecting threw away work that was going to finish. The
+  window now asks the backend whether the run is still going: an answer means
+  it waits, a refusal writes the run off at once, and a backend that hangs
+  gets three bounded probes before the same. The question itself cannot pile
+  up — one probe at a time, four seconds each — so a hung backend cannot stall
+  every other call the window makes behind the browser's connection cap.
+- **A stream nobody reads is put down.** A laptop that slept or a proxy that
+  reset the connection could leave a half-open SSE subscriber behind: the
+  bridge believed an extension was attached and dispatched jobs into a socket
+  nobody reads, and the harness kept a window in its fan-out for ever. The
+  ping is now also the probe, TCP keepalive notices the peer that left without
+  a FIN, and one idempotent cleanup runs on whichever signal comes first.
+- **The extension opens the chat tab it needs.** A job that arrived while no
+  de.aipass.net tab was open was refused with "no de.aipass.net tab is open" —
+  a 502 the person could only fix by opening a tab themselves. The extension
+  opens the tab, waits for it to load, and reuses it: two jobs that arrive
+  together share one new tab, a tab that is already open is not duplicated,
+  and a tab that cannot be opened is reported with Chrome's reason.
 - **A build that finished can publish what it built.** The bundle search asked
   cargo from the repository root, where there is no `Cargo.toml`, and fell
   back to a root `target/` the bundler never writes; every platform built a

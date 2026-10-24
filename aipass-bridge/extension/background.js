@@ -6,6 +6,9 @@
 // Private Network Access checks; an extension request with host_permissions
 // does not.
 const DEFAULT_BRIDGE = 'http://127.0.0.1:8787';
+// The page that holds the logged-in session. A job runs there, so this is
+// the URL the extension opens when no tab is open yet.
+const CHAT_URL = 'https://de.aipass.net/chat';
 // The stream is deliberately aborted every four minutes (Chrome's long-request
 // ceiling — the cycle below), so the reconnect delay backs off instead of
 // being flat: almost at once right after a drop that may just be the cycle,
@@ -20,6 +23,10 @@ let connected = false;
 let lastError = '';
 let retryMs = RECONNECT_FIRST_MS;
 const jobTabs = new Map();
+// The tab being opened right now, if any. Two jobs that arrive while no tab is
+// open both miss in findChatTab(); without this each would open a tab of its
+// own, and the person would be left with two sessions to keep alive.
+let openingTab = null;
 // The per-run token the bridge hands over in its `ready` frame. Every post to
 // /ext/* carries it, so the bridge can tell the extension from any other
 // local process that learned a job id. It is handed over, never configured:
@@ -115,6 +122,52 @@ async function findChatTab() {
   return pool.find((t) => t.url?.includes('/chat')) ?? pool[0];
 }
 
+/**
+ * Open the chat tab, and wait for it to be ready.
+ *
+ * The tab is not optional: the extension is a Chrome extension, so the page
+ * that holds the logged-in session has to be a real tab in the browser the
+ * extension lives in. A request that arrives while no tab is open used to
+ * fail with "no de.aipass.net tab is open", which is what the person saw as
+ * a 502 they could not do anything about — the fix (open the tab) was in the
+ * extension's hands, not theirs.
+ *
+ * So the extension opens it itself and carries on. The tab is opened at the
+ * chat route, and the job waits for it to load: a request that has to wait a
+ * few seconds is better than one that is refused outright.
+ */
+async function openChatTab() {
+  const tab = await chrome.tabs.create({ url: CHAT_URL, active: true });
+  try {
+    await waitForComplete(tab.id, 30_000);
+  } catch {
+    // A tab that did not report "complete" may still be usable — the page
+    // loads its own data and the content script attaches on document_start.
+  }
+  return tab;
+}
+
+/**
+ * The tab a job should run in: the one that is already open, or a new one.
+ *
+ * Reuse first: a tab that is already logged in and sitting on the chat route
+ * is exactly what the job wants, and opening another one would only add a
+ * second session to keep alive.
+ */
+async function tabForJob() {
+  if (openingTab) return openingTab;
+  // Lock tab acquisition so concurrent jobs awaiting tab resolution share
+  // the exact same promise and never trigger duplicate tab creation.
+  openingTab = (async () => {
+    const existing = await findChatTab();
+    if (existing) return existing;
+    return await openChatTab();
+  })().finally(() => {
+    openingTab = null;
+  });
+  return openingTab;
+}
+
 function waitForComplete(tabId, timeoutMs = 15_000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(onUpdated); reject(new Error('tab did not finish loading')); }, timeoutMs);
@@ -146,9 +199,25 @@ async function ensureContentScript(tab) {
 }
 
 async function handleJob(job) {
-  const tab = await findChatTab();
-  if (!tab) {
-    await post('/ext/error', { jobId: job.jobId, message: 'no de.aipass.net tab is open' });
+  // The tab a job runs in: the one that is already open, or a new one.
+  //
+  // Opening it here is the fix for the request that arrived while nobody had
+  // a chat tab open. The old answer was a refusal — "no de.aipass.net tab is
+  // open" — which the person could only fix by opening a tab themselves, and
+  // which read as a broken app when the bridge was perfectly fine. The
+  // extension knows how to open the tab, so it opens it.
+  //
+  // If it cannot be opened at all — Chrome refuses, the browser is closing —
+  // the refusal is still the old one, and it is still honest. `tabForJob`
+  // answers a tab or throws, so there is no third shape to handle here.
+  let tab;
+  try {
+    tab = await tabForJob();
+  } catch (err) {
+    await post('/ext/error', {
+      jobId: job.jobId,
+      message: `could not open a de.aipass.net tab: ${err?.message ?? err}`,
+    });
     return;
   }
   jobTabs.set(job.jobId, tab.id);
@@ -272,7 +341,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // the bridge waits for it on /ext/assistant. This branch was missing, so
     // the reply was dropped: the job sat until it timed out, and the
     // assistant was really created on the account all the same.
-    else if (p.kind === 'assistant') { jobTabs.delete(p.jobId); post('/ext/assistant', { jobId: p.jobId, assistantId: p.assistantId, message: p.message }); }
+    else if (p.kind === 'assistant') { jobTabs.delete(p.jobId); post('/ext/assistant', { jobId: p.jobId, assistantId: p.assistantId, conversationId: p.conversationId, deleted: p.deleted, raw: p.raw, message: p.message }); }
     return;
   }
   if (msg?.type === 'status') {
@@ -285,6 +354,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         tab: tab ? { id: tab.id, url: tab.url } : null,
         activeJobs: jobTabs.size,
       });
+    })();
+    return true;
+  }
+  if (msg?.type === 'open-chat-tab') {
+    (async () => {
+      try {
+        const tab = await tabForJob();
+        if (tab?.id) await chrome.tabs.update(tab.id, { active: true });
+        sendResponse({ ok: true, tabId: tab?.id });
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err?.message ?? err) });
+      }
     })();
     return true;
   }

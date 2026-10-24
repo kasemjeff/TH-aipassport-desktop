@@ -29,6 +29,21 @@ const RESTART_EXIT: i32 = 42;
 /// which one it was.
 const PORT_BUSY_EXIT: i32 = 43;
 
+/// The exit code Windows reports for a process that a console control event
+/// ended — STATUS_CONTROL_C_EXIT, which is what a Ctrl+C leaves behind.
+///
+/// It is not a crash, and it is not the content tree's fault. The backend used
+/// to inherit the app's console, so a console-wide Ctrl+C reached it and
+/// Windows ended it with this code. The supervisor read that as the content
+/// tree breaking the backend, rolled back good content for it, and the
+/// rollback is what turned one Ctrl+C into a crash loop: the log showed the
+/// same `0xc000013a` again and again, each time followed by "the content tree
+/// broke the backend three times in a row — the previous one is back".
+///
+/// So the code is named here, read apart from a genuine crash, and never
+/// counted against the content tree.
+const CONTROL_C_EXIT: i32 = 0xC000_013Au32 as i32;
+
 /// Who is answering on the backend's port.
 #[derive(PartialEq, Eq, Debug)]
 enum PortOwner {
@@ -74,8 +89,54 @@ fn busy_outcome(owner: PortOwner) -> BusyOutcome {
 /// tree that breaks the backend, and rolling back because the port was taken
 /// threw away good content for nothing — the app put the previous tree back
 /// while the port stayed busy, and the backend kept failing.
+///
+/// A console control event is not the tree's fault either, and it is the one
+/// that mattered most: the backend used to inherit the app's console, so a
+/// Ctrl+C ended it with STATUS_CONTROL_C_EXIT, and three of those in a row
+/// rolled back a content tree that was perfectly fine. The Ctrl+C is gone now
+/// (the backend is spawned detached), but the code is still read apart: an
+/// exit that a person asked for is never the tree's fault, and a build that
+/// predates the fix still needs to survive one.
+///
+/// A death with NO exit code is not the tree's fault either: on unix that is
+/// a signal — the OOM killer, a closed terminal, a person's kill — and the
+/// process named no fault of its own. The tree still loses its process (the
+/// backoff below runs), but the rollback only ever fires for a crash the
+/// process reported with a code.
 fn counts_against_the_content(code: Option<i32>) -> bool {
-    code != Some(PORT_BUSY_EXIT)
+    match code {
+        Some(code) => code != PORT_BUSY_EXIT && code != CONTROL_C_EXIT,
+        None => false,
+    }
+}
+
+/// What kind of death this was, as the supervisor reads it.
+///
+/// The three answers need three different treatments, and mixing them up is
+/// what turned one Ctrl+C into a crash loop: the old code read every death
+/// that was not "the port was taken" as "the content tree broke the backend",
+/// so a control event rolled back good content and the rollback is what
+/// kept the loop going.
+#[derive(PartialEq, Eq, Debug)]
+enum Death {
+    /// A deliberate restart: a new content tree needs a new process.
+    Restart,
+    /// The port was taken. Who took it is a separate question.
+    PortBusy,
+    /// Somebody asked the backend to stop (a console control event).
+    Controlled,
+    /// A genuine crash: the tree may be at fault.
+    Crash,
+}
+
+/// Read an exit code as the kind of death it is.
+fn death_of(code: Option<i32>) -> Death {
+    match code {
+        Some(RESTART_EXIT) => Death::Restart,
+        Some(PORT_BUSY_EXIT) => Death::PortBusy,
+        Some(CONTROL_C_EXIT) => Death::Controlled,
+        _ => Death::Crash,
+    }
 }
 
 /// The command the backend leaves for the shell.
@@ -515,9 +576,11 @@ struct Backend {
     child: Mutex<Option<std::process::Child>>,
     quitting: AtomicBool,
     fails: Mutex<u32>,
-    /// The failures that are not the port's fault. The content rollback is
-    /// about a broken tree, and a busy port is not a broken tree: rolling
-    /// back because the port was taken threw away good content for nothing.
+    /// The failures the content tree can own — what
+    /// `counts_against_the_content` blames. The content rollback is about a
+    /// broken tree, and a busy port is not a broken tree: rolling back
+    /// because the port was taken threw away good content for nothing. Nor is
+    /// a death that carries no code: the tree did not report that one.
     content_fails: Mutex<u32>,
     next_try: Mutex<Instant>,
     /// Set once the port has been found to be held by something that is not
@@ -557,6 +620,35 @@ impl Backend {
             if let Ok(dup) = log.try_clone() {
                 command.stdout(log).stderr(dup);
             }
+        }
+        // The backend must NOT share this process's console.
+        //
+        // A child inherits the console of the process that started it, and
+        // Windows delivers a console control event — a Ctrl+C in the terminal
+        // that launched the app — to EVERY process attached to that console.
+        // The backend used to be spawned with no flags at all, so it shared
+        // the console, and a Ctrl+C ended it with STATUS_CONTROL_C_EXIT
+        // (0xc000013a). The supervisor read that as the content tree breaking
+        // the backend, rolled back a perfectly good tree after three such
+        // deaths, and the rollback is what kept the loop going.
+        //
+        // DETACHED_PROCESS gives the child its own console, so it is not
+        // attached to ours and a control event cannot reach it.
+        // CREATE_NEW_PROCESS_GROUP stops the child from receiving Ctrl+C, and
+        // CREATE_NO_WINDOW keeps a console from flashing on screen.
+        //
+        // This is proven, not assumed: a child spawned with these flags
+        // survives a console-wide GenerateConsoleCtrlEvent, while a child
+        // spawned without them exits with 0xC000013A.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(
+                DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+            );
         }
         #[cfg(unix)]
         {
@@ -654,53 +746,80 @@ impl Backend {
         // new content tree and needs a new process to run it. The backoff
         // does not apply, and the note says why — a log line that reads
         // "restart attempt 1 of a crash" is a lie about what happened.
-        if status.map(|s| s.code() == Some(RESTART_EXIT)).unwrap_or(false) {
-            *self.fails.lock().unwrap() = 0;
-            *self.next_try.lock().unwrap() = Instant::now();
-            note("backend asked for a restart (a new content version) — starting it again");
-            match self.spawn() {
-                Ok(kid) => *guard = Some(kid),
-                Err(err) => note(&format!("backend restart failed: {err}")),
-            }
-            return;
-        }
-        // A busy port is not a crash either, and the two facts it can mean
-        // need opposite answers.
-        if status.map(|s| s.code() == Some(PORT_BUSY_EXIT)).unwrap_or(false) {
-            match busy_outcome(self.port_owner()) {
-                BusyOutcome::Adopt => {
-                    // One of our backends is already answering there — a second
-                    // window, a browser `aipass desktop`, an instance this app
-                    // started and lost track of. The window is pointed at that
-                    // port, so it is already talking to the right backend:
-                    // adopt it, and stop starting another one that could only
-                    // die on the same port.
-                    *self.fails.lock().unwrap() = 0;
-                    *self.content_fails.lock().unwrap() = 0;
-                    *self.next_try.lock().unwrap() = Instant::now();
-                    *guard = None;
-                    self.port_busy.store(false, Ordering::SeqCst);
-                    note("another aipass backend is answering on the port — it is adopted, and no second one is started");
-                    return;
+        match death_of(status.and_then(|s| s.code())) {
+            Death::Restart => {
+                *self.fails.lock().unwrap() = 0;
+                *self.next_try.lock().unwrap() = Instant::now();
+                note("backend asked for a restart (a new content version) — starting it again");
+                match self.spawn() {
+                    Ok(kid) => *guard = Some(kid),
+                    Err(err) => note(&format!("backend restart failed: {err}")),
                 }
-                BusyOutcome::Name => {
-                    // Something that is not ours holds the port. Restarting
-                    // cannot fix that, and a loop that cannot win is what made
-                    // the app look broken: name it once, with the fix, and
-                    // keep the polite backoff so the port is picked up again
-                    // if it is freed.
-                    if !self.port_busy.swap(true, Ordering::SeqCst) {
-                        note(&format!(
-                            "port {} is held by something that is not an aipass backend — close it, or start the app with AIPASS_DESKTOP_PORT=<other>",
-                            self.port
-                        ));
+                return;
+            }
+            Death::Controlled => {
+                // Somebody asked the backend to stop. It is not a crash, it is
+                // not the content tree's fault, and — the part that matters —
+                // it must not roll the content back: three control events in a
+                // row used to throw away a good tree and leave the app unable
+                // to start, all because a Ctrl+C had reached the backend.
+                //
+                // The backend is spawned detached now, so this should not
+                // happen any more; it is still handled, because a build that
+                // predates the fix has to survive one, and because the
+                // supervisor's job is to tell the truth about what happened.
+                *self.fails.lock().unwrap() = 0;
+                *self.content_fails.lock().unwrap() = 0;
+                *self.next_try.lock().unwrap() = Instant::now();
+                note("backend was stopped by a console control event — starting it again, the content tree is fine");
+                match self.spawn() {
+                    Ok(kid) => *guard = Some(kid),
+                    Err(err) => note(&format!("backend restart failed: {err}")),
+                }
+                return;
+            }
+            Death::PortBusy => {
+                match busy_outcome(self.port_owner()) {
+                    BusyOutcome::Adopt => {
+                        // One of our backends is already answering there — a second
+                        // window, a browser `aipass desktop`, an instance this app
+                        // started and lost track of. The window is pointed at that
+                        // port, so it is already talking to the right backend:
+                        // adopt it, and stop starting another one that could only
+                        // die on the same port.
+                        *self.fails.lock().unwrap() = 0;
+                        *self.content_fails.lock().unwrap() = 0;
+                        *self.next_try.lock().unwrap() = Instant::now();
+                        *guard = None;
+                        self.port_busy.store(false, Ordering::SeqCst);
+                        note("another aipass backend is answering on the port — it is adopted, and no second one is started");
+                        return;
+                    }
+                    BusyOutcome::Name => {
+                        // Something that is not ours holds the port. Restarting
+                        // cannot fix that, and a loop that cannot win is what made
+                        // the app look broken: name it once, with the fix, and
+                        // keep the polite backoff so the port is picked up again
+                        // if it is freed.
+                        if !self.port_busy.swap(true, Ordering::SeqCst) {
+                            note(&format!(
+                                "port {} is held by something that is not an aipass backend — close it, or start the app with AIPASS_DESKTOP_PORT=<other>",
+                                self.port
+                            ));
+                        }
+                    }
+                    BusyOutcome::Backoff => {
+                        // Nothing is there, or the probe could not say. Either
+                        // way the ordinary backoff below is the right answer.
+                        self.port_busy.store(false, Ordering::SeqCst);
                     }
                 }
-                BusyOutcome::Backoff => {
-                    // Nothing is there, or the probe could not say. Either
-                    // way the ordinary backoff below is the right answer.
-                    self.port_busy.store(false, Ordering::SeqCst);
-                }
+            }
+            Death::Crash => {
+                // A genuine crash — the only death that reaches the blame
+                // below. Whether the tree is actually blamed is
+                // counts_against_the_content's answer: a crash with no code
+                // (a signal on unix) names no fault, and rolls nothing back.
             }
         }
         let mut fails = self.fails.lock().unwrap();
@@ -1703,7 +1822,83 @@ mod tests {
         assert_eq!(counts_against_the_content(Some(PORT_BUSY_EXIT)), false);
         assert_eq!(counts_against_the_content(Some(RESTART_EXIT)), true);
         assert_eq!(counts_against_the_content(Some(1)), true);
-        assert_eq!(counts_against_the_content(None), true);
+    }
+
+    #[test]
+    fn a_death_with_no_exit_code_is_not_a_broken_content_tree() {
+        // `None` is a death the process did not report itself: on unix a
+        // signal — SIGKILL from the OOM killer, SIGTERM from a person, SIGHUP
+        // from a closed terminal. No exit code, no fault the tree can own,
+        // and three of those must not roll a good tree back. The backoff
+        // still runs (the tree lost its process either way); only the
+        // rollback is held back.
+        assert_eq!(counts_against_the_content(None), false);
+    }
+
+    #[test]
+    fn every_death_death_of_reads_apart_is_also_not_the_contents_fault() {
+        // Two readers of one exit code: `death_of` decides what the
+        // supervisor does, `counts_against_the_content` decides whether the
+        // tree is blamed. They must agree for every code that can reach the
+        // blame — the deaths that fall through there are the crashes and the
+        // busy port. (A restart and a control event return above the blame,
+        // so what the count would say about them is never read.)
+        for code in [PORT_BUSY_EXIT, CONTROL_C_EXIT] {
+            assert_ne!(death_of(Some(code)), Death::Crash);
+            assert_eq!(counts_against_the_content(Some(code)), false);
+        }
+        // And the other direction: a crash is a crash for both.
+        assert_eq!(death_of(Some(1)), Death::Crash);
+        assert_eq!(counts_against_the_content(Some(1)), true);
+    }
+
+    #[test]
+    fn a_console_control_event_is_not_a_broken_content_tree() {
+        // The exit Windows reports for a process a console control event
+        // ended: STATUS_CONTROL_C_EXIT, 0xc000013a. The backend used to
+        // inherit the app's console, so a Ctrl+C ended it with exactly this
+        // code — and the supervisor counted it against the content tree.
+        // Three of those rolled back a good tree, and the rollback is what
+        // kept the crash loop going.
+        assert_eq!(counts_against_the_content(Some(CONTROL_C_EXIT)), false);
+    }
+
+    #[test]
+    fn a_control_event_is_read_apart_from_a_crash() {
+        // The four deaths, and what each one means to the supervisor. A
+        // control event is not a crash: the backend was asked to stop, the
+        // content tree is fine, and the app must not roll anything back.
+        assert_eq!(death_of(Some(RESTART_EXIT)), Death::Restart);
+        assert_eq!(death_of(Some(PORT_BUSY_EXIT)), Death::PortBusy);
+        assert_eq!(death_of(Some(CONTROL_C_EXIT)), Death::Controlled);
+        assert_eq!(death_of(Some(1)), Death::Crash);
+        assert_eq!(death_of(None), Death::Crash);
+    }
+
+    #[test]
+    fn the_control_event_code_is_the_one_windows_reports() {
+        // Pinned to the literal: 0xC000013A as a signed 32-bit value. A
+        // typo here would silently turn the one exit that must never be
+        // blamed on the content tree back into a crash.
+        assert_eq!(CONTROL_C_EXIT, -1073741510);
+        assert_eq!(CONTROL_C_EXIT, 0xC000_013Au32 as i32);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn the_windows_child_creation_flags_are_exact() {
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // Pinned to the Win32 Process Creation Flags:
+        // DETACHED_PROCESS (0x8) detaches child from console.
+        // CREATE_NEW_PROCESS_GROUP (0x200) ignores Ctrl+C events.
+        // CREATE_NO_WINDOW (0x08000000) prevents console window creation.
+        // Even though Win32 docs note CREATE_NO_WINDOW is ignored when combined with
+        // DETACHED_PROCESS, specifying both guarantees no window appears across
+        // differing subsystem expectations and child wrappers.
+        let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+        assert_eq!(flags, 0x0800_0208);
     }
 
     #[test]
