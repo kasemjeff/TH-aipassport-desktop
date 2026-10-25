@@ -16,7 +16,7 @@
 // conversation), the recoverable waits and the final "error" are three
 // different endings and they used to be one `catch` block deep inside a
 // thousand-line function.
-import { resilientSay, recoverWaits, sendRecoverable, waitLabel } from '../bridge.mjs';
+import { resilientSay, recoverWaits, sendRecoverable, isContextOverflow, jitterWait, waitLabel } from '../bridge.mjs';
 import { RunContext } from './context.mjs';
 
 /**
@@ -125,7 +125,11 @@ export function createSender(run) {
    *   - a dead conversation → one swap, on the run's first send only
    *   - a refusal      → the bounded recovery, and then `error`
    *
-   * @returns {Promise<{reply: string|null, stopReason: string|null}>}
+   * A refusal that names the context window comes back as
+   * `{ stopReason: 'error', overflow: <message> }` instead — the loop owns
+   * the rotation that heals it, and re-fires the error ending when it cannot.
+   *
+   * @returns {Promise<{reply: string|null, stopReason: string|null, overflow?: string}>}
    */
   const send = async () => {
     const recover = recoverWaits();
@@ -180,18 +184,28 @@ export function createSender(run) {
             continue;
           }
         }
+        // (overflow) A refusal that names the context window is the one
+        // failure a rotation heals — but the rotation is the loop's to run
+        // (it owns the summariser and the seed). Hand the shape up instead of
+        // ending here: the loop retries once on a fresh conversation, or
+        // re-fires this error ending when it cannot. The error event and the
+        // note are deferred with it — a send the rotation recovers must not
+        // read as a failure in the transcript.
+        if (isContextOverflow(why)) {
+          return { reply: null, stopReason: 'error', overflow: String(why.message ?? why) };
+        }
         // A send that delivered nothing and heals by waiting — the extension's
         // cycle, a tab mid-reload, a rate window, a 403 the rewrite chain could
         // not clear — is paused and given the same message again before it is
         // allowed to end the run (sendRecoverable says which shapes; the waits
         // are bounded). The ending below is what stays when they are spent.
         if (attempt < recover.length && sendRecoverable(why)) {
-          const wait = recover[attempt];
+          const pause = jitterWait(recover[attempt]);
           run.sendRecoveries += 1;
-          const line = `the send was refused — waiting ${waitLabel(wait)}, then sending it again (recovery ${attempt + 1}/${recover.length})`;
+          const line = `the send was refused — waiting ${waitLabel(pause)}, then sending it again (recovery ${attempt + 1}/${recover.length})`;
           run.note(line);
           run.emit('firewall_note', { text: line });
-          await sleep(wait);
+          await sleep(pause);
           continue;
         }
         run.emit('error', { message: why.message });

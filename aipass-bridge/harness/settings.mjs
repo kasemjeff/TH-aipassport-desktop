@@ -270,6 +270,8 @@ export const DEFAULTS = {
  * @property {boolean} [slim]                 the compact first message
  * @property {string|null} [seedText]         the seed of a rotated conversation
  * @property {Array} [pluginTools]            the plugin markers this run may use
+ * @property {Array} [pluginSections]         the plugin blocks the turn-1 message carries
+ * @property {Object<string, {lead: string, run: string}>} [helperPresets] the machine's own SUBAGENT roles
  * @property {AbortSignal|null} [signal]      the run's stop switch
  * @property {Array|null} [parts]             the attachments of the first send
  */

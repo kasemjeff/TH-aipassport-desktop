@@ -16,7 +16,7 @@ import { createTools } from './tools.mjs';
 import { PermissionEngine } from './permissions.mjs';
 import { SessionStore } from './session.mjs';
 import { Compactor, DEFAULT_MODEL_BUDGETS } from './compact.mjs';
-import { loadMemory, saveMemory, clearMemory } from './memory-store.mjs';
+import { loadMemory, saveMemory, clearMemory, carryFacts } from './memory-store.mjs';
 import { McpManager } from './mcp.mjs';
 import { runTask, applyOverlay, resolveHelperPreset } from './loop.mjs';
 import { preamble as buildPreamble } from './protocol.mjs';
@@ -775,7 +775,6 @@ export class Harness {
             recall: Boolean(this.options.recall),
             explore: Boolean(this.options.explore),
             plugins: this.options.pluginTools ?? [],
-        sections: this.options.pluginSections ?? [],
             sections: this.options.pluginSections ?? [],
             lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
           }),
@@ -793,9 +792,15 @@ export class Harness {
       // Cross-session memory: on the first run of a session, carry forward the
       // facts persisted from earlier sessions so the model does not rediscover
       // them. Only on the first run — a later run in the same session already
-      // has them in context.
-      const effectiveTask = isFirst && this.#crossSessionMemory.length
-        ? `Facts carried from earlier sessions (durable; re-check anything that may have gone stale):\n${this.#crossSessionMemory.map((f) => '- ' + f).join('\n')}\n\nTask: ${task}`
+      // has them in context. The carry is picked under a byte budget
+      // (carryFacts): the task's own facts first, then the newest of the rest
+      // — the store keeps everything, the first message takes what this task
+      // needs.
+      const carried = isFirst && this.#crossSessionMemory.length
+        ? carryFacts(this.#crossSessionMemory, task)
+        : [];
+      const effectiveTask = carried.length
+        ? `Facts carried from earlier sessions (durable; re-check anything that may have gone stale):\n${carried.map((f) => '- ' + f).join('\n')}\n\nTask: ${task}`
         : task;
 
       // One checker for this run: the DONE gate and a VERIFY ask the SAME
@@ -803,6 +808,14 @@ export class Harness {
       // accepted cannot come from two different judges.
       const checker = this.#makeChecker(task);
 
+      // The loop ends every run it walks out of with a `finished` — the event
+      // the window's run row and the person's `done` hook key on. A run that
+      // dies by exception never says it: the window would show a run that
+      // never ended, and a tools-table done-subscription left behind would
+      // fire on the NEXT run's end. Say it here when the loop could not.
+      let loopSaidFinished = false;
+      const saidFinished = () => { loopSaidFinished = true; };
+      this.events.on('finished', saidFinished);
       try {
         return await runTask(effectiveTask, {
           bridge: this.bridge,
@@ -861,7 +874,17 @@ export class Harness {
           },
           first: isFirst,
         });
+      } catch (e) {
+        if (!loopSaidFinished) {
+          this.events.emit('finished', {
+            summary: `the run failed: ${e?.message ?? e}`,
+            steps: 0, stopReason: 'error', spent: null, credits: null,
+            check: null, changes: [], todo: [],
+          });
+        }
+        throw e;
       } finally {
+        this.events.off('finished', saidFinished);
         // (resume) A conversation this run made that never took a message —
         // the first send died, or a rotation's seed never went out — is
         // dropped: the next run starts from the transcript again instead of

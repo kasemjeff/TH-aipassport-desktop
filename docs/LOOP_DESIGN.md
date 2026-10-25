@@ -454,7 +454,7 @@ check command; `requireCheck` exists wherever the checker can run.
 | `stalled` | hollow replies ×3, repeat refusals past the cap, or a same-failure streak past it |
 | `stagnation` | the same step, two trading places, or a longer round, with identical results |
 | `cancelled` | the user pressed stop |
-| `error` | transport/model failure, a saved model that left the catalog (the pre-flight's sentence), or a missing tab (with `needs_tab`) |
+| `error` | transport/model failure, a saved model that left the catalog (the pre-flight's sentence), a context-size refusal the one rotation could not heal, or a missing tab (with `needs_tab`) |
 | `plan-rejected` | the human declined the plan |
 | `tools-limited` | the tool-call budget was spent |
 | `time-limited` | the wall-clock budget was spent |

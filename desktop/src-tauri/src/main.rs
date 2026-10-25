@@ -578,6 +578,43 @@ fn note(msg: &str) {
     }
 }
 
+/// The backend log's path, for the messages that name it.
+fn backend_log_path() -> std::path::PathBuf {
+    aipass_home().join("logs").join("desktop-backend.log")
+}
+
+/// A native message box, for the deaths a release build cannot print.
+///
+/// `windows_subsystem = "windows"` means no console: an `expect()` on a
+/// failed spawn used to die silently and the window simply never came. The
+/// dialog is std-only — `MessageBoxW` straight from user32 — so the
+/// no-new-dependency rule holds.
+#[cfg(windows)]
+fn alert(title: &str, body: &str) {
+    use std::os::windows::ffi::OsStrExt;
+    let wide = |s: &str| -> Vec<u16> {
+        let mut v: Vec<u16> = std::ffi::OsStr::new(s).encode_wide().collect();
+        v.push(0);
+        v
+    };
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBoxW(hwnd: isize, text: *const u16, caption: *const u16, kind: u32) -> i32;
+    }
+    let text = wide(body);
+    let caption = wide(title);
+    // MB_ICONERROR (0x10), MB_SETFOREGROUND (0x10000) so it is not painted
+    // behind the taskbar on a cold start.
+    unsafe {
+        MessageBoxW(0, text.as_ptr(), caption.as_ptr(), 0x10 | 0x1_0000);
+    }
+}
+
+#[cfg(not(windows))]
+fn alert(_title: &str, body: &str) {
+    eprintln!("{body}");
+}
+
 /// The backend child, kept restartable.
 ///
 /// The window outlives a backend crash — the page's EventSource redials and
@@ -950,7 +987,11 @@ impl Backend {
         helper
             .arg("--install-and-relaunch")
             .arg(&artifact)
-            .arg(&exe);
+            .arg(&exe)
+            // The digest rides along: the helper re-checks the file at the
+            // moment it runs it, closing the gap between this check and the
+            // helper's start.
+            .arg(&command.sha256);
         // Detached: the helper has to outlive this process, which is about to
         // exit.
         #[cfg(windows)]
@@ -1111,10 +1152,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // that has never heard of aipass. The probe asks the question the
             // launcher asks, through the app's own Node.
             if backend.port_owner() != PortOwner::Ours {
-                let kid = backend
-                    .spawn()
-                    .expect("could not start the aipass backend — is Node installed?");
-                *backend.child.lock().unwrap() = Some(kid);
+                match backend.spawn() {
+                    Ok(kid) => *backend.child.lock().unwrap() = Some(kid),
+                    Err(err) => {
+                        // A failed spawn is death the person can see: a
+                        // release build has no console to print a panic on,
+                        // and the expect() that stood here died silently —
+                        // the window simply never came, with nothing named.
+                        alert(
+                            "aipass desktop",
+                            &format!(
+                                "เริ่ม backend ของ aipass ไม่สำเร็จ:\n{err}\n\nตรวจว่ามี Node ติดตั้ง และดู log ได้ที่\n{}",
+                                backend_log_path().display()
+                            ),
+                        );
+                        return Err(err.into());
+                    }
+                }
             } else {
                 // The empty child slot must stay empty: the window is pointed
                 // at the backend already answering, and the supervisor would
@@ -1148,6 +1202,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
             std::thread::sleep(std::time::Duration::from_millis(150));
+            // The window navigates only at OUR backend. The TCP loop above is
+            // the cheap wait; the probe — the same question the spawn asked —
+            // is the verdict before the window points anywhere. A port another
+            // program took between the spawn gate and here would otherwise
+            // open the window onto a stranger's server.
+            if !port_open() {
+                alert(
+                    "aipass desktop",
+                    &format!(
+                        "backend ไม่ตอบบนพอร์ต {backend_port} — หน้าต่างเปิดไม่ได้\n\nดู log ได้ที่\n{}",
+                        backend_log_path().display()
+                    ),
+                );
+                return Err(format!("the backend never answered on port {backend_port}").into());
+            }
+            if backend.port_owner() == PortOwner::Stranger {
+                alert(
+                    "aipass desktop",
+                    &format!(
+                        "พอร์ต {backend_port} ถูกโปรแกรมอื่นใช้อยู่ หน้าต่าง aipass จึงเปิดที่นี่ไม่ได้\n\nตั้ง AIPASS_DESKTOP_PORT เป็นพอร์ตว่างแล้วเริ่มใหม่ (log อยู่ที่\n{})",
+                        backend_log_path().display()
+                    ),
+                );
+                return Err(format!("port {backend_port} is not the aipass backend").into());
+            }
+            // `Unknown` passes: the spawn gate above already demanded a real
+            // "ours" before starting one, and a probe that cannot answer does
+            // not get to invent a verdict the window is blocked on.
 
             let window = tauri::WebviewWindowBuilder::new(
                 app,

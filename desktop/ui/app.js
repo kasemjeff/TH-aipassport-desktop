@@ -312,7 +312,7 @@ const toolKind = (kind) => TOOL_KIND[kind] ?? kind;
 
 // The rail: the session list, the playbooks and the facts the app remembers.
 const sessionsPanel = createSessionsPanel(ctx);
-const { refreshSessions, refreshSkills, renderSkillList, renderMemoryFacts, sessionDay, sessionBucket } = sessionsPanel;
+const { refreshSessions, refreshSkills, renderSkillList, renderMemoryFacts, useSkill, installSkillDialog, sessionDay, sessionBucket } = sessionsPanel;
 Object.assign(ctx, sessionsPanel);
 
 // The settings sheet: one page per tab, one save for all of them.
@@ -349,6 +349,10 @@ const { syncExtensionToken, syncCatalogBanner, hasConversation, hideWelcome, ref
 function resetTranscript() {
   resetLog();
   banners.reset();
+  // The "no chat tab" note is about the run that asked, not the transcript:
+  // a new session (or a project switch) starts with nothing to say about
+  // tabs — the next run that needs one asks again.
+  state.needsTab = false;
 }
 
 /* ------------------------------------------------------------------ panel */
@@ -902,7 +906,7 @@ const STOP_REASON = {
   error: 'รันพัง',
   stalled: 'ค้าง — หยุด',
   stagnation: 'ค้าง — หยุด',
-  'credit-limited': 'โควตตาเกิด — หยุด',
+  'credit-limited': 'โควตาหมด — หยุด',
   'tools-limited': 'เครื่องมือครบโควตา — หยุด',
   'time-limited': 'หมดเวลา — หยุด',
   steps: 'ครบจำนวนรอบ',
@@ -1192,6 +1196,10 @@ const saveDraft = () => {
 };
 $('task').addEventListener('input', saveDraft);
 $('task').value = loadDraft();
+// The modules that fill the composer for the reader (a playbook's "ใช้", the
+// /skill command) save the draft through this — an assignment fires no input
+// event, so without it the next boot comes back without what was set.
+ctx.saveDraft = saveDraft;
 
 /**
  * The options a run carries, when the machine has them.
@@ -1456,13 +1464,17 @@ document.addEventListener('keydown', (ev) => {
 });
 
 $('slash-btn').onclick = () => {
-  // A visible, clickable route into the palело for anyone who does not think to
-  // type "/" first. It behaves exactly like typing it.
-  $('task').value = '/';
+  // A visible, clickable route into the palette for anyone who does not think
+  // to type "/" first. It behaves exactly like typing it — and typing "/"
+  // only ever starts an empty composer: text already typed is the person's
+  // answer in progress, not something a button may replace.
+  if (!$('task').value.trim()) {
+    $('task').value = '/';
+    slash.index = 0;
+    renderSlash('/');
+    slash.open = true;
+  }
   $('task').focus();
-  slash.index = 0;
-  renderSlash('/');
-  slash.open = true;
 };
 
 $('apply').onclick = applyChecked;
@@ -2761,27 +2773,21 @@ function showSkills() {
     $('modal-title').textContent = 'คู่มือ (playbook)';
     const body = $('modal-body');
     body.textContent = '';
-    if (!skills.length) body.append(el('p', 'dim', 'ยังไม่มีคู่มือ — วางไฟล์ .md ใน skillsDirs'));
-    for (const s of skills) {
-      const row = el('div');
-      row.append(el('strong', null, s.name), el('div', 'dim', s.file ?? ''));
-      const view = el('button', 'mini', 'ดู');
-      view.onclick = () => {
-        rpc('skills.load', { name: s.name }).then((found) => {
-          $('modal-title').textContent = `คู่มือ — ${s.name}`;
-          const b = $('modal-body');
-          b.textContent = '';
-          b.append(el('pre', null, found.text));
-        }).catch((err) => addNote(err.message));
-      };
-      row.append(view);
-      row.style.marginBottom = '10px';
-      body.append(row);
-    }
+    // The one list the settings sheet draws: rows that open in place, a ใช้
+    // that fills the composer, and — for the libraries a person may write — a
+    // remove. The modal is a second door into the same list, not a third
+    // rendering of it.
+    const list = el('ul', 'list dim skill-list');
+    renderSkillList(list, skills);
+    body.append(list);
     $('modal-actions').textContent = '';
-    const close = el('button', 'primary', 'ปิด');
+    const install = el('button', 'primary', 'ติดตั้งคู่มือ…');
+    install.onclick = () => installSkillDialog({
+      onInstalled: async () => renderSkillList(list, await refreshSkills()),
+    });
+    const close = el('button', null, 'ปิด');
     close.onclick = hideModal;
-    $('modal-actions').append(close);
+    $('modal-actions').append(install, close);
     openModal();
   });
 }

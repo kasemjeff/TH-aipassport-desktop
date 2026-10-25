@@ -117,7 +117,7 @@ event — is in [`LOOP_DESIGN.md`](LOOP_DESIGN.md).
 | `lang.mjs` | `thaiRatio` over a reply, with code, URLs and commands excluded | the closing message is measured, not guessed at — one rewrite asked for, never a block |
 | `harness.mjs` | the facade a CLI, the window and tests all drive | the one-conversation resource is managed nowhere else; helpers propose into the parent overlay |
 | `session.mjs` | JSONL append with a forkable tree | a session opened next week reads as one continuous piece of work |
-| `skills.mjs` | plain markdown, configured → project → user → repo | the library grows without code changes, and one order serves the window and the CLI alike |
+| `skills.mjs` | plain markdown, configured → project → user → repo; `installSkill`/`removeSkill` write the two libraries a person owns (user, project) | the library grows without code changes, and one order serves the window and the CLI alike — install and remove are the person's acts on their own libraries, never on a configured folder or the repo |
 | `plugins.mjs` | `setup(ctx)` in-process: markers, rpc, panels, settings, events, preamble sections; `apiVersion` checked against `PLUGIN_API` (1) | plugins are code you chose to install — not sandboxed, and it says so |
 | `stats.mjs` | the `run_stats` lines, rolled up | a run's refusals, nudges, stalls and checks are numbers, not an argument |
 

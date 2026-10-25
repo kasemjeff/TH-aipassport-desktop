@@ -11,7 +11,7 @@ import { tempDir } from './harness.mjs';
 import { Overlay } from '../harness/overlay.mjs';
 import { SkillLibrary } from '../harness/skills.mjs';
 import { createTools } from '../harness/tools.mjs';
-import { createSandbox, materializeTree, restorePaths } from '../harness/sandbox.mjs';
+import { createSandbox, materializeTree, restorePaths, sandboxRoot } from '../harness/sandbox.mjs';
 
 const toolsAt = (dir, overlay) => createTools({
   root: dir, overlay, skills: new SkillLibrary([]), allowRun: true, maxResult: 6000,
@@ -126,4 +126,21 @@ test('a heavy directory is linked, not copied, and staged files sit beside it', 
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
+});
+
+test('a projection that cannot be built refuses the command — the real tree is not the fallback', async () => {
+  const dir = tempDir({ 'a.txt': 'a\n' });
+  // A file planted where the projection directory would be made: createSandbox
+  // cannot mkdir through it, so materialize never starts. The old fallback ran
+  // the command in the REAL tree — where the staged edit is invisible and a
+  // write would land on the user's project over staged work.
+  fs.mkdirSync(path.dirname(sandboxRoot(dir)), { recursive: true });
+  fs.writeFileSync(sandboxRoot(dir), 'not a directory');
+  const overlay = new Overlay(dir);
+  overlay.set(path.join(dir, 'a.txt'), 'a changed\n'); // anything staged forces the projection
+  const tools = toolsAt(dir, overlay);
+
+  const out = await tools.run('', 'node -e "console.log(\'should not run\')"');
+  assert.match(out, /^err: the projection could not be built/, `got: ${out}`);
+  assert.equal(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8'), 'a\n', 'the real tree was never written');
 });

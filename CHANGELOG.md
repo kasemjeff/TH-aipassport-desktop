@@ -7,6 +7,68 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Added
 
+- **Playbooks can be installed, invoked and removed from the window.** The
+  library used to grow only by hand — a person dropped `.md` files into a
+  folder and hoped the list caught up. The skills list now carries the whole
+  life of a playbook: `/skill <name>` fills the composer with the phrase that
+  makes the next run load it (the backend confirms the name first), each row
+  names the library it loads from (user / project / configured / built-in)
+  with a ใช้ button beside it, and an install dialog takes a paste or a
+  picked `.md` file into `~/.aipass/skills` or the project's
+  `.aipass/skills` — a whitelisted name, an overwrite that asks once, and a
+  remove that is armed by the first click and refuses to claim success when
+  the playbook actually loads from somewhere it cannot delete
+  (`harness/skills.mjs`, `harness/rpc/files.mjs`, `desktop/ui/panels/sessions.js`,
+  `desktop/ui/commands.js`, `desktop/ui/app.js`, `test/skills.test.mjs`,
+  `test/ui.test.mjs`).
+- **The last step closes instead of digging.** A run with a step cap spent
+  its final round trip on new questions as readily as on the answer, and
+  ended with work asked for but never summarised. The last step's message
+  now asks for the close-out — what was done, what changed, what is open,
+  ending with DONE (`harness/loop.mjs`, `test/step-cap.test.mjs`;
+  opencode's forced drain, adapted to a protocol with no `toolChoice` knob —
+  a reply that asks anyway still runs, and the `step_limit` ending stays the
+  truth).
+- **The send ladders carry jitter.** The rate, edge and recovery waits are
+  shared constants; parallel runs refused in the same moment retried in
+  lock-step and kept the same window hot together. Each wait now carries
+  ±10% (`jitterWait`, `harness/bridge.mjs` + `run/send.mjs`) — pi-mono's own
+  ladder grew the same jitter for the same reason. Zero stays zero, so the
+  tests' env override keeps its meaning.
+
+- **A send refused for context size now heals itself, once.** A provider
+  refusal that names the context window ("prompt is too long", "context
+  length exceeded", and the other shapes providers actually send —
+  `isContextOverflow` in `harness/bridge.mjs`) used to end the run as an
+  error. The server holds the whole conversation, so summarising and rotating
+  to a fresh one fits the same message again: the loop now summarises,
+  rotates, and resends the step once per run (`test/overflow-recovery.test.mjs`).
+  The first send is excluded — a first message too big on its own is not
+  something a rotation shrinks — and a second overflow ends the run as the
+  error it is, with its record.
+- **A new session carries the facts it needs, not all of them.** The
+  cross-session memory used to ride into every session's first message whole
+  — up to 50 facts × 200 characters, roughly 2,500 tokens, most of it about
+  work the task never touched. The carry is picked now (`carryFacts` in
+  `harness/memory-store.mjs`): the facts the task names take the seats first,
+  then the newest of the rest, under a byte budget
+  (`AIPASS_MEMORY_BUDGET`, 2,400 characters). The pick deletes nothing — the
+  store keeps every fact, the recall still reaches all of it, and the same
+  facts and task render byte-identically (`test/memory-carry.test.mjs`).
+- **The memory tier stopped paying twice.** A save whose merged facts are
+  byte-identical to the file skips the atomic write (a compaction that
+  re-emits known facts used to rewrite the store every rotation), and a
+  recall keeps the session tails it parsed while the files' stats stand
+  still — an append changes the stat, and that is the invalidation
+  (`harness/memory-store.mjs`, `test/memory-carry.test.mjs`).
+- **An Anthropic provider asks for the prompt cache.** The history is
+  append-only and re-sent verbatim every turn, so the client now marks the
+  first message (the protocol preamble) and the end of the last complete
+  turn with `cache_control` breakpoints — the stable prefix is read at the
+  cached rate instead of being charged full on every turn. A provider spec
+  that says `promptCache: false` sends no markers; other kinds never did
+  (`harness/provider-client.mjs`, `harness/providers.mjs`,
+  `test/providers.test.mjs`).
 - **A stream that died mid-answer leaves the transcript honest.** When a send
   delivered words and then died — a stop, or a refusal after the answer
   started — the message is now recorded as sent and the delivered prefix is
@@ -96,6 +158,57 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **The window stops lying in small ways** (the desktop audit's small batch):
+  the six-hour update poll no longer stacks a fresh banner per poll — a
+  version is said once and a newer one replaces the bar in place
+  (`ui/banners.js`, `test/ui.test.mjs`); the "/" button starts an empty
+  composer instead of overwriting what was being typed (`ui/app.js`); the
+  model picker no longer offers non-chat entries the chat cannot use
+  (`ui/commands.js`); a stale "no chat tab" note no longer survives a
+  session reset or a project switch (`resetTranscript`); and two Thai typos
+  ("จากงว" → "จากงบ", "โควตตาเกิด" → "โควตาหมด").
+- **A failed backend spawn is death the person can see.** A release build
+  has no console: the `expect()` on a failed spawn died silently and the
+  window simply never came. It is a native message box now — std-only
+  `MessageBoxW`, no new dependency — naming the error and the log path
+  (`desktop/src-tauri/src/main.rs`).
+- **The window navigates only at OUR backend.** The readiness wait stays a
+  cheap TCP loop, but the verdict before the window points anywhere is the
+  same probe the spawn gate asked: a port another program took between the
+  gate and navigation opens a named error, not a stranger's server.
+- **The suite and the build lane run on the mirror.** Both workflows filtered
+  their push trigger to `master`, but the `TH-aipassport-harness` mirror's
+  default branch is `main` — a push there never ran CI at all, and the
+  mirror's pull requests sat unverified. Both filters now name both branches
+  (`.github/workflows/test.yml`, `.github/workflows/build.yml`).
+- **A projection that cannot be built no longer falls back to the real tree.**
+  When the staged copy failed to materialise (disk full, a locked path, a
+  planted file at the sandbox root), the command silently ran in the REAL
+  project — where the staged edits are invisible (the stale-tree lie the
+  projection exists to fix) and a write lands on the user's tree over staged
+  work. It refuses now: `err: the projection could not be built (…)` — the
+  command never runs, nothing on disk changes, and the model can retry or
+  escalate (`test/run-overlay.test.mjs`).
+- **A run that dies by exception now says it.** `runTask`'s `finished` event
+  is what the window's run row and the person's `done` hook key on; a run
+  that threw before the loop's ending never emitted it, so the window showed
+  a run that never ended and a tools-table done-subscription left behind
+  fired the hook on the NEXT run's end. `harness.run` emits the ending its
+  loop could not (`harness/harness.mjs`).
+- **A background helper that finishes too late is announced.** A background
+  SUBAGENT finishing during the final step (or after the run) had no next
+  send to ride — its result landed in a transcript note only. The run's end
+  now emits a note naming the helper and saying plainly that the model never
+  saw it (`harness/loop.mjs`).
+- **A closing sentence is the run's summary.** A prose-only ending after real
+  work recorded `run.summary` as the literal word "done"; the actual sentence
+  rode only a UI event field. The synthetic ending carries the prose now, so
+  run_stats and the window agree (`harness/loop.mjs`).
+- **A check that never ran is not seeded as a failing one.** The rotation
+  seed read "The last check of the staged tree did not pass (none)" when the
+  checker could not run at all — sending the fresh conversation hunting for a
+  failure that does not exist. The `none` verdict gets its own sentence
+  (`harness/compact.mjs`, `test/compact.test.mjs`).
 - **Live evals run the shell again, and authenticate.** Two breaks the replay
   suite could not see: the runner drove its attempts in `auto`, which has
   asked about every shell command since 2026-10-21 — an eval answers no

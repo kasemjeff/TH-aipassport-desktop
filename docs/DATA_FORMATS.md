@@ -390,8 +390,14 @@ write was interrupted — the promises below are pinned by
   `AIPASS_MEMORY=off` stops the carrying without deleting anything;
 - **the project's own facts** — `~/.aipass/memory/<hash>.json`
   (`harness/memory-store.mjs`): the facts that crossed a session boundary.
-  A new session loads them into its first run, and a rotation writes the new
-  ones back. The file is named after a hash of the project's absolute path,
+  A new session's first run carries a PICKED subset into its task — the facts
+  the task names first, then the newest of the rest, under a byte budget
+  (`carryFacts`; `AIPASS_MEMORY_BUDGET`, 2,400 characters by default) — and a
+  rotation writes the new ones back, skipping the rewrite when the store
+  already holds every fact the summary re-emitted. The pick deletes nothing:
+  a fact left out of one first message is still in the file for the next
+  task, and the recall still reaches all of it. The file is named after a
+  hash of the project's absolute path,
   so a project that moved reads "no facts" until `aipass relocate` re-keys
   it. Deleting the file is the off-switch;
 - **everything in the working tree** — uploads, spill files, whatever the
@@ -403,7 +409,9 @@ ask "what did we decide last week?". `RECALL <question>` searches this
 project's own sessions (a plain word match over the newest ones, newest
 first, with a short excerpt per hit) and says how many sessions it searched.
 It reads the sessions, not the facts file, and it brings back nothing that
-was not said in this project.
+was not said in this project. A parsed tail is kept while the file's stat
+stands still, so several recalls in one run do not re-read the sessions they
+just read — an append changes the stat, and that is the invalidation.
 
 **Provenance and trust.** Everything the model can remember was written on
 this machine, by this user's own runs: there is no ingestion path, no shared

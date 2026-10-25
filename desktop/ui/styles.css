@@ -1587,6 +1587,15 @@ details.run > *:not(summary) { margin-left: 2px; }
 .skill-list { display: flex; flex-direction: column; gap: 2px; margin: 6px 0 12px; padding-left: 0 !important; }
 .skill-list li { display: block; white-space: normal; overflow: visible; text-overflow: clip; }
 .skill-list li .name { display: block; font-weight: 600; color: var(--fg); }
+/* One row per playbook: the name, the library it loads from, and the actions
+   (invoke, remove) the list is there to offer. */
+.skill-list .skill-row { display: flex; align-items: center; gap: 8px; }
+.skill-list .skill-row .name { flex: 1; min-width: 0; }
+.skill-list .skill-row .role { flex: none; font-size: 12px; }
+.skill-list .skill-actions { display: flex; gap: 4px; flex: none; }
+.skill-install-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.skill-install-row input { flex: 1; min-width: 0; }
+button.mini.danger { color: var(--warn); }
 .skill-body {
   margin: 6px 0 4px;
   font: 12px/1.5 var(--mono);

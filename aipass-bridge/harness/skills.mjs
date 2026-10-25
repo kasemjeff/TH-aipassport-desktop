@@ -94,9 +94,11 @@ export class SkillLibrary {
     return [...names].sort().map((name) => {
       for (const dir of this.dirs) {
         const file = path.join(dir, `${name}.md`);
-        if (fs.existsSync(file)) return { name, file, dir, bytes: fs.statSync(file).size };
+        if (fs.existsSync(file)) {
+          return { name, file, dir, role: this.roles.get(dir) ?? 'built-in', bytes: fs.statSync(file).size };
+        }
       }
-      return { name, file: null, dir: null, bytes: 0 };
+      return { name, file: null, dir: null, role: null, bytes: 0 };
     });
   }
 
@@ -162,4 +164,85 @@ export class SkillLibrary {
     }
     return { name: bare, error: `no such skill: ${bare}. Use SKILL list to see the library, and load its parts in order.` };
   }
+}
+
+/* -------------------------------------------------------- installing a part */
+
+/** The most one playbook may weigh — the same cap a window's file open has. */
+const MAX_SKILL_BYTES = 1_000_000;
+
+/**
+ * The library a person may install into, by name. Only the two known ones are
+ * writable: a configured folder is somebody else's decision, and the repo's
+ * defaults are code — neither is where a paste from the window should land.
+ */
+export function skillTargetDir(root, target) {
+  if (target === 'project') return path.join(root, '.aipass', 'skills');
+  if (target === 'user') return path.join(aipassHome(), 'skills');
+  return null;
+}
+
+/** The one name check install and remove share. The whitelist is the safety:
+ *  no slash, no dot, no space — a name cannot carry a path out of its folder. */
+function validateSkillName(name) {
+  const bare = String(name ?? '').trim();
+  if (!bare) throw new Error('which skill name?');
+  // Both are the library's own furniture: `list` is the index word, `index.md`
+  // is the curated preamble and is skipped by every listing — a part under
+  // either name could be read but never seen.
+  if (/^(list|index)$/i.test(bare)) throw new Error(`"${bare}" is reserved by the library — pick another name`);
+  if (!SKILL_NAME.test(bare)) throw new Error(`not a skill name: ${bare} — letters, digits and dashes only`);
+  return bare;
+}
+
+/** CRLF is Windows' habit, not the format's: normalize, and end with a newline. */
+function normalizeSkillText(text) {
+  const body = String(text ?? '').replace(/\r\n/g, '\n');
+  if (!body.trim()) throw new Error('the playbook is empty — paste some markdown or pick a file first');
+  if (Buffer.byteLength(body, 'utf8') > MAX_SKILL_BYTES) {
+    throw new Error(`the playbook is too big — one playbook is capped at ${MAX_SKILL_BYTES} bytes`);
+  }
+  return body.endsWith('\n') ? body : `${body}\n`;
+}
+
+/**
+ * Install one playbook from a person's paste or file into a writable library.
+ *
+ * Replacing an existing playbook needs `overwrite` — the call that would
+ * silently drop someone's edits is the one that must come back and say so.
+ */
+export async function installSkill({ root, name, text, target = 'user', overwrite = false } = {}) {
+  const bare = validateSkillName(name);
+  const body = normalizeSkillText(text);
+  const dir = skillTargetDir(root, target);
+  if (!dir) throw new Error(`target must be "user" or "project", not ${JSON.stringify(target)}`);
+  const file = path.join(dir, `${bare}.md`);
+  const existed = fs.existsSync(file);
+  if (existed && !overwrite) {
+    throw new Error(`skill ${bare} already exists in the ${target} library — send overwrite to replace it`);
+  }
+  await fs.promises.mkdir(dir, { recursive: true });
+  await fs.promises.writeFile(file, body, 'utf8');
+  return { name: bare, file, dir, target, overwritten: existed };
+}
+
+/**
+ * Remove a playbook this person installed. Only the user and project
+ * libraries are writable, so a name that resolves from somewhere else is
+ * refused with the place it actually loads from — a remove that lies about
+ * having worked is how a playbook the model still loads gets called gone.
+ */
+export async function removeSkill({ root, name, target = 'user' } = {}) {
+  const bare = validateSkillName(name);
+  const dir = skillTargetDir(root, target);
+  if (!dir) throw new Error(`target must be "user" or "project", not ${JSON.stringify(target)}`);
+  const file = path.join(dir, `${bare}.md`);
+  if (!fs.existsSync(file)) {
+    const elsewhere = SkillLibrary.default({ root }).list().find((s) => s.name === bare);
+    throw new Error(elsewhere?.file
+      ? `${bare} is not in the ${target} library — it loads from ${elsewhere.file}`
+      : `no skill ${bare} in the ${target} library`);
+  }
+  await fs.promises.rm(file);
+  return { name: bare, file, target, removed: true };
 }

@@ -45,6 +45,7 @@ drift this file exists to catch.
 | `AIPASS_COMPACT_AT_PERCENT` | `40` | rotate at this share of the budget, instead of the setting | `compact.mjs` |
 | `AIPASS_ELIDE` | off | the elision tier (stale bulky sends cut to stubs) | `compact.mjs` |
 | `AIPASS_MEMORY` | on | `off` stops the memory-tier carry across rotations | `compact.mjs` |
+| `AIPASS_MEMORY_BUDGET` | `2400` | the char budget for the facts a session's first message carries | `memory-store.mjs` |
 | `AIPASS_SPILL_KEEP` | `200` | how many spill files are kept before pruning | `tools.mjs` |
 | `AIPASS_SPILL_PRUNE_EVERY` | `25` | prune the spill dir every this-many appends | `tools.mjs` |
 | `AIPASS_SANDBOX_MAX_FILE_MB` | `64` | the projection's per-file copy cap | `sandbox.mjs` |

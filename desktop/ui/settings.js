@@ -23,7 +23,7 @@ import { renderGitTab, renderMediaTab, renderScheduleTab } from './panels/tools.
  * @param {object} ctx the window it draws into
  */
 export function createSettings(ctx) {
-  const { $, el, state, rpc, addNote, addCommandOut, friendly, applyTheme, refreshHeader, refreshSkills, renderSkillList, renderMemoryFacts, applySettingsToUi, stageLabel, fillProviders, paintPluginPanels, hideModal, openModal } = ctx;
+  const { $, el, state, rpc, addNote, addCommandOut, friendly, applyTheme, refreshHeader, refreshSkills, renderSkillList, renderMemoryFacts, installSkillDialog, applySettingsToUi, stageLabel, fillProviders, paintPluginPanels, hideModal, openModal } = ctx;
 
 
 /* The pages of the sheet — one tab each. A tab renders its own page and
@@ -374,13 +374,20 @@ const renderMemoryTab = async (page, sheet) => {    // What the app remembers be
     await renderMemoryFacts(list, head);
 };
 const renderSkillsDirsTab = async (page, sheet) => {    const group = el('div', 'set-group');
-    group.append(sheet.row('โฟลเดอร์คู่มือ', 'ทีละ path ต่อบรรทัด · ลองโฟลเดอร์ในโปรเจกต์ก่อน แล้วค่อย ~/.aipass/skills · /skills = ดูที่มี · รายการรีเฟรชเองเมื่อบันทึก', sheet.control({ key: 'skillsDirs', type: 'textarea' })));
+    group.append(sheet.row('โฟลเดอร์คู่มือ', 'ทีละ path ต่อบรรทัด · ลองโฟลเดอร์ในโปรเจกต์ก่อน แล้วค่อย ~/.aipass/skills · /skill <ชื่อ> = เรียก · /skills = ดูที่มี · รายการรีเฟรชเองเมื่อบันทึก', sheet.control({ key: 'skillsDirs', type: 'textarea' })));
     page.append(group);
     // The playbooks those folders hold, right under the folders: the list
     // used to be a folded row in the rail, and the answer belongs next to
-    // the thing that decides what is in it.
+    // the thing that decides what is in it. Installing is here too — the
+    // folder row and the button that fills it are one story.
+    const head = el('h5', 'set-title heading', 'คู่มือที่มี');
+    const install = el('button', 'mini', 'ติดตั้งคู่มือ…');
+    install.onclick = () => installSkillDialog({
+      onInstalled: async () => renderSkillList(list, await refreshSkills()),
+    });
+    head.append(install);
     const list = el('ul', 'list dim skill-list');
-    page.append(el('h5', 'set-title heading', 'คู่มือที่มี'), list);
+    page.append(head, list);
     renderSkillList(list, await refreshSkills());
 };
 const renderPluginsTab = async (page, sheet) => {    let live = sheet.details;

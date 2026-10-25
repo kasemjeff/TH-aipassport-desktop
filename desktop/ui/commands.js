@@ -9,6 +9,10 @@
 // The palette and the handlers live together because a command IS its handler:
 // the entry in the list names the work, and the work is right below it.
 
+// The one name rule the library enforces, shared with the install dialog —
+// the window refuses a name the backend would refuse, before the round trip.
+import { SKILL_NAME_RE } from './panels/sessions.js';
+
 
 /**
  * The commands: the palette and the handlers behind it.
@@ -16,7 +20,7 @@
  * @param {object} ctx the window it draws into
  */
 export function createCommands(ctx) {
-  const { $, el, state, rpc, friendly, scrollDown, addNote, addCommandOut, paintCacheStats, hideModal, openModal, fillModels, refreshModels, fillProviders, refreshHeader, refreshMeta, checkForUpdate, openHelp, openSettings, showMemory, showMcp, showSymbols, listModels, pickConversation, freshConversation, attachPath, clipPaste, startNewSession, resumeSession, forkSession, togglePlan, showSkills, showPendingDiff, applyChecked, discardAll, pickProject, openFile, pickFile, setWorking, cancelRun, showCheckpoints, exportSession, showSessionTree, showGitStatus, showSchedule, showMediaModels, showWorktrees } = ctx;
+  const { $, el, state, rpc, friendly, scrollDown, addNote, addCommandOut, paintCacheStats, hideModal, openModal, fillModels, refreshModels, fillProviders, refreshHeader, refreshMeta, checkForUpdate, openHelp, openSettings, showMemory, showMcp, showSymbols, listModels, pickConversation, freshConversation, attachPath, clipPaste, startNewSession, resumeSession, forkSession, togglePlan, showSkills, useSkill, showPendingDiff, applyChecked, discardAll, pickProject, openFile, pickFile, setWorking, cancelRun, showCheckpoints, exportSession, showSessionTree, showGitStatus, showSchedule, showMediaModels, showWorktrees } = ctx;
 
 
 /* Every command the app has, reachable by typing "/". The header carries three
@@ -47,6 +51,7 @@ const COMMANDS = [
   { cmd: 'image', desc: 'แนบรูปจาก path — /image <path>', args: true, run: (arg) => attachPath(arg, 'image') },
   { cmd: 'open', desc: 'เปิดดูไฟล์ — /open <path>', args: true, run: (arg) => (arg ? openFile(arg) : pickFile()) },
   { cmd: 'skills', desc: 'คู่มือ (playbook) ที่มี', run: showSkills },
+  { cmd: 'skill', desc: 'เรียกคู่มือ — /skill <ชื่อ> (ไม่ใส่ชื่อ = เปิดรายการ)', args: true, run: (arg) => (arg ? invokeSkill(arg) : showSkills()) },
   { cmd: 'diff', desc: 'ดูการเปลี่ยนแปลงที่รอเขียน', run: showPendingDiff },
   { cmd: 'apply', desc: 'เขียนไฟล์ที่อนุมัติลงดิสก์', run: applyChecked },
   { cmd: 'discard', desc: 'ทิ้งไฟล์ที่รออยู่ทั้งหมด', run: discardAll },
@@ -246,7 +251,11 @@ function pickProvider() {
 function pickModel() {
   state.modelPicker = true;
   refreshModels().then((res) => {
-    const list = res?.data ?? res?.models ?? [];
+    const all = res?.data ?? res?.models ?? [];
+    // The site's catalog carries non-chat entries too (embedding and friends);
+    // a picker that lists them offers a choice the chat cannot use. A list
+    // with no kind at all (a provider that does not say) keeps every row.
+    const list = all.filter((m) => typeof m === 'string' || !m?.kind || m.kind === 'chat');
     $('modal-title').textContent = 'เลือกโมเดล';
     const body = $('modal-body');
     body.textContent = '';
@@ -303,6 +312,20 @@ function pickMode() {
   openModal();
 }
 
+/**
+ * Invoke a playbook by name: the composer is filled with the phrase that makes
+ * the next run load it, after the backend confirms the name exists — a draft
+ * that names a playbook that is not there is a task that silently loses its
+ * manual. The reader types the task on and sends.
+ */
+async function invokeSkill(name) {
+  const bare = String(name ?? '').trim();
+  if (!SKILL_NAME_RE.test(bare)) { addNote('ชื่อคู่มือใช้ได้เฉพาะ a-z 0-9 และ - — ดูรายการที่ /skills'); return; }
+  const found = await rpc('skills.load', { name: bare }).catch((err) => ({ error: err.message }));
+  if (found.error) { addNote(`ไม่มีคู่มือ "${bare}" — ${found.error}`); return; }
+  useSkill(bare);
+}
+
 /** Rotate the context now: the model summarises what it has done, that summary
  *  is recorded in the session, and the next run starts from it. */
 async function compactNow() {
@@ -340,7 +363,7 @@ function refreshMeter(status = null) {
     const pct = use.percent;
     slot.textContent = `context ${pct}%`;
     slot.className = `context ${pct >= 85 ? 'full' : pct >= 60 ? 'warm' : ''}`;
-    slot.title = `ใช้ไป ~${use.used.toLocaleString()} จากงว ${use.budget.toLocaleString()} token (สำรอง ${use.reserved.toLocaleString()} สำหรับคำตอบ)\n`
+    slot.title = `ใช้ไป ~${use.used.toLocaleString()} จากงบ ${use.budget.toLocaleString()} token (สำรอง ${use.reserved.toLocaleString()} สำหรับคำตอบ)\n`
       + `${use.entries} รายการในบทสนทนา — ครบงบแล้วมันจะสรุปเก่าไว้แล้วเริ่มบทใหม่ให้เอง (/compact บีบได้เอง)`;
     if (use.needsCompaction && !state.needsCompaction) {
       state.needsCompaction = true;

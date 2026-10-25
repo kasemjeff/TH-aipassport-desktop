@@ -11,6 +11,9 @@ import { listSymbols, findDefinition, findReferences } from '../symbols.mjs';
 import { fuzzyMatch } from '../fuzzy.mjs';
 import { restoreTable } from '../waf.mjs';
 import { openBrowser } from '../browser.mjs';
+// Installing and removing a playbook is a person's act, not a run's: the
+// overlay never sees it, and the only writable libraries are the two known ones.
+import { installSkill, removeSkill } from '../skills.mjs';
 // The undo of an apply (harness/checkpoints.mjs): the store lives outside the
 // project, so nothing here writes inside it.
 import { list as listCheckpoints, restore as restoreCheckpoint, remove as removeCheckpoint } from '../checkpoints.mjs';
@@ -145,6 +148,14 @@ export function createFilesMethods(ctx) {
       const found = targetFor(params).skills.load(params.name);
       if (found.error) throw new Error(found.error);
       return found;
+    },
+    async 'skills.install'(params = {}) {
+      const h = targetFor(params);
+      return installSkill({ root: h.root, name: params.name, text: params.text, target: params.target, overwrite: Boolean(params.overwrite) });
+    },
+    async 'skills.remove'(params = {}) {
+      const h = targetFor(params);
+      return removeSkill({ root: h.root, name: params.name, target: params.target });
     },
 
     /* ----------------------------------------------------------------- fs */

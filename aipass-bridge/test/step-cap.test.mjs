@@ -115,6 +115,27 @@ test('a set cap still ends the run, and says so on the last step', async () => {
   assert.deepEqual(seen.map((s) => s.maxSteps), [3, 3, 3], 'every step carries the cap');
 });
 
+test('the last step asks for the close-out, not another question', async () => {
+  // (max-steps drain) A run that spends its final round trip on a new
+  // question ends with the answer it never wrote; the last step's message
+  // asks for the closing answer instead. The first message stays the task.
+  const dir = tempDir({ 'f1.txt': 'a\n' });
+  const overlay = new Overlay(dir);
+  const tools = createTools({ root: dir, overlay });
+  const bridge = scriptedLoop(['NEED file f1.txt\n', 'DONE wrapped up\n']);
+
+  const result = await runTask('read the file', {
+    bridge, tools, overlay,
+    options: { maxSteps: 2 }, first: true,
+  });
+
+  assert.equal(result.stopReason, 'done', 'the drained step still ends normally');
+  assert.doesNotMatch(bridge.received[0], /last step this run has budget for/,
+    'the first message is the task, not the drain');
+  assert.match(bridge.received[1], /last step this run has budget for/,
+    'the final step asks for the closing answer');
+});
+
 test('an uncapped parent still bounds its helper at eight steps', async () => {
   // 0 must not leak downward: Math.min(0, 8) would have made every helper
   // uncapped too. The helper's own cap is 8 regardless of the parent's.

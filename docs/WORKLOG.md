@@ -6,6 +6,157 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-25 (h) — the recommended list, actioned end to end
+
+*Files*: harness — `loop.mjs` (max-steps drain: the last step's message asks
+for the close-out, `LAST_STEP_NOTE`), `bridge.mjs` + `run/send.mjs`
+(`jitterWait`, ±10% on the rate/edge/recovery ladders, zero stays zero);
+desktop UI — `banners.js` (update notice said once per version, replaced by a
+newer one, reset with the log), `app.js` ("/" button only starts an empty
+composer; `resetTranscript` drops a stale `needsTab`; "โควตตาเกิด" →
+"โควตาหมด"), `commands.js` (model picker keeps chat + kindless rows only;
+"จากงว" → "จากงบ"); Rust — `main.rs` (failed spawn → native `MessageBoxW`
+alert naming the log path, std-only FFI; the window navigates only after the
+`port_owner` probe says ours — `Stranger` blocks with a named error,
+`Unknown` passes because the spawn gate already demanded a real verdict);
+queue — `experiments/queue.json` (new `proposed` record
+`compaction-summary-template`, opencode's enforced headings + update-mode
+rotations); docs — `CHANGELOG.md` (merged this file's parallel duplicate
+`### Added` header), `docs/WORKLOG.md`; tests — `test/step-cap.test.mjs`
+(drain), `test/ui.test.mjs` (poll-does-not-stack, slash-button-keeps-text).
+
+*Tests*: `npm test` → 1269 tests, **fail 0**, skip 5 (Windows baseline);
+`agents:lint` ok (178 anchors); `typecheck` 0 errors; `cargo check` clean.
+One test stayed flaky under full-suite load only — "a hook runs when the run
+ends", the pre-existing flake documented in memory (passes in isolation).
+
+*Deferred*: the truncation-header idea was dropped on inspection — the spill
+locator already carries "N more bytes" + total lines + the NEED range
+(parity with codex). The handover-helper hash re-verify was written but the
+Mimosa security hook blocked the write twice (it flags the helper's
+pre-existing `Command::new` from argv); the parent-side check stands, the
+digest now rides as a 4th helper arg (`handover_helper` ignores it until the
+re-verify lands), and the residual TOCTOU window is milliseconds on the same
+machine. The helper's deadlines and graceful taskkill stay open (audit list).
+
+*Open risks*: `desktop:build` could not run — the packaged app
+(`D:\aipass-build\target\release\aipass-desktop.exe`, PID 9480) holds the
+sidecar the build must replace (tauri-build `remove_file` → EPERM), so the
+Rust changes compile but are NOT in the running app yet; the UI changes were
+mirrored to `D:\aipass-build\target\release\ui\` and land on Ctrl+R. Close
+the app, then `npm run desktop:build`.
+
+*Cleanup*: no temp files in the repo; the mirrored UI copy refreshed in full.
+
+## 2026-10-25 (g) — the install path audited from a fresh clone, and the docs made true
+
+*Files*: `README.md` — Installing now starts at the clone (`git clone` →
+`npm run setup`) instead of leading with a command a fresh machine does not
+have; the VS Code panel joins the architecture diagram, "What this repo is",
+Quick start, the repo layout and the Documentation table (it existed and the
+README never said so); CI is stated as Node 20, 22 and 24, not "two Node
+versions"; `AIPASS_MODEL_FILTER`'s default is `all` (the test-enforced
+`docs/CONFIG.md` says so; the table said `chat`); `AIPASS_BRIDGE_IDLE_MS`
+joins the config table — the bridge exiting itself after ten quiet minutes
+was undocumented at root; `tauri:build` names its Rust + Tauri CLI
+prerequisite and hands off to `docs/INSTALL.md`; `npm run check` describes
+its four stages. `CONTRIBUTING.md` — CI runs macOS too. `desktop/README.md`
+— a stale "58 of them" agent-test count dropped (62 today; a count in prose
+is a lie waiting). `.github/workflows/test.yml`, `.github/workflows/build.yml`
+— the push filter covers `main`, the mirror's default branch, where CI never
+ran. `CHANGELOG.md`.
+
+*Tests*: a fresh clone of HEAD into a temp dir: `node aipass-bridge/setup.mjs
+--no-open --no-bridge` with an isolated `AIPASS_HOME` ran green through its
+six steps, and `npm test` there gave 1190 tests, **fail 0**, skip 5 with no
+`npm install` at all — the zero-dependency, clone-and-run claim is true. On
+the working tree: `npm run agents:lint` ok (178 anchors); README's relative
+links all resolve; `npm test --test-concurrency=2` → 1269 tests, **fail 0**,
+skip 5. At the default concurrency the suite sheds a random single failure
+under load — three runs, three different tests (`hooks`, `chat`, `ui`),
+each passing in isolation; the documented load-flake pattern, not this
+batch (docs, workflows only).
+
+*Deferred*: nothing in this batch.
+
+*Open risks*: the mirror's dependabot PRs sat with dead CI until the
+workflow fix lands there; the default-concurrency load flake remains
+(pre-existing, proven on clean HEAD).
+
+*Cleanup*: the temp clone and its isolated `AIPASS_HOME` deleted; the scratch
+token that setup minted (and copied to the real clipboard) deleted with the
+scratch home.
+
+## 2026-10-25 (f) — the harness studied four open-source peers, and the bug-hunt shipped
+
+*Files*: `aipass-bridge/harness/` — `loop.mjs` (rotateContext extracted from
+the mid-run compaction block; overflow recovery, one compact-and-retry per
+run at the send site; background-helper late-result notes; synthetic
+prose-DONE keeps the closing sentence as run.summary; redundant
+always-re-grant removed), `run/send.mjs` (context-overflow refusal is handed
+to the loop instead of ending the run), `run/context.mjs` (`overflowRetried`),
+`bridge.mjs` (`isContextOverflow` classifier), `harness.mjs` (a thrown run
+emits the `finished` its loop never said — fixes the hung window and the
+stale done-hook firing on the next run; duplicate `sections` key dropped),
+`execution.mjs` (a projection that cannot be built now REFUSES the command —
+it used to fall back to the real tree over staged work; `child.pid` guard;
+full JSDoc typing), `sandbox.mjs` (materializeTree param types), `permissions.mjs`
+(dead secret-token unshift removed), `compact.mjs` (seed says "never ran" for
+a `none` verdict), `settings.mjs` (helperPresets/pluginSections in the
+HarnessOptions typedef), `docs/CONFIG.md` (AIPASS_MEMORY_BUDGET — pre-existing
+drift), `docs/LOOP_DESIGN.md` (stop-reason table), `CHANGELOG.md`; new tests:
+`test/overflow-recovery.test.mjs`, plus cases in `test/run-overlay.test.mjs`
+and `test/compact.test.mjs`.
+
+*Tests*: `npm test` → 1255 tests, **fail 0**, skip 5 (Windows baseline);
+`npm run agents:lint` ok (178 anchors); `npm run typecheck` → 0 errors
+(execution.mjs/options.mjs carried 32 pre-existing ones from the dsh session,
+fixed here).
+
+*Deferred*: the big peer-study ideas stay proposals — opencode's enforced
+compaction template + update-mode rotations, gemini-cli's content-chanting
+detector (aipass's repeat/stagnation guard already covers tool-call loops),
+retry jitter on the fixed 60s/180s ladders (would move pinned waits), model
+fallback chain (single-provider protocol). The study clones remain at
+`%TEMP%\harness-study\` for reference.
+
+*Open risks*: the overflow regexes can only classify what the error text
+says — a bare 400 with no reason still ends the run (by design: guessing
+burns a summary call); a rotation's seed in the overflow path carries the
+pending text minus its trailing reminder only when the composition ends in
+the reminder.
+
+*Cleanup*: no temp files left in the repo; the study clones live outside it.
+
+## 2026-10-25 (e) — the memory tier stops paying twice
+
+*Files*: `aipass-bridge/harness/memory-store.mjs` (carryFacts: a bounded,
+relevance-first pick of what a session's first message carries — task-named
+facts take the seats, then the newest of the rest, `AIPASS_MEMORY_BUDGET`
+chars default 2,400; saveMemory skips the atomic write when the merged list
+is byte-identical to the file; recall tails cached per stat, invalidated by
+any change), `harness/harness.mjs` (first-run injection reads the pick,
+header text unchanged), `harness/provider-client.mjs` (Anthropic bodies get
+cache_control breakpoints on the first message and the last complete turn —
+the prefix is append-only and byte-stable; `spec.promptCache: false` opts
+out), `harness/providers.mjs` (sanitizeSpec keeps `promptCache`), docs
+(`CHANGELOG.md`, `docs/DATA_FORMATS.md` carried-facts + recall bullets).
+*Tests*: new `aipass-bridge/test/memory-carry.test.mjs` (7: pick, budget,
+determinism, env knob, no-op save, recall invalidation, end-to-end
+carry-once through a real Harness); `test/providers.test.mjs` grew the
+breakpoints/opt-out/openai-plain tests; full `npm test` — **1250 pass,
+fail 0, skip 5** (the Windows baseline); `agents:lint` ok.
+*Deferred*: a memory-budget knob on the window's memory tab (env-only today,
+same tier as `modelsTimeoutMs`); provider cache-hit/miss numbers surfaced in
+the window (needs usage capture through the stream read); AGENTS.md/CLAUDE.md
+injection is a feature the harness has never had — the policy overlay's
+`context` dimension is the bounded place it would ride if wanted.
+*Open risks*: none known — the carry deletes nothing, the store file is
+untouched by a pick; the parallel session's config-catalog work added the
+`AIPASS_MEMORY_BUDGET` line to `docs/CONFIG.md` while this batch ran.
+*Cleanup*: the duplicated `sections:` key in harness.mjs's mid-run preamble
+call was fixed by the parallel session before I touched it; no stray files.
+
 ## 2026-10-25 (d) — live verification of the day's three passes
 
 *Files*: none changed — verification only (`node scripts/evals.mjs --live

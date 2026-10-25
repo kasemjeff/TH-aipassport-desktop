@@ -20,7 +20,7 @@
 // or a remote sandbox — is another branch of `pickWorld`, not a second copy
 // of the RUN tool.
 import { spawn } from 'node:child_process';
-import { createSandbox, materializeTree, removeSandbox, restorePaths, sharedDirs } from './sandbox.mjs';
+import { createSandbox, materializeTree, removeSandbox, restorePaths, sandboxRoot, sharedDirs } from './sandbox.mjs';
 import { scrubOutput } from './output-scrub.mjs';
 import { scrubSecretDiff } from './permissions.mjs';
 
@@ -34,6 +34,14 @@ import { scrubSecretDiff } from './permissions.mjs';
  *
  * Rejects the way `exec` did — an Error carrying `code`, `signal`, `stdout`
  * and `stderr` — so callers keep formatting `err: exit …` the same way.
+ *
+ * @param {string} cmd   the shell line, run through the platform shell
+ * @param {object} [opts]
+ * @param {string} [opts.cwd]
+ * @param {number} [opts.timeoutMs]
+ * @param {number} [opts.maxBuffer]
+ * @param {AbortSignal|null} [opts.signal]
+ * @returns {Promise<{stdout: string, stderr: string}>}
  */
 export function runShell(cmd, { cwd, timeoutMs, maxBuffer = 10 * 1024 * 1024, signal = null } = {}) {
   return new Promise((resolve, reject) => {
@@ -48,10 +56,10 @@ export function runShell(cmd, { cwd, timeoutMs, maxBuffer = 10 * 1024 * 1024, si
     let stdout = '';
     let stderr = '';
     let done = false;
-    const cap = (s, d) => (s.length >= maxBuffer ? s : s + String(d));
+    const cap = (/** @type {string} */ s, /** @type {string|Buffer} */ d) => (s.length >= maxBuffer ? s : s + String(d));
     child.stdout?.on('data', (d) => { stdout = cap(stdout, d); });
     child.stderr?.on('data', (d) => { stderr = cap(stderr, d); });
-    const finish = (fn, v) => {
+    const finish = (/** @type {(v: any) => void} */ fn, /** @type {any} */ v) => {
       if (done) return;
       done = true;
       clearTimeout(t);
@@ -89,8 +97,14 @@ export function runShell(cmd, { cwd, timeoutMs, maxBuffer = 10 * 1024 * 1024, si
   });
 }
 
-/** The tree, not the shell alone — see runShell for why. */
+/** The tree, not the shell alone — see runShell for why.
+ *
+ * @param {import('node:child_process').ChildProcess} child
+ */
 function killTree(child) {
+  // A pid the child never got (spawn can fail before one is handed out)
+  // leaves nothing to address: the direct kill is all that can happen.
+  if (!child.pid) { try { child.kill(); } catch { /* already gone */ } return; }
   if (process.platform === 'win32') {
     // Spawned, not run inline: the kill must not block the backend's event
     // loop. /T walks the tree while it is still linked, so the shell is left
@@ -112,13 +126,15 @@ function killTree(child) {
  *
  * `projection` builds the staged copy through sandbox.mjs and maps the
  * sandbox's paths back to the project root; `plain` runs in the project with
- * nothing to map. A projection that cannot be built never blocks the run —
- * the world degrades to `plain` rather than losing the step.
+ * nothing to map. A projection that cannot be built refuses the command
+ * (`err: …`) rather than degrading to `plain`: with edits staged, the plain
+ * world would hide them from the command and let its writes reach the real
+ * project over staged work.
  *
  * @param {object} opts
  * @param {string} opts.root      the project root (or a worktree's root — the
  *   run's root is whichever folder the run works in)
- * @param {object} opts.overlay   the run's pending-edit filesystem
+ * @param {import('./overlay.mjs').Overlay} opts.overlay   the run's pending-edit filesystem
  * @param {AbortSignal|null} [opts.signal]
  * @returns {Promise<{kind: 'projection'|'plain', cwd: string, scrub: (text: string) => string, notes: () => string, dispose: () => void}>}
  */
@@ -127,7 +143,7 @@ async function pickWorld({ root, overlay, signal }) {
     return { kind: 'plain', cwd: root, scrub: (text) => text, notes: () => '', dispose: () => {} };
   }
   let sandbox = null;
-  const tooBig = [];
+  const tooBig = /** @type {string[]} */ ([]);
   try {
     sandbox = createSandbox(root);
     await materializeTree(root, overlay, sandbox, { signal, onSkip: (rel, bytes) => tooBig.push(`${rel} (${Math.round(bytes / 1024 / 1024)} MB)`) });
@@ -167,7 +183,7 @@ async function pickWorld({ root, overlay, signal }) {
  *
  * @param {object} opts
  * @param {string} opts.root
- * @param {object} opts.overlay
+ * @param {import('./overlay.mjs').Overlay} opts.overlay
  * @param {AbortSignal|null} [opts.signal]
  * @param {string} opts.command   the shell line to run
  * @param {number} [opts.timeoutMs]
@@ -179,24 +195,30 @@ export async function runInProjectWorld({ root, overlay, signal = null, command,
   try {
     world = await pickWorld({ root, overlay, signal });
   } catch (err) {
+    const e = /** @type {any} */ (err);
     // A stop during the projection ends the run: the copy is the longest
     // wait a RUN has, and it used to finish while the window said the
     // run was stopping.
-    if (err?.name === 'AbortError') return 'err: the run was stopped before the command could start';
-    // A projection that cannot be built must not block the run — fall back
-    // to the plain world rather than losing the step.
-    world = { kind: 'plain', cwd: root, scrub: (text) => text, notes: () => '', dispose: () => {} };
+    if (e?.name === 'AbortError') return 'err: the run was stopped before the command could start';
+    // A projection that cannot be built is the one failure the plain world
+    // cannot absorb: with edits staged in the overlay, the plain world hides
+    // them from the command — the stale-tree lie the projection exists to fix
+    // — and a write would land on the real project over staged work. The
+    // honest answer is a refusal the model can act on.
+    const why = String(e?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 200);
+    return `err: the projection could not be built (${why || 'unknown reason'}) — the command was not run, and nothing on disk changed. Retry once; if it fails again, tell the person to check disk space and permissions under ${sandboxRoot(root)}.`;
   }
   try {
     const { stdout } = await runShell(command, { cwd: world.cwd, timeoutMs, signal });
     return (await clip(scrubSecretDiff(world.scrub(scrubOutput(stdout))))) + world.notes();
   } catch (err) {
+    const e = /** @type {any} */ (err);
     // A stop that killed the command says so: "exit SIGTERM" would read as
     // the command's own failure, and the person did ask for it.
-    if (err?.killed && /stopped/i.test(String(err.message ?? ''))) {
+    if (e?.killed && /stopped/i.test(String(e.message ?? ''))) {
       return clip(scrubSecretDiff(world.scrub('err: the run was stopped before the command finished')));
     }
-    return clip(scrubSecretDiff(world.scrub(scrubOutput(`err: exit ${err.code ?? err.signal ?? '?'}\n${String(err.stdout ?? '')}${String(err.stderr ?? '')}`))));
+    return clip(scrubSecretDiff(world.scrub(scrubOutput(`err: exit ${e.code ?? e.signal ?? '?'}\n${String(e.stdout ?? '')}${String(e.stderr ?? '')}`))));
   } finally {
     world.dispose();
   }

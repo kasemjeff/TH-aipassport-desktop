@@ -374,7 +374,12 @@ ${transcript}`;
         ? `\nStaged but not on disk yet (Apply has not happened):\n${staged.map((s) => `- ${s}`).join('\n')}`
         : '',
       lastCheck
-        ? `\nThe last check of the staged tree did not pass (${lastCheck.verdict}):\n${String(lastCheck.text ?? '').slice(0, 600)}`
+        ? (lastCheck.verdict === 'none'
+          // A check that never ran is not a failing one: the seed used to read
+          // "did not pass (none)", and a fresh conversation would go hunting
+          // for a failure that does not exist.
+          ? `\nNothing has verified the staged tree yet — no check has run:\n${String(lastCheck.text ?? '').slice(0, 600)}`
+          : `\nThe last check of the staged tree did not pass (${lastCheck.verdict}):\n${String(lastCheck.text ?? '').slice(0, 600)}`)
         : '',
       Array.isArray(todo) && todo.length
         ? `\nThe plan/TODO checklist this run recorded, as it stands — keep it in step (send TODO with [x] as items finish):\n${todo.map((i) => `- [${i.done ? 'x' : ' '}] ${i.text}`).join('\n')}`

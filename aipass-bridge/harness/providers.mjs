@@ -122,10 +122,15 @@ export function sanitizeSpec(raw = {}) {
   // the default. The client reads it, so the spec has to KEEP it — a row
   // that loses the field falls back to the default deadline silently.
   const modelsTimeoutMs = Number(raw.modelsTimeoutMs) > 0 ? Math.floor(Number(raw.modelsTimeoutMs)) : null;
+  // The prompt-cache switch: on by default, off when the spec says false —
+  // the only provider knob that changes what the request body carries (the
+  // anthropic breakpoints), so it must survive the spec like the rest.
+  const promptCache = raw.promptCache === false ? false : true;
   return {
     id, label, kind, baseUrl, apiKeyEnv, models, defaultModel, headers,
     apiKeyHeader: header, apiKeyPrefix, maxTokens, anthropicVersion,
     modelsTimeoutMs,
+    promptCache,
   };
 }
 

@@ -11,10 +11,6 @@
 /desktop/sidecar/node
 /desktop/sidecar/node-*
 
-# TypeScript's incremental build cache - machine-local, regenerable, and it
-# names every file the last build saw. It belongs in nobody's git.
-*.tsbuildinfo
-
 # Local state - sessions, staged uploads, spilled tool output and logs are
 # machine-local by design.
 /.aipass/

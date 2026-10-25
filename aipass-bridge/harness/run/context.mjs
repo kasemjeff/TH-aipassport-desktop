@@ -177,6 +177,9 @@ export class RunContext {
     this.backgroundJobs = new Map();
     this.reportedBg = new Set();
 
+    /* --- the overflow recovery (one compact-and-retry per run) ------------------ */
+    this.overflowRetried = false;
+
     /* --- the clock -------------------------------------------------------------- */
     this.runStart = Date.now();
   }

@@ -244,6 +244,14 @@ async function gatedCopy(src, dst) {
  * for the length of the copy. The bytes on disk are the same, copied through a
  * fixed-width gate, and a command's in-place writes still land in the throwaway
  * copy rather than the project.
+ *
+ * @param {string} root   the project (or worktree) root the projection mirrors
+ * @param {import('./overlay.mjs').Overlay} overlay   the staged edits to write in
+ * @param {string} dest   the empty directory to build the projection in
+ * @param {object} [opts]
+ * @param {AbortSignal|null} [opts.signal]
+ * @param {((rel: string, bytes: number) => void)|null} [opts.onSkip]
+ * @param {((rel: string, reason: string) => void)|null} [opts.onRefuse]
  */
 export async function materializeTree(root, overlay, dest, { signal = null, onSkip = null, onRefuse = null } = {}) {
   // (stop) The projection is the longest wait a RUN has before its command

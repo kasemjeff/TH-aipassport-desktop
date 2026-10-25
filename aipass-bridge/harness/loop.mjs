@@ -59,6 +59,10 @@ const CODE_FILE = /\.(m?js|cjs|tsx?|jsx|py|rb|go|rs|java|cs|php|swift|kt|c|h|cpp
 const PARALLEL_READS = new Set(['read', 'list', 'search', 'tree', 'stat', 'glob', 'symbols', 'def', 'refs']);
 const PARALLEL_READ_GROUP = 6;
 
+// The final step's send carries the close-out ask — see the drain comment at
+// the top of the step loop.
+const LAST_STEP_NOTE = 'This is the last step this run has budget for. Do not ask for anything new — read the results above and write your closing answer now: what was done, what changed, and what is still open, ending with DONE on its own line plus one sentence about the work.';
+
 // (chain guard) After a change has failed in the same reply, only calls whose
 // outcome cannot touch the tree keep running — reads, exfil, control markers.
 // Another edit, a shell command, a git write or a VERIFY would act on the
@@ -339,6 +343,60 @@ export async function runTask(taskText, ctx = {}) {
     }
   }
 
+  /**
+   * Summarise the conversation and rotate to a fresh one, carrying the seed.
+   * The one context-repair move this harness has, called from two places: the
+   * step boundary when the estimate says the budget is nearly spent, and the
+   * send the provider refused for context size (one retry per run). Returns
+   * 'rotated', or 'failed' (the error is already emitted; the caller sends on
+   * or ends), or 'stopped' (the run's signal fired mid-summary).
+   */
+  const rotateContext = async (resultsText) => {
+    try {
+      events?.emit('note', { text: 'context is filling up — summarising this conversation and rotating to a fresh one' });
+      // The summariser is a model call like any other, so it rides the run's
+      // stop signal: a stop during the summary ends the run there instead of
+      // waiting for a round trip nobody asked for.
+      const raw = await compactor.summarize(session, { task: taskText, model, conversation: run.conversation, temporary: run.conversationTemporary, signal: run.options.signal ?? null });
+      // The reply is two products: the narrative and (when the tier is on)
+      // the trailing MEMORY: facts, merged across rotations. A reply
+      // without the section digests to the plain summary, so an older
+      // model's answer still lands.
+      const { summary: note, memory } = compactor.digest(session, raw);
+      // Rotate first, record second: an append that lands while the rotation
+      // fails would leave a compaction entry behind and reset the estimate
+      // to a conversation the model never carried — a session claiming
+      // memory it does not have. Failing this way only retries next step.
+      const rotated = await rotate?.(note);
+      // The fresh conversation is where the seed and every later send must
+      // go. The harness hands its new id back because this loop's own
+      // `conversation` binding would otherwise keep naming the conversation
+      // the rotation just left behind.
+      if (rotated?.conversation) {
+        run.conversation = rotated.conversation;
+        run.conversationTemporary = rotated.temporary === true;
+      }
+      session.append('compaction', { summary: note, ...(memory.length ? { memory } : {}), lastSummarizedEntryId: session.entries.at(-1)?.id ?? null });
+      events?.emit('compacted', { summary: note, memory });
+      // The fresh conversation keeps what a summary would drop: the files
+      // staged so far (deletes marked) and the last check that has not
+      // passed — the two constraints a rotation loses most expensively.
+      const stagedNow = overlay.keys().map((abs) => {
+        const rel = posix(path.relative(overlay.root, abs));
+        return overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
+      }).slice(0, 20);
+      const lastCheck = run.checkResult && run.checkResult.verdict && run.checkResult.verdict !== 'pass' ? run.checkResult : null;
+      run.next = `${compactor.seed({ summary: note, memory, task: taskText, preambleText: pre, results: resultsText, staged: stagedNow, lastCheck, todo: run.todoState })}\n\n${reminder}`;
+      return 'rotated';
+    } catch (err) {
+      // A stop during the summary is not a compaction failure: the run ends
+      // as cancelled, and the error line would only be noise.
+      if (run.stopped()) return 'stopped';
+      events?.emit('error', { message: `compaction failed, sending the results without it: ${err.message}` });
+      return 'failed';
+    }
+  };
+
   for (let step = 1; !modelGone && step <= maxSteps; step++) {
     // A stop ends the run here, before the next reply: the tools of the last
     // reply are done, and nothing new goes out.
@@ -374,8 +432,48 @@ export async function runTask(taskText, ctx = {}) {
       run.emit('injected', { n: notes.length });
     }
 
+    // (max-steps drain) The final step is for closing, not for digging: a run
+    // that spends its last round trip on a new question ends with the answer
+    // it never wrote. The model cannot be stopped from calling tools here —
+    // but it can be asked, and a reply that asks anyway still runs; the
+    // step_limit ending below stays the truth (opencode's forced drain,
+    // adapted to a protocol with no toolChoice knob).
+    if (step === maxSteps && step > 1) run.next = `${LAST_STEP_NOTE}\n\n${run.next}`;
+
     // The send. The reply comes back with the stage that owns the ladder.
-    const sent = await sender.send();
+    let sent = await sender.send();
+    // (overflow recovery, one attempt) A send the provider refused for
+    // context size is the one send-failure a rotation heals: the server holds
+    // the whole conversation, so summarising and rotating to a fresh one fits
+    // the same message again. The first send is excluded — its size was
+    // already settled by the pre-run compaction, and a first message too big
+    // on its own is not something a rotation shrinks. One attempt per run: a
+    // retry that overflows too is a run that ends as the error it is.
+    if (sent.stopReason === 'error' && sent.overflow && run.sends > 0
+        && !run.overflowRetried && compactor && session && rotate) {
+      run.overflowRetried = true;
+      const line = 'the send was refused because the context is full — summarising this conversation, rotating to a fresh one, and sending this step again';
+      run.note(line);
+      events?.emit('note', { text: line });
+      // The pending message without its trailing reminder — the seed appends
+      // its own frame, and a protocol reminder twice reads as noise. The
+      // compositions that end in something else (a gate message after the
+      // reminder) pass whole: the seed's tail is a carrier, not a parser.
+      const pendingText = run.next.endsWith(reminder)
+        ? run.next.slice(0, run.next.length - reminder.length).replace(/\n+$/, '')
+        : run.next;
+      const outcome = await rotateContext(pendingText);
+      if (outcome === 'stopped') { run.stopReason = 'cancelled'; break; }
+      if (outcome === 'rotated') sent = await sender.send();
+    }
+    // The overflow error that was not recovered — no rotation available, the
+    // one attempt already spent, or the rotation itself failed: its record
+    // was deferred by the sender, so it is written here, once.
+    if (sent.stopReason === 'error' && sent.overflow && !run.sendError) {
+      run.sendError = sent.overflow;
+      run.note(`the send failed: ${sent.overflow}`);
+      events?.emit('error', { message: sent.overflow });
+    }
     if (sent.stopReason) { run.stopReason = sent.stopReason; break; }
     let reply = sent.reply;
 
@@ -411,7 +509,11 @@ export async function runTask(taskText, ctx = {}) {
       // `NEED list desktop` followed by prose parsed to nothing, and the run
       // was marked done 633ms later with the nudges never sent. A marker-shaped
       // line earns the nudge that teaches the shape instead.
-      const effectiveDone = done || (run.toolsRun > 0 && proseText && !attemptedMarker(reply) ? { kind: 'done', arg: 'done' } : null);
+      const effectiveDone = done || (run.toolsRun > 0 && proseText && !attemptedMarker(reply)
+        // The synthetic ending carries the closing prose, not the bare word:
+        // run.summary and the stats row read the arg, and a summary of "done"
+        // said nothing a run_stats row could use.
+        ? { kind: 'done', arg: proseText } : null);
       if (effectiveDone) {
         const cleanArg = (effectiveDone.arg || proseText || 'done').replace(/^[-—–:]\s*/, '').trim();
         run.summary = cleanArg || 'done';
@@ -912,49 +1014,29 @@ export async function runTask(taskText, ctx = {}) {
     // measures it after outbound() rewrites, because that is the size the
     // server will actually receive.
     if (compactor && session && compactor.needsCompaction(session, { pending: run.next })) {
-      try {
-        events?.emit('note', { text: 'context is filling up — summarising this conversation and rotating to a fresh one' });
-        // The summariser is a model call like any other, so it rides the run's
-        // stop signal: a stop during the summary ends the run there instead of
-        // waiting for a round trip nobody asked for.
-        const raw = await compactor.summarize(session, { task: taskText, model, conversation: run.conversation, temporary: run.conversationTemporary, signal: run.options.signal ?? null });
-        // The reply is two products: the narrative and (when the tier is on)
-        // the trailing MEMORY: facts, merged across rotations. A reply
-        // without the section digests to the plain summary, so an older
-        // model's answer still lands.
-        const { summary: note, memory } = compactor.digest(session, raw);
-        // Rotate first, record second: an append that lands while the rotation
-        // fails would leave a compaction entry behind and reset the estimate
-        // to a conversation the model never carried — a session claiming
-        // memory it does not have. Failing this way only retries next step.
-        const rotated = await rotate?.(note);
-        // The fresh conversation is where the seed and every later send must
-        // go. The harness hands its new id back because this loop's own
-        // `conversation` binding would otherwise keep naming the conversation
-        // the rotation just left behind.
-        if (rotated?.conversation) {
-          run.conversation = rotated.conversation;
-          run.conversationTemporary = rotated.temporary === true;
-        }
-        session.append('compaction', { summary: note, ...(memory.length ? { memory } : {}), lastSummarizedEntryId: session.entries.at(-1)?.id ?? null });
-        events?.emit('compacted', { summary: note, memory });
-        // The fresh conversation keeps what a summary would drop: the files
-        // staged so far (deletes marked) and the last check that has not
-        // passed — the two constraints a rotation loses most expensively.
-        const stagedNow = overlay.keys().map((abs) => {
-          const rel = posix(path.relative(overlay.root, abs));
-          return overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
-        }).slice(0, 20);
-        const lastCheck = run.checkResult && run.checkResult.verdict && run.checkResult.verdict !== 'pass' ? run.checkResult : null;
-        run.next = `${compactor.seed({ summary: note, memory, task: taskText, preambleText: pre, results: results.join('\n\n'), staged: stagedNow, lastCheck, todo: run.todoState })}\n\n${reminder}`;
-      } catch (err) {
-        // A stop during the summary is not a compaction failure: the run ends
-        // as cancelled, and the error line would only be noise.
-        if (run.stopped()) { run.stopReason = 'cancelled'; break; }
-        events?.emit('error', { message: `compaction failed, sending the results without it: ${err.message}` });
-      }
+      // 'failed' lands here as it always did: the note is out and the error
+      // said, and the results still go — losing the step's work to a
+      // compaction error would be worse than an over-budget conversation.
+      const outcome = await rotateContext(results.join('\n\n'));
+      if (outcome === 'stopped') { run.stopReason = 'cancelled'; break; }
     }
     if (step === maxSteps) events?.emit('step_limit', {});
+  }
+
+  // A background helper can outlive the step that started it: one that
+  // finished during the final step has no next send to ride, and one still
+  // running will finish after the run. The result is already in the
+  // transcript note; what went missing was the person's knowledge that this
+  // run never carried it to the model. Both are said, once, here.
+  for (const [id, job] of run.backgroundJobs) {
+    if (job.status === 'done' && !run.reportedBg.has(id)) {
+      run.reportedBg.add(id);
+      events?.emit('note', { text: `background helper ${id}${job.role ? ` (${job.role})` : ''} finished after the run ended — its result is in the transcript, but the model never saw it.` });
+    } else if (job.status === 'running') {
+      void Promise.resolve(job.promise).then(() => {
+        events?.emit('note', { text: `background helper ${id}${job.role ? ` (${job.role})` : ''} finished (${job.status}) after the run ended — its result is in the transcript, but the model never saw it.` });
+      }).catch(() => { /* the job already recorded its own failure */ });
+    }
   }
 
   // A budget stop is the run's stop reason, recorded like every other ending.
@@ -1257,7 +1339,10 @@ async function execute(call, run) {
         const what = call.kind === 'run' ? String(call.body ?? '').trim().split('\n')[0] : call.arg;
         return `err: the person watching declined ${call.kind} ${what}`.slice(0, 300);
       }
-      if (decision === 'always') { permissions.grant(call.kind, call.arg); }
+      // 'always' is recorded inside request()/answer(), where the command
+      // body is still in hand — a shell grant is keyed by its shape, which
+      // the bare arg of a RUN does not carry. Re-granting here would only
+      // re-set the same key, and for a run grant nothing at all.
     }
   }
 

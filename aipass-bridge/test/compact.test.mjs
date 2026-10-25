@@ -164,6 +164,19 @@ test('seed keeps its between-runs shape, and pastes the step results on a mid-ru
   assert.doesNotMatch(between, /Staged but not on disk/, 'no staged files, no block');
 });
 
+test('a check that never ran is not seeded as a failing one', () => {
+  // verdict 'none' means the check could not run at all — a seed that said
+  // "did not pass (none)" sent the fresh conversation hunting for a failure
+  // that does not exist.
+  const c = new Compactor({ keepRecentBytes: 0 });
+  const seed = c.seed({
+    summary: 'did things', task: 'the task', preambleText: 'PRE',
+    lastCheck: { verdict: 'none', text: 'check could not run: no separate conversation is available' },
+  });
+  assert.match(seed, /Nothing has verified the staged tree yet/);
+  assert.doesNotMatch(seed, /did not pass/);
+});
+
 test('a long run rotates mid-run: summarise, fresh conversation, results still delivered', async (t) => {
   const dir = tempDir({ 'big.txt': `${'z'.repeat(6000)}\nmarker-end\n` });
   const handler = scripted([

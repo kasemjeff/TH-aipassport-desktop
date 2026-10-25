@@ -3388,6 +3388,102 @@ test('a playbook opens in place, under its own row', async () => {
   assert.equal(body.hidden, true, 'clicking it again puts it away');
 });
 
+/* ------------------------------------------------- invoking and installing */
+
+test('"/skill <name>" fills the composer with the phrase that makes the next run load it', async () => {
+  const { node, calls, tick } = await bootApp({
+    ...BACKEND,
+    'skills.load': () => ({ name: 'writing', file: 'skills/writing.md', text: '# writing\n' }),
+  });
+  const task = node('task');
+  task.value = '/skill writing';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.ok(calls.includes('skills.load'), 'the backend confirms the name before the draft is filled');
+  assert.match(task.value, /SKILL writing/, 'the draft names the playbook the way the loop loads it');
+});
+
+test('"/skill" with a name that is not in the library says so, and fills nothing', async () => {
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'skills.load': () => { throw new Error('no such skill: ghost. Use SKILL list to see the library.'); },
+  });
+  const task = node('task');
+  task.value = '/skill ghost';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.equal(task.value, '', 'a playbook that is not there fills no draft');
+  assert.match(node('log').textContent, /no such skill/, 'the refusal names the problem');
+});
+
+test('a playbook row carries the invoke, and names the library it loads from', async () => {
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'skills.list': () => [{ name: 'writing', file: 'skills/writing.md', role: 'user' }],
+  });
+  const task = node('task');
+  task.value = '/skills';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  const list = node('modal-body').children.find((c) => /skill-list/.test(c.className));
+  const row = list.children[0];
+  assert.match(row.textContent, /ผู้ใช้/, 'the row says which library the playbook loads from');
+  const actions = row.children.find((c) => /skill-row/.test(c.className)).children.find((c) => /skill-actions/.test(c.className));
+  const use = actions.children.find((b) => b.textContent === 'ใช้');
+  use.dispatch('click');
+  await tick();
+  assert.match(task.value, /SKILL writing/, 'the composer carries the invocation');
+});
+
+test('the install dialog sends the paste to the backend and refreshes the list', async () => {
+  let installed = null;
+  let lists = 0;
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'skills.list': () => { lists += 1; return [{ name: 'writing', file: 'skills/writing.md', role: 'user' }]; },
+    'skills.install': (params) => { installed = params; return { name: params.name, file: '/skills/deploy.md', target: params.target, overwritten: false }; },
+  });
+  const task = node('task');
+  task.value = '/skills';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  node('modal-actions').children.find((b) => b.textContent === 'ติดตั้งคู่มือ…').dispatch('click');
+  await tick();
+  const body = node('modal-body');
+  const nameRow = body.children.find((c) => /skill-install-row/.test(c.className));
+  nameRow.children[0].value = 'deploy-check';
+  nameRow.children[1].value = 'user';
+  body.children.find((c) => c.tagName === 'TEXTAREA').value = '# deploy\none\n';
+  node('modal-actions').children.find((b) => b.textContent === 'ติดตั้ง').dispatch('click');
+  await tick(); await tick();
+  assert.deepEqual(installed, { name: 'deploy-check', text: '# deploy\none\n', target: 'user', overwrite: false }, 'the dialog sent name, text and target');
+  assert.ok(lists >= 2, 'the list was refreshed after the install');
+  assert.equal(node('modal').classList.contains('hidden'), true, 'the dialog is gone');
+});
+
+test('a remove is armed by the first click and done by the second', async () => {
+  const removed = [];
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'skills.list': () => [{ name: 'writing', file: 'skills/writing.md', role: 'user' }],
+    'skills.remove': (params) => { removed.push(params); return { name: params.name, target: params.target, removed: true }; },
+  });
+  const task = node('task');
+  task.value = '/skills';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  const row = node('modal-body').children.find((c) => /skill-list/.test(c.className)).children[0];
+  const actions = row.children.find((c) => /skill-row/.test(c.className)).children.find((c) => /skill-actions/.test(c.className));
+  const del = actions.children.find((b) => b.textContent === 'ลบ');
+  del.dispatch('click');
+  await tick();
+  assert.deepEqual(removed, [], 'the first click only arms the button');
+  assert.equal(del.textContent, 'ยืนยันลบ?', 'and the button says it is armed');
+  del.dispatch('click');
+  await tick(); await tick();
+  assert.deepEqual(removed, [{ name: 'writing', target: 'user' }], 'the second click removes from the library the row names');
+});
+
 test('the search field is a field, and it counts the history it filters', async () => {
   // "ค้นหาแชท" used to be a row that pointed at a box folded away inside
   // another row — clicking it focused something you could not see, so it read
@@ -3455,6 +3551,57 @@ test('the update notice is a banner with one button, and the click is the consen
     await new Promise((r) => setTimeout(r, 100));
   }
   assert.equal(window_.reloaded, 1, 'and the window reloads once the backend is back');
+});
+
+test('the six-hour poll does not stack the update notice', async () => {
+  // The check runs at boot and every six hours: the same available version
+  // used to append a fresh bar each poll, and a long-open window ended with
+  // a stack of identical notices. A version is said once; a NEWER version
+  // replaces the bar instead of joining it.
+  const available = () => ({
+    ok: true,
+    checkedAt: Date.now(),
+    fromCache: false,
+    stale: false,
+    reason: null,
+    current: { content: '0.2.0', shell: '0.2.0', source: 'bundle' },
+    available: {
+      content: { version: '0.2.1', file: 'aipass-content-0.2.1.json.gz', bytes: 1, sha256: 'a'.repeat(64), notes: '', minShell: '0.2.0' },
+    },
+  });
+  const backend = { ...BACKEND, 'update.check': available };
+  const window_ = await bootApp(backend);
+  const { node, tick } = window_;
+  await tick(); await tick();
+
+  const runUpdate = async () => {
+    node('task').value = '/update';
+    node('task').dispatch('keydown', { key: 'Enter' });
+    await tick(); await tick(); await tick();
+  };
+  await runUpdate();
+  await runUpdate();
+  await runUpdate();
+  const bars = node('log').children.filter((c) => (c.className ?? '').includes('update-bar'));
+  assert.equal(bars.length, 1, `one notice, however many polls — got ${bars.length}`);
+});
+
+test('the slash button starts an empty composer and never eats typed text', async () => {
+  const { node, tick } = await bootApp(BACKEND);
+  await tick();
+
+  // Empty composer: the button behaves like typing "/" — the composer gets
+  // the slash and the palette renders from it.
+  node('task').value = '';
+  node('slash-btn').dispatch('click');
+  await tick();
+  assert.equal(node('task').value, '/', 'an empty composer gets the slash');
+
+  // Typed text is the person's answer in progress — the button only focuses.
+  node('task').value = 'กำลังพิมพ์ครึ่งทาง';
+  node('slash-btn').dispatch('click');
+  await tick();
+  assert.equal(node('task').value, 'กำลังพิมพ์ครึ่งทาง', 'typed text survives the button');
 });
 
 test('the shell update says the app will close, and an unsigned installer is refused', async () => {

@@ -146,5 +146,21 @@
     "stopRule": "the diagnostic ever stages text the model did not name — stopped; hints stay pointers, never substitutions.",
     "created": "2026-10-25",
     "updated": "2026-10-25"
+  },
+  {
+    "id": "compaction-summary-template",
+    "title": "Does an enforced summary shape make rotations hold more of the work?",
+    "source": "research:peer-harness study 2026-10-25 — sst/opencode session/compaction.ts:118-232 (enforced headings, update-mode rotations, SHRINK_STEPS)",
+    "status": "proposed",
+    "impact": 3,
+    "risk": 2,
+    "cost": 2,
+    "hypothesis": "asking the summariser for fixed headings (goal / decisions / changes / files / outstanding) and, on a session's SECOND rotation, framing the ask as an update of the previous summary (newer history takes precedence; completed items move out of outstanding) keeps the seed's actionable content at or above today's free-prose summary — measured by the rotation arms' solved and stale rates, and by whether the seed names every staged file and open item.",
+    "baseline": "the current free-prose summary with the trailing MEMORY: ask (harness/compact.mjs summarize()), the rotation arms' latest live rows, and the seed unit pins in aipass-bridge/test/compact.test.mjs.",
+    "successCriteria": "the rotation eval arms hold their solved rate with 0 stale and 0 invalid while the carried seed names every file the run touched and every open item; a model that ignores the template degrades to today's behavior, because digest() already accepts free prose. A measured no-gain writes the arm off in the record.",
+    "budget": { "attempts": 3, "maxSteps": 10, "maxCredits": 5, "wallMs": 900000 },
+    "stopRule": "any safety or robustness task regressing against the baseline — stopped, the summariser prompt reverts to free prose.",
+    "created": "2026-10-25",
+    "updated": "2026-10-25"
   }
 ]

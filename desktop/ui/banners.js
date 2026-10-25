@@ -161,6 +161,10 @@ export function createBanners(ctx) {
    * getElementById.
    */
   let welcomeCard = null;
+  // The update bar and the version it named: the six-hour poll must not stack
+  // the same notice, and a transcript reset drops it with the log.
+  let updateBar = null;
+  let shownUpdateKey = '';
   const isBanner = (n) => /\b(needs-tab|update-bar)\b/.test(n.className ?? '');
   // The rows are copied out of the collection first: in the browser `children`
   // is an HTMLCollection, which has a length but no `some`.
@@ -296,15 +300,25 @@ export function createBanners(ctx) {
    * the consent, and the content version is on screen before and after.
    */
   function showUpdate(res) {
-    const bar = el('div', 'note update-bar');
     const content = res?.available?.content;
     const shell = res?.available?.shell;
     if (!content && !shell) {
+      const bar = el('div', 'note update-bar');
       bar.append(el('span', null, res?.reason ? `อัปเดต: ${res.reason}` : 'อัปเดต: เป็นเวอร์ชันล่าสุดแล้ว'));
       log.append(bar);
       scrollDown();
       return;
     }
+    // The check runs every six hours: the same available version must not
+    // stack a fresh bar each poll. A version is said once per window — the
+    // "ไม่ตอนนี้" click is that version's dismissal — and a newer version
+    // replaces the bar in place.
+    const key = `${content?.version ?? ''}|${shell?.version ?? ''}`;
+    if (key === shownUpdateKey) return;
+    shownUpdateKey = key;
+    if (updateBar?.isConnected) updateBar.remove();
+    updateBar = el('div', 'note update-bar');
+    const bar = updateBar;
     const version = content?.version ?? shell?.version;
     bar.append(el('span', null, `มีเวอร์ชันใหม่ ${version}`));
     if (content) {
@@ -411,6 +425,8 @@ export function createBanners(ctx) {
   function reset() {
     extensionTokenBar = null;
     catalogBar = null;
+    updateBar = null;
+    shownUpdateKey = '';
   }
 
   return { syncExtensionToken, syncCatalogBanner, hasConversation, showWelcome, hideWelcome, refreshReadiness, checkForUpdate, reset };

@@ -200,7 +200,50 @@ test('an anthropic provider gets its own shape', async () => {
   assert.equal(init.headers['x-api-key'], 'sk-ant');
   assert.equal(init.headers['anthropic-version'], '2023-06-01');
   assert.equal(body.thinking.type, 'enabled', 'a thinking level becomes a thinking budget');
-  assert.deepEqual(body.messages[0].content, [{ type: 'text', text: 'hello' }]);
+  assert.deepEqual(body.messages[0].content, [{ type: 'text', text: 'hello', cache_control: { type: 'ephemeral' } }],
+    'the first message — the protocol — rides a prompt-cache marker');
+});
+
+test('an anthropic history carries prompt-cache breakpoints, unless the spec says no', async () => {
+  const spec = { id: 'claude', kind: 'anthropic', baseUrl: 'https://api.anthropic.com', apiKeyEnv: '', models: [], defaultModel: null, headers: {} };
+  const threeTurns = async (theSpec) => {
+    const { seen } = await withFetch(
+      () => sse(['{"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}']),
+      async () => {
+        const client = new ApiProviderClient(theSpec, { key: 'sk-ant', model: 'claude-x' });
+        await client.chat({ message: 'turn one' });
+        await client.chat({ message: 'turn two' });
+        await client.chat({ message: 'turn three' });
+        return client;
+      },
+    );
+    return seen.map((s) => s.body);
+  };
+
+  const bodies = await threeTurns(spec);
+  const messages = bodies[2].messages;
+  assert.equal(messages.length, 5, 'two prior turns plus the new one');
+  assert.deepEqual(messages[0].content[0].cache_control, { type: 'ephemeral' }, 'the first message is marked — the prefix the cache can hold');
+  assert.deepEqual(messages[3].content[0].cache_control, { type: 'ephemeral' }, 'the end of the last complete turn is marked');
+  assert.equal(messages[4].content[0].cache_control, undefined, 'the new turn is never marked — it is not stable yet');
+
+  const plain = await threeTurns({ ...spec, promptCache: false });
+  const marked = plain[2].messages.flatMap((m) => [].concat(m.content)).filter((b) => b.cache_control);
+  assert.deepEqual(marked, [], 'a spec that says promptCache: false sends no markers');
+});
+
+test('an openai-compatible body carries no prompt-cache markers', async () => {
+  const { seen } = await withFetch(
+    () => sse(['{"choices":[{"delta":{"content":"ok"}}]}']),
+    async () => {
+      const client = new ApiProviderClient(OPENAI_SPEC, { key: 'sk-x', model: 'gpt-x' });
+      await client.chat({ message: 'turn one' });
+      await client.chat({ message: 'turn two' });
+      return client;
+    },
+  );
+  const marked = seen[1].body.messages.flatMap((m) => [].concat(m.content)).filter((b) => b && typeof b === 'object' && b.cache_control);
+  assert.deepEqual(marked, [], 'prefix caching there is the provider’s own, nothing to ask for');
 });
 
 test('a provider without a key says so before it sends', async () => {
