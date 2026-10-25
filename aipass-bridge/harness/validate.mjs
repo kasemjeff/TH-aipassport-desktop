@@ -16,8 +16,8 @@
 
 /** The markers the loop itself owns plus the built-in tool table. */
 export const BUILTIN_KINDS = new Set([
-  'skill', 'list', 'read', 'write', 'replace', 'search', 'run', 'glob', 'git',
-  'fetch', 'delete', 'move', 'attach', 'web', 'symbols', 'def', 'refs', 'recall',
+  'skill', 'list', 'read', 'write', 'replace', 'search', 'tree', 'stat', 'run', 'glob',
+  'git', 'fetch', 'delete', 'move', 'attach', 'web', 'symbols', 'def', 'refs', 'recall',
   'plan', 'todo', 'subagent', 'jobs', 'done', 'ask', 'verify',
 ]);
 
@@ -28,7 +28,8 @@ export const BUILTIN_KINDS = new Set([
  */
 const ARG_GUARDS = {
   read: 'err: NEED needs a file or directory path.',
-  search: 'err: give me some text to search for. (SEARCH -i text matches without letter case.)',
+  search: 'err: give me some text to search for. (SEARCH -i text matches without letter case; -C 2 shows two lines around each hit.)',
+  stat: 'err: STAT needs a file or directory path — STAT src/app.ts',
   glob: 'err: give me a glob pattern, e.g. **/*.ts',
   git: 'err: give me a git subcommand, e.g. status',
   fetch: 'err: give me a URL to fetch, starting with http:// or https://',

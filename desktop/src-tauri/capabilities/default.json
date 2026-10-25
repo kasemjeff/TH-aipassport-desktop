@@ -1,16 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The aipass window: it talks to one local backend process and nothing else. The page uses no Tauri API at all — the Rust side owns the window, the tray and the sidecar — so this grants nothing beyond the window commands a shell may want to drive.",
+  "description": "The aipass window: it talks to one local backend process and nothing else. The page uses no Tauri API at all — the Rust side owns the window, the tray and the sidecar, and its own calls do not pass through this ACL — so this grants nothing: whatever a capability granted here would be reachable by any script that ends up in the page.",
   "windows": ["main"],
-  "permissions": [
-    "core:window:allow-show",
-    "core:window:allow-set-focus",
-    "core:window:allow-set-size",
-    "core:window:allow-close",
-    "core:window:allow-minimize",
-    "core:window:allow-toggle-maximize",
-    "core:window:allow-start-dragging",
-    "core:event:default"
-  ]
+  "permissions": []
 }

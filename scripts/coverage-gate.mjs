@@ -49,6 +49,9 @@ export const FLOORS = {
   'desktop/ui/rpc.js': { lines: 95, branches: 82, functions: 68 },
   'desktop/ui/state.js': { lines: 95, branches: 95, functions: 95 },
   'desktop/ui/transcript.js': { lines: 94, branches: 70, functions: 88 },
+  // The notices pinned over the conversation (no chat tab, the extension's
+  // token, the model catalog, the update) and the welcome card.
+  'desktop/ui/banners.js': { lines: 90, branches: 70, functions: 65 },
   'desktop/ui/settings.js': { lines: 75, branches: 56, functions: 58 },
   'desktop/ui/commands.js': { lines: 70, branches: 62, functions: 59 },
   'desktop/ui/panels/files.js': { lines: 87, branches: 66, functions: 69 },
@@ -286,11 +289,6 @@ export async function runGate({ repo: root = repo, floors = FLOORS, argv = [], c
         merged.set(file, existing);
       }
     }
-    const gatesFile = merged.get('aipass-bridge/harness/run/gates.mjs');
-    if (gatesFile) {
-      const missing = [...gatesFile.functions.entries()].filter(([, count]) => !(count > 0)).map(([name]) => name);
-      console.log('gates functions recorded: ' + gatesFile.functions.size + '; missing: ' + (missing.join(', ') || '(none)'));
-    }
     const { rows, failures: under } = check(merged, floors);
     return { ok: failures.length === 0 && under.length === 0, rows, failures: [...failures, ...under], files: merged };
   } finally {
@@ -324,7 +322,3 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToP
   }
   console.log('\nevery floored file is still watched.');
 }
-
-
-
-

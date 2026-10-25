@@ -16,6 +16,9 @@ test('every built-in marker the protocol can produce passes its shape check', ()
     { kind: 'write', arg: 'a.mjs', body: '' },
     { kind: 'replace', arg: 'a.mjs', body: ['old', 'new'] },
     { kind: 'search', arg: 'needle' },
+    { kind: 'tree', arg: 'src -L 2' },
+    { kind: 'tree', arg: '' },
+    { kind: 'stat', arg: 'src/app.ts' },
     { kind: 'run', arg: '', body: 'node check.mjs' },
     { kind: 'glob', arg: '**/*.ts' },
     { kind: 'git', arg: 'status --short' },
@@ -45,6 +48,7 @@ test('a missing argument is refused with the tool\u2019s own sentence', () => {
   const wanted = [
     ['read', /NEED needs a file or directory path/],
     ['search', /give me some text to search for/],
+    ['stat', /STAT needs a file or directory path/],
     ['glob', /give me a glob pattern/],
     ['git', /give me a git subcommand/],
     ['fetch', /give me a URL/],

@@ -51,6 +51,10 @@ const saveEmptyTab = () => ({ patch: {}, problems: [] });
 const saveModelTab = (sheet) => {
   const d = sheet.draft;
   const problems = [];
+  // The temperature select speaks in strings ('default' / '0.7'); the settings
+  // file stores null or a number, so the sheet converts on the way out — the
+  // same trick the wall-clock minutes below play.
+  const temperature = d.temperature == null || d.temperature === 'default' ? null : Number(d.temperature);
   // Check before writing: a budget under its reserve is a mistake the person
   // should hear about — not a setting that quietly misbehaves on the next
   // run. Zero steps is no mistake: it is the deliberate "no cap".
@@ -94,7 +98,7 @@ const saveModelTab = (sheet) => {
     problems,
     patch: {
       defaultModel: d.defaultModel,
-      mode: d.mode,
+      temperature,
       allowRun: d.allowRun,
       // The two switches the harness option sheet owns. They are sent only
       // when the machine has them: a backend that does not know the key
@@ -108,8 +112,6 @@ const saveModelTab = (sheet) => {
       maxWallClockMs: Math.round(maxWallClockMin) * 60_000,
       maxCredits: d.maxCredits,
       maxResult: d.maxResult,
-      plan: d.plan,
-      requirePlanApproval: d.requirePlanApproval,
       subagent: d.subagent,
       replyLanguage: d.replyLanguage,
       langCheck: d.langCheck,
@@ -886,11 +888,22 @@ const TABS = [
     id: 'model',
     icon: '🤖',
     title: 'คุยกับโมเดล',
-    sub: 'โมเดล สิทธิ์ และขีดจำกัดของแต่ละรัน',
+    // The mode (สิทธิ์/plan) is deliberately NOT a row here: it decides what
+    // the NEXT message may do, so it lives beside the composer where the
+    // message is written — one surface per control, or two copies drift.
+    sub: 'โมเดล temperature และขีดจำกัดของแต่ละรัน — โหมดการทำงาน (สิทธิ์/plan) อยู่ข้างช่องพิมพ์ที่หน้าแชต',
     save: saveModelTab,
     fields: [
       { key: 'defaultModel', label: 'โมเดลเริ่มต้น', type: 'text', note: 'id ของโมเดล — ดูรายการได้ที่ /models หรือกดที่หัวหน้าต่าง' },
-      { key: 'mode', label: 'สิทธิ์แก้ไฟล์', type: 'select', options: [['ask', 'ถามก่อนเขียนทุกไฟล์'], ['auto', 'เขียนเลยไม่ถาม'], ['yolo', 'เขียน + รันคำสั่ง shell']] },
+      { key: 'temperature', label: 'temperature (ความสุ่มของคำตอบ)', type: 'select', options: [
+        ['default', 'default — ปล่อยตามค่าเริ่มต้นของแต่ละโมเดล'],
+        ['0', '0 — นิ่ง ตอบเหมือนเดิมทุกครั้ง'],
+        ['0.3', '0.3 — ต่ำ เหมาะกับงานโค้ด'],
+        ['0.7', '0.7 — สมดุล'],
+        ['1', '1.0 — หลากหลายขึ้น'],
+        ['1.5', '1.5 — สูง'],
+        ['2', '2.0 — สุ่มสูงสุด'],
+      ], note: 'ยิ่งต่ำยิ่งคงที่ ยิ่งสูงยิ่งหลากหลาย — งานที่ต้องแม่นใช้ต่ำ งานร่างไอเดียใช้สูงได้' },
       { key: 'allowRun', label: 'อนุญาตให้รันคำสั่ง shell', type: 'checkbox', note: 'ปิด = โมเดลแก้ไฟล์ได้อย่างอื่นไม่ได้' },
       { key: 'allowGitWrite', label: 'ให้โมเดลเขียน git ได้ (ปิดไว้เป็นค่าเริ่มต้น)', type: 'checkbox', note: 'โมเดลสั่ง GIT stage/commit/branch เองได้ — ยังถามก่อนตามโหมดสิทธิ์เหมือนเดิม' },
       { key: 'allowVerify', label: 'ให้โมเดลใช้ marker VERIFY ได้ (ปิดไว้เป็นค่าเริ่มต้น)', type: 'checkbox', note: 'โมเดลขอรันเช็คของโปรเจกต์เองได้ (VERIFY) — คำสั่งเช็คเป็นงาน shell จึงถูกถามตามโหมดสิทธิ์' },
@@ -899,8 +912,6 @@ const TABS = [
       { key: 'maxWallClockMin', label: 'เวลาสูงสุดต่อคำสั่ง (นาที)', type: 'number', note: 'เพดานเวลา — งานที่ค้างจะหยุดเอง (ค่าเริ่มต้น 30)' },
       { key: 'maxCredits', label: 'เพดานเครดิตต่อคำสั่ง', type: 'number', note: '0 = ไม่จำกัด — หยุดงานเมื่อใช้เครดิตถึงเพดาน (เช็คกับยอดที่แคชไว้ ~30 วิ ต่อครั้ง)' },
       { key: 'maxResult', label: 'สูงสุดกี่ byte ต่อผลเครื่องมือ', type: 'number', note: '0 = ค่าเริ่มต้น (3000) — ที่เหลือ spill ลงดิสก์ให้อ่านต่อได้; ใหญ่ขึ้น = รอบน้อยลง' },
-      { key: 'plan', label: 'plan mode', type: 'checkbox', note: 'โมเดลร่างแผนก่อนลงมือ' },
-      { key: 'requirePlanApproval', label: 'รอให้อนุมัติแผนก่อนทำ', type: 'checkbox', note: 'ใช้ได้ก็ต่อเมื่อ plan mode เปิด' },
       { key: 'subagent', label: 'ให้เรียก helper ย่อย', type: 'checkbox', note: 'งานยาวถูกแบ่งให้ตัวช่วย แล้วรีพอร์ตกลับ' },
       { key: 'replyLanguage', label: 'ภาษาที่ตอบผู้ใช้', type: 'select', options: [['th', 'ไทย — ค่าเริ่มต้น'], ['en', 'English']], note: 'โค้ด คำสั่ง และพาธเป็นอังกฤษเสมอ ไม่ว่าตัวนี้จะตั้งไว้อย่างไร' },
       { key: 'langCheck', label: 'เตือนเมื่อลืมตอบไทย', type: 'checkbox', note: 'ตรวจสัดส่วนอักษรไทยของข้อความปิดงานก่อนรับ DONE — เตือนหนึ่งครั้ง' },
@@ -951,6 +962,9 @@ async function openSettings() {
   // The wall-clock budget is stored in milliseconds; the sheet asks in
   // minutes, because typing 1800000 to mean half an hour is a trap.
   draft.maxWallClockMin = Math.max(1, Math.round(Number(settings.maxWallClockMs ?? 1_800_000) / 60_000));
+  // The temperature select speaks in strings; null — "the model's own
+  // default" — is what the option named 'default' shows.
+  draft.temperature = settings.temperature == null ? 'default' : String(settings.temperature);
 
   $('modal-title').textContent = 'การตั้งค่า';
   $('modal').classList.add('settings-sheet');

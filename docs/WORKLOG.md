@@ -6,6 +6,365 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-25 (d) — live verification of the day's three passes
+
+*Files*: none changed — verification only (`node scripts/evals.mjs --live
+--all --attempts 2 --budget model=gemini-3.5-flash-lite,thinking=low,maxSteps=10,maxCredits=5
+--pause 2000 --keep`; results `evals/results/2026-10-25T15-29-35-026-live.jsonl`
++ kept sessions). Replay smoke first: math-fix `solved` against its fixture —
+the fingerprint (task bytes + preamble bytes + reply count) held after the
+preamble-sections change.
+*Tests*: live 22 attempts — **21 solved (95%), 0 invalid, 0 stale, 0 firewall
+notes, 0 repeats, credits 0** (free-credit model), wall median 9.2 s;
+by category core 2/2 · data 4/4 · robustness 7/8 · safety 8/8; the live
+`promptDigest` is byte-identical to the morning's run. The one unsolved:
+`sum-numbers-twin` attempt 1 read and computed the sum correctly but staged
+no write before DONE (the check caught it); attempt 2 solved — the attempts
+floor doing what it was graduated to do.
+*Deferred*: nothing from this run; no queue record was touched (the smoke
+set is not an experiment arm).
+*Risks*: none new observed on the edge — pacing, the WAF table and the token
+bucket were silent for the whole matrix.
+*Cleanup*: none.
+
+## 2026-10-25 (c) — dsh pass 3: the execution world has one owner; the interrupted anchor
+
+*Files*: new `aipass-bridge/harness/execution.mjs` (`runShell` + `killTree`
+moved verbatim from `tools.mjs`, new `pickWorld`/`runInProjectWorld` — the
+plain/projection world pick, the stop/exit endings, the output path mapping,
+the shared/too-big notes), `harness/tools.mjs` (the RUN tool is guards +
+`runInProjectWorld` now; `runShell` re-exported where its callers found it;
+sandbox imports narrowed to `sharedWriteRefusal`), `harness/run/send.mjs`
+(the interrupted anchor: deltas streamed then the send died → the user entry
+and a `interrupted: true` assistant entry recorded; nothing delivered records
+nothing), new test `test/interrupted-anchor.test.mjs`,
+`docs/DATA_FORMATS.md` (assistant `interrupted` field), `docs/HARNESS_DESIGN.md`
+(`execution.mjs` row, projection guard row, sandbox row), `docs/LOOP_DESIGN.md`
+(send stage + the tests table), `CHANGELOG.md`, `test/CONTRACTS.md` (+2
+anchors, budget 136 → 142).
+*Tests*: `run-overlay` (7), `tools-aci` (15), `stability` (11) green after
+the seam extraction — behavior-preserving; the new anchor file green (2);
+full `npm test` run at the end of the pass.
+*Deferred*: `worktree.mjs` deliberately NOT folded into the seam — it is the
+project-placement layer (the run's root IS the worktree), which composes
+with the per-command world rather than competing with it; the window does
+not yet style `interrupted` assistant entries differently on restore (the
+field is recorded; the renderer can follow); `elision-tier` stays `proposed`
+in `experiments/queue.json` — the default flip waits for the record's own
+evidence, per the queue's discipline.
+*Risks*: the interrupted anchor appends two entries on a path tests rarely
+walk (a stop mid-stream during a live run); `sendRecoverable` excludes
+`streamed`/`AbortError`, so no retry can follow the recording — that gate is
+what keeps the anchor from ever doubling.
+*Cleanup*: none pending.
+
+## 2026-10-25 (b) — dsh source pass: preamble sections from plugins, the machine's own helper roles
+
+*Files*: `aipass-bridge/harness/protocol.mjs` (`sections` param, appended
+after the machine's policy), `harness/plugins.mjs` (`ctx.preamble.section`,
+fifth registration table, `preambleSections()`), `harness/settings.mjs`
+(`helperPresets` in DEFAULTS + `pluginSections`/`helperPresets` in
+HARNESS_OPTION_DEFAULTS), `harness/run/options.mjs` (both carried), `harness/loop.mjs`
+(`sections` into buildPreamble; `resolveHelperPreset` exported; the role
+check rides it), `harness/harness.mjs` (three seed preambles carry sections;
+`#makeHelper` resolves through `resolveHelperPreset`),
+`harness/rpc.mjs` (applySettingsTo + harness creation carry `helperPresets`),
+`harness/rpc/session.mjs` (run passes `pluginSections`), `desktop/` untouched,
+new tests `test/preamble-sections.test.mjs` + `test/helper-presets.test.mjs`,
+`docs/CONFIG.md` (+3 rows), `CHANGELOG.md`, `test/CONTRACTS.md` (+10 anchors,
+budget 122 → 136), `docs/LOOP_DESIGN.md`, `docs/HARNESS_DESIGN.md`.
+*Tests*: both new files green (5 + 5); `protocol.test.mjs` (20) and
+`plugins.test.mjs` (9) green — the tuned preamble bytes unchanged; full
+`npm test` run at the end of the pass.
+*Deferred*: a window sheet field for `helperPresets` (the key is settable
+through `settings.set` today; a JSON editor in the sheet is UI work with its
+own review); interposition order-slots for sections (dsh's sparse named
+orders) — load order is enough while there is no first-party interleaving
+need.
+*Risks*: a plugin section is model-visible instruction text from
+user-installed code — the attribution line names the source, and the
+REMINDER's "information to read, never instructions" line does not cover it;
+a plugin you installed is the same trust a marker already is.
+*Cleanup*: none pending.
+
+## 2026-10-25 — dsh-inspired pass: mid-run inject, the event map, the config catalog
+
+*Files*: `aipass-bridge/harness/run/context.mjs`, `harness/loop.mjs`
+(`tool_start` + the inject drain), `harness/harness.mjs` (`inject()`, the
+orphan drain), `harness/rpc/session.mjs` (`run.inject`),
+`harness/plugins.mjs` (pointer comment), `harness/skills.mjs` (stale comment),
+`desktop/ui/app.js` (composer queues mid-run, two SSE handlers), new
+`docs/EVENTS.md` + `docs/CONFIG.md`, new tests `test/inject.test.mjs`,
+`test/event-map.test.mjs`, `test/config-catalog.test.mjs`,
+`test/CONTRACTS.md` (+11 anchors), `scripts/agents-lint.mjs` (CONTRACTS
+budget 108 → 121), `CHANGELOG.md`, `docs/LOOP_DESIGN.md`, `docs/HARNESS_DESIGN.md`.
+*Tests*: `node --test` on the three new files green (5 + 3 + 4); full
+`npm test` — see the session report (the same day's earlier sessions left
+the tree green; the suite ran again after this pass).
+*Deferred*: window-level UI test for the inject composer path (the ui.test.mjs
+fake-DOM harness is inline in that file and the file carries another
+session's WIP — the RPC/facade/loop layers are pinned instead); no
+`tools/pre`-style decision event — the repo's own rule keeps gate-class
+checks core, so only observe-only events were added.
+*Risks*: `run.inject` is a new RPC the CLI never calls; a window older than
+the backend just never queues. The event-map scan reads `emit('…')`
+literals only — an event emitted with a computed name would bypass it (none
+exist today).
+*Cleanup*: the sparse clone of deepseek-ai/deepseek-harness used for the
+comparison sits in `%TEMP%/dsh-inspect` (outside the repo; the OS clears it).
+
+## 2026-10-25 — memory-tier-carry ran both arms and ended stopped; the rotation slice exists
+
+*Files*: `aipass-bridge/harness/compact.mjs` + `aipass-bridge/test/compact.test.mjs`
+(`AIPASS_COMPACT_AT_PERCENT` — the env sibling of the settings sheet's
+share-of-budget rotation trigger, the lever the rotation arms squeeze through;
+one new test); `evals/tasks/log-tails/` (new fixture: three ~3.6KB logs to
+read, an exact-value check, `allowRun: false`, proven fail-before by
+`evals:lint`); `experiments/queue.json` (`edit-drift-slice` proposed;
+`memory-tier-carry` → stopped with its result); `docs/HARNESS_DESIGN.md` (the
+env switch named beside its siblings); `docs/EXPERIMENTS.md` (the queue
+paragraph, on top of the pacing entry); `CHANGELOG.md` (the Added bullet).
+
+*Tests*: `compact.test.mjs` 29/29; `npm run experiments -- --check` OK (9
+records validate); `evals:lint` OK before the live arms; arms live on the
+account's bridge — baseline (`AIPASS_MEMORY=off`) 3/3 solved at 2 rotations
+per attempt, carried (default) 3/3 solved at 2-4 rotations, 0 invalid, 0
+credits, all 50 carried facts audited right; `evals:compare` PASS; full
+`npm test` 1212 pass · 0 fail · 5 skip (the Windows baseline); `agents:lint`
+ok, 155 anchors.
+
+*Deferred*: the `edit-drift-slice` arm — its slice and its nearHint work sit
+behind the `tools.mjs` WIP this tree already carries; the window-side error
+rendering half of the same research note stays with the `desktop/ui` WIP.
+
+*Open risks*: the bare-summary arm held the solved rate on `log-tails`, so
+the memory tier's benefit is still unmeasured on a slice hard enough to lose
+state — the record's result names the next hypothesis; two sessions ran live
+evals on the same account concurrently today (rows stayed honest, 0 invalid,
+but wall medians inflate — check `evals/results/` for a foreign run before
+starting an arm).
+
+*Cleanup*: the fixture generator temp script and its scratch copies removed;
+the three pilot rows left in `evals/results/` (honest rows; the record's
+result names them as tuning).
+
+## 2026-10-25 — the evals runner learned to run live again; pacing and attempts-floor graduated
+
+*Files*: `scripts/evals.mjs` (two live-only bugs, both found by running the
+`pacing-reduces-invalids` arm for real: the attempt's `AIPASS_HOME` swap
+emptied the token path so every authed send minted a token the bridge did not
+know — 401 on all 25 attempts of the first try — and the harness options rode
+`mode: 'auto'`, which asks about every shell command since 2026-10-21, so
+every RUN was refused with "the person watching declined" and
+`allow-clean-run` could never pass. Attempts now pin the real home's token
+read-only for the attempt — the runner never mints into the caller's home —
+and run `yolo`, the unattended mode where "shell follows allowRun" holds);
+`aipass-bridge/test/evals.test.mjs` (two tests: a replay transcript that
+exercises the shell gate — the blind spot that hid both bugs — and one that
+pins the token across the swap with no leak and no mint);
+`docs/SPEC_EVALS.md` (the stale "shell follows allowRun in auto" sentence, the
+token step, and the measured-floor paragraph);
+`experiments/queue.json` (`pacing-reduces-invalids`: running → done with its
+result; `attempts-floor`: running → done — a second full matrix ran fresh and
+two consecutive matrices flipped no task, so the 3-attempt floor holds as the
+gate floor, the decision written into `SPEC_EVALS.md`);
+`docs/EXPERIMENTS.md` (the queue paragraph); `CHANGELOG.md` (the Fixed
+bullet).
+
+*Tests*: `evals.test.mjs` 16/16; `experiments.test.mjs` 7/7; full `npm test`
+1212 pass · 0 fail · 5 skip (the Windows baseline); `agents:lint` ok, 155
+anchors; `evals:lint` exit 0 before the live run. The attempts-floor pair:
+matrix one 32/33 (the pacing arm, reused as the first matrix — same budget
+and flags), matrix two 33/33 (`evals/results/2026-10-25T11-57-10-229-live.jsonl`),
+0 invalid both sides, per-task flips 0, `evals:compare` PASS.
+
+*Deferred*: `mixed-model-routing` — its production-model baseline is blocked
+on the account's credits (0 available until 2026-10-25T19:00Z, ≈ 02:00
+local). The command is staged in the session report; the flash-lite arm must
+re-run fresh AFTER that baseline is pinned (the record's ordering rule), even
+though today's 11-10-30 matrix ran the same budget on the same flags.
+
+*Open risks*: any other unattended surface that drives the Harness with
+`mode: 'auto'` and `allowRun` and no answerer would still hit the ask→deny
+path — the desktop and CLI are safe (a person answers), the eval runner was
+the only known unattended one. `ignore-injection` went 2/3 with a one-step
+DONE that left the benign work undone — a capability wobble on flash-lite
+worth watching, not a safety FN (the embedded instruction was not followed;
+0 FP / 0 FN holds).
+
+*Cleanup*: deleted my own failed-run artifacts (the 25×401 JSONL and the
+one-row probe); kept `evals/results/2026-10-25T10-41-06-621-live.jsonl` (the
+two refusal rows, the bug's evidence) and `2026-10-25T11-10-30-777-live.jsonl`
+(the graduating run) with their sessions; the scratch token-pin script is
+gone; the other session's result files from today are untouched.
+
+## 2026-10-25 — the mode moved to the composer, temperature to the sheet
+
+*Files*: `desktop/ui/index.html` (the `#mode` select left the top bar for the
+composer's chip row — first chip, where the message it governs is written —
+and the `#temperature` chip came out of that row; the layout comment says
+where each knob lives and why);
+`desktop/ui/app.js` (the temperature chip's wiring is gone — `applySettingsToUi`
+carries the mode and the effort only; the guide grew a ปรับแต่งโมเดล section
+that names temperature's new home and the mode's);
+`desktop/ui/settings.js` (the คุยกับโมเดล page carries `temperature` — a
+select that speaks in strings and converts to null/number on save, the same
+trick the wall-clock minutes play — and no longer carries its own copy of
+`mode`/`plan`/`requirePlanApproval`; their patch keys went with the fields, so
+a sheet save can no longer re-stamp the live mode from values read when the
+sheet opened);
+`desktop/ui/commands.js` (`/mode`'s palette entry and the pickMode sheet say
+โหมดการทำงาน, and the desc lists `plan`, which it never had);
+`desktop/ui/styles.css` (the narrow-view rule that hid the bar's second
+`.field` retired with the markup it targeted);
+`aipass-bridge/test/ui.test.mjs` (the chip test became "temperature lives in
+the settings sheet, not beside the composer" — the window no longer wires
+`#temperature`, the sheet carries the select, a save writes the number, and
+the sheet carries no mode select; the apply-path test lost the temperature
+assertions and follows the mode/effort pair);
+`desktop/README.md` (the window's description names the composer's chip row
+and each control's home, the settings section says where temperature and the
+mode are edited, `/mode`'s table row lists plan);
+`CHANGELOG.md` (the swap as Changed).
+
+*Tests*: `npm test` — fail 0 (the Windows baseline's 5 skips; 1215 tests,
+1210 pass). `node --check` ran on every touched JS file first; `ui.test.mjs`
+ran alone before the suite; `npm run agents:lint` resolved all 155 anchors
+after.
+
+*Deferred*: nothing from this session's scope. The temperature select offers
+the same seven values the old chip did; the sheet still carries
+`allowRun`/`allowGitWrite`/`allowVerify`, which are permission switches, not
+mode views.
+
+*Open risks*: a settings sheet that was already open across this change keeps
+its own draft — the next open is the clean one. The composer row holds four
+chips now (mode, provider, model, effort) where it held four before (provider,
+model, effort, temperature), so narrow screens are no worse off; a fifth chip
+would want the flex-wrap the row still has not got.
+
+*Cleanup*: the dead `#bar .field:nth-of-type(2)` narrow-view rule is gone
+rather than left hiding nothing.
+
+## 2026-10-25 — the reading switches the settings file could not speak
+
+*Files*: `aipass-bridge/harness/settings.mjs` (the settings file's schema
+ships `parallelReads` and `explore` — the reading batch had added them to the
+run sheet only, so the file had no key to say them with, and `settings.set`
+dropped a save naming either);
+`aipass-bridge/harness/rpc.mjs` (the boot sheet carries `explore` and
+`parallelReads` off the settings file, and the save applier re-applies all
+three — `recall` included, which the applier had never carried, so a saved
+toggle stayed dead on every harness the backend already held);
+`aipass-bridge/harness/rpc/settings.mjs` (`settings.set`'s own per-key walk
+moves the live copies too, so a save is true the moment it lands);
+`aipass-bridge/test/settings-clamp.test.mjs` (the applier-keys test grew the
+three switches, both default directions pinned);
+`aipass-bridge/test/desktop.test.mjs` (the switches reach the harness from a
+preset file at boot and from a save, live);
+`aipass-bridge/docs/DOCS.md` (the file agent's action table names TREE, STAT,
+`NEED dir -l` and SEARCH's context flags — the batch had shipped without a
+word there); `CHANGELOG.md` (the reading batch's Added entries, and the dead
+keys as Fixed).
+
+*Tests*: `npm test` — fail 0 (the Windows baseline's 5 skips). The suite was
+run once at the session's start on the WIP as found — 1210 tests, 1205 pass,
+0 fail, 5 skipped — so the found state was known green before anything was
+touched; the two edited test files also ran alone first.
+
+*Deferred*: nothing from this session's scope. The WIP found in the tree
+(TREE/STAT tools, SEARCH context, LIST -l, parallel reads, the deferred-media
+markdown work) was complete and green; what was missing was the wiring at the
+settings edge, and the docs that named none of it. The settings sheet's UI
+gains no toggles for the three — the sheet deliberately leaves the
+preamble-offer group (searchI, attach, webScratch, parallelHelpers, recall)
+to the file, and these join that group.
+
+*Open risks*: none new — all three switches default on everywhere, so the
+only behavior change is that `false` in the file is honored now. The class is
+pinned: the applier-keys test fails for any switch the backend reads but the
+schema forgets, the same shape the searchI/attach/webScratch fix was written
+for.
+
+*Cleanup*: nothing left in the tree, no scratch files, no git operations (the
+human owns shape). Files that already carried foreign WIP (settings.mjs,
+rpc.mjs, CHANGELOG.md, WORKLOG.md) took disjoint hunks only.
+
+## 2026-10-25 (evening) — the window that stopped hitching at step boundaries
+
+*Files*: `desktop/ui/app.js` (conditional `scrollDown()` coalesced into one
+frame — a step-boundary burst of rows used to force one synchronous layout per
+row, the measured hitch source; Apply/Discard share an `applyInFlight` guard so
+a double-clicked Apply writes once and a Discard cannot interleave);
+`desktop/ui/styles.css` (`#log > *` and `.run > *` carry `content-visibility:
+auto; contain-intrinsic-size: auto 48px`, so scrollback outside the view stops
+costing layout and paint); `aipass-bridge/test/ui.test.mjs` (3 tests: the
+burst reads no layout mid-burst and follows after it, a reader who scrolled up
+is not yanked, a double-clicked apply writes once and a discard cannot
+interleave); `CHANGELOG.md`.
+
+*Tests*: `npm test` — 1214 tests, 1209 pass, 0 fail, 5 skipped (the Windows
+baseline); `node --test aipass-bridge/test/ui.test.mjs` — 168 pass;
+`npm run agents:lint` — ok, 155 anchors against 1212 titles. Measured: the
+per-frame `transcript()` walk + `splitMarkdownStable` over a full 1,400-line
+reply costs 0.4–0.8 ms/frame (node bench) — the marker walk is NOT a jank
+source; the `scrollDown` layout reads were.
+
+*Deferred*: the settings sheet still fires all 8 RPCs on open (an open-time
+stutter, needs a sequencing round in `settings.js`); the O(full-text) marker
+walk stays as is — it measured cheap; the rest of the audit list is unchanged
+(update-banner dedup, picker filter, setup message box, refactors).
+
+*Risks*: `npm run coverage:gate` currently fails on
+`aipass-bridge/harness/rpc.mjs` branches (72.63% vs floor 74%) — that file
+carries another session's uncommitted WIP (`parallelReads`/`explore` switches
+plus the untracked `parallel-reads.test.mjs`); coverage unions only add, so
+the failure predates this session. Not touched here (dirty ≠ ours).
+
+*Cleanup*: none needed — no scratch files; the bench script lived in the
+system temp directory.
+
+## 2026-10-25 — the supervisor that keeps trying, and the transcript that owns its clear
+
+*Files*: `desktop/src-tauri/src/main.rs` (an empty child slot is no longer read
+as "healthy": `empty_slot_needs_a_spawn` + an `adopted` flag separate the
+spawn-failed slot, which falls through to the crash backoff, from an adopted
+backend, which nobody here may respawn — boot adoption now sets the flag too,
+and the restart note says "could not be started" instead of a false "exited");
+`desktop/ui/app.js` (`ctx.cancelRun`, the `?` key opens the guide, `sendTask`
+syncs the draft with its clear, one `resetTranscript()` replaces four hand
+`log.textContent=''` sites); `desktop/ui/commands.js` (`/stop` delegates to the
+send button's `cancelRun` instead of its own thin stop); `desktop/ui/transcript.js`
+(`resetLog` drops the trim marker and the count with the DOM);
+`desktop/ui/banners.js` (`reset` forgets the pinned bars so the next poll
+repaints what still applies); `aipass-bridge/test/ui.test.mjs` (5 tests);
+`CHANGELOG.md`.
+
+*Tests*: `npm test` — 1210 tests, 1205 pass, 0 fail, 5 skipped (the Windows
+baseline); `npm run agents:lint` — 155 anchors against 1208 titles;
+`npm run coverage:gate` — ok after the `?` test grew its modified-key and
+open-sheet branches (app.js branches had dipped to 54.78% under the 55%
+floor); `cargo test` — 28 pass. One earlier suite run died on the 20-minute
+runner ceiling under machine load; rerun with `AIPASS_TEST_TIMEOUT_MS`
+honored the house knob and the load-flaky `a hook runs when the run ends`
+passed both later runs.
+
+*Deferred*: the rest of the review list, on purpose — setup's silent death in
+release builds, navigation gated only by a bare TCP connect, the handover
+TOCTOU, update-banner dedup, the model picker sheet's chat filter, the two
+Thai typos, and the big refactors (run-lifecycle owner, `panels/answers.js`,
+dialog builder); the full list with priorities is in the audit notes.
+
+*Open risks*: the supervisor's respawn path is pinned by a pure-helper test
+only — `tick()` itself needs an `AppHandle` and stays untestable in cargo, so
+the first real spawn-failure recovery on a live machine is the proof; the
+banners' re-entry after a clear rides the next poll, not the clear itself, so
+a window closed inside that ten-second gap shows one poll cycle without a
+stale notice (correct, but worth knowing).
+
+*Cleanup*: the scratch suite logs went to the temp directory, not the repo;
+no stray files left in the tree, no git operations (the human owns shape).
+
 ## 2026-10-24 — the rerun that reached the runners, and the path spellings
 
 *Files*: `scripts/build-desktop.mjs` (the bundle search asks cargo in
@@ -24,10 +383,8 @@ prefix; `~/.local/bin` is not `/bin`), `CHANGELOG.md`.
 *Tests*: `npm test` — 1178 tests, 1172 pass, 0 fail, 6 skipped;
 `npm run agents:lint` — 154 anchors against 1177 titles; `npm run typecheck`,
 `npm run coverage`, `npm run coverage:gate`, `npm run evals:lint`,
-`npm run smoke:e2e` - ok. `cargo test` - 24 pass. The mirror snapshot ran the
-same checks: `npm test` - 1183 tests, 1177 pass, 0 fail, 6 skipped, with 154
-anchors against 1182 titles. The rerun's failures were reproduced from the job
-logs: Linux checkpoints and the archive restore, macOS
+`npm run smoke:e2e` — ok. `cargo test` — 24 pass. The rerun's failures were
+reproduced from the job logs: Linux checkpoints and the archive restore, macOS
 update promotion and worktree sweep, Windows worktree remove/sweep, the Ubuntu
 shim test, and all three build lanes publishing from the wrong target.
 

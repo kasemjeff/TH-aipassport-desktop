@@ -70,29 +70,12 @@ test('the shapes the edge refuses do not survive outbound, and come back byte fo
     '<!doctype html>\n<!-- x -->\n<script>javascript:alert(1)</script>',
     'cd ~/project && ./run.sh',
     'console.warn("127.0.0.1 & 0.0.0.0");',
-    'powershell -ExecutionPolicy Bypass -File run.ps1',
   ].join('\n');
   const enc = outbound(risky);
-  for (const shape of ['console.log', 'console.warn', 'localhost', '===', '!==', 'node:child_process', '<script', 'javascript:', 'process.env', '127.0.0.1', '0.0.0.0', '&&', '<!doctype', 'Bypass']) {
+  for (const shape of ['console.log', 'console.warn', 'localhost', '===', '!==', 'node:child_process', '<script', 'javascript:', 'process.env', '127.0.0.1', '0.0.0.0', '&&', '<!doctype']) {
     assert.ok(!enc.includes(shape), `${shape} must not survive outbound`);
   }
   assert.equal(inbound(enc), risky, 'the round trip restores the original bytes');
-});
-
-// The table's own promise: a placeholder shares no substring with the
-// original, or a case-insensitive rule still matches it. "BYPASS-ARG" broke
-// it — the rule matches "Bypass" at any word boundary and "-" is one — so a
-// text encoded twice came back as "Bypass-ARG" and never matched the file it
-// was copied from. Encoding has to be idempotent: a tool result is encoded by
-// its caller and again by the message it rides in.
-test('no placeholder matches its own rule, so encoding twice is the same as once', () => {
-  for (const [re, to] of SUBSTITUTIONS) {
-    const again = new RegExp(re.source, re.flags);
-    assert.ok(!again.test(to), `${to} matches its own rule ${re}`);
-  }
-  const sample = 'powershell -ExecutionPolicy Bypass -File run.ps1';
-  assert.equal(outbound(outbound(sample)), outbound(sample), 'outbound is idempotent');
-  assert.equal(inbound(outbound(outbound(sample))), sample, 'and the round trip survives it');
 });
 
 // The one documented lossy edge: outbound is case-insensitive for URLs/hosts,

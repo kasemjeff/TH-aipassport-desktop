@@ -11,6 +11,7 @@ import { createTranscript } from './transcript.js';
 import { createFilesPanel } from './panels/files.js';
 import { createSessionsPanel } from './panels/sessions.js';
 import { createCommands } from './commands.js';
+import { createBanners } from './banners.js';
 import { createSettings } from './settings.js';
 
 const $ = (id) => document.getElementById(id);
@@ -182,8 +183,26 @@ const stageLabel = (stage) => STAGE_COPY[stage] ?? stage;
  *  Scrolling up to read something and being yanked back down by the next line
  *  is the kind of small thing that makes a window feel hostile. */
 const atBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+// A step boundary drops a burst of rows — the step note, the tool rows, the
+// next bubble — and each row used to ask "are we at the bottom?" the moment it
+// landed. That question reads scrollHeight, which forces a layout of the whole
+// transcript before it can answer: N rows, N synchronous layouts inside one
+// turn, and the window hitched at every step. The burst now shares one frame —
+// a row only marks the need, and the frame asks once, against the burst's
+// final state. A forced scroll (nobody uses one today) stays synchronous,
+// because it does not need the answer to a question.
+let scrollQueued = false;
+const nextScrollFrame = typeof requestAnimationFrame === 'function'
+  ? requestAnimationFrame
+  : (fn) => setTimeout(fn, 0);
 const scrollDown = (force = false) => {
-  if (force || atBottom()) log.scrollTop = log.scrollHeight;
+  if (force) { log.scrollTop = log.scrollHeight; return; }
+  if (scrollQueued) return;
+  scrollQueued = true;
+  nextScrollFrame(() => {
+    scrollQueued = false;
+    if (atBottom()) log.scrollTop = log.scrollHeight;
+  });
 };
 
 /**
@@ -221,6 +240,18 @@ ctx.meterTimer = null;
 // them are built.
 ctx.renderAttachments = renderAttachments;
 ctx.setWorking = setWorking;
+ctx.setHint = setHint;
+// The ONE stop: the send button's, with its stopping guard and the bar that
+// comes back down when the backend answers there was nothing to stop. The
+// /stop command reaches it through here — a second stop of its own used to
+// leave the bar beating for a run that did not exist.
+ctx.cancelRun = cancelRun;
+// The banners are built after the modules they talk through (the transcript's
+// notes, the commands' refresh), but /update reaches them from the commands,
+// which are built before — so the context carries a wrapper that resolves
+// when the first command runs.
+let banners = null;
+ctx.checkForUpdate = (...a) => banners.checkForUpdate(...a);
 // The file panel and the rail open sessions and files through the commands.
 ctx.openFile = openFile;
 ctx.openSession = openSession;
@@ -232,7 +263,6 @@ ctx.refreshModels = refreshModels;
 ctx.fillProviders = fillProviders;
 ctx.refreshHeader = refreshHeader;
 ctx.refreshMeta = refreshMeta;
-ctx.checkForUpdate = checkForUpdate;
 ctx.openHelp = openHelp;
 ctx.showMemory = showMemory;
 ctx.showMcp = showMcp;
@@ -264,11 +294,10 @@ ctx.showGitStatus = showGitStatus;
 ctx.showSchedule = showSchedule;
 ctx.showMediaModels = showMediaModels;
 ctx.showWorktrees = showWorktrees;
-
 const transcript = createTranscript(ctx);
 // The transcript's own words are what every other module writes into.
 Object.assign(ctx, transcript);
-const { addTask, addNote, addCommandOut, assistantText, assistantSummary, replayAssistant, thinkingText, foldThinking, endTurn, foldRun, addTool, paintCacheStats, bubbleSays } = transcript;
+const { addTask, addNote, addCommandOut, assistantText, assistantSummary, replayAssistant, thinkingText, foldThinking, endTurn, foldRun, addTool, paintCacheStats, bubbleSays, resetLog } = transcript;
 
 /**
  * The word a tool row shows.
@@ -299,6 +328,28 @@ const {
   setMode, setModel, setProvider, pickProvider, pickModel, pickMode, compactNow,
   showPaintStats, showStatus, refreshMeter,
 } = commands;
+
+// The banners: the notices pinned over the conversation (no chat tab, the
+// extension's token, the model catalog, the update) and the welcome card.
+// They are built after the transcript and the commands — they talk through
+// both — and the event wiring below hands the frames to them.
+banners = createBanners(ctx);
+const { syncExtensionToken, syncCatalogBanner, hasConversation, hideWelcome, refreshReadiness, checkForUpdate } = banners;
+
+/**
+ * The one place that empties the transcript.
+ *
+ * Four flows cleared #log by hand, and every clear stranded the pieces that
+ * hold references into it: the trim marker (the next trim then counted rows
+ * the window never showed) and the pinned banners (their syncs saw the state
+ * still failing and a bar "already up", so the notice never came back). The
+ * welcome card re-enters through its own refresh; the banners, on the next
+ * poll.
+ */
+function resetTranscript() {
+  resetLog();
+  banners.reset();
+}
 
 /* ------------------------------------------------------------------ panel */
 
@@ -589,12 +640,13 @@ const stream = new EventSource(token ? `/events?token=${encodeURIComponent(token
 // longer existed. Now it says so, and gives the run a deadline: if nothing
 // arrives for a while, the run is treated as lost rather than hanging forever.
 let lastEventAt = Date.now();
-stream.addEventListener('open', () => { lastEventAt = Date.now(); void restoreFromSnapshot(); });
-stream.addEventListener('message', () => { lastEventAt = Date.now(); });
+let quietSince = 0;
+stream.addEventListener('open', () => { lastEventAt = Date.now(); quietSince = 0; void restoreFromSnapshot(); });
+stream.addEventListener('message', () => { lastEventAt = Date.now(); quietSince = 0; });
 // rpc.mjs sends a named ping every 15 s precisely so this watchdog reads
 // "the backend died", not "the model went quiet": a long RUN or SEARCH streams
 // no other frames for a while, and nothing else here refreshes the clock.
-stream.addEventListener('ping', () => { lastEventAt = Date.now(); });
+stream.addEventListener('ping', () => { lastEventAt = Date.now(); quietSince = 0; });
 
 /**
  * Put the window back where it was after a reload or a reconnect.
@@ -662,24 +714,123 @@ stream.onerror = () => {
 
 // Every event refreshes the watchdog; a run that stops sending anything is
 // reported as lost instead of blocking the composer forever.
-setInterval(() => {
-  if (!state.running) return;
-  if (Date.now() - lastEventAt > 20_000) {
+//
+// But a quiet stream is not the same as a dead run, and the difference
+// matters: the window used to write the run off AND cancel it upstream after
+// twenty silent seconds. A run whose backend was briefly unreachable — the
+// laptop slept, the stream was reconnecting, the backend was restarting — is
+// still running on the backend, and cancelling it threw away work that was
+// going to finish. The window's own snapshot recovery then showed a run that
+// had been stopped for no reason at all.
+//
+// So the watchdog asks before it cancels: the backend is asked whether it is
+// alive. If it answers, the run is legitimate and the window waits. If it
+// does not, the backend really is gone, and the run is written off.
+//
+// The probe is bounded, and only one flies at a time. A backend that accepts
+// and never answers would otherwise leave a pending fetch behind on every
+// tick, and the browser's per-origin connection cap would stall every other
+// call the window makes — including the ones that would have noticed the
+// backend coming back. An aborted probe means "cannot say": it is not a
+// refusal, so it gets three strikes before the write-off, but a refusal
+// (connection refused, the process gone) is answered at once.
+let statusProbe = null;
+let probeGen = 0;
+let probeFails = 0;
+let warnedSilence = false;
+const HARD_SILENCE_CEILING_MS = 180_000; // 3 minutes continuous silence ceiling
+
+setInterval(async () => {
+  if (!state.running) {
+    quietSince = 0;
+    warnedSilence = false;
+    return;
+  }
+  const now = Date.now();
+  if (now - lastEventAt <= 20_000) {
+    // The stream is back, so any strikes the last outage collected mean
+    // nothing: the next one starts from zero.
+    probeFails = 0;
+    quietSince = 0;
+    warnedSilence = false;
+    return;
+  }
+
+  if (!quietSince) quietSince = lastEventAt;
+
+  // Hard ceiling check: if the stream has been continuously silent for over 3 minutes,
+  // do not spin forever even if the backend process answers.
+  if (now - quietSince > HARD_SILENCE_CEILING_MS) {
     state.running = false;
     state.stopping = false;
     setLogBusy(false);
     $('send').textContent = 'ส่ง';
     setHint('');
-    // The run is written off, so the window stops saying it is working: a
-    // heartbeat that keeps beating for a run nobody has is a lie.
     setWorking(false);
-    // The window has written the run off; the backend is told as well, so the
-    // next task does not bump into a run that is still in flight there ("a run
-    // is already in flight" was what a lost run looked like from the composer).
     rpc('cancel', { root: state.root ?? undefined }).catch(() => {});
-    addNote('run นี้เงียบไป 20 วินาที — ถือว่าหยุดแล้ว (backend อาจหลุด) · ลองส่งใหม่ หรือเช็ค aipass doctor');
+    addNote('run นี้เงียบเกิน 3 นาทีต่อเนื่อง แม้ backend ยังเปิดอยู่ — ถือว่าหยุดแล้ว · ลองส่งใหม่ หรือเช็ค aipass doctor');
     refreshMeter();
+    quietSince = 0;
+    warnedSilence = false;
+    return;
   }
+
+  // The transport is down but the backend may not be. A reconnecting
+  // EventSource is CONNECTING, and the backend is still running behind it.
+  const reconnecting = stream.readyState === EventSource.CONNECTING;
+  // Ask the backend whether THIS run is still going, not merely whether it
+  // answers: pass root so we check the exact project the window is running.
+  if (statusProbe) statusProbe.abort();
+  probeGen += 1;
+  const gen = probeGen;
+  const ctrl = new AbortController();
+  statusProbe = ctrl;
+  const probeTimer = setTimeout(() => ctrl.abort(), 4_000);
+  const st = await rpc('status', { root: state.root ?? undefined }, statusProbe.signal)
+    .catch((err) => (err?.name === 'AbortError' ? 'hung' : null))
+    .finally(() => clearTimeout(probeTimer));
+  if (gen !== probeGen) return; // a newer probe superseded this one
+  statusProbe = null;
+  const answered = st && st !== 'hung';
+  if (answered) {
+    probeFails = 0;
+  } else if (st === 'hung' && ++probeFails < 3) {
+    return; // cannot say yet — the backend may just be slow; wait for the next tick
+  }
+  const ended = Boolean(answered) && st.running === false && (!state.root || st.root === state.root);
+  const alive = Boolean(answered) && !ended;
+  if (alive) {
+    // The backend answered: the run is still going, and the silence was the
+    // transport, not the run. Wait. The clock is refreshed so the watchdog
+    // does not fire again on every tick until the stream is back.
+    lastEventAt = Date.now();
+    if (!reconnecting && !warnedSilence) {
+      warnedSilence = true;
+      addNote('backend ยังตอบอยู่แต่สตรีมเงียบ — รอสตรีมกลับมา');
+    }
+    return;
+  }
+  // The backend does not answer or the run has ended.
+  state.running = false;
+  state.stopping = false;
+  setLogBusy(false);
+  $('send').textContent = 'ส่ง';
+  setHint('');
+  // The run is written off, so the window stops saying it is working: a
+  // heartbeat that keeps beating for a run nobody has is a lie.
+  setWorking(false);
+  // The window has written the run off; the backend is told as well, so the
+  // next task does not bump into a run that is still in flight there ("a run
+  // is already in flight" was what a lost run looked like from the composer).
+  rpc('cancel', { root: state.root ?? undefined }).catch(() => {});
+  addNote(ended
+    ? 'run นี้จบไปแล้วที่ backend แต่สตรีมไม่ได้ส่งสัญญาณจบมา — ถือว่าหยุดแล้ว'
+    : st === 'hung'
+      ? 'backend ไม่ตอบสนองสักที (สถานะค้าง) — ถือว่า run หยุดแล้ว · ลองส่งใหม่ หรือเช็ค aipass doctor'
+      : 'run นี้เงียบไป 20 วินาที และ backend ไม่ตอบ — ถือว่าหยุดแล้ว · ลองส่งใหม่ หรือเช็ค aipass doctor');
+  refreshMeter();
+  quietSince = 0;
+  warnedSilence = false;
 }, 5_000);
 
 /* Which project an event belongs to ---------------------------------------
@@ -774,6 +925,8 @@ onRun('task_start', (data) => {
   state.runCursor = log.children.length;
   refreshMeter();
   lastEventAt = Date.now();
+  quietSince = 0;
+  warnedSilence = false;
 });
 
 // A run that cannot proceed because no logged-in chat tab is open is the one
@@ -808,80 +961,6 @@ onAny('fell_behind', (data) => {
   if (!dropped) return;
   addNote(`ตกหล่น ${dropped} ข้อความจาก backend (หน้าต่างไม่ได้อ่านเร็วพอ) — บทสนทนาที่เหลืออาจไม่ครบ`);
 });
-/* The extension's token ----------------------------------------------------
- *
- * The extension talks to the bridge, not to the window, and the bridge
- * refuses it without the loopback token. That refusal reaches the reader as
- * "extensions: 0" — the same number a missing extension gives — so the fix
- * was a hunt through the home directory for a file of hex, pasted by hand
- * into a popup in another window.
- *
- * The bridge now says which state it is (/status), and the window does the
- * half it can: it already holds the token (it fetched it from /token when it
- * booted), so one click puts it on the clipboard and the step that only the
- * popup can do is a paste. The token is never read from disk here and never
- * minted here.
- */
-let extensionTokenBar = null;
-
-/** The token this window already holds — the one the backend minted. */
-async function ownToken() {
-  return client.ensureToken();
-}
-
-/** Put the loopback token on the clipboard, so the popup's paste finds it. */
-async function putTokenOnClipboard() {
-  const token = await ownToken();
-  if (!token) {
-    addNote('อ่าน token ไม่ได้ — ดูไฟล์ ~/.aipass/.token แล้ววางเอง');
-    return false;
-  }
-  try {
-    await navigator.clipboard.writeText(token);
-    return true;
-  } catch {
-    addNote('เขียนคลิปบอร์ดไม่ได้ — คัดลอกจาก ~/.aipass/.token เอง');
-    return false;
-  }
-}
-
-/** The button that does the half the window can do. */
-function tokenFixButton() {
-  const btn = el('button', 'mini', 'วาง token ให้');
-  btn.onclick = async () => {
-    btn.disabled = true;
-    const ok = await putTokenOnClipboard();
-    btn.disabled = false;
-    if (!ok) return;
-    btn.remove();
-    addNote('วาง token ลงคลิปบอร์ดแล้ว — เปิด popup ของ extension → Advanced → "Paste from clipboard" → Save');
-  };
-  return btn;
-}
-
-/**
- * Show the extension's missing token, and take it down when it is fixed.
- *
- * One banner, not one per poll: the header asks the backend every ten
- * seconds, and a banner that came and went with every poll would be noise.
- */
-function syncExtensionToken() {
-  const missing = state.extensionToken === 'missing';
-  if (!missing) {
-    extensionTokenBar?.remove();
-    extensionTokenBar = null;
-    return;
-  }
-  if (extensionTokenBar) return;
-  const bar = el('div', 'note needs-tab');
-  bar.append(el('span', null, 'extension ยังไม่ได้รับ token — '));
-  bar.append(tokenFixButton());
-  bar.append(el('span', null, '  (เปิด popup ของ extension → Advanced → "Paste from clipboard" → Save)'));
-  log.append(bar);
-  extensionTokenBar = bar;
-  scrollDown();
-}
-
 onRun('assistant_delta', (data) => assistantText(data.text));
 onRun('reasoning_delta', (data) => thinkingText(data.text));
 onRun('step', (data) => {
@@ -894,6 +973,26 @@ onRun('step', (data) => {
   state.assistant = null;
   addNote(maxSteps > 0 ? `step ${step}/${maxSteps} · ${elapsed}s` : `step ${step} · ${elapsed}s`);
 });
+// (mid-run inject) The message the person queued mid-run went out with a
+// step's paste. The window that queued it already said so when the RPC
+// answered; this says it was delivered — including in a second window.
+onRun('injected', (data) => {
+  addNote(`ส่งข้อความของคุณถึงโมเดลแล้ว (กลางรัน${Number(data?.n) > 1 ? ` ${data.n} ข้อความ` : ''})`);
+});
+
+// The run ended before a step could carry the queued message: it comes back
+// to the composer — a message the person wrote is their intent, not litter.
+// A composer the person has typed into since is left alone.
+onRun('inject_orphaned', (data) => {
+  const texts = Array.isArray(data?.texts) ? data.texts : [];
+  if (!texts.length) return;
+  if (!$('task').value.trim()) {
+    $('task').value = texts.join('\n\n');
+    saveDraft();
+  }
+  addNote('รันจบก่อนข้อความจะถูกส่ง — ข้อความกลับมาอยู่ในช่องพิมพ์ กดส่งได้เลย');
+});
+
 onRun('thinking', (data) => {
   const { text } = data;
   // The headline is the first line of the reply, and the bubble is already
@@ -1121,7 +1220,11 @@ async function sendTask(seed = null) {
     const [name, ...rest] = text.slice(1).split(/\s+/);
     const arg = rest.join(' ').trim();
     const item = COMMANDS.find((c) => c.cmd === name.toLowerCase());
+    // Assignment fires no input event, so the storage still holds the text
+    // that was just sent — synced here, or the next boot comes back
+    // pre-filled with work that is already done.
     $('task').value = '';
+    saveDraft();
     closeSlash();
     hideWelcome();
     if (item) { void runCommand(item, arg); return; }
@@ -1129,8 +1232,13 @@ async function sendTask(seed = null) {
     return;
   }
 
-  if (state.running) return;
+  // A message typed while the run is working does not interrupt it: it goes
+  // into the mid-run queue (run.inject) and rides the next step's paste. The
+  // composer stays usable for exactly this — and /commands above still run
+  // while a turn is in flight.
+  if (state.running) { void injectMidrun(text); return; }
   $('task').value = '';
+  saveDraft();
   closeSlash();
   state.running = true;
   state.stopping = false;
@@ -1174,6 +1282,36 @@ async function sendTask(seed = null) {
     setHint('');
     // The run never started, so there is nothing to be working on.
     setWorking(false);
+  }
+}
+
+/**
+ * A message typed while a run is working: queued on the backend (run.inject)
+ * and delivered with the next step's paste. The backend answers `refused`
+ * when the run ended in the meantime — the text goes back in the composer
+ * rather than vanishing, because a message the person wrote is their intent.
+ */
+async function injectMidrun(text) {
+  $('task').value = '';
+  saveDraft();
+  closeSlash();
+  try {
+    const res = await rpc('run.inject', {
+      text,
+      project: state.runRoot ?? undefined,
+      root: state.runRoot ?? state.root ?? undefined,
+    });
+    if (res?.refused) {
+      $('task').value = text;
+      saveDraft();
+      addNote('รันจบไปแล้ว — ข้อความกลับมาอยู่ในช่องพิมพ์ กดส่งได้เลย');
+      return;
+    }
+    addNote(`เข้าคิวแล้ว — จะส่งให้โมเดลพร้อมผลสเต็ปถัดไป (คิว ${res?.queued ?? 1})`);
+  } catch (err) {
+    $('task').value = text;
+    saveDraft();
+    addNote(`error: ${friendly(err.message)}`);
   }
 }
 
@@ -1292,6 +1430,15 @@ document.addEventListener('keydown', (ev) => {
     ev.preventDefault();
     void refreshModels().then(() => pickModel());
   }
+  // The welcome card promises "?" as the way into the guide, and the keys
+  // keep that promise: it opens from anywhere the window itself has the
+  // focus. A form field keeps its question marks, and an open sheet keeps
+  // its own keys.
+  else if (ev.key === '?' && !modalOpen && !ev.ctrlKey && !ev.metaKey && !ev.altKey
+    && !['INPUT', 'TEXTAREA', 'SELECT'].includes(ev.target?.tagName ?? '')) {
+    ev.preventDefault();
+    openHelp();
+  }
   // The sheet is a dialog: Tab stays inside it, so a keyboard user cannot
   // wander out into the page behind the scrim and lose the sheet.
   else if (ev.key === 'Tab' && modalOpen) {
@@ -1338,14 +1485,14 @@ $('session-filter').oninput = () => {
 $('side-settings').onclick = () => openSettings();
 $('side-help').onclick = openHelp;
 
-// The header chips follow the saved settings: the mode select, the effort chip
-// and the temperature chip. They are ONE apply path, not three — a settings
-// change lands in all of them at once, and none of them can be left showing
-// what the machine no longer believes.
+// The composer's controls follow the saved settings: the mode select and the
+// effort chip. They are ONE apply path, not two — a settings change lands in
+// both at once, and neither can be left showing what the machine no longer
+// believes.
 //
 // Mode is the one setting that decides everything else it might do — may it
-// write, may it run, must it plan first — so the header select and the
-// Shift+Tab cycle share this path. 'plan' is a view, not a permission
+// write, may it run, must it plan first — so the select beside the composer
+// and the Shift+Tab cycle share this path. 'plan' is a view, not a permission
 // mode: it means plan first, and the approval of that plan is the consent the
 // run then works under, which is why its runs use 'auto'.
 // The views themselves live with the commands (commands.js).
@@ -1353,19 +1500,16 @@ $('side-help').onclick = openHelp;
 // The effort chip follows the saved thinking level, the way #mode follows the
 // saved mode. The settings sheet no longer carries it: how hard the model
 // thinks is a per-message decision, so it lives where the message is written.
-// The temperature chip mirrors the effort chip: it sits beside the model chip
-// and writes through settings.set the moment it changes. null (default) means
-// "leave it to the server's per-model default".
+// Temperature went the other way (the sheet's คุยกับโมเดล page owns it now):
+// unlike effort it is not a per-message judgement call but a rarely-touched
+// model parameter, and a knob nobody turns has no business sitting in the row
+// read on every message.
 function applySettingsToUi(settings = state.settings ?? {}) {
   const mode = settings.requirePlanApproval ? 'plan' : (settings.mode ?? 'ask');
   $('mode').value = MODE_VIEWS[mode] ? mode : 'ask';
 
   const level = settings.thinking ?? 'low';
   $('thinking').value = ['off', 'low', 'medium', 'high', 'max'].includes(level) ? level : 'low';
-
-  const temperature = settings.temperature;
-  const key = temperature == null ? 'default' : String(temperature);
-  $('temperature').value = ['default', '0', '0.3', '0.7', '1', '1.5', '2'].includes(key) ? key : 'default';
 }
 
 $('thinking').onchange = () => {
@@ -1373,14 +1517,6 @@ $('thinking').onchange = () => {
   rpc('settings.set', { thinking: level })
     .then(() => { state.settings = { ...(state.settings ?? {}), thinking: level }; })
     .catch((err) => addNote(`เปลี่ยนระดับ effort ไม่ได้: ${err.message}`));
-};
-
-$('temperature').onchange = () => {
-  const value = $('temperature').value;
-  const next = value === 'default' ? null : Number(value);
-  rpc('settings.set', { temperature: next })
-    .then(() => { state.settings = { ...(state.settings ?? {}), temperature: next }; })
-    .catch((err) => addNote(`ตั้งค่า temperature ไม่ได้: ${err.message}`));
 };
 
 /**
@@ -1481,12 +1617,13 @@ function openHelp() {
   section('บอกมันทำอะไร', [
     'พิมพ์แล้วกด Enter — ถามคำถาม หรือสั่งแก้ไฟล์ก็ได้',
     'Shift+Enter = ขึ้นบรรทัดใหม่ · Esc = ยกเลิกรันที่กำลังทำ',
+    'โหมดการทำงานอยู่ข้างช่องพิมพ์ — ask · auto · yolo · plan (Shift+Tab วนโหมดได้)',
     'มันอ่านไฟล์เอง (NEED/SEARCH) เมื่อจำเป็น — ไม่ต้องบอกว่าอ่านแค่ไหน',
   ]);
   section('มันแก้ไฟล์ยังไง', [
     'ไม่มีอะไรเขียนลงดิสก์จนกว่าคุณจะกด "เขียนเลย"',
     'แต่ละไฟล์ติ๊กแยกกันได้ · กดดู diff ก่อนได้',
-    'สิทธิ์ "ถามก่อนเขียน" = ยืนยันทุกครั้ง · "เขียนเลย" = ไม่ถาม · "เขียน+รันคำสั่ง" = อนุญาต shell ด้วย',
+    'โหมด ask = ถามก่อนเขียนทุกไฟล์ · auto = เขียนเลยไม่ถาม · yolo = เขียน + รันคำสั่ง shell · plan = ร่างแผนให้อนุมัติก่อนลงมือ',
   ]);
   section('แนบไฟล์', [
     'ลากรูป/เอกสาร/วิดีโอทับหน้านี้ หรือกด "แนบไฟล์"',
@@ -1496,10 +1633,15 @@ function openHelp() {
     'เลือกที่ "โปรเจกต์" ด้านบน หรือกด + โฟลเดอร์',
     'แต่ละโปรเจกต์มีบทสนทนา คู่มือ และไฟล์แยกกัน',
   ]);
+  section('ปรับแต่งโมเดล', [
+    'โมเดล ผู้ให้บริการ และ effort เลือกได้ข้างช่องพิมพ์',
+    'temperature (ความสุ่มของคำตอบ — 0 นิ่ง … 2 หลากหลาย) อยู่ที่ ตั้งค่า → คุยกับโมเดล',
+    'ค่าเริ่มต้น (default) คือปล่อยให้แต่ละโมเดลใช้ค่าของตัวเอง',
+  ]);
   section('ถ้าไม่ได้', [
     'แถบด้านบนบอกว่าขาดอะไร: bridge / extension / tab',
     'ไม่มีแท็บ → กด "เปิดให้" แล้วล็อกอินในหน้า de.aipass.net',
-    'ตั้งค่าได้หมด: โมเดล สิทธิ์ ขนาด compaction ปลั๊กอิน MCP และความจำข้ามเซสชัน',
+    'ตั้งค่าได้หมด: โมเดล temperature ขนาด compaction ปลั๊กอิน MCP และความจำข้ามเซสชัน',
   ]);
 
   // Every command the window has, taken from the palette itself.
@@ -1646,7 +1788,7 @@ $('project').onchange = async () => {
   // project leaves it too — otherwise the run would land in a checkout of
   // the project the window just left.
   if (state.runRoot) { state.runRoot = null; renderWorktreeBar(); }
-  log.textContent = '';
+  resetTranscript();
   state.sessionId = null;
   renderPending([]);
   // Another project's tree is another project's tree: the filter that was
@@ -2128,6 +2270,9 @@ const modelState = {
   loading: false,
   promise: null,       // the refresh in flight, so a poll and a click join one
 };
+// The catalog's banner reads this through the context: the banners are built
+// before the catalog's state exists, and only reach for it when a refresh ends.
+ctx.modelState = modelState;
 
 /** The chip's marker: what the list is, in a word. */
 const CATALOG_LABEL = {
@@ -2307,42 +2452,6 @@ function paintModelChip() {
   }
 }
 
-let catalogBar = null;
-
-/**
- * Say that the list on screen is not the site's list, and offer the fix.
- *
- * One banner, not one per poll: the header asks the backend every ten
- * seconds, and a banner that came and went with every poll would be noise.
- */
-function syncCatalogBanner() {
-  const broken = Boolean(modelState.error);
-  const stub = modelState.source === 'fallback' || modelState.source === 'none';
-  if (!broken && !stub) {
-    catalogBar?.remove();
-    catalogBar = null;
-    return;
-  }
-  const text = broken
-    ? `ดึงรายชื่อโมเดลไม่สำเร็จ: ${modelState.error}`
-    : (modelState.source === 'none'
-      ? 'ผู้ให้บริการไม่ได้ตอบรายชื่อโมเดล'
-      : 'รายชื่อโมเดลยังเป็นรายการสำรอง — ต้องมีหน้า de.aipass.net ที่ล็อกอินอยู่ และ extension ต้องต่ออยู่');
-  if (catalogBar) {
-    // The bar is already up and the reason may have changed: the text is
-    // rewritten in place rather than a second bar appearing.
-    catalogBar.textContent = '';
-  } else {
-    catalogBar = el('div', 'note needs-tab');
-    log.append(catalogBar);
-    scrollDown();
-  }
-  catalogBar.append(el('span', null, `${text} — `));
-  const again = el('button', 'mini', 'รีเฟรช');
-  again.onclick = () => { void refreshModels(); };
-  catalogBar.append(again);
-}
-
 setInterval(refreshHeader, 10_000);
 
 // The update check, on the clock the comment above it promises: once at
@@ -2350,273 +2459,6 @@ setInterval(refreshHeader, 10_000);
 // between, so the ask is cheap — and a window left open for days still hears
 // about a new content release, instead of waiting for a reload to find out.
 setInterval(() => { void checkForUpdate().catch(() => {}); }, 6 * 60 * 60 * 1000);
-
-/* ------------------------------------------------------------------ boot */
-
-/**
- * What the window says when there is nothing to show yet.
- *
- * An empty main area reads as "broken" — the first thing on screen has to say
- * what this is, whether it can run right now, and what to type. It disappears
- * the moment a task starts, and comes back when a session is empty again.
- */
-/**
- * Does the transcript hold a conversation?
- *
- * The welcome card is the window's "nothing here yet" note, so it does not
- * count as one: a window that shows the card must not hide it behind a
- * conversation, and a window that HAS a conversation must not have the card
- * pushed in underneath it.
- *
- * A banner is not a conversation either — it is the window's notice ("there
- * is no chat tab", "the update is ready"), and the card still belongs under
- * it. The card lists what the app is waiting for, and a banner takes one
- * thing away from that list, not the whole of it.
- *
- * The card is held by a reference and not looked up by id: it is built at
- * runtime, and an element that is not in the document cannot be found by
- * getElementById.
- */
-let welcomeCard = null;
-const isBanner = (n) => /\b(needs-tab|update-bar)\b/.test(n.className ?? '');
-// The rows are copied out of the collection first: in the browser `children`
-// is an HTMLCollection, which has a length but no `some`.
-const hasConversation = () => [...log.children].some((n) => n !== welcomeCard && !isBanner(n));
-
-function showWelcome(readiness) {
-  // The card belongs to an empty window. It used to be painted whatever was
-  // on screen, so a reloaded window came back to the welcome card with the
-  // transcript pushed under it — and "the app forgot everything" is what that
-  // looks like.
-  if (hasConversation()) { hideWelcome(); return; }
-  hideWelcome();
-  const card = el('div', 'welcome');
-  card.id = 'welcome';
-  welcomeCard = card;
-
-  card.append(el('h2', null, 'aipass desktop'));
-  card.append(el('p', null, 'คุยกับโมเดลของ de.aipass.net จากหน้านี้ แล้วสั่งให้แก้ไฟล์ในโปรเจกต์ของคุณ'));
-
-  const list = el('ul');
-  const items = [
-    ['คุย', 'พิมพ์คำถามแล้วกด Enter — ตอบสตรีมตรง ๆ ไม่ต้องเปิดบราวเซอร์'],
-    ['สั่งแก้ไฟล์', 'บอกอย่าง "สรุป README ให้สั้นลง" มันอ่านแล้วแก้ให้ โดยอนุมัติทุกไฟล์ก่อนเขียน'],
-    ['แนบไฟล์', 'ลากรุป เอกสาร หรือวิดีโอมาวางบนหน้านี้ แล้วถามเกี่ยวมันได้เลย'],
-  ];
-  for (const [head, body] of items) {
-    const li = el('li');
-    li.append(el('strong', null, head), el('span', null, ' — ' + body));
-    list.append(li);
-  }
-  card.append(list);
-
-  const ready = el('div', 'ready');
-  const rows = readiness.provider
-    // Another provider is reached by the backend itself: the bridge, the
-    // extension and the chat tab are not part of that path, so listing them
-    // as "not ready" would name a problem that does not exist.
-    ? [['provider', `ผู้ให้บริการ ${readiness.provider}`, readiness.providerOk !== false]]
-    : [
-      ['bridge', 'ตัวกลาง local', readiness.bridge],
-      ['extension', 'ส่วนขยายใน Chrome', readiness.extensions > 0],
-      ['tab', 'หน้า de.aipass.net ที่ล็อกอินอยู่', readiness.tab],
-      // A fourth row only when the quota is known: 0 available reads as
-      // "broken" without it, while null (no tab) means the tab row already
-      // explains what to fix.
-      ...(readiness.credits === null || readiness.credits === undefined ? [] : [[
-        'credits',
-        `เครดิต ${readiness.credits.available} / ${readiness.credits.limit}`,
-        Number(readiness.credits.available) > 0,
-      ]]),
-    ];
-  for (const [key, label, ok] of rows) {
-    const row = el('div', 'ready-row ' + (ok ? 'ok' : 'no'));
-    row.append(el('span', 'dot ' + (ok ? 'ok' : 'no')));
-    row.append(el('span', null, `${ok ? 'พร้อม — ' : 'ยังไม่ได้ — '}${label}`));
-    row.append(el('span', 'grow'));
-    if (!ok && key === 'tab') {
-      const fix = el('button', 'mini', 'เปิดให้');
-      fix.onclick = () => rpc('browser.open', { url: appSettingsUrl() }).catch(() => {});
-      row.append(fix);
-    }
-    if (!ok && key === 'credits') row.append(el('span', 'dim', 'รอรอบถัดไป หรือใช้โมเดล free-credit'));
-    if (!ok && key === 'extension') {
-      // Two jobs behind one red dot: the extension was never loaded, or the
-      // bridge refused it for want of the loopback token. The bridge says
-      // which — sending the reader to load an extension that is already
-      // loaded is a dead end.
-      if (readiness.extensionToken === 'missing') {
-        row.append(el('span', 'dim', 'ยังไม่ได้รับ token — '), tokenFixButton());
-      } else {
-        row.append(el('span', 'dim', 'โหลดจากโฟลเดอร์ aipass-bridge/extension'));
-      }
-    }
-    if (!ok && key === 'bridge') row.append(el('span', 'dim', 'รัน aipass dev'));
-    ready.append(row);
-  }
-  card.append(ready);
-
-  card.append(el('p', 'dim', 'เริ่มจากพิมพ์ข้อความข้างล่างได้เลย · กด ? เพื่อดูวิธีใช้ทั้งหมด'));
-  log.append(card);
-}
-
-/**
- * Take the welcome card off the screen.
- *
- * The card is held by a reference: it is built at runtime, and an element
- * that is not in the document cannot be found by getElementById — so a card
- * this window built would not be found when it has to go.
- */
-function hideWelcome() {
-  welcomeCard?.remove();
-  welcomeCard = null;
-  $('welcome')?.remove();
-}
-
-const appSettingsUrl = () => state.settings?.chatUrl ?? 'https://de.aipass.net/chat';
-
-async function refreshReadiness() {
-  const st = await rpc('status').catch(() => null);
-  if (!st) { showWelcome({ bridge: false, extensions: 0, tab: false }); return; }
-  // A provider that is not AiPASS is reached by the backend itself, so the
-  // bridge and the chat tab are not on its path.
-  if (st.provider && st.provider !== 'aipass') {
-    showWelcome({ provider: st.provider, providerOk: true });
-    return;
-  }
-  // The quota is what tells "no tab" (null — the tab row names the fix) from
-  // "tab attached but the pool is empty" (0 — the new credits row names its
-  // own fix). Idle windows ride the bridge cache (force:false); a run spends,
-  // so it forces.
-  const credits = await rpc('credits', { force: Boolean(state.running) }).catch(() => null);
-  showWelcome({
-    bridge: st.bridge,
-    extensions: st.extensions ?? 0,
-    // The extension's own token: loaded and refused is not the same as not
-    // loaded, and the bridge is the one that knows.
-    extensionToken: st.extensionToken === 'missing' ? 'missing' : 'ok',
-    // A run can only tell us "no tab" by failing, so the strip stays neutral
-    // until that happens; the banner flips it and offers the fix.
-    tab: !state.needsTab,
-    credits: credits ?? null,
-  });
-}
-
-/* --------------------------------------------------------------- updates */
-
-/**
- * The update notice.
- *
- * One line and one button, the same shape as the "no chat tab" banner: a
- * failure with a one-click fix gets a banner, not a log line. It never
- * interrupts a run, and it never applies anything on its own — the click is
- * the consent, and the content version is on screen before and after.
- */
-function showUpdate(res) {
-  const bar = el('div', 'note update-bar');
-  const content = res?.available?.content;
-  const shell = res?.available?.shell;
-  if (!content && !shell) {
-    bar.append(el('span', null, res?.reason ? `อัปเดต: ${res.reason}` : 'อัปเดต: เป็นเวอร์ชันล่าสุดแล้ว'));
-    log.append(bar);
-    scrollDown();
-    return;
-  }
-  const version = content?.version ?? shell?.version;
-  bar.append(el('span', null, `มีเวอร์ชันใหม่ ${version}`));
-  if (content) {
-    const install = el('button', 'mini', 'อัปเดตเดี๋ยวนี้');
-    install.onclick = () => applyUpdate();
-    bar.append(install);
-  }
-  if (shell) {
-    // The binary is replaced by the installer, and the app has to be closed
-    // for it — so this one says so, and the app closes itself.
-    const reinstall = el('button', 'mini', 'ติดตั้งเวอร์ชันนี้ (แอปจะปิดแล้วเปิดใหม่)');
-    reinstall.onclick = () => installShellUpdate();
-    bar.append(reinstall);
-  }
-  if (content?.notes) bar.append(el('span', 'dim', `— ${content.notes}`));
-  const later = el('button', 'mini', 'ไม่ตอนนี้');
-  later.onclick = () => bar.remove();
-  bar.append(later);
-  log.append(bar);
-  scrollDown();
-}
-
-/**
- * Ask what is out there.
- *
- * The check runs once at startup and then every six hours: the feed is a
- * static file, and a machine that is offline gets nothing rather than an
- * error. Nothing is nagged — the notice appears when there is genuinely
- * something new.
- */
-async function checkForUpdate({ force = false, quiet = true } = {}) {
-  const res = await rpc('update.check', { force }).catch(() => null);
-  if (!res) return null;
-  if (res.available?.content || res.available?.shell) {
-    showUpdate(res);
-  } else if (!quiet) {
-    addCommandOut(res.reason ? `อัปเดต: ${res.reason}` : 'อัปเดต: เป็นเวอร์ชันล่าสุดแล้ว');
-  }
-  return res;
-}
-
-/**
- * Install the new content.
- *
- * The backend refuses while a run is in flight, and says so — the update
- * waits for the turn to end rather than swapping files under it. When the
- * content is in place the backend restarts, and the window waits for it and
- * reloads, so the window's own files are the new ones.
- */
-async function applyUpdate() {
-  const res = await rpc('update.apply').catch((err) => ({ ok: false, reason: err?.message ?? String(err) }));
-  if (!res?.ok) {
-    addCommandOut(`อัปเดตไม่สำเร็จ — ${res?.reason ?? 'ไม่ทราบสาเหตุ'}`);
-    return;
-  }
-  addCommandOut(`อัปเดตแล้ว — ${res.version} · กำลังเปิดใหม่เพื่อใช้`);
-  await waitForBackend();
-  location.reload();
-}
-
-/** The backend restarts so the new content can take over; wait for it. */
-async function waitForBackend() {
-  setHint('กำลังเปิดใหม่เพื่อใช้เวอร์ชันใหม่…', true);
-  // The window is about to be reloaded, and a reload looks like a dead app
-  // for as long as it takes: the bar keeps beating, with the words that say
-  // what is happening.
-  setWorking(true, { label: 'กำลังเปิดใหม่…' });
-  for (let i = 0; i < 60; i += 1) {
-    await new Promise((r) => setTimeout(r, 500));
-    const back = await rpc('status').then(() => true).catch(() => false);
-    if (back) return true;
-  }
-  setHint('กำลังเปิดใหม่… ถ้ายังไม่ขึ้น ให้ปิดแล้วเปิดแอปอีกครั้ง');
-  return false;
-}
-
-/**
- * Hand the app over to the installer.
- *
- * The binary is replaced by the installer, and a running binary is locked:
- * so the app closes, the installer runs, and the app comes back. The backend
- * refuses while a run is in flight, and refuses an UNSIGNED installer — an
- * app that downloads and runs an unsigned installer on its own is the worm
- * shape, and the Windows installer is unsigned today. The refusal says so,
- * rather than the button failing silently.
- */
-async function installShellUpdate() {
-  const res = await rpc('update.install').catch((err) => ({ ok: false, reason: err?.message ?? String(err) }));
-  if (!res?.ok) {
-    addCommandOut(`ติดตั้งไม่สำเร็จ — ${res?.reason ?? 'ไม่ทราบสาเหตุ'}`);
-    return;
-  }
-  addCommandOut('กำลังปิดแอปเพื่อติดตั้ง…');
-  setHint('กำลังติดตั้งเวอร์ชันใหม่ — แอปจะเปิดใหม่เอง', true);
-}
 
 async function showMemory(arg) {
   if (arg && arg.trim().toLowerCase() === 'clear') {
@@ -2764,7 +2606,7 @@ let viewSeq = 0;
 
 async function startNewSession() {
   viewSeq += 1;
-  log.textContent = '';
+  resetTranscript();
   clearTodo();
   const made = await rpc('session.new').catch((err) => ({ error: err.message }));
   if (made.error) { addNote(`เริ่มบทสนทนาใหม่ไม่ได้: ${friendly(made.error)}`); return; }
@@ -2801,7 +2643,7 @@ function resumeSession() {
       del.onclick = async () => {
         if (!window.confirm(`ลบบทสนทนา "${s.title ?? s.id}"?`)) return;
         await rpc('session.delete', { id: s.id }).catch((err) => addNote(err.message));
-        if (state.sessionId === s.id) { state.sessionId = null; log.textContent = ''; clearTodo(); }
+        if (state.sessionId === s.id) { state.sessionId = null; resetTranscript(); clearTodo(); }
         await refreshSessions();
         resumeSession();
       };
@@ -2826,7 +2668,7 @@ async function openSession(id) {
   // two quick clicks interleaved their entries into one transcript.
   if (seq !== viewSeq) return;
   state.sessionId = id;
-  log.textContent = '';
+  resetTranscript();
   clearTodo();
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (entry.type === 'task') addTask(entry.text);
@@ -3090,22 +2932,42 @@ async function showPendingDiff() {
   await showDiff(pending[0].file);
 }
 
+// One apply or discard at a time: the buttons answer clicks faster than the
+// rpc answers, and a second press on an unanswered Apply sent the same write
+// twice — the second one landing after the pending list had already been
+// rebuilt under it. While the first call is in flight the button is simply
+// not listening again; the guard releases when it settles, so the next
+// deliberate press still works.
+let applyInFlight = false;
+
 async function applyChecked() {
-  const files = [...state.pending.entries()].filter(([, info]) => info.checked).map(([file]) => file);
-  if (!files.length) { addNote('ยังไม่มีไฟล์ที่ติ๊ก'); return; }
-  const written = await rpc('apply', { files }).catch((err) => ({ error: err.message }));
-  if (written.error) { addNote(`เขียนไฟล์ไม่ได้: ${friendly(written.error)}`); return; }
-  await refreshPending();
-  await refreshCheckpoints();
-  // The apply keeps the bytes that were on the disk before it, so the way back
-  // is here — in the window — and not in a terminal with `git restore`.
-  if (written.checkpoint?.id) addNote(`เขียนแล้ว — ย้อนกลับได้ที่จุด #${written.checkpoint.id}`);
+  if (applyInFlight) return;
+  applyInFlight = true;
+  try {
+    const files = [...state.pending.entries()].filter(([, info]) => info.checked).map(([file]) => file);
+    if (!files.length) { addNote('ยังไม่มีไฟล์ที่ติ๊ก'); return; }
+    const written = await rpc('apply', { files }).catch((err) => ({ error: err.message }));
+    if (written.error) { addNote(`เขียนไฟล์ไม่ได้: ${friendly(written.error)}`); return; }
+    await refreshPending();
+    await refreshCheckpoints();
+    // The apply keeps the bytes that were on the disk before it, so the way back
+    // is here — in the window — and not in a terminal with `git restore`.
+    if (written.checkpoint?.id) addNote(`เขียนแล้ว — ย้อนกลับได้ที่จุด #${written.checkpoint.id}`);
+  } finally {
+    applyInFlight = false;
+  }
 }
 
 async function discardAll() {
-  const dropped = await rpc('discard').catch((err) => ({ error: err.message }));
-  if (dropped.error) { addNote(`ทิ้งไฟล์ไม่ได้: ${friendly(dropped.error)}`); return; }
-  await refreshPending();
+  if (applyInFlight) return;
+  applyInFlight = true;
+  try {
+    const dropped = await rpc('discard').catch((err) => ({ error: err.message }));
+    if (dropped.error) { addNote(`ทิ้งไฟล์ไม่ได้: ${friendly(dropped.error)}`); return; }
+    await refreshPending();
+  } finally {
+    applyInFlight = false;
+  }
 }
 
 /* ------------------------------------------------------------- checkpoints */

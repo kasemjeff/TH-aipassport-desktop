@@ -17,7 +17,7 @@ terminal ──HTTP──▶ bridge (node, no deps)
 page JavaScript inside a de.aipass.net tab, so Chrome attaches the session
 cookie itself. The bridge never sees it and nothing is stored on disk.
 
-For the full structure and how every piece works, see [`DOCS.md`](./docs/DOCS.md).
+For the full structure and how every piece works, see [`DOCS.md`](./DOCS.md).
 
 ## Setup
 
@@ -91,24 +91,18 @@ aipass "question" # one-shot answer from CLI
 
 | command | |
 |---|---|
-| `aipass` · `aipass chat` · `aipass "question"` | chat (interactive / one-shot) |
+| `aipass` / `aipass "question"` | chat (interactive / one-shot) |
 | `aipass dev` | run the bridge in the foreground (Ctrl+C to stop) |
 | `aipass desktop` | the desktop app: bridge (if needed) + agent window, one command |
 | `aipass agent "task"` | file agent against **the current directory** |
 | `aipass models` · `aipass conversations` | the list printers |
-| `aipass providers` | list / add / remove / use the API providers |
 | `aipass styles` | list video & image style presets |
 | `aipass credits` | check credit quota |
 | `aipass doctor` | node / bridge / extension / model diagnostics |
 | `aipass memory` | list/clear the facts carried across sessions for this project |
 | `aipass relocate` | re-key a project's stored data after its folder moved |
-| `aipass scale "task" [--n N]` | test-time scaling: run a task N times, keep the best |
-| `aipass plugin` | install / inspect / enable / disable / remove plugins |
-| `aipass mcp` | add / remove / list MCP servers and call their tools |
 | `aipass setup-assistant` | configure custom coding assistant |
-| `aipass setup` | first-run setup: Node, PATH, token, bridge, browser pages |
 | `aipass status` | node / bridge / extension check |
-| `aipass stop` | stop a lingering background bridge |
 
 Uninstall with `rm -f ~/.local/bin/aipass` (or `npm rm -g aipass` if you used `npm link`).
 

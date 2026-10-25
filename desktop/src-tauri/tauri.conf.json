@@ -17,8 +17,8 @@
         "default-src": "'none'",
         "script-src": "'self'",
         "style-src": "'self' 'unsafe-inline'",
-        "img-src": "'self' data: blob: https: http:",
-        "media-src": "'self' data: blob: https: http:",
+        "img-src": "'self' data: blob: https:",
+        "media-src": "'self' data: blob: https:",
         "font-src": "'self' data:",
         "connect-src": "'self' http://127.0.0.1:* http://localhost:*",
         "base-uri": "'self'",
@@ -67,8 +67,9 @@
     },
     "windows": {
       "webviewInstallMode": { "type": "offlineInstaller" }
-    },    "publisher": "aipass",
-    "copyright": "",
+    },
+    "publisher": "aipass",
+    "copyright": "Copyright (c) 2026 niawjunior",
     "category": "DeveloperTool",
     "shortDescription": "AiPASS bridge, chat and file agent in a window",
     "longDescription": "A desktop front end for the aipass bridge: chat with the AiPASS models from a window, and let the file agent edit a project you point it at — with sessions, per-file approval, plan mode, helpers and compaction."

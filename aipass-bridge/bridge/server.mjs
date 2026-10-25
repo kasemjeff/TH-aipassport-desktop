@@ -1607,8 +1607,34 @@ function extEvents(req, res) {
     warm(() => refreshStyleOptions(), 1700);
   }
 
-  const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* closed */ } }, 15_000);
-  req.on('close', () => {
+  // A write to a socket the peer has dropped does not throw: it is accepted
+  // into the buffer and reported later through the callback, or not at all. So
+  // the ping is also the probe — a stream that is already destroyed, or a write
+  // that comes back with an error, ends the client here instead of waiting for
+  // a `close` that a half-open connection may never send. TCP keepalive is the
+  // other half: it lets the kernel notice a peer that went away without a FIN,
+  // which then surfaces as `close` on the socket.
+  req.socket?.setKeepAlive?.(true, 15_000);
+  const ping = setInterval(() => {
+    if (res.destroyed || res.writableEnded) { cleanup(); return; }
+    try { res.write(': ping\n\n', (err) => { if (err) cleanup(); }); } catch { cleanup(); }
+  }, 15_000);
+  // One cleanup, from every signal a dropped connection can give.
+  //
+  // The extension's stream cycles every few minutes, and a laptop that sleeps
+  // or a proxy that resets the connection can leave the response half-open
+  // without ever firing `req.on('close')`. The client then stays in
+  // `extClients` for ever: the bridge believes an extension is attached, so it
+  // dispatches jobs to a socket nobody reads, and those jobs sit until they
+  // time out — a hang the person sees as "the app is stuck".
+  //
+  // So the cleanup is idempotent and runs on whichever comes first: the
+  // request ending, the request aborting, the response erroring, the
+  // response closing, or the socket going away.
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
     clearInterval(ping);
     extClients.delete(client);
     // The 1→0 edge only: a cycle leaves another tab attached, a real
@@ -1630,7 +1656,12 @@ function extEvents(req, res) {
       job.client = null;
       if (job.kind === 'loader') job.fail('extension disconnected');
     }
-  });
+  };
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+  req.socket?.on('error', cleanup);
+  req.socket?.on('close', cleanup);
 }
 
 async function extPost(req, res, kind) {

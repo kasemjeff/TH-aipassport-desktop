@@ -14,7 +14,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderMarkdown, splitMarkdownStable } from '../../desktop/ui/md.js';
+import fs from 'node:fs';
+import { renderMarkdown, splitMarkdownStable, loadDeferredMedia, ACCOUNT_MEDIA_HOST } from '../../desktop/ui/md.js';
 import { setRestoreTable } from '../../desktop/ui/waf-restore.js';
 import { restoreTable } from '../harness/waf.mjs';
 
@@ -50,6 +51,24 @@ const SAMPLES = [
 const prefixes = (sample) => {
   const lines = sample.split('\n');
   return Array.from({ length: lines.length + 1 }, (_, n) => lines.slice(0, n).join('\n'));
+};
+
+/** The slice of an element loadDeferredMedia touches: the class mark, the
+ *  carried address, and the attributes the consent spends. */
+const fakeEl = (tag, { className = '', dataset = {} } = {}) => {
+  const el = {
+    tagName: tag.toUpperCase(),
+    className,
+    dataset,
+    classList: {
+      remove(c) { el.className = el.className.split(/\s+/).filter((x) => x !== c).join(' '); },
+    },
+    attrs: {},
+    setAttribute(k, v) { el.attrs[k] = String(v); },
+    getAttribute(k) { return el.attrs[k] ?? null; },
+    removeAttribute(k) { delete el.attrs[k]; },
+  };
+  return el;
 };
 
 test('a streamed reply renders the same page from its pieces as in one pass', () => {
@@ -129,20 +148,76 @@ test('a table needs its separator row', () => {
   assert.match(html, /<p>\| a \| b \| not a separator<\/p>/);
 });
 
-test('a standalone image becomes a figure and escapes URL and caption', () => {
+test('a standalone image paints a deferred figure and escapes URL and caption', () => {
   const html = renderMarkdown('![<cat> & "dog"](https://example.com/cat.png?a=1&b=2)');
-  assert.match(html, /^<figure class="md-figure"><img class="md-image"/);
-  assert.ok(html.includes('src="https://example.com/cat.png?a=1&amp;b=2"'), html);
+  assert.match(html, /^<figure class="md-figure"><img class="md-image md-media-deferred"/);
+  assert.ok(html.includes('data-md-src="https://example.com/cat.png?a=1&amp;b=2"'), html);
+  assert.ok(!/\ssrc="/.test(html), 'nothing is fetched on paint');
   assert.ok(!html.includes('&amp;amp;'), html);
   assert.ok(html.includes('alt="&lt;cat&gt; &amp; &quot;dog&quot;"'), html);
+  assert.ok(html.includes('aria-label="Load image: &lt;cat&gt; &amp; &quot;dog&quot;"'), html);
   assert.ok(html.includes('<figcaption>&lt;cat&gt; &amp; &quot;dog&quot;</figcaption>'), html);
 });
 
 test('an image inside prose stays inline', () => {
   const html = renderMarkdown('see ![cat](https://example.com/cat.png) here');
-  assert.match(html, /^<p>see <img class="md-image md-image-inline"/);
-  assert.ok(html.includes('alt="cat"'), html);
+  assert.match(html, /^<p>see <img class="md-image md-media-deferred md-image-inline"/);
+  assert.ok(html.includes('data-md-src="https://example.com/cat.png"'), html);
   assert.ok(html.includes(' here</p>'), html);
+});
+
+test('web media waits for a click before it is fetched', () => {
+  // The consent surface, pinned at both ends. The paint carries no src
+  // attribute — an element without one fetches nothing — and
+  // loadDeferredMedia, which transcript.js wires to the click and to the
+  // Enter key of the slot's button role, is the only thing that sets one. It
+  // re-validates the address it was handed: the attribute is as readable by
+  // anything in the page as by the reader's click.
+  const html = renderMarkdown('![cat](https://example.com/cat.png?d=secret)');
+  assert.ok(!/\ssrc=/i.test(html), html);
+  assert.ok(html.includes('data-md-src="https://example.com/cat.png?d=secret"'), html);
+
+  const img = fakeEl('img', { className: 'md-image md-media-deferred', dataset: { mdSrc: 'https://example.com/cat.png?d=secret' } });
+  assert.equal(loadDeferredMedia(img), 'https://example.com/cat.png?d=secret');
+  assert.equal(img.src, 'https://example.com/cat.png?d=secret');
+  assert.equal(img.className, 'md-image', 'the slot mark is gone once it loads');
+  assert.equal(img.getAttribute('data-md-src'), null, 'the consent is spent');
+
+  const video = fakeEl('video', { className: 'md-video md-media-deferred', dataset: { mdSrc: 'https://example.com/clip.mp4' } });
+  assert.equal(loadDeferredMedia(video), 'https://example.com/clip.mp4');
+  assert.equal(video.preload, 'metadata', 'the first frame may arrive once it is asked for');
+  assert.equal(video.controls, true);
+
+  // A slot with no address, or one that is not a web address, loads nothing.
+  assert.equal(loadDeferredMedia(fakeEl('img', { dataset: {} })), null);
+  assert.equal(loadDeferredMedia(fakeEl('img', { dataset: { mdSrc: 'javascript:alert(1)' } })), null);
+});
+
+test('media on the account origin renders at once, the open web waits', () => {
+  // The one allowlist entry: the account's own origin already holds the whole
+  // conversation, so a URL addressed there leaks nothing new. The pin below
+  // keeps the allowlist tied to the origin the extension's host permissions
+  // cover — it may not grow past the account side.
+  const own = renderMarkdown('![own](https://de.aipass.net/pic.png?d=1)');
+  assert.ok(own.includes('src="https://de.aipass.net/pic.png?d=1"'), own);
+  assert.ok(!own.includes('data-md-src'), own);
+
+  const ownVideo = renderMarkdown('https://media.aipass.net/clip.mp4');
+  assert.ok(ownVideo.includes('src="https://media.aipass.net/clip.mp4"'), ownVideo);
+
+  const lookalike = renderMarkdown('![x](https://notaipass.net/pic.png)');
+  assert.ok(lookalike.includes('data-md-src="https://notaipass.net/pic.png"'), lookalike, 'a suffix lookalike is not the account');
+  assert.ok(!/\ssrc="/.test(lookalike), lookalike);
+
+  const manifest = JSON.parse(fs.readFileSync(new URL('../extension/manifest.json', import.meta.url), 'utf8'));
+  for (const host of (manifest.host_permissions ?? [])) {
+    const name = host.replace(/^[a-z]+:\/\//, '').replace(/\/.*$/, '');
+    if (name.includes('aipass.net')) {
+      assert.ok(ACCOUNT_MEDIA_HOST.test(name.replace(/^\*\./, 'sub.')), `the allowlist covers the manifest host ${host}`);
+    } else {
+      assert.equal(ACCOUNT_MEDIA_HOST.test(name.replace(/^\*\./, 'sub.')), false, `${host} is not the account origin`);
+    }
+  }
 });
 
 test('image URLs that can run code are never fetched', () => {
@@ -158,27 +233,28 @@ test('markdown quoted in backticks stays code, never a live image', () => {
 
 test('emphasis characters inside an image URL or alt text are left alone', () => {
   const html = renderMarkdown('![a*b](https://example.com/a*b.png)');
-  assert.ok(html.includes('src="https://example.com/a*b.png"'), html);
+  assert.ok(html.includes('data-md-src="https://example.com/a*b.png"'), html);
   assert.ok(html.includes('alt="a*b"'), html);
   assert.ok(!html.includes('<em>'), html);
 });
 
-test('a standalone video URL or media line becomes a player', () => {
+test('a standalone video URL or media line waits for a click too', () => {
   const bare = renderMarkdown('https://example.com/demo.mp4?t=10');
   assert.match(bare, /<figure class="md-figure md-video-figure">/);
-  assert.ok(bare.includes('<video class="md-video" controls preload="metadata" playsinline src="https://example.com/demo.mp4?t=10"></video>'), bare);
+  assert.ok(bare.includes('<video class="md-video md-media-deferred" preload="none" playsinline role="button" tabindex="0" aria-label="Load video" title="https://example.com/demo.mp4?t=10" data-md-src="https://example.com/demo.mp4?t=10"></video>'), bare);
 
   const labelled = renderMarkdown('![demo](https://example.com/demo.webm)');
-  assert.ok(labelled.includes('src="https://example.com/demo.webm"'), labelled);
+  assert.ok(labelled.includes('data-md-src="https://example.com/demo.webm"'), labelled);
+  assert.ok(labelled.includes('aria-label="Load video: demo"'), labelled);
   assert.ok(labelled.includes('<figcaption>demo</figcaption>'), labelled);
 
   const linked = renderMarkdown('[demo](https://example.com/demo.mp4)');
-  assert.ok(linked.includes('src="https://example.com/demo.mp4"'), linked);
+  assert.ok(linked.includes('data-md-src="https://example.com/demo.mp4"'), linked);
   assert.ok(linked.includes('<figcaption>demo</figcaption>'), linked);
 
   // Signed storage URLs often carry the filename only in the label.
   const signed = renderMarkdown('[clip.mp4](https://storage.example.com/signed/abc?token=1)');
-  assert.ok(signed.includes('src="https://storage.example.com/signed/abc?token=1"'), signed);
+  assert.ok(signed.includes('data-md-src="https://storage.example.com/signed/abc?token=1"'), signed);
   assert.ok(signed.includes('<figcaption>clip.mp4</figcaption>'), signed);
 });
 

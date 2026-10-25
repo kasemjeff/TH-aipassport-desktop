@@ -94,7 +94,9 @@ const PORT_BUSY_EXIT = 43;
  *
  *   script    the app's own modules and nothing else — no inline, no eval
  *   style     'unsafe-inline' because a plugin panel may style itself
- *   img/media the model's own pictures and clips, from the web
+ *   img/media the model's own pictures and clips, https only, and not until
+ *             the reader clicks the slot into loading (md.js paints no src —
+ *             the URL of a fetched picture is a channel out of the machine)
  *   connect   this backend, and the loopback it is served from
  *
  * The object is the shape tauri.conf.json wants, so the two can be compared
@@ -104,8 +106,8 @@ export const WINDOW_CSP = {
   'default-src': "'none'",
   'script-src': "'self'",
   'style-src': "'self' 'unsafe-inline'",
-  'img-src': "'self' data: blob: https: http:",
-  'media-src': "'self' data: blob: https: http:",
+  'img-src': "'self' data: blob: https:",
+  'media-src': "'self' data: blob: https:",
   'font-src': "'self' data:",
   'connect-src': "'self' http://127.0.0.1:* http://localhost:*",
   'base-uri': "'self'",
@@ -526,6 +528,12 @@ export function createRpc({
         // The RECALL marker: the model may ask what this project said before.
         recall: appSettings.get('recall'),
         parallelHelpers: appSettings.get('parallelHelpers'),
+        // The reading switches: consecutive reads may run beside each other,
+        // and the preamble may teach TREE/STAT. Reads, not powers — on by
+        // default; these lines are what makes a `false` in the file mean
+        // anything at all.
+        explore: appSettings.get('explore'),
+        parallelReads: appSettings.get('parallelReads'),
         // The window's bootstrap start: the same git status + package.json
         // snapshot the CLI asks for with `--snapshot`. On by default here
         // because the window's user pays the same discovery round trips and
@@ -540,6 +548,8 @@ export function createRpc({
         repeatGuard: appSettings.get('repeatGuard'),
         repeatGuardMax: appSettings.get('repeatGuardMax'),
         attempts: appSettings.get('attempts'),
+        // The machine's own helper roles beside the built-ins (SUBAGENT_ROLES).
+        helperPresets: appSettings.get('helperPresets'),
         // (docs/SPEC_CHECKER.md) The declared check and the strict Verify gate.
         verifyCommand: appSettings.get('verifyCommand'),
         requireCheck: appSettings.get('requireCheck'),
@@ -634,6 +644,12 @@ export function createRpc({
       // settings say the machine has been told to let it through.
       allowFetch: appSettings.get('allowFetch'),
       parallelHelpers: appSettings.get('parallelHelpers'),
+      // The reading switches, and RECALL with them: a save re-applies onto
+      // every harness the backend holds, so the file says the same thing to a
+      // harness built last week as to one built now.
+      recall: appSettings.get('recall'),
+      explore: appSettings.get('explore'),
+      parallelReads: appSettings.get('parallelReads'),
       // (Thai pack) the language policy and the loop guards
       replyLanguage: appSettings.get('replyLanguage'),
       langCheck: appSettings.get('langCheck'),
@@ -641,6 +657,9 @@ export function createRpc({
       repeatGuard: appSettings.get('repeatGuard'),
       repeatGuardMax: appSettings.get('repeatGuardMax'),
       attempts: appSettings.get('attempts'),
+      // The machine's own helper roles beside the built-ins: a save here is
+      // live on every harness the backend holds, like every other sheet key.
+      helperPresets: appSettings.get('helperPresets'),
       // The declared check and the strict Verify gate, re-applied so a save in
       // the sheet is live on every harness the backend holds.
       verifyCommand: appSettings.get('verifyCommand'),
@@ -1044,8 +1063,41 @@ export function createRpc({
       // ⇒ run lost) fired on any long RUN or SEARCH while the backend was
       // perfectly alive. It carries no id — a reconnect's Last-Event-ID still
       // points at the last real frame.
-      const ping = setInterval(() => { try { res.write('event: ping\ndata: {}\n\n'); } catch { /* closed */ } }, 15_000);
-      req.on('close', () => { clearInterval(ping); fanout.unsubscribe(sub); });
+      // The ping is also the probe: a write to a dropped socket does not throw,
+      // so a destroyed stream or a write that reports an error ends the
+      // subscriber here, and TCP keepalive lets the kernel notice a peer that
+      // left without a FIN (the same reasoning as the extension's stream in
+      // bridge/server.mjs).
+      req.socket?.setKeepAlive?.(true, 15_000);
+      const ping = setInterval(() => {
+        if (res.destroyed || res.writableEnded) { cleanup(); return; }
+        try { res.write('event: ping\ndata: {}\n\n', (err) => { if (err) cleanup(); }); } catch { cleanup(); }
+      }, 15_000);
+      // One cleanup, from every signal a dropped connection can give.
+      //
+      // `req.on('close')` alone is not enough. A window that is suspended, a
+      // laptop whose lid closes, a proxy that resets the connection — each of
+      // those can leave the response half-open, and the subscriber then stays
+      // in the fan-out with a socket that will never drain again. The frames
+      // it missed keep filling its bounded queue until the oldest are dropped,
+      // and the backend pays for a window that is not there.
+      //
+      // So the cleanup is idempotent and runs on whichever comes first: the
+      // request ending, the response erroring, the response closing, or the
+      // socket going away. The ping stops, the subscriber is taken out of the
+      // fan-out, and nothing is left behind.
+      let closed = false;
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(ping);
+        fanout.unsubscribe(sub);
+      };
+      req.on('close', cleanup);
+      res.on('close', cleanup);
+      res.on('error', cleanup);
+      req.socket?.on('error', cleanup);
+      req.socket?.on('close', cleanup);
       return;
     }
 
@@ -1199,6 +1251,7 @@ export function createRpc({
     events: bus,
     get port() { return boundPort(); },
     get url() { return `http://127.0.0.1:${boundPort()}`; },
+    get fanout() { return fanout; },
     // The replay buffer's own counters: the budget is in BYTES, and a test
     // needs to see that the buffer counts the way the limit is written.
     get replay() { return { frames: replay.length, bytes: replayBytes }; },

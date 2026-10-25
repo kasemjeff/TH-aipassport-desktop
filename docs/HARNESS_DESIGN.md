@@ -77,6 +77,15 @@ copied into a throwaway directory outside the project, the command runs there,
 and the disk is still untouched. "Stage a fix, run the check, get `PASS`" is
 true inside one run; nothing reaches the real tree until the person applies it.
 
+One more input the diagram hides: a message the person types **while the run
+is working**. It neither interrupts the run nor starts a second one — it waits
+in the harness's queue (`Harness.inject`, the `run.inject` RPC) and rides the
+next step's paste, the one message the protocol allows, framed as a
+mid-run note. No run, no queue: the window keeps the text. A run that ends
+before delivering it hands the texts back as `inject_orphaned` instead of
+swallowing them; the queue is capped at twenty messages so a paste storm
+cannot outrun the compaction budget.
+
 The step-by-step anatomy of that loop — every stage, guard, stop reason and
 event — is in [`LOOP_DESIGN.md`](LOOP_DESIGN.md).
 
@@ -97,17 +106,19 @@ event — is in [`LOOP_DESIGN.md`](LOOP_DESIGN.md).
 | `media.mjs` | the image, video and music models, their presets and their option surface | an option the model does not declare is dropped before the request, and the file is kept outside the project |
 | `export.mjs` | one block list, two renderers (markdown, HTML) | the two exports cannot drift, and a transcript loses no entry |
 | `schedule.mjs` | the machine's tasks, and the detached CLI that runs them | a due task runs once and is then spent; the backend is never held open by one |
-| `sandbox.mjs` | the overlay projected into a child-visible tree for one `RUN` | a child process sees the staged edit, and the disk is still never written by a run |
+| `sandbox.mjs` | the projection engine: the staged tree copied into a child-visible tree (consumed through `execution.mjs`) | a child process sees the staged edit, and the disk is still never written by a run |
+| `execution.mjs` | the one owner of "against what tree does a command run": the world (plain, or the projection), `runShell`, the stop/exit endings, the output path mapping — RUN and VERIFY both execute through it | the tool layer keeps the guards and the text policy; a second world is a branch here, not a second copy of the RUN tool |
 | the checker (in `harness.mjs`) | a read-only child that runs the project's own check over the staged tree | a DONE is backed by a verdict the run cannot write for itself |
 | `permissions.mjs` | classify → rules → mode → ask | path rules outrank the mode — reads included (H9); nobody listening to a question means deny, not hang |
 | `rules.mjs` | one JSON file (`~/.aipass/rules.json`) keyed by project root | "always allow writes under src/" survives a restart |
 | `compact.mjs` | estimate bytes/4 → summarise → rotate → re-seed | summarisation happens in the conversation that still holds the history |
+| `events.mjs` | the run's observer (`Emitter`) and the windows' bounded fan-out; every type is named in [`EVENTS.md`](EVENTS.md) and pinned by `test/event-map.test.mjs` | a listener never breaks a run; a window that stops reading cannot grow the backend's memory |
 | `memory-store.mjs` | the facts a project carries across sessions, and the `RECALL` word match over the sessions it already wrote | a carry survives a rotation, and the recall answers with what was said — never with a guess, and "nothing said" when there is nothing |
 | `lang.mjs` | `thaiRatio` over a reply, with code, URLs and commands excluded | the closing message is measured, not guessed at — one rewrite asked for, never a block |
 | `harness.mjs` | the facade a CLI, the window and tests all drive | the one-conversation resource is managed nowhere else; helpers propose into the parent overlay |
 | `session.mjs` | JSONL append with a forkable tree | a session opened next week reads as one continuous piece of work |
 | `skills.mjs` | plain markdown, configured → project → user → repo | the library grows without code changes, and one order serves the window and the CLI alike |
-| `plugins.mjs` | `setup(ctx)` in-process: markers, rpc, panels, settings; `apiVersion` checked against `PLUGIN_API` (1) | plugins are code you chose to install — not sandboxed, and it says so |
+| `plugins.mjs` | `setup(ctx)` in-process: markers, rpc, panels, settings, events, preamble sections; `apiVersion` checked against `PLUGIN_API` (1) | plugins are code you chose to install — not sandboxed, and it says so |
 | `stats.mjs` | the `run_stats` lines, rolled up | a run's refusals, nudges, stalls and checks are numbers, not an argument |
 
 What is already right and should not be "improved" away: unique-match REPLACE
@@ -160,7 +171,7 @@ check.
 | permission gate | every write, shell call and network fetch | classify → rules → mode → ask; path rules outrank the mode, reads included, and no listener means deny | `permissions.mjs` |
 | git write | a `GIT stage` / `commit` / `branch`, and only when the run was given `allowGitWrite` | argv arrays (never a shell string), a path that leaves the root is refused, an empty message or an empty index is refused — and the call is classified as a WRITE, so `ask` asks before it runs | `git.mjs`, `tools.mjs`, `permissions.mjs` |
 | safety set | a config or lockfile mutation, a destructive `RUN` body | a question in every mode, ahead of grants; a shell-risk command inside the checker denies at once | `permissions.mjs`, `settings.mjs` |
-| projection | every `RUN` with something staged | the staged tree is copied into `~/.aipass/run/<project>/run-*` and the command runs there; heavy dirs are junctioned, the output is scrubbed back to the project root, the copy is deleted afterwards | `sandbox.mjs` |
+| projection | every `RUN` with something staged | the staged tree is copied into `~/.aipass/run/<project>/run-*` and the command runs there; heavy dirs are junctioned, the output is scrubbed back to the project root, the copy is deleted afterwards | `execution.mjs` (via `sandbox.mjs`) |
 | repeat guard | a third identical call with nothing staged in between | refused with an `err:` that says what to change first | `loop.mjs` |
 | stagnation guard | the same step ×3, or two steps trading places | one correction, then the run stops | `loop.mjs` |
 | verify nudge (R4) | after the first staged code change | one soft nudge: run a test, read the file back, or say that nothing can be run here | `loop.mjs` |
@@ -380,9 +391,11 @@ What each pass changed, briefly:
   budget map (F8); SEARCH/GLOB honour the root `.gitignore`, skip files over
   1 MB, and SEARCH takes `-i` (F9). `AIPASS_CONTEXT_TOKENS` /
   `AIPASS_KEEP_RECENT_BYTES` tune a terminal run without a settings object,
-  and so do the context manager's two newer switches: `AIPASS_ELIDE` turns
-  the elision tier on (off by default) and `AIPASS_MEMORY=off` stops the
-  carried facts.
+  and so do the context manager's newer switches: `AIPASS_ELIDE` turns
+  the elision tier on (off by default), `AIPASS_MEMORY=off` stops the
+  carried facts, and `AIPASS_COMPACT_AT_PERCENT` names the share-of-budget
+  rotation trigger the window's sheet owns (the rotation arms in
+  `experiments/queue.json` squeeze through it).
 - **Pass 3 (P2):** `ATTACH` queues an image or document onto the next message,
   behind the `--attach` preamble flag (A); permission rules and "always"
   grants persist per project in `~/.aipass/rules.json` and survive a restart,

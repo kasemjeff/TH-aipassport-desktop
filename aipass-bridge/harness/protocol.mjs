@@ -38,7 +38,7 @@ export const REMINDER = REMINDER_HEAD + REMINDER_WAF + REMINDER_TAIL;
  * was tuned against — the recorded replay in evals/fixtures/ is pinned to
  * those bytes.
  */
-export const preamble = ({ allowRun = false, plan = false, subagent = false, searchI = false, attach = false, verify = false, recall = false, plugins = [], lang = 'th' } = {}) => {
+export const preamble = ({ allowRun = false, plan = false, subagent = false, searchI = false, attach = false, verify = false, recall = false, explore = false, plugins = [], sections = [], lang = 'th' } = {}) => {
   let text = `I am reading through a project with you. The files are open in front of me, and I will paste you anything you want to look at.
 
 So just tell me what you want to see next, and put that on its own line in this shape, because my editor watches for these markers:
@@ -46,7 +46,7 @@ So just tell me what you want to see next, and put that on its own line in this 
 NEED dir .
 NEED file README.md
 NEED file src/index.ts 1-80
-SEARCH text to find across the whole project${searchI ? ' — put -i first (SEARCH -i Text) to match without letter case' : ''}
+SEARCH text to find across the whole project${searchI ? ' — put -i first (SEARCH -i Text) to match without letter case, and -C 2 (or -A 2 / -B 2) to show that many lines around each hit' : ''}
 GLOB **/*.ts
 SYMBOLS src/index.ts
 DEF someName
@@ -154,6 +154,19 @@ RECALL what we decided about the login flow
 I will look through this project's past sessions and paste back what was said, each line with its date and the session it came from. It is a word match, so ask with the words the past would carry.`;
   }
 
+  if (explore) {
+    text += `
+
+When you need the shape of a folder before opening its files, ask for a tree instead of listing every level by hand:
+
+TREE src
+TREE src -L 3
+
+It lists two levels below the path unless -L says otherwise. For one level with each entry's size and modified time, add -l to a listing (NEED dir src -l), and for one path's kind, size, line count and modified time:
+
+STAT src/app.ts`;
+  }
+
   if (plugins.length) {
     const lines = plugins.map((t) => `${t.marker}${t.takesBody ? '\nwhatever the tool needs\nEND' : ' the arguments on the same line'}    — ${t.description || 'no description'}`);
     text += `
@@ -185,6 +198,20 @@ When you have changed code, do not call it done on the strength of the edit alon
   // evals/fixtures/ depends on.
   const overlay = composePolicy(currentPolicy());
   if (overlay) text += `\n\n${overlay}`;
+
+  // (preamble sections, after the dsh system-prompt shape) What a plugin
+  // contributes lands last, after the machine's own words, one
+  // blank-line-separated block each in load order, attributed so the model
+  // knows whose sentence it is reading. Empty text disappears; a section
+  // whose builder throws or returns nothing is dropped — a plugin must never
+  // break a run. With nothing registered this loop adds no bytes at all,
+  // which is what keeps the CLI's turn-1 message byte-identical.
+  for (const section of sections) {
+    let body = '';
+    try { body = String(section?.text?.() ?? '').trim(); } catch { body = ''; }
+    if (!body) continue;
+    text += `\n\nFrom the "${section.name}" extension installed on this machine:\n\n${body}`;
+  }
 
   return text;
 };
@@ -226,7 +253,7 @@ const markerRe = (marker) => {
 
 // The model usually writes its answer as prose and then a bare DONE, so fall
 // back to that prose rather than reporting an empty result.
-export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|list|ls|file)\b|[^\s]+(?: [\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+)?\s*$)|SEARCH\b|GLOB\b|SYMBOLS\b|DEF\b|REFS\b|RECALL\b|SKILL\b|GIT\b|VERIFY\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|ASK\b|(?:\*{1,3}|#{1,6}\s*)?DONE\b|JOBS\s*$)/i;
+export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|list|ls|file)\b|[^\s]+(?: [\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+)?\s*$)|SEARCH\b|TREE\b|STAT\b|GLOB\b|SYMBOLS\b|DEF\b|REFS\b|RECALL\b|SKILL\b|GIT\b|VERIFY\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|TASK\s*:|ASK\b|(?:\*{1,3}|#{1,6}\s*)?DONE\b|JOBS\s*$)/i;
 export const prose = (reply, plugins = []) => {
   const re = proseRe(plugins);
   let inFence = false;
@@ -240,7 +267,7 @@ export const prose = (reply, plugins = []) => {
 // recorded replies wrote "NEED list desktop" and bare "RUN" as broken markers,
 // while prose that merely starts with the word ("Need to check the logs") must
 // never count as an attempt.
-const MARKER_ATTEMPT = /^\s*(?:\*{1,3}|#{1,6}\s*)?(?:NEED|SEARCH|GLOB|SYMBOLS|DEF|REFS|RECALL|SKILL|GIT|VERIFY|FETCH|WEB|DELETE|MOVE|EDIT|CREATE|ATTACH|FIND|NEW|END|RUN|PLAN|TODO|SUBAGENT|JOBS|TASK|ASK|DONE)\b/;
+const MARKER_ATTEMPT = /^\s*(?:\*{1,3}|#{1,6}\s*)?(?:NEED|SEARCH|TREE|STAT|GLOB|SYMBOLS|DEF|REFS|RECALL|SKILL|GIT|VERIFY|FETCH|WEB|DELETE|MOVE|EDIT|CREATE|ATTACH|FIND|NEW|END|RUN|PLAN|TODO|SUBAGENT|JOBS|TASK|ASK|DONE)\b/;
 
 /**
  * Did the reply try to speak the protocol — even in a shape parse() cannot
@@ -266,7 +293,7 @@ export function attemptedMarker(reply) {
  *  the NEXT message too, so a DONE beside one of them used to end the run and
  *  throw the payoff away unread (a listing, a fetched page, a check's
  *  verdict, a helper's summary). */
-export const READING = new Set(['list', 'read', 'search', 'glob', 'symbols', 'def', 'refs', 'recall', 'skill', 'attach', 'git', 'verify', 'fetch', 'web', 'subagent', 'jobs']);
+export const READING = new Set(['list', 'read', 'search', 'tree', 'stat', 'glob', 'symbols', 'def', 'refs', 'recall', 'skill', 'attach', 'git', 'verify', 'fetch', 'web', 'subagent', 'jobs']);
 
 export function parse(reply, { plugins = [] } = {}) {
   const lines = reply.split('\n');
@@ -315,6 +342,16 @@ export function parse(reply, { plugins = [] } = {}) {
 
     m = /^\s*SEARCH\s+(.+?)\s*$/i.exec(line);
     if (m) { i++; calls.push({ kind: 'search', arg: m[1].trim() }); continue; }
+
+    // TREE — the shape of a folder. The path is optional (the project root),
+    // and an optional `-L depth` narrows it; the tool owns the argument.
+    m = /^\s*TREE\b\s*(.*?)\s*$/i.exec(line);
+    if (m) { i++; calls.push({ kind: 'tree', arg: m[1].trim() }); continue; }
+
+    // STAT — one path's metadata. The path is required, like DEF/REFS: a bare
+    // STAT stays a shape mistake the nudge teaches, not a call on the root.
+    m = /^\s*STAT\s+(.+?)\s*$/i.exec(line);
+    if (m) { i++; calls.push({ kind: 'stat', arg: m[1].trim() }); continue; }
 
     m = /^\s*GLOB\s+(.+?)\s*$/i.exec(line);
     if (m) { i++; calls.push({ kind: 'glob', arg: m[1].trim() }); continue; }

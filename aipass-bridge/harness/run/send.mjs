@@ -44,20 +44,43 @@ export function createSender(run) {
    * @param {any} [withParts]
    */
   const say = async (text, withParts = null) => {
-    const res = await run.bridge.chat({
-      message: text,
-      parts: withParts ?? null,
-      model: run.sheet.model,
-      thinkingLevel: run.sheet.thinking,
-      temperature: run.sheet.temperature,
-      ...(run.conversation ? { conversation: run.conversation, temporary: run.conversationTemporary } : {}),
-      signal: run.options.signal ?? null,
-      onText: (/** @type {string} */ t) => run.emit('assistant_delta', { text: t }),
-      onReasoning: (/** @type {string} */ t) => run.emit('reasoning_delta', { text: t }),
-    });
-    run.session?.append('user', { text, bytes: Buffer.byteLength(text) });
-    run.session?.append('assistant', { text: res.text, reasoning: res.reasoning });
-    return res.text;
+    // What streamed before the send died. A send that delivered words the
+    // person SAW is a different failure from one that delivered nothing: the
+    // message reached the server's context either way, and the transcript
+    // has to hold what was on screen — dsh calls this the interrupted anchor.
+    let delivered = '';
+    try {
+      const res = await run.bridge.chat({
+        message: text,
+        parts: withParts ?? null,
+        model: run.sheet.model,
+        thinkingLevel: run.sheet.thinking,
+        temperature: run.sheet.temperature,
+        ...(run.conversation ? { conversation: run.conversation, temporary: run.conversationTemporary } : {}),
+        signal: run.options.signal ?? null,
+        onText: (/** @type {string} */ t) => { delivered += t; run.emit('assistant_delta', { text: t }); },
+        onReasoning: (/** @type {string} */ t) => run.emit('reasoning_delta', { text: t }),
+      });
+      run.session?.append('user', { text, bytes: Buffer.byteLength(text) });
+      run.session?.append('assistant', { text: res.text, reasoning: res.reasoning });
+      return res.text;
+    } catch (err) {
+      // (interrupted anchor) Deltas streamed, then the send died — a stop, or
+      // a refusal that arrives after the answer started (`err.streamed`, which
+      // the rewrite chain never resends over). The words reached the server
+      // and the person's screen, so both sides are recorded: the message as
+      // sent, and the delivered prefix marked `interrupted` — the next send's
+      // reply continues a conversation whose transcript holds what came
+      // before it, instead of pretending nothing streamed. A failure with
+      // nothing delivered records nothing: the retry path may resend the same
+      // message, and a duplicate user entry would be a lie about what the
+      // server ever received.
+      if (delivered) {
+        run.session?.append('user', { text, bytes: Buffer.byteLength(text) });
+        run.session?.append('assistant', { text: delivered, interrupted: true });
+      }
+      throw err;
+    }
   };
 
   /**
@@ -106,15 +129,9 @@ export function createSender(run) {
    */
   const send = async () => {
     const recover = recoverWaits();
-    // The parts are taken once, before the attempts, not once per attempt: the
-    // queue is emptied by taking them, so an attempt after a refused send
-    // found it empty and the attachment queued for this message was lost —
-    // silently, because the tool had already answered "queued … it goes out
-    // with your next message".
-    const parts = partsForSend();
     for (let attempt = 0; ; attempt++) {
       try {
-        const reply = await saySafe(run.next, parts);
+        const reply = await saySafe(run.next, partsForSend());
         // (listing delta) The memory only becomes true once the message that
         // carries the listing was accepted. The first send of the run is the
         // composed message; every later message carries results or the seed,

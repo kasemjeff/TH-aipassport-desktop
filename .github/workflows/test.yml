@@ -1,10 +1,10 @@
 name: test
 
 on:
-  # main, the branch this repo actually uses — the filter said master, which
-  # does not exist here, so a push to main never ran the suite at all.
+  # master, not main — this repo's default is master, and the old filter meant
+  # a push to it never ran the suite at all.
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 # A push supersedes its predecessors: cancel their runs so a hung runner

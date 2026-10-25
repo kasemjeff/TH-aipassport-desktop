@@ -257,6 +257,11 @@ export function createSettingsMethods(ctx) {
         for (const key of ['replyLanguage', 'langCheck', 'minThaiRatio', 'repeatGuard', 'repeatGuardMax', 'attempts', 'verifyCommand', 'requireCheck']) {
           if (params[key] != null) h.options[key] = appSettings.get(key);
         }
+        // The reading switches: the preamble and the read group read their
+        // options per run, so a save is live on the next one.
+        for (const key of ['recall', 'explore', 'parallelReads']) {
+          if (params[key] != null) h.options[key] = appSettings.get(key);
+        }
         // The playbook folders are per project, so each harness rebuilds its
         // own list. The plugin list is one module for the whole backend and is
         // reloaded once below.

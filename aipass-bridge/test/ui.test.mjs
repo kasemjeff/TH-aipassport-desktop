@@ -586,6 +586,21 @@ test('a stop that found nothing to stop says so instead of pretending', async ()
   assert.equal(node('send').textContent, 'ส่ง', 'the button is free again — there was nothing to stop');
 });
 
+test('/stop with nothing to stop brings the working bar back down', async () => {
+  // The palette stop used to put the bar up by itself and, hearing "there was
+  // nothing to stop", never took it down — a window that kept beating for a
+  // run that did not exist, because the command asked the backend with its
+  // own thin stop instead of the send button's cancelRun.
+  const backend = { ...BACKEND, cancel: () => ({ ok: false, running: false, reason: 'no run in /tmp/proj' }) };
+  const { node, tick } = await bootApp(backend);
+  node('task').value = '/stop';
+  node('task').dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.match(node('log').textContent, /หยุดไม่ได้/, 'the window says what the stop found');
+  assert.equal(node('send').textContent, 'ส่ง', 'the button is free again');
+  assert.equal(node('working').classList.contains('hidden'), true, 'and the bar is down — nothing is working');
+});
+
 test('the model list holds only models that can talk', async () => {
   // The bridge offers image, video and music models too; selecting one would
   // fail every run, so the dropdown is filtered and named for humans.
@@ -1027,6 +1042,47 @@ test('a longer checklist keeps the reading position', async () => {
   assert.equal(ul.scrollTop, 40, 'the scroll position survives the rebuild');
 });
 
+test('rows that land in one burst ask the bottom once, after the burst', async () => {
+  // A step boundary drops a burst of rows — the step note, the tool rows, the
+  // next bubble — and every row used to read the layout the moment it landed:
+  // N synchronous layouts inside one turn, and the window hitched at every
+  // step. The burst now shares one frame, which asks the question once,
+  // against the burst's final state.
+  const { node, tick } = await bootApp(BACKEND);
+  const log = node('log');
+  let reads = 0;
+  Object.defineProperty(log, 'scrollHeight', { get() { reads += 1; return 1000; } });
+  Object.defineProperty(log, 'clientHeight', { get() { return 400; } });
+  // Drain the boot's last frames first: this test counts reads, and a banner
+  // from a late boot frame must not land in the count.
+  for (let i = 0; i < 8; i++) await tick();
+  reads = 0;
+  log.scrollTop = 600; // 1000 − 600 − 400 = 0 — pinned at the bottom
+  globalThis.__stream.emit('note', { text: 'one' });
+  globalThis.__stream.emit('note', { text: 'two' });
+  globalThis.__stream.emit('note', { text: 'three' });
+  // The load-bearing number: the old code read the layout once per row, right
+  // here, mid-burst. Coalescing means the burst reads nothing while it lands.
+  assert.equal(reads, 0, 'the burst reads no layout while it lands');
+  assert.equal(log.scrollTop, 600, 'nothing scrolls mid-burst');
+  await tick();
+  assert.equal(log.scrollTop, 1000, 'the frame after the burst follows to the bottom');
+});
+
+test('a reader who scrolled up is not yanked by the next burst', async () => {
+  // The follow is conditional on the reader being at the bottom, and the
+  // coalescing must not change that: a deferred check still reads THEIR
+  // position, not the one the window had when the row landed.
+  const { node, tick } = await bootApp(BACKEND);
+  const log = node('log');
+  Object.defineProperty(log, 'scrollHeight', { get() { return 1000; } });
+  Object.defineProperty(log, 'clientHeight', { get() { return 400; } });
+  log.scrollTop = 0; // 600px away from the bottom — reading, not following
+  globalThis.__stream.emit('note', { text: 'a row they were not reading yet' });
+  await tick(); await tick();
+  assert.equal(log.scrollTop, 0, 'the row lands, the scroll stays where the reader put it');
+});
+
 test('a malformed todo frame is dropped, not a crash', async () => {
   // The card renders wire data. A frame with no items (an older backend, a
   // truncated relay) used to throw inside the stream handler — mid-run.
@@ -1379,6 +1435,52 @@ test('a link in the chat opens in the browser, not in the window', async () => {
   );
 });
 
+test('web media in a reply waits for the reader to load it', async () => {
+  // The paint path: a picture the model addressed on the open web reaches the
+  // bubble as a slot that names its address and carries no src — the fetch
+  // waits for the reader's click (transcript.js wires it), because the URL
+  // leaves the machine the moment the element loads.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('assistant_delta', { text: 'นี่กราฟครับ\n\n![chart](https://example.com/chart.png?d=1)\n' });
+  await tick();
+  const bubble = node('log').children.find((c) => c.className.includes('assistant'));
+  const html = bubbleHtml(bubble);
+  assert.ok(html.includes('data-md-src="https://example.com/chart.png?d=1"'), html);
+  assert.ok(!/\ssrc=/i.test(html), 'nothing is fetched on paint');
+});
+
+test('a click or an Enter on a media slot loads it', async () => {
+  // The consent wiring: transcript.js delegates the click and the Enter or
+  // Space of the slot's button role to loadDeferredMedia. The bubble's markup
+  // is a string in the fake DOM, so the slot is hosted on a real node — the
+  // delegated listener and the swap are the real code under test.
+  const { node } = await bootApp(BACKEND);
+  const log = node('log');
+  const slot = new El('img');
+  slot.className = 'md-image md-media-deferred';
+  slot.dataset.mdSrc = 'https://example.com/cat.png?d=1';
+  log.append(slot);
+  slot.dispatch('click');
+  assert.equal(slot.src, 'https://example.com/cat.png?d=1', 'the click gave the element its source');
+  assert.equal(slot.className, 'md-image', 'the slot mark is spent');
+
+  const video = new El('video');
+  video.className = 'md-video md-media-deferred';
+  video.dataset.mdSrc = 'https://example.com/clip.mp4';
+  log.append(video);
+  video.dispatch('keydown', { key: 'Enter' });
+  assert.equal(video.src, 'https://example.com/clip.mp4');
+  assert.equal(video.controls, true, 'the player appears once it is asked for');
+  assert.equal(video.preload, 'metadata');
+
+  // A slot whose address is spent (or was never one) loads nothing again.
+  const spent = new El('img');
+  spent.className = 'md-image md-media-deferred';
+  log.append(spent);
+  spent.dispatch('click');
+  assert.equal(spent.src, undefined);
+});
+
 test('a finished run folds its working trail and leaves the result open', async () => {
   // The run used to leave every step on screen — the answer sat at the bottom
   // of a wall of rows. On done/ask the trail folds under one line and the
@@ -1571,6 +1673,29 @@ test('a typed draft survives a reload', async () => {
   node('task').dispatch('input');
   assert.equal(store.get('aipass.draft'), 'a paragraph worth keeping', 'the draft is stored as you type');
   void tick;
+});
+
+test('the draft is gone once the task it held is sent', async () => {
+  // sendTask emptied the textarea with an assignment, and an assignment
+  // fires no input event — the storage kept the SENT text, and the next boot
+  // came back pre-filled with work that was already done.
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+  };
+  const { node, tick } = await bootApp(BACKEND);
+  node('task').value = 'the text that was sent';
+  node('task').dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.equal(store.get('aipass.draft'), '', 'the sent text is not stored as a draft');
+
+  // A command goes through the same composer and the same clear.
+  node('task').value = '/status';
+  node('task').dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.equal(store.get('aipass.draft'), '', 'and a sent command clears the draft too');
 });
 
 test('the session list filters as you type', async () => {
@@ -2018,37 +2143,59 @@ test('the effort level is picked in the composer, not buried in settings', async
   assert.equal(/thinking level/.test(node('modal-body').textContent), false, 'the sheet does not ask for the effort anymore');
 });
 
-test('the temperature chip sits beside the effort chip and writes through', async () => {
-  // Sampling temperature is a per-message knob too: it rides beside the effort
-  // chip and writes through settings.set the moment it changes; null means the
-  // server's per-model default, so the chip boots at "default".
+test('temperature lives in the settings sheet, not beside the composer', async () => {
+  // The temperature chip used to sit beside the effort chip on the theory that
+  // both ride the next message. They do not age the same: effort is a
+  // per-message judgement call, temperature a rarely-touched model parameter,
+  // and a knob nobody turns has no business in the row read on every message.
+  // The sheet's คุยกับโมเดล page owns it now, and the window itself stopped
+  // wiring #temperature — a stray change event reaches nothing.
   const { node, sent, tick } = await bootApp(BACKEND);
-  assert.equal(node('temperature').value, 'default', 'the chip boots at the default');
-
   node('temperature').value = '0.7';
   node('temperature').dispatch('change');
   await tick();
-  assert.deepEqual(sent.at(-1), { method: 'settings.set', params: { temperature: 0.7 } }, 'a pick is a number on the wire');
+  assert.equal(sent.filter((c) => c.method === 'settings.set').length, 0, 'the composer no longer writes temperature');
 
-  node('temperature').value = 'default';
-  node('temperature').dispatch('change');
-  await tick();
-  assert.deepEqual(sent.at(-1), { method: 'settings.set', params: { temperature: null } }, 'default clears it back to null');
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  const page = sheetPage(node, 'model');
+  assert.ok(page, 'the model page is in the sheet');
+  const selects = [];
+  const walk = (n) => {
+    if (n.tagName === 'SELECT') selects.push(n);
+    for (const c of n.children ?? []) walk(c);
+  };
+  walk(page);
+  const temp = selects.find((s) => s.options.some((o) => o.value === '0.7'));
+  assert.ok(temp, 'the sheet carries the temperature select');
+  assert.equal(temp.options.find((o) => o.value === 'default')?.selected, true, 'a saved null boots at default');
+  // And the mode is NOT a row here anymore: it lives beside the composer,
+  // where the message it governs is written. Two surfaces for one control
+  // drift, so the sheet stopped carrying its copy.
+  assert.equal(selects.some((s) => s.options.some((o) => o.value === 'ask')), false, 'the sheet no longer asks for the mode');
+
+  temp.value = '0.7';
+  temp.dispatch('change');
+  const save = node('modal-actions').children.find((b) => /save|บันทึก/.test(b.textContent));
+  assert.ok(save, 'a save button exists');
+  save.dispatch('click');
+  await tick(); await tick();
+  const savedTemperature = sent.filter((c) => c.method === 'settings.set').at(-1)?.params?.temperature;
+  assert.equal(savedTemperature, 0.7, 'the sheet writes temperature as a number');
 });
 
-test('the saved settings land in the header chips together', async () => {
-  // The mode, the effort and the temperature are ONE apply path: a settings
-  // change lands in all three chips at once, and none of them is left showing
-  // what the machine no longer believes.
-  const saved = { ...BACKEND['settings.get'](), mode: 'auto', requirePlanApproval: true, thinking: 'high', temperature: 0.7 };
+test('the saved settings land in the composer controls together', async () => {
+  // The mode and the effort are ONE apply path: a settings change lands in
+  // both at once, and neither is left showing what the machine no longer
+  // believes.
+  const saved = { ...BACKEND['settings.get'](), mode: 'auto', requirePlanApproval: true, thinking: 'high' };
   const backend = { ...BACKEND, 'settings.get': () => saved, 'settings.set': () => saved };
   const { node, tick } = await bootApp(backend);
   assert.equal(node('mode').value, 'plan', 'the mode chip shows the plan view');
   assert.equal(node('thinking').value, 'high', 'the effort chip shows the saved level');
-  assert.equal(node('temperature').value, '0.7', 'the temperature chip shows the saved number');
 
-  // And a save from the sheet moves all three at once, because the sheet
-  // asks the same one path to apply what it just wrote.
+  // And a save from the sheet moves both at once, because the sheet asks the
+  // same one path to apply what it just wrote.
   node('settings-btn').dispatch('click');
   await tick(); await tick();
   const save = node('modal-actions').children.find((b) => /save|บันทึก/.test(b.textContent));
@@ -2057,7 +2204,6 @@ test('the saved settings land in the header chips together', async () => {
   await tick(); await tick();
   assert.equal(node('mode').value, 'plan', 'the mode chip still shows the plan view');
   assert.equal(node('thinking').value, 'high', 'the effort chip still shows the saved level');
-  assert.equal(node('temperature').value, '0.7', 'the temperature chip still shows the saved number');
 });
 
 test('shift+tab cycles ask, auto and plan — and writes each through', async () => {
@@ -2442,6 +2588,98 @@ test('the window says it is working while a run is in flight', async () => {
   assert.equal(node('log').classList.contains('busy'), false, 'and the log takes its room back');
 });
 
+/** The silence the watchdog acts on: twenty seconds with no event at all. */
+async function agePastTheWatchdog(t) {
+  // `now` pins the mocked clock to the real present: the run just stamped
+  // lastEventAt with the real clock, and a mocked epoch that starts anywhere
+  // else would make the silence read as negative instead of past the window.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.mock.timers.tick(21_000);
+}
+
+test('a quiet stream with a live backend is not written off', async (t) => {
+  // The stream can go quiet while the run is fine — the laptop slept, the
+  // socket is reconnecting, the backend restarted. The watchdog used to write
+  // the run off AND cancel it upstream after twenty silent seconds, throwing
+  // away work that was going to finish. Now it asks the backend first: an
+  // answer means the run is legitimate, and the window waits for the stream.
+  const backend = { ...BACKEND, status: () => ({ ...BACKEND.status(), running: true }) };
+  const { node, tick, timers } = await bootApp(backend);
+  const task = node('task');
+  task.value = 'a task that keeps going';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+
+  await agePastTheWatchdog(t);
+  for (const fn of [...timers.values()]) await fn();
+  await tick();
+
+  assert.equal(node('send').textContent, 'หยุด', 'the run is still the window\'s');
+  assert.equal(node('working').classList.contains('hidden'), false, 'the bar stays up');
+  assert.match(node('log').textContent, /backend ยังตอบอยู่แต่สตรีมเงียบ/, 'and the silence is explained');
+  assert.doesNotMatch(node('log').textContent, /ถือว่าหยุดแล้ว/, 'and nothing was written off');
+});
+
+test('a run the backend already ended is written off, once', async (t) => {
+  // A closing frame can be lost to a transport that never came back: the
+  // backend is fine and says the run is over, and the window would keep the
+  // bar up for ever. The watchdog asks, hears "ended", and puts the run down.
+  const { node, tick, timers, sent } = await bootApp(BACKEND);
+  const task = node('task');
+  task.value = 'a task whose ending was lost';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+
+  await agePastTheWatchdog(t);
+  for (const fn of [...timers.values()]) await fn();
+  await tick();
+
+  assert.equal(node('send').textContent, 'ส่ง', 'the composer is free again');
+  assert.equal(node('working').classList.contains('hidden'), true, 'the bar is down');
+  assert.match(node('log').textContent, /จบไปแล้วที่ backend/, 'and the note says where the run ended');
+  assert.ok(sent.some((r) => r.method === 'cancel'), 'the backend is told the window let go');
+});
+
+test('a backend that refuses to answer the watchdog ends the run on screen', async (t) => {
+  // A refusal is a fact about the backend, not the transport: the process is
+  // gone, no run can come back, and waiting for it is a spinner for ever.
+  const backend = { ...BACKEND };
+  const { node, tick, timers, sent } = await bootApp(backend);
+  const task = node('task');
+  task.value = 'a task whose backend died';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+
+  backend.status = () => { throw new Error('connection refused'); };
+  await agePastTheWatchdog(t);
+  for (const fn of [...timers.values()]) await fn();
+  await tick();
+
+  assert.equal(node('send').textContent, 'ส่ง', 'the composer is free again');
+  assert.equal(node('working').classList.contains('hidden'), true, 'the bar is down');
+  assert.match(node('log').textContent, /backend ไม่ตอบ/, 'and the note says the backend is gone');
+  assert.ok(sent.some((r) => r.method === 'cancel'), 'the write-off still tells the backend');
+});
+
+test('a quiet stream exceeding the 3-minute hard ceiling writes off the stalled run', async (t) => {
+  const backend = { ...BACKEND, status: () => ({ ...BACKEND.status(), running: true }) };
+  const { node, tick, timers, sent } = await bootApp(backend);
+  const task = node('task');
+  task.value = 'a task that stalled forever';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.mock.timers.tick(181_000);
+  for (const fn of [...timers.values()]) await fn();
+  await tick();
+
+  assert.equal(node('send').textContent, 'ส่ง', 'the composer is reset');
+  assert.equal(node('working').classList.contains('hidden'), true, 'the bar is down');
+  assert.match(node('log').textContent, /เงียบเกิน 3 นาที/, 'the hard ceiling note is shown');
+  assert.ok(sent.some((r) => r.method === 'cancel'), 'cancel is called upstream');
+});
+
 test('a reloaded window comes back with its conversation, not the welcome card', async () => {
   // Ctrl+R reloads the window. What came back used to be the welcome card
   // over an empty screen: the boot paints the card, and the card says
@@ -2518,6 +2756,65 @@ test('a token refusal does not send the reader to the extension popup', async ()
   const text = node('log').textContent;
   assert.doesNotMatch(text, /\.aipass\/\.token/, 'the token file is not the answer any more');
   assert.match(text, /ปฏิเสธ token/, 'but it is still a token refusal');
+});
+
+test('a banner the transcript was emptied under comes back on the next look', async () => {
+  // A new session cleared #log, and the token banner's sync still held the
+  // bar it had painted — a node no longer in the document. The sync saw the
+  // state still failing and a bar "already up", and the notice never came
+  // back. The clear now forgets the bars, and the next look repaints the
+  // ones that still apply.
+  const backend = {
+    ...BACKEND,
+    status: () => ({ ...BACKEND.status(), extensions: 0, extensionToken: 'missing' }),
+    'model.set': () => ({ ok: true }),
+  };
+  const { node, tick } = await bootApp(backend, { token: 'tok' });
+  await tick(); await tick();
+  const bar = () => node('log').children.find((c) => /needs-tab/.test(c.className ?? ''));
+  assert.ok(bar(), 'the token banner is up');
+
+  node('new-session').dispatch('click');
+  await tick(); await tick(); await tick();
+  assert.ok(!bar(), 'the clear took the banner with it');
+
+  // The next look at the state — here a model switch, which ends in the same
+  // refreshHeader the ten-second poll uses — repaints it.
+  node('task').value = '/model m';
+  node('task').dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick(); await tick();
+  assert.ok(bar(), 'and the banner is back — the state is still missing');
+});
+
+test('a cleared transcript starts its trim count over', async () => {
+  // The trim marker survived a clear as a detached node: the next trim
+  // counted the last session's rows into this one, and — the marker being
+  // out of the document — cut rows without the line that says how many at
+  // all. A new session starts its account from zero.
+  const entries = Array.from({ length: 305 }, (_, i) => ({ type: 'task', text: `task ${i}` }));
+  const backend = {
+    ...BACKEND,
+    snapshot: () => ({
+      status: { root: '/tmp/proj', running: false },
+      session: { id: 's1', title: 'one' },
+      entries,
+      pending: [],
+      asks: {},
+    }),
+  };
+  const { node, tick } = await bootApp(backend);
+  globalThis.__stream.emit('open', {});
+  await tick(); await tick(); await tick();
+  const first = node('log').textContent.match(/ตัด (\d+) รายการ/);
+  assert.ok(first, 'the trim is counted — 305 rows in a 300-row window');
+
+  node('new-session').dispatch('click');
+  await tick(); await tick(); await tick();
+  globalThis.__stream.emit('open', {});
+  await tick(); await tick(); await tick();
+  const second = node('log').textContent.match(/ตัด (\d+) รายการ/);
+  assert.ok(second, 'and the new transcript still says what it dropped');
+  assert.equal(second[1], first[1], 'and the count starts over — the last session\'s rows are not carried in');
 });
 
 test('the window names the extension\'s token when that is what is missing', async () => {
@@ -3002,6 +3299,41 @@ test('the rail starts a session, and the foot opens the rest of the app', async 
   assert.match(node('modal-title').textContent, /วิธีใช้/);
 });
 
+test('the ? key opens the guide the welcome card promises', async () => {
+  // The welcome card says "กด ? เพื่อดูวิธีใช้ทั้งหมด", and no key did that —
+  // a promise the keys did not keep. It opens now, from anywhere the window
+  // itself has the focus; a form field keeps its question marks. (The sheet
+  // is closed by Escape first: the fake does not carry the HTML's initial
+  // class, so "closed" has to be a state the window itself set.)
+  const { node, tick } = await bootApp(BACKEND);
+  const key = (ev) => globalThis.document.dispatch('keydown', { preventDefault() {}, ...ev });
+  key({ key: 'Escape' });
+  await tick();
+  key({ key: '?', target: { tagName: 'TEXTAREA' } });
+  await tick();
+  assert.equal(node('modal').classList.contains('hidden'), true, 'a form field keeps its ?');
+
+  // A modified ? belongs to nobody here: the shell's own chords keep their
+  // meaning, and none of them opens the guide.
+  key({ key: '?', ctrlKey: true });
+  key({ key: '?', metaKey: true });
+  key({ key: '?', altKey: true });
+  await tick();
+  assert.equal(node('modal').classList.contains('hidden'), true, 'modified ? keys do not open it');
+
+  key({ key: '?' });
+  await tick();
+  assert.equal(node('modal').classList.contains('hidden'), false, '? opens the guide');
+  assert.match(node('modal-title').textContent, /วิธีใช้/);
+
+  // The sheet is open: it keeps its own keys — the guide is not replaced
+  // under the reader.
+  key({ key: '?' });
+  await tick();
+  assert.equal(node('modal').classList.contains('hidden'), false, 'an open sheet is left open');
+  assert.match(node('modal-title').textContent, /วิธีใช้/);
+});
+
 test('the rail carries no playbook row and no plugin row — the settings sheet has both', async () => {
   // Two folded headings used to sit in the rail: "คู่มือ" and "ปลั๊กอิน".
   // Clicking one opened a box you had to guess at, in a column whose job is the
@@ -3294,6 +3626,29 @@ test('the apply says the write can be taken back', async () => {
   node('apply').dispatch('click');
   await tick(); await tick();
   assert.match(node('log').textContent, /ย้อนกลับได้ที่จุด #cp-9/, 'the window names the way back');
+});
+
+test('a double-clicked apply writes once, and listens again once it settles', async () => {
+  // The buttons answer faster than the rpc does: a second press on an
+  // unanswered Apply used to send the same write twice, the second landing
+  // after the pending list had been rebuilt under it. While one is in flight
+  // the buttons are not listening; once it settles, a deliberate press works.
+  const { node, tick, calls } = await bootApp({
+    ...BACKEND,
+    apply: () => ({ written: 1, deleted: 0, files: ['a.js'], checkpoint: { id: 'cp-1', createdAt: 1, files: ['a.js'] } }),
+    pending: () => [{ file: 'a.js', added: 1, removed: 0 }],
+  });
+  globalThis.__stream.emit('diff_update', { changes: [{ file: 'a.js', added: 1, removed: 0 }] });
+  await tick();
+  node('apply').dispatch('click');
+  node('apply').dispatch('click'); // the first call is still in flight
+  node('discard').dispatch('click'); // same staging area — also not listening
+  await tick(); await tick();
+  assert.equal(calls.filter((m) => m === 'apply').length, 1, 'the double click sent one write');
+  assert.equal(calls.includes('discard'), false, 'a discard cannot interleave with an apply in flight');
+  node('apply').dispatch('click'); // a deliberate press, after it settled
+  await tick(); await tick();
+  assert.equal(calls.filter((m) => m === 'apply').length, 2, 'and the settled press is listened to again');
 });
 
 test('the git page commits with a message, and refuses an empty one', async () => {

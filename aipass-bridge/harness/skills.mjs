@@ -9,10 +9,10 @@
 // playbook is FOR. It is a preamble, not the index: the list of what is
 // actually on disk is generated and always follows it.
 //
-// Search order: the folders a person wrote into settings, then the project
-// (`.aipass/skills` under the root), the user (`~/.aipass/skills`), then the
-// repo default shipped next to the CLI. An explicit `--skills` /
-// `AIPASS_SKILLS_DIR` replaces the list entirely, which is how the original
+// Search order: the folders a person wrote into settings (`skillsDirs`), then
+// the project (`.aipass/skills` under the root), the user (`~/.aipass/skills`),
+// then the repo default shipped next to the CLI. An explicit `--skills`
+// replaces the list entirely, which is how the original
 // single-folder behaviour stays byte-identical.
 import fs from 'node:fs';
 import path from 'node:path';

@@ -10,9 +10,7 @@ name: build
 
 on:
   push:
-    # main, the branch this repository actually uses — the filter said
-    # master, which does not exist here, so the lane never ran at all.
-    branches: [main]
+    branches: [master]
   pull_request:
   workflow_dispatch:
 

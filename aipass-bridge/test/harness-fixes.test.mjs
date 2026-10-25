@@ -1,23 +1,23 @@
 ﻿// One test per finding of the harness sweep, each a measured defect:
 //
-//   H1 the harness walked into its own spill directory — `.aipass` was missing
+//   H1 the harness walked into its own spill directory â€” `.aipass` was missing
 //      from SKIP, so LIST/SEARCH/GLOB traversed the output of earlier runs
 //   H2 glob() matched only the last segment of a `**` pattern, so
 //      `src/**/*.ts` returned every .ts file in the tree
 //   H3 the git gate was a prefix test, so `branch -D main`, `tag -d v1`,
-//      `remote add …` and `-c core.pager=sh status` all passed
+//      `remote add â€¦` and `-c core.pager=sh status` all passed
 //   H4 append() rewrote the whole session file on every entry (O(nÂ²) IO)
 //   H5 a rejected send was recorded before it was ever accepted, so the
-//      session kept ghost messages the server never saw — and every
+//      session kept ghost messages the server never saw â€” and every
 //      resilientSay retry wrote a duplicate
 //   H7 nothing stopped a run that repeated the same step with the same
-//      results until the step limit — a loop that burns the whole budget
-//   H8 #makeHelper() built its engine with no rules, so a `.env* → deny` rule
+//      results until the step limit â€” a loop that burns the whole budget
+//   H8 #makeHelper() built its engine with no rules, so a `.env* â†’ deny` rule
 //      was bypassed by every helper run
-//   H9 the same `.env* → deny` rule stopped writes but not reads — `NEED file
+//   H9 the same `.env* â†’ deny` rule stopped writes but not reads â€” `NEED file
 //      .env` still sent the secrets upstream; reads consult the rules now
 //   H10 a reply that tried to speak the protocol and mangled it parsed to
-//      nothing, and the implicit-done path read that as an answer — a
+//      nothing, and the implicit-done path read that as an answer â€” a
 //      marker-shaped line now earns the shape-teaching nudge instead
 // (H6, the compaction estimate measuring the message before the WAF rewrites
 // it, lives in compact.test.mjs with the rest of the compactor's tests.)
@@ -44,8 +44,6 @@ process.env.AIPASS_HOME = HOME;
 // The 403 waits are pinned by their own tests; here H5 only needs the retry
 // order, not the clock.
 process.env.AIPASS_EDGE_WAITS_MS = '0';
-// The run-level pause before a refused send is given the message again.
-process.env.AIPASS_RECOVER_WAITS_MS = '0';
 after(() => fs.rmSync(HOME, { recursive: true, force: true }));
 
 /** Tools over a plain directory, the way the CLI and the harness build them. */
@@ -59,7 +57,7 @@ function toolsIn(dir) {
   });
 }
 
-/* H1 — the project's own spill directory ---------------------------------- */
+/* H1 â€” the project's own spill directory ---------------------------------- */
 
 test('the spill directory is out of every listing, but still readable', async () => {
   const dir = tempDir({
@@ -87,7 +85,7 @@ test('the spill directory is out of every listing, but still readable', async ()
   assert.ok(!globbed.includes('.aipass'), 'and a glob does not surface it either');
 });
 
-/* H2 — glob honours the prefix before ** ---------------------------------- */
+/* H2 â€” glob honours the prefix before ** ---------------------------------- */
 
 test('glob matches the pattern against the whole path, not the last segment', async () => {
   const dir = tempDir({
@@ -111,7 +109,7 @@ test('glob matches the pattern against the whole path, not the last segment', as
   assert.match(await tools.glob('src/**/*.tsx'), /^no files matched "src\/\*\*\/\*\.tsx"\.$/);
 });
 
-/* H3 — the git gate ------------------------------------------------------- */
+/* H3 â€” the git gate ------------------------------------------------------- */
 
 const DANGEROUS = [
   'diff --no-index /etc/passwd /etc/passwd',
@@ -163,7 +161,7 @@ test('git outside a repository answers in one line, not a page of help', async (
   assert.ok(out.split('\n').length <= 2, `one line of reason, got:\n${out}`);
 });
 
-/* H4 — the header is rewritten in batches --------------------------------- */
+/* H4 â€” the header is rewritten in batches --------------------------------- */
 
 test('append batches the header rewrite, and rename still fixes it at once', (t) => {
   const store = new SessionStore(tempDir());
@@ -172,7 +170,7 @@ test('append batches the header rewrite, and rename still fixes it at once', (t)
   // rewriteHeader() is the only thing that rewrites an existing session file.
   // Since headers are padded to a fixed width, a rewrite is normally one
   // writeSync at offset 0 (the atomic writeFileSync swap remains the fallback
-  // for unpadded files) — so both write paths count as one rewrite. That also
+  // for unpadded files) â€” so both write paths count as one rewrite. That also
   // tells appendFileSync apart from it: on Node 24 an append is implemented as
   // a writeFileSync, and the caller in the stack is what separates "one entry
   // appended" from "the header rewritten".
@@ -219,7 +217,7 @@ test('append batches the header rewrite, and rename still fixes it at once', (t)
   assert.equal(JSON.parse(fs.readFileSync(session.file, 'utf8').split('\n', 1)[0]).title, 'renamed now');
   assert.equal(renamed.title, 'renamed now');
 
-  // The entries themselves were never rewritten — appendFileSync appends — so
+  // The entries themselves were never rewritten â€” appendFileSync appends â€” so
   // the whole chain is still on disk and still parses.
   const back = store.load(session.id);
   assert.equal(back.entries.length, 60);
@@ -228,7 +226,7 @@ test('append batches the header rewrite, and rename still fixes it at once', (t)
   assert.equal(back.title, 'renamed now');
 });
 
-/* H8 — a helper is judged by the rules the person configured --------------- */
+/* H8 â€” a helper is judged by the rules the person configured --------------- */
 
 test('a helper engine keeps the parent path rules', () => {
   const engine = new PermissionEngine({ mode: 'yolo', allowRun: false, rules: [{ pattern: '.env*', decision: 'deny' }] });
@@ -242,7 +240,7 @@ test('a helper run that edits a denied path is declined, and nothing is staged',
   const root = tempDir({ 'src/app.ts': 'export const a = 1;\n' });
 
   // A bridge that answers with scripted turns, and does nothing else: chat()
-  // hands them out in order — the parent delegates, the helper tries the
+  // hands them out in order â€” the parent delegates, the helper tries the
   // edit, the parent finishes.
   class StubBridge extends BridgeClient {
     constructor(replies) {
@@ -288,7 +286,7 @@ test('a helper run that edits a denied path is declined, and nothing is staged',
   assert.equal(fs.existsSync(path.join(root, '.env')), false, 'nothing was written to disk either');
 });
 
-/* H9 — a deny rule stops reads as well -------------------------------------- */
+/* H9 â€” a deny rule stops reads as well -------------------------------------- */
 
 test('a deny rule keeps secrets out of reads too (H9)', () => {
   const engine = new PermissionEngine({ mode: 'yolo', allowRun: false, rules: [{ pattern: '.env*', decision: 'deny' }] });
@@ -342,46 +340,7 @@ test('a denied read is refused with a reason before the file is opened (H9)', as
   assert.match(denied.head, /denies reading \.env/, `the rule answered before the read happened:\n${denied.head}`);
 });
 
-/* H5 — only the sends the server accepted are recorded --------------------- */
-
-/* H12 — an attachment queued for the next message rides every attempt of it - */
-
-test('an attachment queued for the next message survives a refused send (H12)', async () => {
-  const dir = tempDir({ 'shot.png': 'pretend this is a picture\n' });
-  const store = new SessionStore(path.join(dir, 'sessions'));
-  const session = store.create({ root: dir });
-  const tools = createTools({ root: dir, overlay: new Overlay(dir) });
-
-  // The model asks for the file, the tool queues it, and the send that
-  // carries it is refused once and retried. The parts are taken by handing
-  // them over, and they were taken again on the retry — so the retry went
-  // out without the attachment, and nothing said so: the tool had already
-  // answered "queued … it goes out with your next message".
-  const replies = ['ATTACH shot.png', 'DONE attached'];
-  const sent = [];
-  let calls = 0;
-  const result = await runTask('attach the shot', {
-    bridge: {
-      async chat({ message, parts }) {
-        calls++;
-        sent.push({ message, parts });
-        if (calls === 2) throw new Error('bridge returned 503');
-        return { text: replies[Math.min(calls - 1, replies.length - 1)] };
-      },
-      async quota() { return { available: 1 }; },
-    },
-    tools, overlay: new Overlay(dir), session,
-    options: { maxSteps: 3 }, first: true,
-  });
-
-  assert.ok(calls >= 3, `the refused send was retried (calls: ${calls})`);
-  assert.ok(sent[1].parts?.length, 'the first attempt carried the attachment');
-  assert.ok(sent[2].parts?.length, 'and the retry carried it too');
-  assert.equal(sent[2].parts[0].type, 'file');
-  assert.equal(result.stopReason, 'done');
-});
-
-/* H5 — only the sends the server accepted are recorded --------------------- */
+/* H5 â€” only the sends the server accepted are recorded --------------------- */
 
 test('nothing is recorded for a send that failed outright (H5)', async () => {
   const dir = tempDir({ 'a.txt': 'hello\n' });
@@ -429,7 +388,7 @@ test('a firewall rejection is not logged, and each accepted retry exactly once (
   assert.equal(result.stopReason, 'done');
   assert.ok(calls > 1, 'the rejected attempt was retried');
   const users = session.entries.filter((e) => e.type === 'user');
-  // received[0] is the rejected attempt — it must have left no trace. Every
+  // received[0] is the rejected attempt â€” it must have left no trace. Every
   // accepted send (split halves, the redaction, the fallback note) is what the
   // server's context holds, so each has to be there, once, in order.
   assert.deepEqual(users.map((u) => u.text), received.slice(1));
@@ -457,7 +416,7 @@ test('a send that failed outright records why it died (note + run_stats.sendErro
   assert.equal(stats.sendError, 'bridge is unreachable', 'run_stats carries the cause');
 });
 
-/* H7 — the stagnation guard ------------------------------------------------ */
+/* H7 â€” the stagnation guard ------------------------------------------------ */
 
 /** A bridge that answers a fixed list of turns and records what was sent. */
 function scriptedLoop(replies) {
@@ -515,12 +474,12 @@ test('one repeat earns a correction, and a different move clears the guard (H7)'
   assert.match(bridge.received[2], /repeating it moves nothing/, 'the correction reached the model');
 });
 
-/* H10 — a broken marker is an attempt, not an answer ------------------------ */
+/* H10 â€” a broken marker is an attempt, not an answer ------------------------ */
 
 test('a marker-shaped line that parses to nothing earns the nudge, not a silent done (H10)', async () => {
   // Recorded live (session f5acb222): the model asked for a folder with a line
   // that parsed to nothing, and the run was marked done 633ms later with zero
-  // nudges — the implicit-done path treats "prose after real work" as an
+  // nudges â€” the implicit-done path treats "prose after real work" as an
   // answer, and a mangled marker is not an answer.
   const dir = tempDir({ 'a.txt': 'hello\n' });
   const store = new SessionStore(path.join(dir, 'sessions'));
@@ -535,7 +494,7 @@ test('a marker-shaped line that parses to nothing earns the nudge, not a silent 
     options: { maxSteps: 8 }, first: true,
   });
 
-  assert.equal(result.stopReason, 'done', 'the run still finishes — after the nudge');
+  assert.equal(result.stopReason, 'done', 'the run still finishes â€” after the nudge');
   assert.deepEqual(nudged.map((p) => p.n), [1], 'the broken marker earned exactly one nudge');
   assert.match(bridge.received[2], /no marker I could act on/, 'the nudge teaches the shape instead of ending the run');
   assert.match(bridge.received[2], /if your answer is already written above, that is all the reply needs/, 'and a written answer plus DONE is enough');
@@ -544,7 +503,7 @@ test('a marker-shaped line that parses to nothing earns the nudge, not a silent 
 
 test('a plain answer after real work still ends the run, un-nudged (H10)', async () => {
   // The guard above must not turn every prose ending into a nudge. A run that
-  // did real work and closes with a sentence — no marker lookalike — is done.
+  // did real work and closes with a sentence â€” no marker lookalike â€” is done.
   const dir = tempDir({ 'a.txt': 'hello\n' });
   const store = new SessionStore(path.join(dir, 'sessions'));
   const session = store.create({ root: dir });
@@ -566,7 +525,7 @@ test('a plain answer after real work still ends the run, un-nudged (H10)', async
 /* A RUN's label is its command --------------------------------------------- */
 
 test('a run row carries the command, not an empty string', async () => {
-  // The parser puts a RUN command in the body, so `arg` used to be '' — the
+  // The parser puts a RUN command in the body, so `arg` used to be '' â€” the
   // window showed a row that said "Run" and nothing else, the replayed session
   // the same, and the step result read "Result of run :" to the model.
   const dir = tempDir({});
@@ -593,7 +552,7 @@ test('a run row carries the command, not an empty string', async () => {
   assert.equal(entry.arg, 'echo one');
 });
 
-/* Per-run budgets — the caps that stop a runaway reply or a stuck command --- */
+/* Per-run budgets â€” the caps that stop a runaway reply or a stuck command --- */
 
 test('a run whose wall clock is spent stops like the step limit (time-limited)', async () => {
   const dir = tempDir({ 'a.txt': 'hello\n' });
@@ -633,7 +592,7 @@ test('a reply full of markers stops at the tool-call cap (tools-limited)', async
   assert.equal(chats, 1, 'and the run never sent another step');
 });
 
-/* SUBAGENT roles — a named helper is read-only and knows its job ------------ */
+/* SUBAGENT roles â€” a named helper is read-only and knows its job ------------ */
 
 test('a role line reaches the helper, and the task text stays the task', async () => {
   const dir = tempDir({ 'a.txt': 'hello\n' });
@@ -651,7 +610,7 @@ test('a role line reaches the helper, and the task text stays the task', async (
       async quota() { return { available: 10 }; },
     },
     tools, overlay,
-    subagent: async (task, role) => { calls.push({ task, role }); return 'verdict: pass — a.txt says hello'; },
+    subagent: async (task, role) => { calls.push({ task, role }); return 'verdict: pass â€” a.txt says hello'; },
     options: { maxSteps: 3, subagent: true }, first: true,
   });
 

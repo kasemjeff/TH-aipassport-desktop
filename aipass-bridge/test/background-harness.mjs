@@ -16,8 +16,23 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const BACKGROUND = path.join(here, '..', 'extension', 'background.js');
 
-export function loadBackground({ bridgeUrl = 'http://127.0.0.1:8787', eventsStatus = 200 } = {}) {
+export function loadBackground(opts = {}) {
+  // One destructure for every option: `firstFrames` is what the first event
+  // stream delivers, `initialTabs` are the tabs that already exist, and
+  // `createError` makes tabs.create refuse.
+  const {
+    bridgeUrl = 'http://127.0.0.1:8787',
+    eventsStatus = 200,
+    firstFrames = '',
+    tabDelayMs = 5,
+    initialTabs = [],
+    createError = '',
+  } = opts;
   const requests = [];
+  const created = [];
+  const opened = [...initialTabs];
+  const sent = [];
+  const updated = [];
   const listeners = { message: [], connect: [], startup: [], installed: [], alarm: [] };
   let streams = 0;
 
@@ -35,10 +50,23 @@ export function loadBackground({ bridgeUrl = 'http://127.0.0.1:8787', eventsStat
       onAlarm: { addListener: (fn) => listeners.alarm.push(fn) },
     },
     tabs: {
-      query: async () => [],
-      sendMessage: async () => {},
+      // The delay is the point: two jobs both ask before either has created a tab.
+      query: async () => { await new Promise((r) => setTimeout(r, tabDelayMs)); return [...opened]; },
+      sendMessage: async (tabId, message) => { sent.push({ tabId, message }); },
+      create: async ({ url }) => {
+        if (createError) throw new Error(createError);
+        created.push(url);
+        const tab = { id: 100 + created.length, url, status: 'loading' };
+        opened.push(tab);
+        setTimeout(() => { for (const fn of [...updated]) fn(tab.id, { status: 'complete' }); }, tabDelayMs);
+        return tab;
+      },
       reload: async () => {},
-      onUpdated: { addListener: () => {}, removeListener: () => {} },
+      update: async (tabId, props) => ({ id: tabId, ...props }),
+      onUpdated: {
+        addListener: (fn) => updated.push(fn),
+        removeListener: (fn) => { const i = updated.indexOf(fn); if (i >= 0) updated.splice(i, 1); },
+      },
     },
     scripting: { executeScript: async () => [] },
   };
@@ -54,7 +82,7 @@ export function loadBackground({ bridgeUrl = 'http://127.0.0.1:8787', eventsStat
       // The first attempt answers, so the worker's reaction to it can be
       // observed. Every later one hangs, so the reconnect loop stops.
       if (streams++ === 0) {
-        return new Response('', { status: eventsStatus, headers: { 'content-type': 'text/event-stream' } });
+        return new Response(firstFrames, { status: eventsStatus, headers: { 'content-type': 'text/event-stream' } });
       }
       return new Promise(() => {});
     }
@@ -76,6 +104,15 @@ export function loadBackground({ bridgeUrl = 'http://127.0.0.1:8787', eventsStat
 
   return {
     requests,
+    created,
+    opened,
+    sent,
+    // Send an arbitrary message to the worker.
+    sendMessage: (msg) => new Promise((resolve) => {
+      let answered = false;
+      const respond = (r) => { if (!answered) { answered = true; resolve(r); } };
+      for (const fn of listeners.message) fn(msg, { id: 'test' }, respond);
+    }),
     // Hand the worker a page reply, the way the content script does.
     fromPage: (payload) => { for (const fn of listeners.message) fn({ type: 'from-page', payload }); },
     // Ask the worker how it is doing; the answer carries the last error.

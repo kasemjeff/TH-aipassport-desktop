@@ -788,6 +788,21 @@ button.nav-item:hover { border-color: transparent; }
    wide window does not leave the conversation hugging the left edge. */
 #log > * { width: 100%; max-width: 860px; margin-inline: auto; }
 
+/* The transcript's rows are scrollback: while the reader watches the newest
+   ones, every older row is offscreen weight — a session an hour old lays out
+   and paints hundreds of rows the reader cannot see, and every forced layout
+   (a scroll read, a row landing) pays for all of them. `content-visibility`
+   lets the browser skip what is out of view, so scroll and paint cost what is
+   on screen, not what is in the session. `auto` in the intrinsic size keeps
+   each row's last-rendered height, so the scrollbar holds still while a row
+   is skipped. Rows folded into a `.run` wrapper are no longer direct children,
+   so they carry the same rule — opening a fold is then as cheap as the page
+   around it. */
+#log > *, .run > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 48px;
+}
+
 /* The run's heartbeat: three dots bouncing over a clock. It floats above the
    foot of the transcript so it is on screen wherever the reader has scrolled
    to, and #log grows a little at the foot while it is up, so the bar never
@@ -914,6 +929,23 @@ button.nav-item:hover { border-color: transparent; }
   background: #000;
 }
 .msg .body .md-figure figcaption { margin-top: 6px; color: var(--dim); font-size: 12px; line-height: 1.4; }
+
+/* Web media waits for a click: the slot carries no src (md.js paints it that
+   way), names its address in the tooltip, and only the reader's click gives
+   it one. The alt text is what shows inside the empty box. */
+.msg .body .md-media-deferred {
+  cursor: pointer;
+  min-height: 40px;
+  min-width: 100px;
+  padding: 8px 12px;
+  border: 1px dashed var(--dim);
+  border-radius: 10px;
+  color: var(--dim);
+  font-size: 12px;
+}
+.msg .body .md-media-deferred:hover { border-style: solid; }
+.msg .body .md-figure .md-media-deferred,
+.msg .body video.md-media-deferred { min-width: 220px; min-height: 64px; padding: 14px 18px; }
 
 /* One line per tool call, expandable — the whole point is that a ten-step run
    reads as ten lines, not ten screens. The "⏺" mark carries the state, so the
@@ -1484,7 +1516,9 @@ details.run > *:not(summary) { margin-left: 2px; }
   .burger { display: inline-flex; }
   .side-burger { display: none; }
   .status { display: none; }
-  #bar .field:nth-of-type(2) { display: none; }
+  /* the mode used to be the bar's second .field and this rule hid it on
+     narrow windows; it lives beside the composer now (a .model-chip there),
+     so the rule retired with the markup */
   .model-chip select { max-width: 120px; }
 }
 

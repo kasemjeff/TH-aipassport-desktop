@@ -293,6 +293,11 @@ test('the desktop config keeps its CSP and ships no test suite', (t) => {
   assert.equal(csp['object-src'], "'none'");
   assert.equal(csp['base-uri'], "'self'");
   assert.match(String(csp['connect-src']), /http:\/\/127\.0\.0\.1/, 'the window must still reach the loopback backend');
+  // The window's media loads by consent (md.js paints no src until the reader
+  // clicks), and what it does load never crosses plaintext: a URL that leaves
+  // the machine unwrapped is readable by every hop on the way.
+  assert.doesNotMatch(String(csp['img-src']), /(^|\s)http:/, 'images are not fetched over plaintext');
+  assert.doesNotMatch(String(csp['media-src']), /(^|\s)http:/, 'clips are not fetched over plaintext');
 
   const resources = conf?.bundle?.resources ?? {};
   const shipped = Object.values(resources).join(' ');
@@ -357,13 +362,12 @@ test('the shell grants the page no more than it uses', (t) => {
 
   assert.equal(conf?.app?.withGlobalTauri, false,
     'the page gets no window.__TAURI__ — it uses no Tauri API');
-  const granted = caps?.permissions ?? [];
-  assert.ok(!granted.includes('core:default'),
-    'the blanket permission set is not granted: it carries the tray, the menu and the devtools');
-  for (const p of granted) {
-    assert.match(String(p), /^core:(window|event):/,
-      `only the window and the event commands may be granted, not ${p}`);
-  }
+  // The page invokes no Tauri command — the backend speaks HTTP, and the Rust
+  // side's own calls do not pass through this ACL — so the window/event sets
+  // that used to ride along here were reachable by nothing but whatever
+  // script might one day end up in the page.
+  assert.deepEqual(caps?.permissions ?? [], [],
+    'the page is granted nothing: it invokes no command');
 });
 
 /* 7 — the extension ----------------------------------------------------------- */

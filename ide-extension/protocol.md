@@ -170,6 +170,7 @@ shown, and they name the project they belong to.
 | `reasoning_delta` | `{ text }` | A piece of the model's thinking. |
 | `step` | `{ step, maxSteps, elapsed }` | The boundary between two replies: the bubble closes here. |
 | `thinking` | `{ text }` | The step's headline. |
+| `tool_start` | `{ kind, arg }` | A call was admitted for execution, in marker order, before its result. |
 | `tool` | `{ kind, arg, ok, head, lines[], sources[], isLast }` | One tool call. `kind` is the wire name (`read`, `list`, `replace`, `write`, `run`, `web`, …). |
 | `note` | `{ text }` | Something worth saying that is not a tool call. |
 | `firewall_note` | `{ text }` | The edge refused something; the client is waiting it out. |
@@ -188,6 +189,9 @@ shown, and they name the project they belong to.
 | `todo` | `{ items: [{ text, done }] }` | The checklist. |
 | `diff_update` | `{ changes[] }` | The staged changes changed — the same shape as `pending`. |
 | `compacted` | `{ summary, memory }` | The conversation was rotated; the summary is what survived. |
+| `inject_queued` | `{ n }` | A message the person typed mid-run entered the queue. |
+| `injected` | `{ n }` | The queue was drained into a step’s paste. |
+| `inject_orphaned` | `{ texts[] }` | The run ended first; the texts go back to the composer. |
 | `helper_start` | `{ task, role, session }` | A helper began. |
 | `helper_end` | `{ task, role, summary, prepared[], skipped[] }` | A helper finished. |
 | `subagent_start` / `subagent_end` | `{ task, role, out }` | A background helper. |

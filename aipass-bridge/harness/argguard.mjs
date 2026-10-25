@@ -20,7 +20,7 @@
 import { stripInvisibles, toArabicDigits, beYearsIn } from './lang.mjs';
 
 /** Call kinds whose `arg` names a path (or a path plus a line range). */
-export const PATHY = new Set(['read', 'list', 'write', 'replace', 'delete', 'move', 'attach', 'symbols']);
+export const PATHY = new Set(['read', 'list', 'write', 'replace', 'delete', 'move', 'attach', 'symbols', 'tree', 'stat']);
 
 /**
  * Normalized retries for a path argument, in order: invisible characters

@@ -50,6 +50,11 @@ export class RunContext {
     this.listingShown = ctx.listingShown ?? null;
     this.onConversationDead = ctx.onConversationDead ?? null;
     this.onConversationSettled = ctx.onConversationSettled ?? null;
+    // Messages the person typed while the run was in flight (Harness.inject):
+    // the loop drains this queue at the top of every step after the first, so
+    // they ride the next paste — the one message the protocol allows — instead
+    // of interrupting the run or waiting for it to end.
+    this.injected = Array.isArray(ctx.injected) ? ctx.injected : null;
     this.first = ctx.first !== false;
     // The raw sheet, as the caller wrote it, and the clamped one the run
     // reads. Both are needed: the raw sheet carries the flags the gates ask

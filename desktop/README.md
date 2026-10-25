@@ -87,7 +87,13 @@ stall) keeps the whole trail open, and a row with a button on it — carry on,
 open the chat tab — is never folded away. The moon in the header flips
 the theme, and the choice is written through.
 
-Header: project, model, permission mode — three controls, one thin row.
+The thin top row carries the project and the connection state; the controls
+that govern the next message live where the message is written — the composer's
+chip row holds the **mode** (โหมดการทำงาน: ask / auto / yolo / plan), the
+provider, the model and the effort level, in that order. Temperature is not
+there on purpose: it is a rarely-touched model parameter, and it lives in the
+settings sheet (คุยกับโมเดล → temperature). One surface per control — the sheet
+no longer carries its own copy of the mode, so the two cannot drift apart.
 
 Keys: `Enter` sends, `Shift+Enter` is a newline, `Shift+Tab` cycles the mode (ask → auto → plan), `Esc` cancels a running turn
 (or closes a dialog), `Ctrl+K` goes to the sidebar's search.
@@ -114,7 +120,7 @@ Typing `/` in the composer opens the palette: arrows move, `Enter`/`Tab` picks,
 | `/model` `/model <id>` | pick a model, or set one by id |
 | `/provider` `/provider <id>` | switch who answers the run — AiPASS or an added API provider |
 | `/models` | list the models that can hold a conversation, with the current one marked |
-| `/mode` `/mode ask\|auto\|yolo` | permission level, with what each one means |
+| `/mode` `/mode ask\|auto\|yolo\|plan` | the work mode, with what each one means |
 | `/status` | bridge, extensions, model, credits, pending count |
 | `/paint` | the paint cache's hit/miss counters — how often a frame re-rendered instead of appending |
 | `/conversations` | switch which bridge conversation the model is remembering |
@@ -577,19 +583,18 @@ What it holds: default model (+ the **thinking level** the model reasons at
 before each step — edited from the composer's effort chip in the window, or
 `/thinking` in the terminal; it streams into a fold labeled `✻ reasoning…` and
 closes when the turn ends, and only models that advertise thinking levels
-honour it), the **sampling temperature** (`temperature`, 0..2 — edited from
-the composer's temperature chip beside the effort chip; `null` leaves it to
-the server's per-model default, and a value outside the range is clamped),
-write
-permission (`ask` / `auto` / `yolo`), `allowRun`, `maxSteps` (0 = no cap, the
-shipped default), the per-run caps `maxToolCalls` / `maxWallClockMs` (the sheet
-asks for the wall clock in minutes), plan mode (+
-whether a plan waits for approval), helpers on/off, the compaction budget
-(**budget**, **reserve**, and the share at which it rotates —
-`compactAtPercent`, 40 by default), playbook folders, the project list, the
-current root, enabled plugins, theme, the chat tab URL and whether a run that
-needs one opens it — and the **declared check**: `verifyCommand` (the one
-command the checker must treat as the project's check, replacing
+honour it), the **sampling temperature** (`temperature`, 0..2 — edited in the
+sheet's คุยกับโมเดล page; `null` leaves it to the server's per-model default,
+and a value outside the range is clamped), the **work mode** (`ask` / `auto` /
+`yolo` — edited from the mode chip beside the composer, and `plan` rides
+`plan` + `requirePlanApproval` as the chip's plan view), `allowRun`, `maxSteps`
+(0 = no cap, the shipped default), the per-run caps `maxToolCalls` /
+`maxWallClockMs` (the sheet asks for the wall clock in minutes), helpers on/off,
+the compaction budget (**budget**, **reserve**, and the share at which it
+rotates — `compactAtPercent`, 40 by default), playbook folders, the project
+list, the current root, enabled plugins, theme, the chat tab URL and whether a
+run that needs one opens it — and the **declared check**: `verifyCommand` (the
+one command the checker must treat as the project's check, replacing
 `.aipass/check.txt` when set) and `requireCheck` (refuse a DONE while that
 check is still failing; the run ends as `done-unverified` instead of accepting
 it). Both are off by default, so the checker stays advisory until a project
@@ -660,7 +665,13 @@ setup(ctx) {
 }
 ```
 
-Tools the model can call arrive as `MARKER rest-of-line` — or as a block ending
+The built-in markers the model reaches for most often are `NEED file|dir`,
+`SEARCH`, `TREE`, `STAT`, `LIST -l`, `GLOB`, `SYMBOLS`, `DEF`, `REFS`,
+`RECALL`, `EDIT`, `CREATE`, `RUN`, `VERIFY` and `GIT`. `TREE` shows a folder's
+shape, `STAT` one path's metadata, `LIST -l` adds size and modified time to a
+listing, and `SEARCH` takes `-i` plus `-A`/`-B`/`-C` context flags.
+
+Tools the model can call arrive as `MARKER rest-of-line` - or as a block ending
 in `END` when `takesBody` is true — and their result comes back exactly like a
 NEED or SEARCH result. The preamble grows one paragraph listing them while a
 run is in flight. Every tool rides the same permission gate a built-in of that

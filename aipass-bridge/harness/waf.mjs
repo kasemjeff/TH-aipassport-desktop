@@ -54,14 +54,7 @@ export const SUBSTITUTIONS = [
   [/\bspawn\b/g, 'SPAWN-CALL'],
   [/\bexecSync\b/g, 'EXEC-SYNC-CALL'],
   [/ExecutionPolicy/gi, 'EXEC-POLICY'],
-  // One word, no separator: the rule matches "Bypass" at any word boundary,
-  // so a placeholder spelled "BYPASS-ARG" matched its own rule (the "-" is a
-  // boundary) and was encoded a second time. A text that passes through
-  // outbound twice — a tool result, encoded by its caller and again by the
-  // message it rides in — came back as "Bypass-ARG" and never matched the
-  // file it was copied from. "BYPASSARG" is one word, so the rule cannot see
-  // it, and the same text can be encoded any number of times.
-  [/Bypass\b/gi, 'BYPASSARG'],
+  [/Bypass\b/gi, 'BYPASS-ARG'],
   [/powershell/gi, 'PSHELL'],
   [/\.ps1\b/gi, 'DOT-PS1'],
   [/\.sh\b/gi, 'DOT-SH'],
@@ -126,7 +119,7 @@ export const RESTORE = [
   [/SPAWN-CALL/g, 'spawn'],
   [/EXEC-SYNC-CALL/g, 'execSync'],
   [/EXEC-POLICY/g, 'ExecutionPolicy'],
-  [/BYPASSARG/g, 'Bypass'],
+  [/BYPASS-ARG/g, 'Bypass'],
   [/PSHELL/g, 'powershell'],
   [/DOT-PS1/g, '.ps1'],
   [/DOT-SH/g, '.sh'],

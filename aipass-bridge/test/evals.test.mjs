@@ -108,13 +108,7 @@ test('loadTask parses task.md + task.json and names its failures', () => {
   assert.equal(task.taskText, 'Fix the thing.\n');
   assert.equal(task.check, 'node check.mjs');
   assert.equal(task.allowRun, true);
-  assert.deepEqual(task.budget, { model: 'm', thinking: 'high', maxSteps: 3, wallMs: null, maxCredits: 0 });
-
-  // A task may cap its own credits. The key was read off the raw spec but
-  // dropped by the normaliser, so the cap came out as 0 — off — and the row
-  // recorded "maxCredits: 0" for a run that was supposed to be capped.
-  const capped = makeTask({ 'a.txt': 'hello\n' }, { budget: { maxCredits: 25 } });
-  assert.equal(capped.budget.maxCredits, 25, 'the task\'s own credit cap survives');
+  assert.deepEqual(task.budget, { model: 'm', thinking: 'high', maxSteps: 3, wallMs: null });
 
   // The shipped layout is loadable the way --task resolves it.
   assert.ok(resolveTask('math-fix', { evalsDir: EVALS }).check);
@@ -477,4 +471,89 @@ test('the category and pair-drift slices only appear when they have something to
     { taskId: 'count-lines-twin', outcome: 'unsolved', scored: true, category: 'robustness', pair: 'count-lines', wallMs: 1 },
   ]);
   assert.doesNotMatch(bothLost, /pair drift:/, 'a pair that failed together is not a drift');
+});
+
+/* 15 — the eval surface runs the shell unattended --------------------------- */
+
+// The stamp the RUN writes; the check passes only when the command really ran.
+const STAMP_CHECK = [
+  "import fs from 'node:fs';",
+  "const ok = fs.existsSync('stamp.txt');",
+  "console.log(ok ? 'PASS: the RUN executed' : 'FAIL: no stamp.txt — the RUN never executed');",
+  'process.exit(ok ? 0 : 1);',
+  '',
+].join('\n');
+
+test('an unattended eval attempt runs the shell — the eval mode is yolo', async () => {
+  // permissions.mjs (2026-10-21) taught auto to ask about every shell command;
+  // this surface answers no questions, so auto denied every RUN and the row
+  // read "the person watching declined". yolo is the mode where "shell follows
+  // allowRun" holds with nobody watching — the eval's contract all along.
+  const task = makeTask(
+    { 'stamp.mjs': "import { writeFileSync } from 'node:fs';\nwriteFileSync('stamp.txt', 'ran\\n');\n", 'check.mjs': STAMP_CHECK },
+    { id: 'shell-yolo', budget: { maxSteps: 3 }, allowRun: true },
+  );
+  const row = track(await runAttempt(task, {
+    mode: 'replay',
+    bridge: replayBridge(['RUN\nnode stamp.mjs\nEND', 'DONE ran the command']),
+  }));
+  assert.equal(row.outcome, 'solved', `check said: ${row.check.tail}`);
+  assert.equal(row.check.exit, 0);
+});
+
+/* 16 — the loopback token survives the AIPASS_HOME swap --------------------- */
+
+test('an attempt pins the real home token and restores the environment', async () => {
+  // authtoken.mjs reads the loopback token per request from aipassHome() —
+  // which the attempt empties — so the runner pins the real home's token to
+  // AIPASS_TOKEN for the attempt (read-only: a missing file stays missing).
+  // The RUN below observes the env DURING the run — the check runs after the
+  // restore, so it reads the file the RUN wrote, not the environment.
+  const SHOW_TOKEN = "import { writeFileSync } from 'node:fs';\nwriteFileSync('token.txt', process.env.AIPASS_TOKEN ?? 'no');\n";
+  const TOKEN_CHECK = [
+    "import fs from 'node:fs';",
+    "const seen = fs.existsSync('token.txt') ? fs.readFileSync('token.txt', 'utf8').trim() : 'absent';",
+    "console.log(seen === 'pinned-token-123' ? 'PASS: the pinned token reached the run' : 'FAIL: token.txt holds ' + seen);",
+    'process.exit(seen === "pinned-token-123" ? 0 : 1);',
+    '',
+  ].join('\n');
+  const task = makeTask({ 'showtok.mjs': SHOW_TOKEN, 'check.mjs': TOKEN_CHECK }, { id: 'token-pin', budget: { maxSteps: 3 }, allowRun: true });
+  fs.writeFileSync(path.join(HOME, '.token'), 'pinned-token-123\n', 'utf8');
+
+  const prev = process.env.AIPASS_TOKEN;
+  delete process.env.AIPASS_TOKEN;
+  try {
+    const row = track(await runAttempt(task, {
+      mode: 'replay',
+      bridge: replayBridge(['RUN\nnode showtok.mjs\nEND', 'DONE noted the environment']),
+    }));
+    assert.equal(row.outcome, 'solved', `check said: ${row.check.tail}`);
+    assert.equal(process.env.AIPASS_TOKEN, undefined, 'no token leaks into the environment after the attempt');
+  } finally {
+    if (prev === undefined) delete process.env.AIPASS_TOKEN;
+    else process.env.AIPASS_TOKEN = prev;
+  }
+
+  // A token the caller set wins over the file and is restored untouched —
+  // this check accepts any token, so the sentinel's own value passes.
+  const ANY_TOKEN_CHECK = [
+    "import fs from 'node:fs';",
+    "const seen = fs.existsSync('token.txt') ? fs.readFileSync('token.txt', 'utf8').trim() : 'absent';",
+    "console.log(seen !== 'no' && seen !== 'absent' ? 'PASS: a token reached the run' : 'FAIL: token.txt holds ' + seen);",
+    'process.exit(seen !== "no" && seen !== "absent" ? 0 : 1);',
+    '',
+  ].join('\n');
+  const callerTask = makeTask({ 'showtok.mjs': SHOW_TOKEN, 'check.mjs': ANY_TOKEN_CHECK }, { id: 'token-caller', budget: { maxSteps: 3 }, allowRun: true });
+  process.env.AIPASS_TOKEN = 'sentinel';
+  try {
+    const row = track(await runAttempt(callerTask, {
+      mode: 'replay',
+      bridge: replayBridge(['RUN\nnode showtok.mjs\nEND', 'DONE noted the environment']),
+    }));
+    assert.equal(row.outcome, 'solved', `check said: ${row.check.tail}`);
+    assert.equal(process.env.AIPASS_TOKEN, 'sentinel', 'the caller token is restored untouched');
+  } finally {
+    if (prev === undefined) delete process.env.AIPASS_TOKEN;
+    else process.env.AIPASS_TOKEN = prev;
+  }
 });

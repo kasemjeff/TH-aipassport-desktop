@@ -87,7 +87,10 @@ async function reconnect() {
 }
 
 async function openChatTab() {
-  await chrome.tabs.create({ url: CHAT_URL });
+  // Delegate to background worker to reuse any existing chat tab or share opening lock
+  await chrome.runtime.sendMessage({ type: 'open-chat-tab' }).catch(async () => {
+    await chrome.tabs.create({ url: CHAT_URL });
+  });
   window.close();
 }
 

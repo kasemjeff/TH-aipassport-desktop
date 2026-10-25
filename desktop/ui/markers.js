@@ -39,6 +39,10 @@ const SINGLE = [
   // The bare file shape — `NEED events.mjs` — mirroring parse()'s fallback.
   { marker: 'NEED', re: /^\s*NEED\s+([^\s]+(?: \d+-\d+)?)\s*$/i, pick: (m) => ({ kind: 'read', arg: m[1].trim() }) },
   { marker: 'SEARCH', re: /^\s*SEARCH\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'search', arg: m[1].trim() }) },
+  // TREE is the shape of a folder; the path is optional (the project root).
+  { marker: 'TREE', re: /^\s*TREE\b\s*(.*?)\s*$/i, pick: (m) => ({ kind: 'tree', arg: m[1].trim() }) },
+  // STAT is one path's metadata; the path is required, like DEF/REFS.
+  { marker: 'STAT', re: /^\s*STAT\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'stat', arg: m[1].trim() }) },
   { marker: 'GLOB', re: /^\s*GLOB\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'glob', arg: m[1].trim() }) },
   // The code-navigation markers — mirrored from parse()'s rules, or the bubble
   // would show raw wire the moment a model used one.

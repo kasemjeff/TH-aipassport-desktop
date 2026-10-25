@@ -9,7 +9,7 @@ under `../aipass-bridge/harness/` it drives. The bridge, extension and CLI under
 ## Shape
 
 - `main.mjs` — the entry point; the launcher's rules live in `../aipass-bridge/harness/launcher.mjs` (testable: an entry script runs its top level on import).
-- `ui/` — the chat UI: plain ES modules, **no framework, no build step**. `ui/app.js` is the entry; `ui/state.js`, `ui/rpc.js`, `ui/transcript.js`, `ui/settings.js`, `ui/commands.js` and `ui/panels/` are modules of their own.
+- `ui/` — the chat UI: plain ES modules, **no framework, no build step**. `ui/app.js` is the entry; `ui/state.js`, `ui/rpc.js`, `ui/transcript.js`, `ui/banners.js`, `ui/settings.js`, `ui/commands.js` and `ui/panels/` are modules of their own.
 - `sidecar/` — the local Node copy for packaged builds (`npm run desktop:sidecar`); `src-tauri/` — Tauri config (`npm run desktop:build`).
 - `plugins-example/` — example plugin panels; the `*.md` and `*.html` at this level are the human's working documents.
 
@@ -44,8 +44,10 @@ under `../aipass-bridge/harness/` it drives. The bridge, extension and CLI under
   Verify: "two windows on two projects do not share state, and Apply writes only its own"
 - **A file the human unticked stays unticked.** The pending panel is rebuilt on every diff frame; re-ticking it would write what the human said no to.
   Verify: "a file the human unticked stays unticked when the panel is rebuilt"
-- **The page is granted nothing it does not use.** The page never calls Tauri — the Rust side owns the window, the tray and the sidecar, so `withGlobalTauri` is off.
+- **The page is granted nothing it does not use.** The page never calls Tauri — the Rust side owns the window, the tray and the sidecar, so `withGlobalTauri` is off, and the capability grants nothing at all.
   Verify: "the shell grants the page no more than it uses"
+- **Web media loads only by consent.** A picture or clip the model addresses on the open web paints as an empty slot that names its address; the fetch waits for the reader's click — the account's own origin (`aipass.net`) excepted, for it already holds the conversation.
+  Verify: "web media waits for a click before it is fetched"
 - **The window is served under a policy.** It is loaded FROM the backend, so the
   header the backend sends binds; the two policies are the same, key for key.
   Verify: "the window is served under a policy, not without one"
@@ -53,12 +55,10 @@ under `../aipass-bridge/harness/` it drives. The bridge, extension and CLI under
   window's point of view: a frame after every attempt put its working bar down
   while the next attempt was still going.
   Verify: "the window hears the end of a run once, after the last attempt"
-- **The sheet is a dialog, and a row owns its own keys.** The sheet takes the
-  focus when it opens and gives it back when it closes.
+- **The sheet is a dialog, and a row owns its own keys.** The sheet takes the focus when it opens and gives it back when it closes.
   Verify: "the window says what it is to a screen reader"
   Verify: "the attach button is a button, and a key on it is its own business"
-- **Every control is named, and the window says its state.** An icon button and
-  a select each carry an aria-label — a title is a tooltip, not a name.
+- **Every control is named, and the window says its state.** An icon button and a select each carry an aria-label — a title is a tooltip, not a name.
   Verify: "every control in the window carries a name a screen reader can read"
   Verify: "the transcript holds its announcements while a run streams, and releases them when it ends"
 - **The window shows what it has, and what it dropped.** The transcript is

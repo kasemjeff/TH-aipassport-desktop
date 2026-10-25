@@ -34,7 +34,7 @@ export function createRpcClient(ctx) {
     }
   }
 
-  async function rpc(method, params = {}) {
+  async function rpc(method, params = {}, signal) {
     // The project this window is showing rides on every call, as a header. The
     // backend holds one harness per project, and without this a second window
     // on another project would decide what this one reads — its sessions, its
@@ -52,6 +52,10 @@ export function createRpcClient(ctx) {
         ...(ctx.getRoot?.() ? { 'x-aipass-project': ctx.getRoot() } : {}),
       },
       body: JSON.stringify({ method, params }),
+      // The caller owns the deadline when it passes one (the watchdog's probe
+      // is the only one today); the retry below rides the same signal, so a
+      // cancelled probe cannot sneak a second request past the abort.
+      ...(signal ? { signal } : {}),
     });
     let res = await send();
     // A 401 on a token-less call means the boot fetch lost a race (or the

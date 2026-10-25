@@ -264,6 +264,9 @@ export function createSessionMethods(ctx) {
         requireCheck: Boolean(params.requireCheck ?? h.options.requireCheck),
         parts: await partsFor(params.attachments ?? []),
         pluginTools: plugins.toolTable(),
+        // What the plugins contributed to the run's first message; the loop
+        // builds them fresh per run, so a section may read the world.
+        pluginSections: plugins.preambleSections(),
       });
       if (params.model) h.bridge.model = params.model;
       if (!h.session) await h.startSession({ title: params.title ?? null });
@@ -333,6 +336,22 @@ export function createSessionMethods(ctx) {
       const running = h.running;
       h.cancel();
       return { ok: true, running };
+    },
+
+    /**
+     * A message the person typed while the run was working.
+     *
+     * The project is named like cancel's — the run the window is looking at,
+     * looked up, never the machine's current project. The harness refuses
+     * with `refused` when nothing is running (the window puts the text back
+     * in the composer) or when the queue is full; the text itself is capped
+     * and queued by Harness.inject.
+     */
+    async 'run.inject'(params = {}) {
+      const wanted = params.project ?? params.root;
+      const h = wanted ? harnesses.get(path.resolve(wanted)) : ctx.current;
+      if (!h) throw new Error(`no run in ${wanted ?? 'this project'}`);
+      return h.inject(params.text ?? '');
     },
 
     /* -------------------------------------------------------- permissions */

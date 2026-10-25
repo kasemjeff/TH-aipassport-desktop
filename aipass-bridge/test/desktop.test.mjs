@@ -142,6 +142,33 @@ test('settings.set carries verifyCommand and requireCheck into the harness', asy
   assert.equal(env.rpc.harness.options.requireCheck, true);
 });
 
+test('the reading switches reach the harness from the file and from a save', async (t) => {
+  // The reading batch's keys — `explore`, `parallelReads`, and `recall`
+  // beside them. The boot sheet reads them off the settings file, and a save
+  // re-applies them onto the harness the backend already holds. A key the
+  // applier never carried was a dead key: `false` in the file said nothing,
+  // and a save changed nothing.
+  const home = tempDir();
+  fs.writeFileSync(path.join(home, 'settings.json'), JSON.stringify({
+    explore: false, parallelReads: false, recall: false,
+  }));
+  const env = await startRpc({
+    files: { 'a.txt': 'hello' },
+    rpcOptions: { settings: new Settings(home, 'settings.json') },
+  });
+  t.after(() => env.stop());
+
+  assert.equal(env.rpc.harness.options.explore, false, 'the boot sheet reads the file');
+  assert.equal(env.rpc.harness.options.parallelReads, false);
+  assert.equal(env.rpc.harness.options.recall, false);
+
+  const next = await env.call('settings.set', { explore: true, parallelReads: true, recall: true });
+  assert.equal(next.explore, true);
+  assert.equal(env.rpc.harness.options.explore, true, 'a save re-applies live');
+  assert.equal(env.rpc.harness.options.parallelReads, true);
+  assert.equal(env.rpc.harness.options.recall, true);
+});
+
 test('discard drops the pending change without touching the disk', async (t) => {
   const env = await startRpc({
     files: { 'a.txt': 'hello' },

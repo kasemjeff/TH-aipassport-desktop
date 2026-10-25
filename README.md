@@ -410,8 +410,6 @@ The design and operations docs live in [`docs/`](./docs/):
 |---|---|
 | [`docs/HARNESS_DESIGN.md`](./docs/HARNESS_DESIGN.md) | the harness end to end: loop, tools, protocol, permissions, WAF — and how it sits on the bridge and the window; the research rounds and the incident log behind that shape are its Appendix A |
 | [`docs/LOOP_DESIGN.md`](./docs/LOOP_DESIGN.md) | the agent loop itself: stage map, guards, stop reasons, the event stream |
-| [`docs/PLUGINS_MCP_DESIGN.md`](./docs/PLUGINS_MCP_DESIGN.md) | the two extension channels: installing, enabling, updating and removing local plugins and MCP servers |
-| [`docs/UX.md`](./docs/UX.md) | the user-facing surfaces — the CLI, the window, the extension popup, first-run setup — and the project's voice |
 | [`docs/SPEC_CHECKER.md`](./docs/SPEC_CHECKER.md) | the checker: the read-only pass a `DONE` earns, verdicts, the declared check |
 | [`docs/SPEC_EVALS.md`](./docs/SPEC_EVALS.md) | the eval runner: task fixtures, live and replay modes, scoring |
 | [`docs/EXPERIMENTS.md`](./docs/EXPERIMENTS.md) | the experiment queue: sources, records, budgets, when an experiment ends |
@@ -424,7 +422,6 @@ The design and operations docs live in [`docs/`](./docs/):
 | [`docs/UPDATE_DESIGN.md`](./docs/UPDATE_DESIGN.md) | the update system: the shell and the content as two versioned halves, the signed feed, the phases |
 | [`docs/MATURITY.md`](./docs/MATURITY.md) | capability status — production vs experimental, owners, what changes a status |
 | [`docs/TEST_PLAN.md`](./docs/TEST_PLAN.md) | the test design: layers L1–L5, cases, pass criteria, what each layer cannot prove |
-| [`docs/WORKLOG.md`](./docs/WORKLOG.md) | the session handoff log: what each working session touched, tested, deferred and left open |
 
 The behavior-level change history is [`CHANGELOG.md`](./CHANGELOG.md); it is
 what release notes are cut from.

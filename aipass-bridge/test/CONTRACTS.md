@@ -105,3 +105,35 @@ Verify: "the history rail groups the sessions by day"
 Verify: "the sheet offers the hooks the person configured"
 Verify: "the window names the worktree it is running in"
 Verify: "the window offers to work in a worktree and to make one"
+
+## The docs that name the wires are contracts, and a mid-run message reaches the model.
+
+Verify: "a message typed mid-run rides the next paste, not the first message"
+Verify: "a message queued mid-run is delivered by the next step, said once"
+Verify: "inject with no run in flight is refused, and the window keeps the text"
+Verify: "a run that ends before delivering the queue hands the texts back"
+Verify: "the mid-run queue is capped at twenty messages"
+Verify: "every event the harness emits is named in docs/EVENTS.md"
+Verify: "every event named in docs/EVENTS.md is emitted by the harness"
+Verify: "every AIPASS_* variable the product reads is named in docs/CONFIG.md"
+Verify: "every AIPASS_* variable in docs/CONFIG.md is read by the product"
+Verify: "every settings key is named in docs/CONFIG.md, and every row is a real key"
+Verify: "every harness option is named in docs/CONFIG.md, and every row is a real option"
+
+## A plugin can speak in the preamble, and the machine can name its own helper roles.
+
+Verify: "with no sections the preamble is byte-identical to the tuned bytes"
+Verify: "a registered section rides the first message, named and in load order"
+Verify: "a section that throws or returns nothing is dropped, and the build lives"
+Verify: "a second plugin claiming a taken name fails at load"
+Verify: "a malformed registration fails the plugin at load, not at run time"
+Verify: "a settings preset leads the helper brief the way a built-in does"
+Verify: "a settings entry cannot shadow a built-in role"
+Verify: "a malformed settings preset is an error at the helper, named"
+Verify: "an unknown role names the machine presets among the choices"
+Verify: "a preset spelled with capitals still answers its lowercase role line"
+
+## What the person saw survives a mid-answer death.
+
+Verify: "a stream that died mid-answer records the message and the delivered prefix"
+Verify: "a send that delivered nothing records nothing"

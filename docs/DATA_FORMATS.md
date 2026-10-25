@@ -107,7 +107,7 @@ Entry types:
 | type | carries |
 |---|---|
 | `user` | the text the run sent (the only thing upstream ever sees per turn) |
-| `assistant` | `text`, optional `reasoning` |
+| `assistant` | `text`, optional `reasoning`; `interrupted: true` marks a delivered prefix — the stream died mid-answer (a stop, a streamed refusal) after the message reached the server, so both sides are recorded |
 | `tool` | `kind`, `arg`, `out`, `ok` |
 | `diff` | `file`, `added`, `removed`, `decision: pending \| applied \| rejected` |
 | `todo` | `items: [{text, done}]` |

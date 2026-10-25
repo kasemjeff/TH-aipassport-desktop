@@ -114,6 +114,26 @@ test('AIPASS_CONTEXT_TOKENS overrides the budget for a terminal run', () => {
   }
 });
 
+test('AIPASS_COMPACT_AT_PERCENT names the share-of-budget trigger for a terminal run', () => {
+  const plain = new Compactor({ contextTokens: 24_000, reserveTokens: 4_096, keepRecentBytes: 0 });
+  assert.equal(plain.needsCompaction(sessionLike([user('a'.repeat(4000))])), false, '1000 tokens sits far under the plain ceiling');
+  process.env.AIPASS_COMPACT_AT_PERCENT = '4';
+  try {
+    const squeezed = new Compactor({ contextTokens: 24_000, reserveTokens: 4_096, keepRecentBytes: 0 });
+    assert.equal(squeezed.compactAtPercent, 4);
+    assert.equal(squeezed.needsCompaction(sessionLike([user('a'.repeat(4000))])), true, '4% of 24k is 960 — 1000 tokens crosses it');
+  } finally {
+    delete process.env.AIPASS_COMPACT_AT_PERCENT;
+  }
+  // A value that is not a number is unset, not a crash: the sheet value stands.
+  process.env.AIPASS_COMPACT_AT_PERCENT = 'nonsense';
+  try {
+    assert.equal(new Compactor({ compactAtPercent: 40 }).compactAtPercent, 40);
+  } finally {
+    delete process.env.AIPASS_COMPACT_AT_PERCENT;
+  }
+});
+
 test('seed keeps its between-runs shape, and pastes the step results on a mid-run rotation', () => {
   const c = new Compactor();
   const between = c.seed({ summary: 'did things', task: 'the task', preambleText: 'PRE' });

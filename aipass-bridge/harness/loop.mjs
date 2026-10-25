@@ -51,6 +51,13 @@ export { normalizeOptions } from './run/options.mjs';
 // and which files count as code for the verification nudge.
 const MUTATING = new Set(['write', 'replace', 'delete', 'move']);
 const CODE_FILE = /\.(m?js|cjs|tsx?|jsx|py|rb|go|rs|java|cs|php|swift|kt|c|h|cpp|hpp|sh|ps1|css|html?|sql)$/i;
+// Consecutive reads with no write between them cannot see different states,
+// so the loop runs a small group of them beside each other. The set is
+// deliberately local and side-effect-free: no RUN, no GIT (a read-only
+// subcommand can still take a lock), no FETCH/WEB (network), no RECALL (the
+// session store). Results and events are still processed in marker order.
+const PARALLEL_READS = new Set(['read', 'list', 'search', 'tree', 'stat', 'glob', 'symbols', 'def', 'refs']);
+const PARALLEL_READ_GROUP = 6;
 
 // (chain guard) After a change has failed in the same reply, only calls whose
 // outcome cannot touch the tree keep running — reads, exfil, control markers.
@@ -190,6 +197,7 @@ export async function runTask(taskText, ctx = {}) {
   const {
     maxSteps, maxStepsWire, maxToolCalls, maxWallClockMs, maxCredits,
     model, thinking, temperature, useSlim, seedText, pluginTools,
+    pluginSections, helperPresets,
     replyLanguage, repeatGuard, repeatGuardMax,
   } = run.sheet;
 
@@ -256,7 +264,15 @@ export async function runTask(taskText, ctx = {}) {
     // an option, because the preamble's bytes are pinned by the recorded
     // replay (evals/fixtures/).
     verify: Boolean(run.options.allowVerify),
+    // RECALL and the exploration tools are taught behind their own flags. The
+    // preamble is built once per run, so a missing flag here means a marker
+    // the loop happily dispatches but the model was never told about.
+    recall: Boolean(run.options.recall),
+    explore: Boolean(run.options.explore),
     plugins: pluginTools,
+    // (preamble sections) What plugins contributed, appended after the
+    // machine's own words — attributed, in load order, empty ones dropped.
+    sections: pluginSections,
     lang: replyLanguage,
   });
 
@@ -343,6 +359,19 @@ export async function runTask(taskText, ctx = {}) {
     }
     if (bgDone.length) {
       run.next = `${bgDone.join('\n\n')}\n\n${run.next}`;
+    }
+
+    // (mid-run inject) Messages the person typed while the run was working —
+    // Harness.inject queued them — ride the next paste, the one message the
+    // protocol allows. Only from the second step on: the first message already
+    // carries the preamble and the task, and a note bolted onto it would read
+    // as part of the protocol. Whatever is still queued when the run ends goes
+    // back to the window (harness.mjs's orphan drain), never vanishes.
+    if (step > 1 && run.injected?.length) {
+      const notes = run.injected.splice(0);
+      run.next = `${notes.map((t) => `The person sent this while the run was in progress — read it as part of the task:\n\n${t}`).join('\n\n')}\n\n${run.next}`;
+      run.note(`the person sent ${notes.length} message(s) mid-run — delivered with this step`);
+      run.emit('injected', { n: notes.length });
     }
 
     // The send. The reply comes back with the stage that owns the ladder.
@@ -542,6 +571,7 @@ export async function runTask(taskText, ctx = {}) {
     };
 
     const results = [];
+    const prefetched = new Map(); // index → { text, ms } for a read group run beside itself
     let brokenBy = null;    // the first change that failed in this reply …
     let chainNoted = false; // … and whether the skip was spoken yet
     for (let i = 0; i < work.length; i++) {
@@ -589,14 +619,57 @@ export async function runTask(taskText, ctx = {}) {
       }
       run.toolsRun += 1;
       const callStartedAt = Date.now();
-      const result = helperResults && call.kind === 'subagent'
-        ? helperResults[i]
-        : await guarded(call);
-      // A serial call is timed where it ran; a parallel SUBAGENT carries the
-      // wall time measured at its fan-out (its `await` already happened).
-      const callMs = helperResults && call.kind === 'subagent'
-        ? (helperMs.get(call) ?? 0)
-        : Date.now() - callStartedAt;
+      // (event map, docs/EVENTS.md) The call is admitted for execution —
+      // emitted in marker order, before its result event, so a watcher can
+      // pair them. A parallel read group's later members may already be
+      // running by the time their start fires: the order here is the wire's,
+      // not the wall clock's.
+      events?.emit('tool_start', { kind: call.kind, arg: label });
+      let result;
+      let callMs;
+      if (helperResults && call.kind === 'subagent') {
+        result = helperResults[i];
+        // A parallel SUBAGENT carries the wall time measured at its fan-out
+        // (its `await` already happened).
+        callMs = helperMs.get(call) ?? 0;
+      } else if (prefetched.has(i)) {
+        ({ text: result, ms: callMs } = prefetched.get(i));
+      } else if (run.options.parallelReads !== false && PARALLEL_READS.has(call.kind)) {
+        // The read group: this call and the consecutive safe reads after it.
+        // Bounded by the tool budget, so a reply of a hundred NEEDs cannot
+        // start more work than the serial loop would have allowed.
+        const group = [i];
+        const room = Math.max(0, maxToolCalls - run.toolsRun);
+        const cap = Math.min(PARALLEL_READ_GROUP, 1 + room);
+        for (let j = i + 1; j < work.length && group.length < cap; j++) {
+          if (!PARALLEL_READS.has(work[j].kind)) break;
+          group.push(j);
+        }
+        if (group.length > 1) {
+          const outs = await Promise.all(group.map(async (j) => {
+            const startedAt = Date.now();
+            // A stop between the group's start and this call's slot still
+            // means the call never started — the same promise the serial
+            // loop makes.
+            if (run.stopped()) {
+              return { text: 'err: the run was stopped before this call', ms: Date.now() - startedAt };
+            }
+            try {
+              return { text: String(await guarded(work[j])), ms: Date.now() - startedAt };
+            } catch (err) {
+              return { text: `err: ${err.message}`, ms: Date.now() - startedAt };
+            }
+          }));
+          group.forEach((j, k) => prefetched.set(j, outs[k]));
+          ({ text: result, ms: callMs } = prefetched.get(i));
+        } else {
+          result = await guarded(call);
+          callMs = Date.now() - callStartedAt;
+        }
+      } else {
+        result = await guarded(call);
+        callMs = Date.now() - callStartedAt;
+      }
       const text = String(result);
       const [head, ...rest] = text.split('\n');
       // Tools answer with an `err: …` prefix when they failed (the tool
@@ -982,6 +1055,42 @@ export const SUBAGENT_ROLES = {
   },
 };
 
+/**
+ * The spec a `role:` line resolves to, built-ins first.
+ *
+ * The three built-in shapes are the tested ones; the machine may define more
+ * (settings `helperPresets`, name → { lead, run }), and a machine preset is
+ * judged by the same rule a built-in is: read-only by construction, and
+ * `run` true only where the run itself was given allowRun — so a preset can
+ * narrow the parent's powers, never widen them. A settings entry cannot
+ * shadow a built-in name (those shapes are pinned by the recorded replay),
+ * and a malformed entry is an error at the point of use — named, never a
+ * silent fallback to "no role".
+ *
+ * @param {string} role the name on the role line ('' = no role)
+ * @param {Record<string, {lead?: unknown, run?: unknown}>} [presets] the machine's own
+ * @returns {{ spec: {lead: string, run: boolean} | null, error: string | null }}
+ */
+export function resolveHelperPreset(role, presets = {}) {
+  const clean = String(role ?? '').trim().toLowerCase();
+  if (!clean) return { spec: null, error: null };
+  const builtin = SUBAGENT_ROLES[clean];
+  if (builtin) return { spec: builtin, error: null };
+  // The role line is matched without letter case, so a preset may be spelled
+  // however its author wrote it; the built-ins stay lowercase and unshadowed.
+  const userNames = Object.keys(presets ?? {}).filter((n) => n && !SUBAGENT_ROLES[n.toLowerCase()]);
+  const entryKey = userNames.find((n) => n.toLowerCase() === clean);
+  if (!entryKey) {
+    return { spec: null, error: `no helper role called "${clean}" — use one of: ${[...Object.keys(SUBAGENT_ROLES), ...userNames].join(', ')} (or drop the role line).` };
+  }
+  const entry = presets[entryKey];
+  const lead = typeof entry?.lead === 'string' ? entry.lead.trim() : '';
+  if (!lead) {
+    return { spec: null, error: `helper preset "${entryKey}" is malformed — it needs a "lead" instruction naming what the helper is and does` };
+  }
+  return { spec: { lead, run: entry?.run === true }, error: null };
+}
+
 /** One marker: run it behind the permission gate, or handle it here. */
 async function execute(call, run) {
   const { tools, permissions, events, subagent, todoState, session, options, runPluginTool, backgroundJobs } = run;
@@ -1022,12 +1131,12 @@ async function execute(call, run) {
     const body = String(call.body ?? '');
     const background = /^\s*background:\s*(true|yes|1)\s*$/im.test(body);
     // The optional `role:` line narrows the helper before it starts: its own
-    // instructions and its own limits (SUBAGENT_ROLES). An unknown role is
-    // refused here, before anything starts, and the error names the set.
+    // instructions and its own limits (SUBAGENT_ROLES, plus the machine's
+    // own presets). An unknown or malformed role is refused here, before
+    // anything starts, and the error names the set.
     const role = (body.match(/^\s*role:\s*([A-Za-z][\w-]*)/im)?.[1] ?? '').toLowerCase();
-    if (role && !SUBAGENT_ROLES[role]) {
-      return `err: no helper role called "${role}" — use one of: ${Object.keys(SUBAGENT_ROLES).join(', ')} (or drop the role line).`;
-    }
+    const resolvedRole = resolveHelperPreset(role, options.helperPresets);
+    if (resolvedRole.error) return `err: ${resolvedRole.error}`;
     const taskLine = body.match(/^\s*task:\s*(.+)$/im)?.[1];
     const task = (taskLine ?? body.split('\n').find((l) => l.trim() && !/^\s*role:/i.test(l) && !/^\s*background:/i.test(l)) ?? '').trim();
     if (!task) return 'err: give the helper a task, on a `task:` line inside SUBAGENT';

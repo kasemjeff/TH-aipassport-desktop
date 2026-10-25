@@ -146,8 +146,24 @@ waiting on a slow model is as real a spend as running a command — and so is
 the credit cap, when the run has one. Stops: `time-limited` or
 `credit-limited` (via `spendBudget`).
 
+**Between the budget and the send — what the step carries in.** Two queues
+drain into `run.next` before it goes out. Background helper results that
+finished since the last turn are prepended, so the model sees them without
+polling (`JOBS` is the explicit form). And the messages the person typed
+mid-run (`Harness.inject`, the `run.inject` RPC) are prepended from the
+second step on — the first message already carries the preamble and the
+task — each framed "The person sent this while the run was in progress".
+Whatever the run ends with still queued goes back to the window as
+`inject_orphaned` (the facade's drain), never vanishes; the texts are in the
+session log like everything else the model sees, because they rode the send.
+
 **2. The send.** `saySafe` → `resilientSay`: a message the edge rejects is
-retried in a rewritten form (`firewall_note` goes out). The chain, in order:
+retried in a rewritten form (`firewall_note` goes out). And when a stream
+dies mid-answer — a stop, or a refusal after deltas streamed — the delivered
+prefix is recorded as an `interrupted: true` assistant entry beside the sent
+message, because the server received it and the person read it; a send that
+delivered nothing records nothing, so a retry's resend never becomes a
+duplicate. The chain, in order:
 `redact()` drops the lines that match `RISKY_LINE`; a **big** message is sent
 again **shorter** — the head and the tail survive, the bulky middle is left
 out with a line that says so — because a run that stands still at a refusal
@@ -229,6 +245,11 @@ Stops: `tools-limited`, `time-limited`, `credit-limited` (the capacity check
 runs before the fan-out, so a hundred helpers never start).
 
 **6. Execute, in order.** Every call goes through `guarded()`:
+
+Consecutive read-only calls in one reply (read, list, search, tree, stat, glob,
+symbols, def, refs) run in a bounded group of up to six beside each other
+when `parallelReads` is on; results and events still re-assemble in marker
+order, and a write always ends the group. Off with `parallelReads: false`.
 
 - **shape check** — `validateCall()` runs before anything is dispatched: a
   built-in, a plugin marker and an MCP tool all answer a malformed call with
@@ -490,20 +511,26 @@ check command; `requireCheck` exists wherever the checker can run.
 
 ## The event stream
 
-Everything above the loop consumes events; nothing prints. Grouped by
+Everything above the loop consumes events; nothing prints. The full map —
+every event, who fires it, who reads it — is [`EVENTS.md`](EVENTS.md), and
+`test/event-map.test.mjs` holds the map equal to the code. Grouped by
 consumer:
 
 | group | events |
 |---|---|
 | lifecycle | `task_start`, `step`, `thinking`, `done_line`, `ask`, `ignore_done`, `give_up`, `step_limit`, `finished`, `run_stats` |
 | model tokens | `assistant_delta`, `reasoning_delta` |
-| tools | `tool`, `repeat_block`, `plugin_call`, `diff_update`, `applied` |
+| tools | `tool_start`, `tool`, `repeat_block`, `plugin_call`, `diff_update`, `applied` |
 | gates & prompts | `plan_request` (facade), `permission_request` (permission engine), `nudge`, `stagnation`, `verify_prompt`, `lang_prompt`, `check_start`, `check_end` |
 | context & transport | `compacted`, `note`, `budget`, `firewall_note`, `needs_tab`, `error` |
 | helpers & panel | `subagent_start`, `subagent_end`, `todo` |
+| mid-run messages | `inject_queued`, `injected`, `inject_orphaned` (the facade) |
 
 A `role:` line in a `SUBAGENT` body picks a named helper shape; without one
-the helper keeps its original behaviour.
+the helper keeps its original behaviour. The three built-ins
+(`resolveHelperPreset`, `loop.mjs`) are the tested shapes, and the machine
+may define more in settings (`helperPresets`) — same rule, same limits; a
+preset can narrow the parent's powers, never widen them.
 
 ## Tests that pin this
 
@@ -526,5 +553,11 @@ the helper keeps its original behaviour.
 | `test/protocol.test.mjs` | markers, fences, the preamble |
 | `test/plan.test.mjs` | tick forms (`- [x]`, `* [x]`, bare `[x]`), the once-per-run DONE checkpoint, `mergeTodo`'s one-row-per-text dedupe, and `finished.todo` |
 | `test/stats.test.mjs` | `run_stats` and its aggregation |
+| `test/inject.test.mjs` | the mid-run message: rides the next paste, never the first; refused with no run; orphaned texts go back; the queue capped at twenty |
+| `test/interrupted-anchor.test.mjs` | a stream that died mid-answer: the message and the delivered prefix recorded, marked interrupted; nothing delivered records nothing |
+| `test/preamble-sections.test.mjs` | a plugin's preamble section: attributed, load order, empty/failing dropped, taken name fails at load, byte-identical when none |
+| `test/helper-presets.test.mjs` | the machine's own helper roles: the preset leads the brief, built-ins unshadowable, malformed named at the helper |
+| `test/event-map.test.mjs` | docs/EVENTS.md names exactly the events the harness emits |
+| `test/config-catalog.test.mjs` | docs/CONFIG.md names exactly the env vars, settings keys and harness options the code reads |
 | `test/secret-screen.test.mjs` | the secret screen past the file tools — RUN bodies, GIT args, SEARCH walks |
 | `test/desktop-window.test.mjs` · `test/ui.test.mjs` | the whole run through the backend — plan gate, permissions, todos — and the window's handlers |

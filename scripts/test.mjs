@@ -127,6 +127,7 @@ const passThrough = extra.filter((a) => a !== '--coverage');
 // Ten minutes is a stuck-run ceiling, not a budget — the suite runs in ~30 s.
 // A leaked handle makes the runner wait forever (the Node 24 CI runners did,
 // for hours); a timeout fails the step instead of stalling it.
+const TEST_TIMEOUT_MS = Number(process.env.AIPASS_TEST_TIMEOUT_MS) || (process.platform === 'win32' ? 20 * 60 * 1000 : 10 * 60 * 1000);
 const nodeArgs = ['--test', ...(coverage ? ['--experimental-test-coverage'] : []), ...passThrough, ...files];
 // The suite must not write into the developer's real ~/.aipass: the memory
 // store, the settings, the sessions and the plugins all live under it. A test
@@ -167,7 +168,7 @@ const suite = await suiteEnv({
 });
 const result = spawnSync(process.execPath, nodeArgs, {
   stdio: 'inherit',
-  timeout: 10 * 60 * 1000,
+  timeout: TEST_TIMEOUT_MS,
   env: suite.env,
 });
 

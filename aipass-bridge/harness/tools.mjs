@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { SKIP, binaryKind, posix, stripGutter, realPath, DELETED } from './overlay.mjs';
-import { createSandbox, materializeTree, removeSandbox, restorePaths, sharedDirs, sharedWriteRefusal } from './sandbox.mjs';
+import { sharedWriteRefusal } from './sandbox.mjs';
 import { outbound, inbound } from './waf.mjs';
 import { withResolvedSources } from './web-sources.mjs';
 import { secretHit, scrubSecretDiff } from './permissions.mjs';
@@ -300,86 +300,14 @@ function runChild(cmd, args, timeoutMs) {
 }
 
 /**
- * Run one shell command to completion, and take the whole process tree down
- * when the timeout runs out. `exec`'s timeout kills the shell alone: on
- * Windows the command's own children — a server it started, a watcher —
- * survived the timeout and kept holding the files they had open, so a later
- * RUN met "EBUSY" from a process nobody could see. taskkill /T (or a POSIX
- * process-group signal) ends the tree instead.
- *
- * Rejects the way `exec` did — an Error carrying `code`, `signal`, `stdout`
- * and `stderr` — so callers keep formatting `err: exit …` the same way.
+ * Run one shell command to completion — the shell runner and the execution
+ * world it runs in now live in `execution.mjs` (one owner of "against what
+ * tree does a command run"); the import-and-re-export keeps the runner both
+ * in scope here (the GIT tool runs through it) and where its callers have
+ * always found it.
  */
-export function runShell(cmd, { cwd, timeoutMs, maxBuffer = 10 * 1024 * 1024, signal = null } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, {
-      cwd,
-      shell: true,
-      windowsHide: true,
-      // A POSIX group leader is what lets `kill(-pid)` below reach the
-      // grandchildren; on Windows the tree is addressed by taskkill /T.
-      detached: process.platform !== 'win32',
-    });
-    let stdout = '';
-    let stderr = '';
-    let done = false;
-    const cap = (s, d) => (s.length >= maxBuffer ? s : s + String(d));
-    child.stdout?.on('data', (d) => { stdout = cap(stdout, d); });
-    child.stderr?.on('data', (d) => { stderr = cap(stderr, d); });
-    const finish = (fn, v) => {
-      if (done) return;
-      done = true;
-      clearTimeout(t);
-      // The listener is dropped with the child: a stop that lands after the
-      // command is over must not go and kill a tree that is already gone.
-      if (signal) signal.removeEventListener('abort', onAbort);
-      fn(v);
-    };
-    const t = setTimeout(() => {
-      killTree(child);
-      finish(reject, Object.assign(new Error(`timed out after ${timeoutMs} ms`), {
-        code: null, signal: 'SIGTERM', killed: true, stdout, stderr,
-      }));
-    }, timeoutMs);
-    t.unref?.();
-    // (stop) A stop kills the command, tree and all. The command used to run
-    // to its own timeout (two minutes) after the person pressed stop: the
-    // window said the run was stopping while the build kept going, holding
-    // the files it needed and the next task waiting behind it.
-    function onAbort() {
-      killTree(child);
-      finish(reject, Object.assign(new Error('the run was stopped'), {
-        code: null, signal: 'SIGTERM', killed: true, stdout, stderr,
-      }));
-    }
-    if (signal) {
-      if (signal.aborted) return onAbort();
-      signal.addEventListener('abort', onAbort, { once: true });
-    }
-    child.on('error', (error) => finish(reject, Object.assign(error, { stdout, stderr })));
-    child.on('close', (code, killedBy) => {
-      if (code === 0 && !killedBy) finish(resolve, { stdout, stderr });
-      else finish(reject, Object.assign(new Error(`exited with ${code ?? killedBy}`), { code, signal: killedBy, stdout, stderr }));
-    });
-  });
-}
-
-/** The tree, not the shell alone — see runShell for why. */
-function killTree(child) {
-  if (process.platform === 'win32') {
-    // Spawned, not run inline: the kill must not block the backend's event
-    // loop. /T walks the tree while it is still linked, so the shell is left
-    // standing here — killing it first orphans the children that taskkill
-    // would otherwise have walked to (the first version did exactly that,
-    // and the grandchild outlived its timeout).
-    const tk = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-    tk.on('error', () => { try { child.kill(); } catch { /* already gone */ } });
-    tk.on('close', (code) => { if (code !== 0) { try { child.kill(); } catch { /* already gone */ } } });
-    return;
-  }
-  try { process.kill(-child.pid, 'SIGKILL'); } catch { /* the tree is already gone */ }
-  try { child.kill(); } catch { /* already gone */ }
-}
+import { runInProjectWorld, runShell } from './execution.mjs';
+export { runShell };
 
 // Awaited, not spawnSync: this runs in the backend's process, and a blocked
 // event loop there freezes the window's stream for the length of the check.
@@ -523,6 +451,107 @@ export function splitLines(text) {
   if (s.endsWith('\n')) lines.pop();
   return lines;
 }
+
+// A human-readable size for LIST -l and STAT. One decimal is enough to decide
+// whether a file is worth opening; the exact byte count rides STAT.
+function humanSize(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
+// Local time, minute precision: enough to tell a fresh file from a stale one,
+// and short enough to keep a long listing readable.
+function clockOf(ms) {
+  const d = new Date(Number(ms));
+  if (Number.isNaN(d.getTime())) return '';
+  const two = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+
+// `LIST -l`, `--long`, and the same flag after the path (`NEED dir src -l`).
+// The rest of the argument is the path, spaces included.
+function parseListArg(raw) {
+  let s = String(raw ?? '').trim();
+  let long = false;
+  for (;;) {
+    const head = /^(?:-l|--long)\b\s*/i.exec(s);
+    if (head) { long = true; s = s.slice(head[0].length).trim(); continue; }
+    const tail = /\s(?:-l|--long)\s*$/i.exec(s);
+    if (tail) { long = true; s = s.slice(0, tail.index).trim(); continue; }
+    break;
+  }
+  return { long, path: s || '.' };
+}
+
+function escapeRe(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * SEARCH's leading flags: -i, and ripgrep's -A/-B/-C context with a count.
+ * The count is bounded (10) because a hit with a hundred lines around it is a
+ * page of the file, not a search result. The first context flag resets the
+ * default one-line window, so `-A 2` means "two lines after, none before" the
+ * way ripgrep reads it.
+ */
+function parseSearchArg(raw) {
+  const tokens = String(raw ?? '').trim().split(/\s+/);
+  let ci = false;
+  let before = 1;
+  let after = 1;
+  let contextGiven = false;
+  const setContext = (side, n) => {
+    if (!contextGiven) { before = 0; after = 0; contextGiven = true; }
+    if (side !== 'after') before = n;
+    if (side !== 'before') after = n;
+  };
+  let i = 0;
+  for (; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token === '') continue;
+    if (token === '--') { i++; break; }
+    if (token === '-i') { ci = true; continue; }
+    const m = /^(?:-([ABC])(\d+)?|--(context|after-context|before-context)(?:=(\d+))?)$/i.exec(token);
+    if (!m) break;
+    let digits = m[2] ?? m[4];
+    if (digits == null) {
+      if (!/^\d+$/.test(tokens[i + 1] ?? '')) {
+        return { error: `err: ${token} needs a number of lines, e.g. ${token} 2.` };
+      }
+      digits = tokens[i + 1];
+      i++;
+    }
+    const n = Number(digits);
+    if (!Number.isFinite(n) || n < 0 || n > 10) {
+      return { error: `err: ${token} takes 0..10 lines.` };
+    }
+    const flag = (m[1] ?? m[3] ?? '').toLowerCase();
+    setContext(flag.startsWith('a') ? 'after' : (flag.startsWith('b') ? 'before' : 'both'), n);
+  }
+  return { ci, before, after, query: tokens.slice(i).join(' ').trim() };
+}
+
+/**
+ * A FIND block that differs from the file only in line endings or trailing
+ * spaces. It must match exactly once, at line boundaries, so a sloppy block
+ * can repair a copied CRLF file without ever landing on an unintended line.
+ * Returns the matched text and its offset, or null.
+ */
+function looseMatch(text, before) {
+  const lines = String(before).split('\n').map((l) => l.replace(/[ \t\r]+$/, ''));
+  if (!lines.length || !lines.some(Boolean)) return null;
+  const body = lines.map(escapeRe).join('[ \\t]*\\r?\\n');
+  const re = new RegExp(`(^|\\n)(${body}[ \\t]*)(?=\\r?\\n|$)`, 'g');
+  const found = [...text.matchAll(re)];
+  if (found.length !== 1) return null;
+  const m = found[0];
+  return { index: m.index + m[1].length, text: m[2] };
+}
+
+
 // Brace expansion recurses once per brace group, so the depth of the
 // recursion is the number of groups in the pattern: a pattern with 20,000
 // `{` blew the stack (RangeError: Maximum call stack size exceeded), and a
@@ -733,7 +762,8 @@ export function createTools(ctx) {
       return found.text;
     },
     async list(arg) {
-      const abs = safe(arg || '.');
+      const { long, path: rel } = parseListArg(arg);
+      const abs = safe(rel);
       // A missing directory is an empty listing, not a throw — the old
       // existsSync guard was also the one blocking call left in this path.
       let entries = [];
@@ -745,7 +775,175 @@ export function createTools(ctx) {
       // by `exists`, so a listing that omits it tells the model its own write
       // failed — issue #32.
       overlay.mergeIntoListing(abs, names);
-      return await clip([...names].sort().join('\n') || '(empty)');
+      // A staged delete is gone in the run's view, and a listing that still
+      // shows it invites the model to open a file it just removed.
+      const visible = [...names]
+        .filter((name) => !overlay.isDeleted(path.join(abs, name.replace(/\/$/, ''))))
+        .sort();
+      if (!long) return await clip(visible.join('\n') || '(empty)');
+
+      // Long form: one line per entry with size and modified time. `dir` is
+      // the whole size column for a folder — its bytes say nothing about what
+      // is inside it, and a recursive size is a walk the model did not ask for.
+      const rows = [];
+      for (const name of visible) {
+        const isDir = name.endsWith('/');
+        const full = path.join(abs, name.replace(/\/$/, ''));
+        if (isDir) { rows.push(`    dir  ${''.padEnd(16)}  ${name}`); continue; }
+        let size = 0;
+        let when = '';
+        if (overlay.has(full) && !overlay.isDeleted(full)) {
+          try { size = Buffer.byteLength(overlay.readAt(full), 'utf8'); when = 'staged'; } catch { /* vanished */ }
+        } else {
+          try {
+            const st = await fs.promises.stat(full);
+            size = st.size;
+            when = clockOf(st.mtimeMs);
+          } catch { /* vanished between readdir and stat */ }
+        }
+        rows.push(`${humanSize(size).padStart(7)}  ${when.padEnd(16)}  ${name}`);
+      }
+      return await clip(rows.join('\n') || '(empty)');
+    },
+    /**
+     * TREE — the shape of a folder, bounded.
+     *
+     * LIST answers one level and GLOB answers "where is this pattern"; neither
+     * tells the model what a project looks like before it opens files. TREE is
+     * that view: directories first, two levels by default, with the same skip
+     * rules (SKIP, dot names, gitignore, secrets behind links) as every other
+     * walk. A tree that ran away would be worse than no tree, so depth and
+     * entry count are capped and the cap says so.
+     */
+    async tree(arg) {
+      const tokens = String(arg ?? '').trim().split(/\s+/).filter(Boolean);
+      const words = [];
+      let depth = 2;
+      for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i];
+        let m = /^(?:-L|--depth)(?:=(\d+))?$/i.exec(token);
+        if (m) {
+          let digits = m[1];
+          if (digits == null) { digits = tokens[i + 1]; i++; }
+          if (!/^\d+$/.test(digits ?? '')) return 'err: TREE -L needs a depth, e.g. TREE src -L 3.';
+          depth = Number(digits);
+          continue;
+        }
+        m = /^-L(\d+)$/i.exec(token);
+        if (m) { depth = Number(m[1]); continue; }
+        words.push(token);
+      }
+      if (depth < 1 || depth > 6) return `err: TREE -L takes 1..6 levels (got ${depth}).`;
+      const rel = words.join(' ') || '.';
+      const abs = trySafe(rel);
+      if (!abs) return `err: ${rel} leaves the project — TREE stays inside it.`;
+      if (!existsAt(abs)) return `err: no such path: ${rel}`;
+      let isDir = false;
+      try { isDir = fs.statSync(abs).isDirectory(); } catch { isDir = false; }
+      if (!isDir) return TOOLS.stat(rel);
+
+      const MAX = 400;
+      let count = 0;
+      const treeRoot = { children: new Map() };
+      const ensure = (node, name, dir) => {
+        let child = node.children.get(name);
+        if (!child) { child = { name, dir, children: new Map() }; node.children.set(name, child); }
+        else if (dir) child.dir = true;
+        return child;
+      };
+      const ign = loadGitignore(root);
+      const walk = async (dirAbs, node, level) => {
+        if (level > depth || count >= MAX) return;
+        let entries = [];
+        try { entries = await fs.promises.readdir(dirAbs, { withFileTypes: true }); } catch { return; }
+        entries.sort((a, b) => a.name.localeCompare(b.name));
+        for (const e of entries) {
+          if (count >= MAX) return;
+          if (SKIP.has(e.name) || e.name.startsWith('.')) continue;
+          const full = path.join(dirAbs, e.name);
+          const childRel = posix(path.relative(root, full));
+          if (ign.ignored(childRel, e.isDirectory())) continue;
+          if (e.isSymbolicLink()) {
+            if (!trySafe(full)) continue;
+            if (secretHit(linkTarget(full))) continue;
+          }
+          count++;
+          const child = ensure(node, e.name, e.isDirectory());
+          if (e.isDirectory()) await walk(full, child, level + 1);
+        }
+      };
+      await walk(abs, treeRoot, 1);
+
+      // Staged paths ride the tree: a file this run wrote is part of the
+      // project's shape even before it reaches the disk, and a folder it
+      // created is a folder. A helper's base layer counts as this run's view.
+      const stagedRows = [...overlay.entries()];
+      try { stagedRows.push(...(overlay.base?.entries?.() ?? [])); } catch { /* no base */ }
+      for (const [p, value] of stagedRows) {
+        if (value === DELETED) continue;
+        const relPath = path.relative(abs, p);
+        if (!relPath || relPath.startsWith('..') || path.isAbsolute(relPath)) continue;
+        const parts = relPath.split(path.sep).filter(Boolean);
+        if (!parts.length || parts.length > depth) continue;
+        let node = treeRoot;
+        for (let k = 0; k < parts.length; k++) {
+          node = ensure(node, parts[k], k < parts.length - 1);
+        }
+        if (parts.length) count++;
+      }
+
+      const lines = [];
+      if (rel !== '.') lines.push(`${rel.replace(/\/+$/, '')}/`);
+      const render = (node, indent) => {
+        const children = [...node.children.values()].sort((a, b) => (Number(b.dir) - Number(a.dir)) || a.name.localeCompare(b.name));
+        for (const child of children) {
+          lines.push(`${indent}${child.name}${child.dir ? '/' : ''}`);
+          if (child.dir && child.children.size) render(child, indent + '  ');
+        }
+      };
+      render(treeRoot, rel === '.' ? '' : '  ');
+      if (!lines.length || (lines.length === 1 && rel !== '.')) return `${rel}/ is empty.`;
+      const more = count >= MAX ? `\n… stopped at ${MAX} entries — narrow the path or lower -L.` : '';
+      return await clip(lines.join('\n') + more);
+    },
+    /**
+     * STAT — one path's facts: kind, size, line count, modified time, and
+     * whether this run has changed it. A read, like LIST and READ: it answers
+     * questions the model would otherwise spend a whole file paste to learn.
+     */
+    async stat(arg) {
+      const rel = String(arg ?? '').trim();
+      if (!rel) return 'err: STAT needs a file or directory path — STAT src/app.ts';
+      const abs = trySafe(rel);
+      if (!abs) return `err: ${rel} leaves the project — STAT stays inside it.`;
+      if (overlay.isDeleted(abs)) {
+        return `${rel}: deleted (staged this run; the disk copy is untouched until apply)`;
+      }
+      if (!existsAt(abs)) return `err: no such file or directory: ${rel}`;
+      const staged = overlay.has(abs);
+      let onDisk = null;
+      try { onDisk = fs.statSync(abs); } catch { onDisk = null; }
+      if (onDisk?.isDirectory()) {
+        const names = new Set();
+        try {
+          for (const e of await fs.promises.readdir(abs, { withFileTypes: true })) names.add(e.name);
+        } catch { /* vanished: the overlay may still name staged entries */ }
+        overlay.mergeIntoListing(abs, names);
+        return `${rel}: directory, ${names.size} entr${names.size === 1 ? 'y' : 'ies'}${onDisk ? `, modified ${clockOf(onDisk.mtimeMs)}` : ''}${staged ? ' (staged this run)' : ''}`;
+      }
+      const kind = binaryKind(abs, (p) => overlay.has(p));
+      let content = null;
+      if (staged) { try { content = overlay.readAt(abs); } catch { content = null; } }
+      const bytes = content != null ? Buffer.byteLength(content, 'utf8') : (onDisk?.size ?? 0);
+      let lines = null;
+      if (!kind && content != null) lines = splitLines(content).length;
+      else if (!kind && bytes <= MAX_READ_FILE) {
+        try { lines = splitLines(await fs.promises.readFile(abs, 'utf8')).length; } catch { /* unreadable */ }
+      }
+      const what = kind ? (kind === 'binary' ? 'binary file' : `${kind} file`) : 'file';
+      const facts = [what, humanSize(bytes), lines != null ? `${lines} line(s)` : null, onDisk ? `modified ${clockOf(onDisk.mtimeMs)}` : null]
+        .filter(Boolean);
+      return `${rel}: ${facts.join(', ')}${staged ? ' (staged this run)' : ''}`;
     },
     async read(arg) {
       // Accept an optional trailing line range, e.g. `NEED file src/app.ts 200-320`.
@@ -795,9 +993,6 @@ export function createTools(ctx) {
         // note claiming "lines 500-100 of 100" — which reads like the file is
         // empty, and the model then creates it again.
         const [from, to] = range;
-        if (from < 1) {
-          return `err: ${rel} has ${total} line(s). Lines are counted from 1 — ask for a range within it.`;
-        }
         if (from > to) {
           return `err: ${rel} has ${total} line(s). The range ${from}-${to} runs backwards — ask for ${to}-${from} instead.`;
         }
@@ -899,6 +1094,23 @@ export function createTools(ctx) {
           const note = await syntaxNote(arg, matched);
           return `updated ${arg} (1 change; the FIND text carried invisible characters — they were dropped to make the match)${note ? '\n' + note : ''}`;
         }
+        // The other two copy mistakes that do not change the intent: a file
+        // with CRLF line endings copied back as LF, and trailing spaces the
+        // model cannot see (or a formatter stripped on its side). The loose
+        // match is stricter than a fuzzy search — every line must match at a
+        // line boundary, exactly once — and the result says which
+        // normalization made it land.
+        const loose = looseMatch(text, normalized);
+        if (loose) {
+          const replacement = loose.text.includes('\r\n')
+            ? after.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n')
+            : after;
+          const updated = text.slice(0, loose.index) + replacement + text.slice(loose.index + loose.text.length);
+          overlay.set(abs, updated);
+          const note = await syntaxNote(arg, updated);
+          const hook = await hookVerdict('afterWrite');
+          return `updated ${arg} (1 change; the FIND text matched once line endings and trailing spaces were normalized)${note ? '\n' + note : ''}${hook ? '\n' + hook : ''}`;
+        }
         const hint = nearHint(text, before);
         return `err: the text to change was not found in ${arg}. Read it again with NEED file ${arg} and copy the lines exactly.${hint ? `\n${hint}` : ''}`;
       }
@@ -931,10 +1143,10 @@ export function createTools(ctx) {
       return `updated ${arg} (1 change)${note ? '\n' + note : ''}${hook ? '\n' + hook : ''}`;
     },
     async search(arg) {
-      const raw = String(arg).trim();
-      const ci = /^-i\s+/i.test(raw);
-      const query = (ci ? raw.slice(2) : raw).trim();
-      if (!query) return 'err: give me some text to search for. (SEARCH -i text matches without letter case.)';
+      const parsed = parseSearchArg(arg);
+      if (parsed.error) return parsed.error;
+      const { ci, before, after, query } = parsed;
+      if (!query) return 'err: give me some text to search for. (SEARCH -i text matches without letter case; -C 2 shows two lines around each hit.)';
       const needle = inbound(query); // the model may type placeholders like LCLHST
       const wanted = ci ? needle.toLowerCase() : needle;
       const hits = [];
@@ -972,13 +1184,13 @@ export function createTools(ctx) {
           try { text = overlay.has(full) ? readAt(full) : await fs.promises.readFile(full, 'utf8'); } catch { continue; }
           if (text.includes('\u0000')) continue; // skip binary
           const lines = text.split('\n');
-          // One line of context on each side, ripgrep-style: a match line
-          // keeps the `rel:N: text` shape every other tool prints, a context
-          // line trades the colon for a dash. A bare hit line makes the model
-          // read the file just to learn what surrounds it, and the line
-          // around a hit is usually what says whether it is the hit it wants
-          // (Anthropic's tool-writing guidance, 2025: return the relevant
-          // lines and some surrounding context).
+          // Context on each side, ripgrep-style: a match line keeps the
+          // `rel:N: text` shape every other tool prints, a context line trades
+          // the colon for a dash. The window defaults to one line each side
+          // (what the ACI round asked for); -A/-B/-C set it explicitly. A bare
+          // hit line makes the model read the file just to learn what
+          // surrounds it, and the line around a hit is usually what says
+          // whether it is the hit it wants.
           const shown = new Map(); // idx → slot in hits, so a line first seen as context can be upgraded to a match
           const show = (idx, isMatch) => {
             if (idx < 0 || idx >= lines.length) return;
@@ -990,13 +1202,14 @@ export function createTools(ctx) {
             shown.set(idx, hits.length);
             hits.push(line);
           };
+          const lastShown = new Map(); // rel -> highest line queued, so context windows do not repeat
           for (let i = 0; i < lines.length && matches < MAX; i++) {
             const line = ci ? lines[i].toLowerCase() : lines[i];
             if (!line.includes(wanted)) continue;
             matches++;
-            show(i - 1, false);
+            for (let k = Math.max(0, i - before); k < i; k++) show(k, false);
             show(i, true);
-            show(i + 1, false);
+            for (let k = i + 1; k <= Math.min(lines.length - 1, i + after); k++) show(k, false);
           }
         }
       };
@@ -1015,61 +1228,14 @@ export function createTools(ctx) {
       // all that can be screened — see secretHit's note on runtime-built names.
       const secret = secretHit(body);
       if (secret) return `err: the command names ${secret.token} (${secret.pattern}) — secret files stay on this machine.`;
-      // With anything staged, the command runs against a projection of the
-      // tree that has the staged edits written in (sandbox.mjs) — the disk
-      // itself is untouched. Without staged changes it runs in the project,
-      // exactly as before. Either way the child's own paths are put back to
-      // the project's, so the output reads as if it ran where the model
-      // thinks it did.
-      let sandbox = null;
-      const tooBig = [];
-      if (overlay.size) {
-        try {
-          sandbox = createSandbox(root);
-          await materializeTree(root, overlay, sandbox, { signal, onSkip: (rel, bytes) => tooBig.push(`${rel} (${Math.round(bytes / 1024 / 1024)} MB)`) });
-        } catch (err) {
-          if (sandbox) removeSandbox(sandbox);
-          // A stop during the projection ends the run: the copy is the longest
-          // wait a RUN has, and it used to finish while the window said the
-          // run was stopping.
-          if (err?.name === 'AbortError') return 'err: the run was stopped before the command could start';
-          sandbox = null; // a projection that cannot be built must not block the run
-        }
-      }
-      const scrub = (text) => (sandbox ? restorePaths(text, sandbox, root) : text);
-      // The honest limit of the projection, said out loud: the heavy
-      // directories are shared with the real project (a copy of node_modules
-      // would cost a minute per RUN), so a write into one of them lands in the
-      // user's project. The model is never surprised by a change it did not
-      // make.
-      const sharedNote = (where, projectRoot) => {
-        if (!where) return '';
-        const shared = sharedDirs(projectRoot);
-        if (!shared.length) return '';
-        return `\n\nnote: ${shared.join(', ')} — in this projection those are the REAL folders, not copies: a write there changes your project.`;
-      };
-      // What the projection left out, said out loud: a command that trips
-      // over a missing file deserves to know it was left out on purpose.
-      const skippedNote = () => (tooBig.length
-        ? `\n\nnote: not copied into this projection (too large): ${tooBig.slice(0, 5).join(', ')}${tooBig.length > 5 ? `, and ${tooBig.length - 5} more` : ''}.`
-        : '');
-      try {
-        // Async, not execSync: this runs in the backend's process, and a
-        // blocked event loop there freezes every window call for the length
-        // of the command. The platform shell is picked for us: /bin/sh on
-        // POSIX, cmd.exe on Windows.
-        const { stdout } = await runShell(body, { cwd: sandbox ?? root, timeoutMs: 120_000, signal });
-        return (await clipRun(scrubSecretDiff(scrub(scrubOutput(stdout))))) + sharedNote(sandbox, root) + skippedNote();
-      } catch (err) {
-        // A stop that killed the command says so: "exit SIGTERM" would read as
-        // the command's own failure, and the person did ask for it.
-        if (err?.killed && /stopped/i.test(String(err.message ?? ''))) {
-          return clipRun(scrubSecretDiff(scrub('err: the run was stopped before the command finished')));
-        }
-        return clipRun(scrubSecretDiff(scrub(scrubOutput(`err: exit ${err.code ?? err.signal ?? '?'}\n${String(err.stdout ?? '')}${String(err.stderr ?? '')}`))));
-      } finally {
-        if (sandbox) removeSandbox(sandbox);
-      }
+      // The world the command runs in is one owner now (execution.mjs): with
+      // anything staged it is a projection of the tree that has the staged
+      // edits written in — the disk itself is untouched — and without them it
+      // is the project, exactly as before. Either way the child's own paths
+      // are put back to the project's, so the output reads as if it ran where
+      // the model thinks it did. The tool layer keeps the guards above and
+      // the text policy (clipRun, the spill); the world keeps the rest.
+      return runInProjectWorld({ root, overlay, signal, command: body, clip: clipRun });
     },
     /**
      * VERIFY — the model asks for a check.

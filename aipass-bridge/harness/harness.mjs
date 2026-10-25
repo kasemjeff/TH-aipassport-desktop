@@ -18,7 +18,7 @@ import { SessionStore } from './session.mjs';
 import { Compactor, DEFAULT_MODEL_BUDGETS } from './compact.mjs';
 import { loadMemory, saveMemory, clearMemory } from './memory-store.mjs';
 import { McpManager } from './mcp.mjs';
-import { runTask, applyOverlay, SUBAGENT_ROLES } from './loop.mjs';
+import { runTask, applyOverlay, resolveHelperPreset } from './loop.mjs';
 import { preamble as buildPreamble } from './protocol.mjs';
 import { RulesStore } from './rules.mjs';
 import { sweepSandboxes } from './sandbox.mjs';
@@ -77,6 +77,13 @@ export class Harness {
    * told it to stop.
    */
   #stopAsked = false;
+  /**
+   * Messages the person typed while a run was in flight (inject()). The loop
+   * drains the queue at the top of every step after the first, so each one
+   * rides the next paste instead of interrupting the run; whatever a run ends
+   * with goes back to the window as `inject_orphaned` rather than vanishing.
+   */
+  #injected = [];
 
   /**
    * @param {object} opts
@@ -495,7 +502,9 @@ export class Harness {
         attach: Boolean(this.options.attach),
         verify: Boolean(this.options.allowVerify),
         recall: Boolean(this.options.recall),
+        explore: Boolean(this.options.explore),
         plugins: this.options.pluginTools ?? [],
+        sections: this.options.pluginSections ?? [],
         lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
       staged: this.#stagedList(),
@@ -608,7 +617,9 @@ export class Harness {
         attach: Boolean(this.options.attach),
         verify: Boolean(this.options.allowVerify),
         recall: Boolean(this.options.recall),
+        explore: Boolean(this.options.explore),
         plugins: this.options.pluginTools ?? [],
+        sections: this.options.pluginSections ?? [],
         lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
       staged,
@@ -762,7 +773,10 @@ export class Harness {
             // The RECALL marker: the model may ask what this project said
             // before. The same reason - the preamble's bytes are pinned.
             recall: Boolean(this.options.recall),
+            explore: Boolean(this.options.explore),
             plugins: this.options.pluginTools ?? [],
+        sections: this.options.pluginSections ?? [],
+            sections: this.options.pluginSections ?? [],
             lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
           }),
           staged: this.#stagedList(),
@@ -837,6 +851,9 @@ export class Harness {
           // (listing delta) The per-conversation listing memory the loop reads
           // and updates; see #listingShown.
           listingShown: this.#listingShown,
+          // (mid-run inject) The queue the person's mid-run messages wait in;
+          // the loop drains it at the top of each step after the first.
+          injected: this.#injected,
           options: {
             ...this.options,
             signal: this.abort.signal,
@@ -869,6 +886,14 @@ export class Harness {
       // compaction that fails - has to clear the flag too, or one bad run
       // locks the project out for the rest of the process's life.
       this.running = false;
+      // (mid-run inject) Messages typed mid-run that no step carried — the run
+      // ended first, or it died before its bookkeeping — go back to the window
+      // as an event, never vanish in the queue. The normal ending drains here
+      // too, so the loop does not need its own end-of-run sweep.
+      if (this.#injected.length) {
+        const texts = this.#injected.splice(0);
+        this.events.emit('inject_orphaned', { texts });
+      }
     }
   }
 
@@ -955,6 +980,30 @@ export class Harness {
     return this.#stopAsked;
   }
 
+  /**
+   * A message the person typed while the run was in flight.
+   *
+   * It neither starts a run nor interrupts the one going: it waits in the
+   * queue and rides the next paste — the one message the protocol allows —
+   * where the model reads it as part of the task. No run, no queue: the
+   * answer says so (`refused`), and the window puts the text back in the
+   * composer. A queue is capped at both ends — twenty messages, twenty
+   * thousand characters each — so a paste storm cannot outrun the compaction
+   * budget that guards every message the run sends.
+   */
+  inject(text) {
+    const clean = String(text ?? '').trim();
+    if (!clean) return { queued: this.#injected.length, running: this.running, refused: 'no text given' };
+    if (!this.running) return { queued: this.#injected.length, running: false, refused: 'no run in flight' };
+    if (this.#injected.length >= 20) return { queued: this.#injected.length, running: true, refused: 'queue full (20)' };
+    const capped = clean.length > 20_000
+      ? `${clean.slice(0, 20_000)}\n\n(message cut at 20,000 characters)`
+      : clean;
+    this.#injected.push(capped);
+    this.events.emit('inject_queued', { n: this.#injected.length });
+    return { queued: this.#injected.length, running: true };
+  }
+
   pendingChanges() {
     return this.overlay.changes().map(({ file, added, removed, deleted, isNew }) => ({ file, added, removed, deleted, isNew }));
   }
@@ -984,7 +1033,12 @@ export class Harness {
    */
   #makeHelper() {
     return async (task, role = null) => {
-      const spec = role ? (SUBAGENT_ROLES[role] ?? null) : null;
+      // The loop has already refused an unknown or malformed role line; the
+      // resolve here is the same pure function, so the spec the helper is
+      // built from cannot be a different one than the gate judged.
+      const resolved = resolveHelperPreset(role, this.options.helperPresets);
+      if (resolved.error) return resolved.error;
+      const spec = resolved.spec;
       const brief = spec ? `${spec.lead}\n\nTask: ${task}` : task;
       // A verifier may RUN checks, but only where the run itself may: the
       // child narrows the parent's permissions, never widens them.
