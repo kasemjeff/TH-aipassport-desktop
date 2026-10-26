@@ -162,8 +162,8 @@ and the CLI*, below.
 From a fresh clone, this is the whole machine setup:
 
 ```bash
-git clone https://github.com/kasemjeff/TH-aipassport-harness.git
-cd TH-aipassport-harness
+git clone https://github.com/kasemjeff/TH-aipassport-desktop.git
+cd TH-aipassport-desktop
 npm run setup
 ```
 
