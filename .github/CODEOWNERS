@@ -1,0 +1,10 @@
+# Every path belongs to the maintainer until a second maintainer lands.
+# Keep this file small: it is a review routing rule, not a permission system.
+* @kasemjeff
+
+/.github/ @kasemjeff
+/SECURITY.md @kasemjeff
+/LICENSE @kasemjeff
+/NOTICE @kasemjeff
+/desktop/src-tauri/ @kasemjeff
+/aipass-bridge/harness/ @kasemjeff

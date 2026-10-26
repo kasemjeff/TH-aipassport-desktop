@@ -1,0 +1,32 @@
+aipass desktop
+==============
+
+This repository is a continuation of the MIT-licensed project
+niawjunior/aipass-bridge:
+
+    https://github.com/niawjunior/aipass-bridge
+
+The upstream bridge, Chrome extension and CLI remain under the copyright of
+the aipass-bridge contributors, niawjunior and Pheem49. The desktop window,
+the agent harness and the documentation added in this repository are under
+the copyright of kasemjeff. The combined work is distributed under the MIT
+License in LICENSE.
+
+The upstream project's copyright notice is preserved in LICENSE. If you
+redistribute this software or a substantial portion of it, keep LICENSE and
+this NOTICE with the distribution.
+
+Trademarks
+----------
+
+"AiPASS", "aipass" and de.aipass.net are names and marks of their respective
+owner. This repository is an independent community client and is not
+affiliated with, endorsed by, or sponsored by the service operator. See
+TRADEMARK.md.
+
+Third-party components
+----------------------
+
+Release artifacts include third-party software (Node.js, Tauri, Rust crates,
+and platform libraries). See THIRD_PARTY_NOTICES.md and the generated list
+produced by `npm run notices:rust` before publishing an installer.

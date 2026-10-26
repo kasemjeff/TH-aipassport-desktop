@@ -1,7 +1,7 @@
 # aipass-bridge — architecture & internals
 
 A deep reference for how this thing is built and why. For *using* it, see
-[`README.md`](./README.md); this document is the map you read once before
+[`README.md`](../README.md); this document is the map you read once before
 changing something.
 
 - [What it is, in one paragraph](#what-it-is-in-one-paragraph)

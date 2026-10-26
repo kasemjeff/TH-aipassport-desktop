@@ -7,6 +7,19 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Added
 
+- **The repository now carries the open-source essentials.** The project had a
+  license file and a CI lane, but a new contributor could not find the security
+  channel, the conduct rules, the contribution terms or the provenance of the
+  upstream code. There is now a preserved multi-holder `LICENSE`, a `NOTICE`
+  and provenance files, a Contributor Covenant, governance and maintainer
+  pages, a local private-advisory process, issue/PR templates, a DCO check,
+  a Thai README, a docs link check, CodeQL and dependency review, and a
+  release gate that runs the suite, coverage floors and docs check before any
+  artifact is published. Third-party notices are generated for the Rust
+  bundle, and the installers carry the license and notice files. The
+  contributor list is `kasemjeff`; the upstream authors remain copyright
+  holders in `LICENSE`/`NOTICE`, not contributors to this repository
+  (`test/sessions-panel.test.mjs`, `test/step-cap.test.mjs`).
 - **Playbooks can be installed, invoked and removed from the window.** The
   library used to grow only by hand — a person dropped `.md` files into a
   folder and hoped the list caught up. The skills list now carries the whole

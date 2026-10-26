@@ -25,15 +25,52 @@ on:
         default: '1'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  # A tag must not publish an artifact the suite has not seen. The build lane
+  # and this gate run in parallel; publish waits for both, so a red gate means
+  # no release even when every installer compiled.
+  gate:
+    name: release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install dev dependencies
+        run: npm ci
+
+      - name: Lint this guide
+        run: npm run agents:lint
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Run the suite
+        run: npm test
+
+      - name: Lint the eval set
+        run: npm run evals:lint
+
+      - name: Check the coverage floors
+        run: npm run coverage:gate
+
+      - name: Check every relative Markdown link
+        run: npm run docs:check
+
   build:
     name: build ${{ matrix.label }}
+    needs: gate
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -75,7 +112,22 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ matrix.artifact }}-cargo-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+      # Signing is macOS-only and is configured entirely by secrets. With no
+      # secrets the build still runs, and the manifest records the artifact as
+      # unsigned (`docs/INSTALL.md`). With them, Tauri imports the certificate,
+      # signs with the identity and notarizes with the API key or Apple ID.
       - name: Build the artifact
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: npm run desktop:build
       - uses: actions/upload-artifact@v4
         with:
@@ -85,9 +137,14 @@ jobs:
 
   publish:
     name: publish the feed
-    needs: build
+    needs: [gate, build]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The one job that writes. Configure a protected `release` environment in
+    # the repository settings if you want required reviewers on a tag.
+    environment: release
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

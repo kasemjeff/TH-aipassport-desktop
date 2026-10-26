@@ -4,6 +4,14 @@ version = "0.2.0"
 description = "AiPASS in a window — bridge, agent and chat, one command."
 edition = "2021"
 rust-version = "1.77"
+license = "MIT"
+repository = "https://github.com/kasemjeff/TH-aipassport-desktop"
+homepage = "https://github.com/kasemjeff/TH-aipassport-desktop"
+authors = ["kasemjeff"]
+readme = "../../README.md"
+publish = false
+keywords = ["tauri", "ai", "desktop", "agent"]
+categories = ["development-tools"]
 
 # The Rust side is deliberately thin: it owns the window, the tray and the
 # Node sidecar that runs the bridge and the harness. All the agent logic stays

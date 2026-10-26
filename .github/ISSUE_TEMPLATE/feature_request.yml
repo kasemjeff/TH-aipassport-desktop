@@ -1,0 +1,64 @@
+name: Feature request
+description: Suggest a capability, a change in behavior, or a documentation improvement
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to write this down. Before you submit:
+
+        - Search the existing issues and discussions first.
+        - Do not include tokens, credentials, private project paths, or
+          customer data. Security problems belong in a private advisory, not
+          here: https://github.com/kasemjeff/TH-aipassport-desktop/security/advisories/new
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the task or friction, not only the proposed implementation.
+      placeholder: "When I ..., I cannot ..., so I ..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+      description: The behavior you want. A sketch is enough; a design note is welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other tools, workarounds, or designs you tried.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - desktop window
+        - agent harness / loop
+        - bridge or Chrome extension
+        - CLI
+        - evals / experiments
+        - documentation
+        - packaging / release
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links, screenshots, related issues, or a note about scope.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and discussions.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

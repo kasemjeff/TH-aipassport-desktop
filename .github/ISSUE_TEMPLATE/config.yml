@@ -1,8 +1,14 @@
 blank_issues_enabled: true
 contact_links:
   - name: Something exploitable
-    url: https://github.com/niawjunior/aipass-bridge/security/advisories/new
-    about: Please report security problems privately rather than as an issue.
+    url: https://github.com/kasemjeff/TH-aipassport-desktop/security/advisories/new
+    about: Please report security problems privately rather than as an issue. See SECURITY.md.
   - name: Setup and usage
-    url: https://github.com/niawjunior/aipass-bridge/blob/main/aipass-bridge/README.md
-    about: Setup, the agent's action set, models, image generation, credits, configuration.
+    url: https://github.com/kasemjeff/TH-aipassport-desktop/blob/main/docs/INSTALL.md
+    about: Install, the two browser steps, the native app, and where state lives.
+  - name: Something is broken
+    url: https://github.com/kasemjeff/TH-aipassport-desktop/blob/main/docs/TROUBLESHOOTING.md
+    about: Run `npm run doctor` first, then read the common failures and where the logs are.
+  - name: Ask a question
+    url: https://github.com/kasemjeff/TH-aipassport-desktop/discussions
+    about: Setup questions, ideas, and show-and-tell.
