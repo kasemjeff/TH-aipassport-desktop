@@ -39,11 +39,15 @@ const NOW = new Date(2026, 9, 21, 12, 0, 0).getTime();
  */
 function fakeSpawner() {
   const calls = [];
+  // A real runner can have a process at a low pid (1002 was alive on a macOS
+  // runner), and `recordPids([])` correctly keeps running pids. Use a number
+  // above every platform's pid range so "this job ended" is unambiguous.
+  const base = 2_000_000_000;
   const spawnFn = (cmd, args, opts) => {
     calls.push({ cmd, args, opts });
-    return { pid: 1000 + calls.length, unref() {} };
+    return { pid: base + calls.length, unref() {} };
   };
-  return { calls, spawnFn };
+  return { calls, spawnFn, base };
 }
 
 test('a due schedule entry is due once and then spent', async () => {
@@ -60,7 +64,7 @@ test('a due schedule entry is due once and then spent', async () => {
   assert.equal(due.length, 2, 'the two whose time has come are due');
   assert.ok(due.every((e) => e.at === '09:00'), 'the one whose time has not come is not');
 
-  const { calls, spawnFn } = fakeSpawner();
+  const { calls, spawnFn, base } = fakeSpawner();
   const ran = await store.runDue({ now: NOW, spawnFn, cli: path.join(dir, 'aipass.mjs') });
 
   assert.equal(ran.count, 2, 'both ran');
@@ -95,7 +99,7 @@ test('a due schedule entry is due once and then spent', async () => {
 
   // The jobs that started are named in the pid file, the way the bridge's are.
   const pids = await store.readPids();
-  assert.deepEqual(pids, [1001, 1002], 'the running jobs are named');
+  assert.deepEqual(pids, [base + 1, base + 2], 'the running jobs are named');
   await store.recordPids([]);
   assert.deepEqual(await store.readPids(), [], 'and a job that ended leaves nothing behind');
 });
