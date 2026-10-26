@@ -27,6 +27,9 @@ they are actually done; the detailed capability status is in
 - [ ] Add a second maintainer with release access, or document a tested
       handover procedure.
 - [ ] Pin GitHub Actions to commit SHAs and add an SBOM/provenance step.
+- [ ] Enable the repository's dependency graph (Settings → Security) and add
+      dependency review to pull requests; the graph is currently disabled, so
+      the action refuses to run.
 
 ## Later — product and community
 

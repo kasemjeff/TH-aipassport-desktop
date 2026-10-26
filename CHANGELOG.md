@@ -13,7 +13,7 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   upstream code. There is now a preserved multi-holder `LICENSE`, a `NOTICE`
   and provenance files, a Contributor Covenant, governance and maintainer
   pages, a local private-advisory process, issue/PR templates, a DCO check,
-  a Thai README, a docs link check, CodeQL and dependency review, and a
+  a Thai README, a docs link check, CodeQL, and a
   release gate that runs the suite, coverage floors and docs check before any
   artifact is published. Third-party notices are generated for the Rust
   bundle, and the installers carry the license and notice files. The
