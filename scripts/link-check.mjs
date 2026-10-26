@@ -33,12 +33,35 @@ function walk(dir, out = []) {
   return out;
 }
 
+/**
+ * Remove HTML comments with a scanner rather than a single regex.
+ *
+ * A regex pass can leave a `<!--` behind when comments overlap or one is never
+ * closed, and the leftover then swallows the links after it. Scanning until
+ * the next `-->` (and treating an unclosed comment as "to end of file") makes
+ * the output unable to contain an opening marker at all.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function stripHtmlComments(text) {
+  let out = '';
+  let at = 0;
+  for (;;) {
+    const start = text.indexOf('<!--', at);
+    if (start < 0) return out + text.slice(at);
+    out += text.slice(at, start);
+    const end = text.indexOf('-->', start + 4);
+    if (end < 0) return out;
+    at = end + 3;
+  }
+}
+
 /** Remove fenced blocks, inline code and HTML comments before looking for links. */
 function stripNonMarkdown(text) {
-  return text
+  return stripHtmlComments(text)
     .replace(/^```[\s\S]*?^```/gm, '')
     .replace(/^~~~[\s\S]*?^~~~/gm, '')
-    .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/(`+)([^`\n]*?)\1/g, '');
 }
 

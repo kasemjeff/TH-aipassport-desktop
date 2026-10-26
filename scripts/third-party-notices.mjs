@@ -35,7 +35,12 @@ try {
   process.exit(1);
 }
 
-const escape = (value) => String(value ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+// A Markdown table cell needs pipes and the escape character itself escaped;
+// a raw newline would end the row. Escape both in one pass so a backslash is
+// never added twice.
+const escape = (value) => String(value ?? '')
+  .replace(/[\\|]/g, (char) => `\\${char}`)
+  .replace(/\r?\n/g, ' ');
 const packages = (metadata.packages ?? [])
   .slice()
   .sort((a, b) => a.name.localeCompare(b.name) || String(a.version).localeCompare(String(b.version)));
