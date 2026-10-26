@@ -17,7 +17,7 @@ terminal ──HTTP──▶ bridge (node, no deps)
 page JavaScript inside a de.aipass.net tab, so Chrome attaches the session
 cookie itself. The bridge never sees it and nothing is stored on disk.
 
-For the full structure and how every piece works, see [`DOCS.md`](./DOCS.md).
+For the full structure and how every piece works, see [`docs/DOCS.md`](./docs/DOCS.md).
 
 ## Setup
 

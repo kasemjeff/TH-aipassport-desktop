@@ -1,13 +1,20 @@
 # ✳ aipass
 
+**English** · [ไทย](./README.th.md)
+
 > **The desktop window and the agent harness for [de.aipass.net](https://de.aipass.net/chat)** —
 > a file-editing agent you can watch, approve and resume — running on top of the
 > community bridge that reaches the site through your own logged-in browser tab.
+>
+> **Independent community project.** Not affiliated with, endorsed by, or
+> sponsored by the operator of de.aipass.net. See [TRADEMARK.md](./TRADEMARK.md).
 
 <p align="left">
+  <img src="https://github.com/kasemjeff/TH-aipassport-desktop/actions/workflows/test.yml/badge.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License" />
   <img src="https://img.shields.io/badge/node-%E2%89%A520-blue?logo=node.js&style=flat-square" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/dependencies-zero-success?style=flat-square" alt="Zero Dependencies" />
-  <img src="https://img.shields.io/badge/tests-npm%20test-blue?style=flat-square" alt="Tests: run npm test" />
+  <img src="https://img.shields.io/badge/status-pre--1.0-orange?style=flat-square" alt="Status: pre-1.0" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgray?style=flat-square" alt="Platforms" />
 </p>
 
@@ -23,6 +30,7 @@
 
 ## Contents
 
+- [Project status](#project-status)
 - [What this repo is](#what-this-repo-is)
 - [What this repo does well](#what-this-repo-does-well)
 - [Architecture](#architecture)
@@ -35,7 +43,34 @@
 - [Documentation](#documentation)
 - [Repo layout](#repo-layout)
 - [Development](#development)
+- [Community and support](#community-and-support)
+- [Contributing](#contributing)
+- [Security](#security)
 - [Credits & license](#credits--license)
+
+## Project status
+
+**Pre-1.0, source install.** There is no published installer or GitHub release
+yet; the install command in this README builds/runs from a checkout. The
+release workflow is in place but has not been used — see
+[ROADMAP.md](./ROADMAP.md) for what is still missing before `v0.2.0` ships.
+
+What is green today:
+
+- the Node suite (bridge, extension stand-in, harness, window logic) on
+  Ubuntu, macOS and Windows across Node 20, 22 and 24;
+- the Rust shell's unit tests on Ubuntu and Windows;
+- the coverage floors, the docs link check, the eval-set lint and CodeQL.
+
+Known limits are stated rather than hidden: the extension has no automated
+test that reaches the real browser, the Windows installer is unsigned, and
+macOS signing/notarization depends on secrets the maintainer must provide.
+See [SECURITY.md](./SECURITY.md#known-limits-not-bugs) and
+[docs/MATURITY.md](./docs/MATURITY.md).
+
+**Node 20 is end-of-life upstream.** It remains in the CI matrix for
+compatibility with the declared `>=20` floor; Node 22 or 24 is recommended for
+development. Moving the floor is tracked in [ROADMAP.md](./ROADMAP.md).
 
 ## What this repo is
 
@@ -211,6 +246,10 @@ installs it needs no Node of its own. *Building* it is the part that needs
 more: the Rust toolchain and the Tauri CLI (`cargo install tauri-cli --version
 "^2"`). The whole procedure — sidecars, signing, what each platform ships —
 is [`docs/INSTALL.md`](./docs/INSTALL.md).
+
+There is no published installer yet. Until the first release is tagged, build
+from source as above; the release checklist is
+[`docs/RELEASE.md`](./docs/RELEASE.md).
 
 ### Where the state lives
 
@@ -486,25 +525,72 @@ aipass/
 ## Development
 
 ```bash
-npm run setup   # first-run machine setup: Node, PATH, token, bridge, browser pages
-npm test        # the whole suite (bridge, extension, harness, window logic)
-npm run check   # agents:lint + the suite + qa + the coverage gates — the pre-push set
-npm run qa      # static checks + suite + fake-DOM window + live status
-npm run verify  # suite + a sandboxed live smoke of the bridge and backend
-npm run evals   # score agent runs against task checks
+npm run setup       # first-run machine setup: Node, PATH, token, bridge, browser pages
+npm test            # the whole suite (bridge, extension, harness, window logic)
+npm run typecheck   # the files that opt in with // @ts-check
+npm run agents:lint # this guide: anchors, shims, size budgets
+npm run docs:check  # every relative Markdown link resolves
+npm run coverage:gate # the per-file coverage floors
+npm run check       # agents:lint + suite + qa + coverage + docs — the pre-push set
+npm run dco         # every commit in the branch carries Signed-off-by
+npm run qa          # static checks + suite + fake-DOM window + live status
+npm run verify      # suite + a sandboxed live smoke of the bridge and backend
+npm run evals       # score agent runs against task checks
 ```
 
-The tests are plain `node --test` — no framework, no dependencies.
+The tests are plain `node --test` — no framework, no dependencies. Every
+human commit needs a DCO sign-off (`git commit -s`); see
+[CONTRIBUTING.md](./CONTRIBUTING.md).
+
+## Community and support
+
+- **Questions, setup help, ideas** — [GitHub Discussions](https://github.com/kasemjeff/TH-aipassport-desktop/discussions).
+- **Bugs and feature requests** — use the issue templates. Include the full
+  `npm run doctor` output for a bug.
+- **Support expectations and the not-supported list** — [SUPPORT.md](./SUPPORT.md).
+- **Code of Conduct** — [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md).
+- **Who decides what** — [GOVERNANCE.md](./GOVERNANCE.md) and
+  [MAINTAINERS.md](./MAINTAINERS.md).
+- **Privacy: no telemetry** — [PRIVACY.md](./PRIVACY.md).
+- **Trademarks and non-affiliation** — [TRADEMARK.md](./TRADEMARK.md).
+- **Migrating from the upstream project** — [docs/MIGRATION.md](./docs/MIGRATION.md).
+
+## Contributing
+
+Pull requests are welcome. The short version:
+
+1. Read [CONTRIBUTING.md](./CONTRIBUTING.md) and the
+   [Code of Conduct](./CODE_OF_CONDUCT.md).
+2. Sign off every commit: `git commit -s` (Developer Certificate of Origin).
+3. Run `npm test`, `npm run typecheck`, `npm run agents:lint` and
+   `npm run docs:check` before opening the PR.
+4. Keep the core dependency-free and add a test with every behavior change.
+
+The CI must be green; a maintainer reviews and merges with a merge commit
+(never a squash), so authorship stays intact.
+
+## Security
+
+Do **not** open a public issue for something exploitable. Use
+[private vulnerability reporting](https://github.com/kasemjeff/TH-aipassport-desktop/security/advisories/new)
+and follow [SECURITY.md](./SECURITY.md). The security model, supported
+versions and the inherited upstream incident record are in that file.
 
 ## Credits & license
 
-**Our work** — the desktop window (`desktop/`), the harness
+**This repository** — the desktop window (`desktop/`), the harness
 (`aipass-bridge/harness/`), the sessions, the agent protocol, the eval and
-experiment tooling, and the docs.
+experiment tooling, and the docs. **kasemjeff** is the sole contributor; see
+[AUTHORS.md](./AUTHORS.md).
 
 **Upstream, continued** — the bridge, the Chrome extension and the CLI, from
-**[niawjunior/aipass-bridge](https://github.com/niawjunior/aipass-bridge)** by
-[niawjunior](https://github.com/niawjunior). That code stays under
-niawjunior's copyright, credited in the [MIT License](./LICENSE).
+**[niawjunior/aipass-bridge](https://github.com/niawjunior/aipass-bridge)**.
+The upstream copyright holders are **niawjunior**, **Pheem49** and the other
+`aipass-bridge` authors. Their notices are preserved in [LICENSE](./LICENSE)
+and [NOTICE](./NOTICE), with provenance in [CREDITS.md](./CREDITS.md).
+They are credited for the upstream code, not listed as contributors to this
+repository.
 
-This continuation is released under the [MIT License](./LICENSE).
+This continuation is released under the [MIT License](./LICENSE). Release
+artifacts bundle Node.js, Tauri, Rust crates and platform libraries; see
+[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).

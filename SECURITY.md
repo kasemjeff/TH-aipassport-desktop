@@ -8,9 +8,38 @@ bridge port the way you would treat a password.
 
 ## Reporting
 
-Open a [security advisory](https://github.com/niawjunior/aipass-bridge/security/advisories/new),
-or email the maintainer if you would rather not file publicly. Please do not open
-a normal issue for something exploitable.
+Open a **private security advisory** in this repository:
+
+<https://github.com/kasemjeff/TH-aipassport-desktop/security/advisories/new>
+
+Please do not open a normal issue for something exploitable, and do not send
+reports to the upstream project: this repository is the maintained
+continuation and the advisory here is the one the maintainer reads. If GitHub
+advisories are not usable for you, say so in a minimal public issue **without
+the details** and ask for a private channel.
+
+The targets are best-effort, not a support contract: acknowledge within 3
+business days, triage within 7 days, and agree a fix or mitigation timeline
+after triage. Default-configuration issues ship before issues that require a
+non-default setting.
+
+### Supported versions
+
+| version | supported |
+|---|---|
+| `0.2.x` | yes |
+| older than `0.2` | no |
+
+Only the latest published minor is supported with security fixes. If you are
+on a source checkout, update to the latest `main` or the latest release tag.
+
+### What to include
+
+- the version, commit and platform (`git rev-parse --short HEAD`, OS, Node);
+- whether the report needs `AIPASS_ALLOW_REMOTE`, `AIPASS_ADMIN`,
+  `AIPASS_CORS_ORIGIN` or `AIPASS_REQUIRE_AUTH=0` to reproduce;
+- a minimal reproduction without real credentials, tokens or private project
+  data.
 
 The process, as small as the project:
 
@@ -27,9 +56,16 @@ The process, as small as the project:
 4. **Announce when copies are affected** — like the pre-2-Sep notice below,
    because a fix without a notice leaves old clones running the hole.
 
+## Inherited upstream history
+
+The section below is kept from the upstream project for context. This
+repository's first import already contains the fix; it is not a list of open
+holes. It stays here because the incident is part of the security record and
+because a fork of an old upstream checkout may still be affected.
+
 ## If you cloned or forked before 2 Sep 2026
 
-**Update.** Every copy taken before commit
+**Update.** Every upstream copy taken before commit
 [`8cad676`](https://github.com/niawjunior/aipass-bridge/commit/8cad676)
 (2026-09-02, 21:55 +07) has a bridge that any website could drive.
 

@@ -4,6 +4,27 @@
   "private": true,
   "license": "MIT",
   "description": "AiPASS in a desktop window — bridge, chat and a file agent with a pi-style harness.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kasemjeff/TH-aipassport-desktop.git"
+  },
+  "homepage": "https://github.com/kasemjeff/TH-aipassport-desktop#readme",
+  "bugs": {
+    "url": "https://github.com/kasemjeff/TH-aipassport-desktop/issues"
+  },
+  "author": "kasemjeff",
+  "contributors": [
+    "kasemjeff"
+  ],
+  "keywords": [
+    "aipass",
+    "ai-agent",
+    "desktop",
+    "tauri",
+    "chrome-extension",
+    "harness",
+    "thai"
+  ],
   "bin": {
     "aipass": "aipass-bridge/bin/aipass.mjs"
   },
@@ -14,11 +35,14 @@
     "typecheck": "tsc -p aipass-bridge/jsconfig.json",
     "coverage": "node scripts/test.mjs --coverage",
     "coverage:gate": "node scripts/coverage-gate.mjs",
+    "docs:check": "node scripts/link-check.mjs",
+    "dco": "node scripts/dco.mjs",
+    "notices:rust": "node scripts/third-party-notices.mjs",
     "verify": "node scripts/verify.mjs",
     "smoke:e2e": "node scripts/smoke-e2e.mjs",
     "qa": "node scripts/qa-loop.mjs",
     "qa:loop": "node scripts/qa-loop.mjs",
-    "check": "node scripts/agents-lint.mjs && node scripts/test.mjs && node scripts/qa-loop.mjs && node scripts/coverage-gate.mjs",
+    "check": "node scripts/agents-lint.mjs && node scripts/test.mjs && node scripts/qa-loop.mjs && node scripts/coverage-gate.mjs && node scripts/link-check.mjs",
     "chat": "node aipass-bridge/chat.mjs",
     "agent": "node aipass-bridge/agent.mjs",
     "models": "node aipass-bridge/list.mjs models",

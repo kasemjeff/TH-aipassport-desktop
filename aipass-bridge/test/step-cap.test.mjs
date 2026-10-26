@@ -64,6 +64,91 @@ test('normalizeOptions clamps the option sheet before the loop sees it', () => {
   assert.equal(custom.repeatGuardMax, 2);
 });
 
+test('normalizeOptions handles the loose edges of the sheet', () => {
+  // The configuration file is hand-edited and the RPC payload is JSON, so the
+  // values that reach here are not the tidy ones a TypeScript signature
+  // promises: Infinity, -1, 0, NaN, a string where a number belongs. Every
+  // one of them has a defined answer and none of them may reach the loop.
+  const loose = normalizeOptions({
+    maxSteps: Infinity,
+    maxToolCalls: 0,
+    maxWallClockMs: -1,
+    maxCredits: -1,
+    model: 'some-model',
+    thinking: 'OFF',
+    temperature: 'hot',
+    slim: 0,
+    seedText: null,
+    pluginTools: null,
+    pluginSections: 'nope',
+    helperPresets: null,
+    replyLanguage: 'fr',
+    langCheck: 0,
+    minThaiRatio: Number.NaN,
+    repeatGuard: 0,
+    repeatGuardMax: 0,
+  });
+  assert.equal(loose.maxSteps, Infinity, 'Infinity means no cap');
+  assert.equal(loose.maxStepsWire, 0, 'the wire spells no cap as 0');
+  assert.equal(loose.maxToolCalls, DEFAULT_MAX_TOOL_CALLS);
+  assert.equal(loose.maxWallClockMs, DEFAULT_MAX_WALL_CLOCK_MS);
+  assert.equal(loose.maxCredits, 0);
+  assert.equal(loose.model, 'some-model');
+  assert.equal(loose.thinking, null, "'off' in any casing never asks");
+  assert.equal(loose.temperature, null, 'a non-number never asks');
+  assert.equal(loose.useSlim, false);
+  assert.equal(loose.seedText, null);
+  assert.deepEqual(loose.pluginTools, []);
+  assert.deepEqual(loose.pluginSections, [], 'a non-array is not carried');
+  assert.deepEqual(loose.helperPresets, {}, 'a non-object is not carried');
+  assert.equal(loose.replyLanguage, 'th', 'only en is a language choice');
+  assert.equal(loose.langCheck, false);
+  assert.equal(loose.minThaiRatio, 0.4, 'NaN falls back to the shipped ratio');
+  assert.equal(loose.repeatGuard, false);
+  assert.equal(loose.repeatGuardMax, 4);
+
+  const nanCap = normalizeOptions({
+    maxSteps: 'not a number', maxToolCalls: '2.9', maxWallClockMs: '3.9', maxCredits: '2.5',
+    thinking: '', temperature: Number.NaN, minThaiRatio: Infinity, repeatGuardMax: '2.9',
+  });
+  assert.equal(nanCap.maxSteps, Infinity);
+  assert.equal(nanCap.maxStepsWire, 0);
+  assert.equal(nanCap.maxToolCalls, 2);
+  assert.equal(nanCap.maxWallClockMs, 3);
+  assert.equal(nanCap.maxCredits, 2.5);
+  assert.equal(nanCap.thinking, null, 'an empty level is no level');
+  assert.equal(nanCap.temperature, null, 'NaN is not a temperature');
+  assert.equal(nanCap.minThaiRatio, 0.4, 'Infinity is not a ratio');
+  assert.equal(nanCap.repeatGuardMax, 2);
+
+  const clamped = normalizeOptions({
+    maxSteps: -1, maxToolCalls: -1, maxWallClockMs: 0, maxCredits: 0,
+    thinking: 'HIGH', temperature: 5, slim: 1, seedText: 'seed',
+    pluginTools: ['x'], pluginSections: [{ id: 'p' }], helperPresets: { helper: 'x' },
+    replyLanguage: 'en', langCheck: 1, minThaiRatio: 2, repeatGuard: 1, repeatGuardMax: -1,
+  });
+  assert.equal(clamped.maxSteps, Infinity, 'a negative cap is no cap');
+  assert.equal(clamped.maxToolCalls, DEFAULT_MAX_TOOL_CALLS);
+  assert.equal(clamped.maxWallClockMs, DEFAULT_MAX_WALL_CLOCK_MS);
+  assert.equal(clamped.thinking, 'high');
+  assert.equal(clamped.temperature, 2, 'temperature is clamped to the top of the range');
+  assert.equal(clamped.useSlim, true);
+  assert.equal(clamped.seedText, 'seed');
+  assert.deepEqual(clamped.pluginTools, ['x']);
+  assert.deepEqual(clamped.pluginSections, [{ id: 'p' }]);
+  assert.deepEqual(clamped.helperPresets, { helper: 'x' });
+  assert.equal(clamped.replyLanguage, 'en');
+  assert.equal(clamped.langCheck, true);
+  assert.equal(clamped.minThaiRatio, 1, 'the ratio is clamped to 1');
+  assert.equal(clamped.repeatGuard, true);
+  assert.equal(clamped.repeatGuardMax, 4, 'a negative count falls back to four');
+
+  const cold = normalizeOptions({ temperature: -1, minThaiRatio: -1, maxSteps: 2.9 });
+  assert.equal(cold.temperature, 0, 'temperature is clamped to zero');
+  assert.equal(cold.minThaiRatio, 0, 'the ratio is clamped to zero');
+  assert.equal(cold.maxSteps, 2, 'the step cap is floored');
+});
+
 test('a run with no step cap is not stopped by ten steps', async () => {
   // Eleven steps of real work, then a DONE. The shipped default used to end
   // this at step ten with "reached the step limit".

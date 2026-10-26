@@ -41,6 +41,10 @@
       "../../aipass-bridge/harness": "aipass-bridge/harness/",
       "../../aipass-bridge/.gitignore": "aipass-bridge/.gitignore",
       "../../aipass-bridge/README.md": "aipass-bridge/README.md",
+      "../../LICENSE": "LICENSE",
+      "../../NOTICE": "NOTICE",
+      "../../AUTHORS.md": "AUTHORS.md",
+      "../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
       "../../aipass-bridge/agent.mjs": "aipass-bridge/agent.mjs",
       "../../aipass-bridge/argv.mjs": "aipass-bridge/argv.mjs",
       "../../aipass-bridge/assistant-prompt.mjs": "aipass-bridge/assistant-prompt.mjs",
@@ -69,7 +73,7 @@
       "webviewInstallMode": { "type": "offlineInstaller" }
     },
     "publisher": "aipass",
-    "copyright": "Copyright (c) 2026 niawjunior",
+    "copyright": "Copyright (c) 2026 the aipass-bridge contributors, niawjunior, Pheem49, and kasemjeff",
     "category": "DeveloperTool",
     "shortDescription": "AiPASS bridge, chat and file agent in a window",
     "longDescription": "A desktop front end for the aipass bridge: chat with the AiPASS models from a window, and let the file agent edit a project you point it at — with sessions, per-file approval, plan mode, helpers and compaction."

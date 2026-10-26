@@ -14,6 +14,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# The suite only reads the repository. A pull request never needs a write
+# token, and a compromised test helper should not get one either.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: node ${{ matrix.node }} on ${{ matrix.os }}
@@ -30,10 +35,10 @@ jobs:
         # machine cannot run — the lane is the Node-side half of that proof;
         # the window bundle still needs real hardware. Node 20 is the floor the
         # runtime asks for (engines >=20): the code needs nothing newer, so a
-        # machine still on 20 is a machine the app has to run on. The matrix
-        # keeps the floor and both maintained LTS lines (22, 24), because
-        # `node --test` changed shape in 21 and again in 24 — the ends of the
-        # range are where the surprises live.
+        # machine still on 20 is a machine the app has to run on. Node 20 is
+        # end-of-life upstream, so it is kept only for compatibility; 22 and 24
+        # are the maintained lines. `node --test` changed shape in 21 and again
+        # in 24 — the ends of the range are where the surprises live.
         os: [ubuntu-latest, macos-latest, windows-latest]
         node: [20, 22, 24]
 
@@ -161,6 +166,35 @@ jobs:
         working-directory: desktop/src-tauri
         continue-on-error: true
         run: cargo clippy --all-targets
+
+  docs:
+    name: docs and metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # No install: the link checker uses Node built-ins only. That is the
+      # point of it, and it keeps this job fast enough to run on every PR.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Check every relative Markdown link
+        run: npm run docs:check
+
+      - name: Check the package metadata
+        run: |
+          node -e '
+            const p = require("./package.json");
+            const missing = ["name", "version", "license", "repository", "bugs", "homepage"]
+              .filter((key) => !p[key]);
+            if (missing.length) {
+              console.error("package.json is missing: " + missing.join(", "));
+              process.exit(1);
+            }
+            console.log(`${p.name}@${p.version} — ${p.license}`);
+          '
 
   shellcheck:
     name: deploy scripts

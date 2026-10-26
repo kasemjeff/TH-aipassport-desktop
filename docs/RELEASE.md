@@ -26,8 +26,11 @@ Before `git tag vX.Y.Z`, all of these are true:
 
 1. **`npm run check`** green on the release commit — the full suite plus the
    QA loop, including the live backend checks.
-2. **CI matrix** green on both operating systems × Node 20/22/24
-   (`.github/workflows/test.yml`), plus the parse/shellcheck jobs.
+2. **CI matrix** green on Ubuntu, macOS and Windows × Node 20/22/24
+   (`.github/workflows/test.yml`), plus the docs, parse/shellcheck, CodeQL and
+   Rust jobs. The release workflow's own `gate` job runs the suite, type check,
+   eval lint, coverage floors and docs check again on the tagged commit; a
+   failed gate stops the release before any artifact is published.
 3. **`npm run doctor`** against a real signed-in tab, on at least one machine
    (the one the release notes were written on).
 4. **`npm run stats -- --strict`** — no warning fired on this machine's recent
@@ -48,7 +51,12 @@ Before `git tag vX.Y.Z`, all of these are true:
    checksums and the manifest); the artifacts are attached to the tag's
    release, and **the previous release's installers stay downloadable** —
    that is the rollback. A macOS artifact needs a Mac to build and to sign:
-   see [`INSTALL.md`](INSTALL.md#can-macos-do-it).
+   see [`INSTALL.md`](INSTALL.md#can-macos-do-it). The release workflow reads
+   the Apple credentials from the `release` environment's secrets
+   (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
+   `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID` or
+   `APPLE_API_ISSUER`/`APPLE_API_KEY`/`APPLE_API_KEY_PATH`); with no secrets it
+   builds unsigned and the manifest says so.
 8. **The content pack and the signed feed** (`npm run desktop:content-pack`
    and `npm run desktop:feed`). The pack is the content tree — the harness,
    the bridge, the window's own files — as one gzipped JSON file; the feed is
