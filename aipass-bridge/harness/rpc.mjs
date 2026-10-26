@@ -97,7 +97,8 @@ const PORT_BUSY_EXIT = 43;
  *   img/media the model's own pictures and clips, https only, and not until
  *             the reader clicks the slot into loading (md.js paints no src —
  *             the URL of a fetched picture is a channel out of the machine)
- *   connect   this backend, and the loopback it is served from
+ *   connect   the backend itself — the page is served from it, so 'self'
+ *             names exactly the one loopback origin it may talk to
  *
  * The object is the shape tauri.conf.json wants, so the two can be compared
  * key by key.
@@ -109,7 +110,7 @@ export const WINDOW_CSP = {
   'img-src': "'self' data: blob: https:",
   'media-src': "'self' data: blob: https:",
   'font-src': "'self' data:",
-  'connect-src': "'self' http://127.0.0.1:* http://localhost:*",
+  'connect-src': "'self'",
   'base-uri': "'self'",
   'form-action': "'none'",
   'frame-ancestors': "'none'",
@@ -212,10 +213,18 @@ const isLocalRequest = (req) => {
 const isBrowserSameOrigin = (req) => {
   if (process.env.AIPASS_ALLOW_REMOTE === '1') return false;
   if (!loopbackHost(req.headers.host)) return false;
-  if (req.headers['sec-fetch-site'] === 'same-origin') return true;
+  // A browser that names its context has already decided the answer:
+  // same-site — another local dev server on another port — is a different
+  // origin even though it is loopback too, so it is refused before the
+  // Origin header is read at all.
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin') return false;
+  // Without the header, the Origin must be THIS origin — host and port, not
+  // merely loopback: a check that only asks "is it 127.0.0.1?" passes a page
+  // served by any other local server.
   const origin = req.headers['origin'];
   if (origin) {
-    try { return loopbackHost(new URL(origin).host); } catch { return false; }
+    try { return new URL(origin).host === String(req.headers.host).toLowerCase(); } catch { return false; }
   }
   return false;
 };
@@ -1167,6 +1176,16 @@ export function createRpc({
         const params = { ...(msg.params ?? {}) };
         if (params.project == null) {
           const scope = String(req.headers['x-aipass-project'] ?? '').trim();
+          // A header is a claim about who is asking, not a parameter: it has
+          // to name a real folder on this machine, absolutely. Anything else
+          // — a relative path (which would resolve against this backend's
+          // cwd), a URL, junk — is refused rather than turned into the
+          // project the call runs against.
+          const real = path.isAbsolute(scope)
+            && (() => { try { return fs.statSync(scope).isDirectory(); } catch { return false; } })();
+          if (scope && !real) {
+            return json(res, 200, { ok: false, error: `x-aipass-project must name an existing folder — got: ${scope}` });
+          }
           if (scope) params.project = scope;
         }
         try {

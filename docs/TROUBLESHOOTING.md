@@ -125,7 +125,8 @@ reason and guard.
   the stop reason reads `credit-limited`. 0 (the default) means no cap.
 - **"the person watching declined …"** — a change in `ask` mode was not
   approved, or a path rule or the plan gate said no. Approve the diff, switch
-  mode (`Shift+Tab` cycles ask → auto → plan), or amend the rule.
+  mode (`Shift+Tab` cycles ask → auto → plan; yolo is left out of the cycle
+  so it is always a deliberate pick), or amend the rule.
 - **"… denies reading …; the file stays on this machine"** — the secret floor
   (`SECRET_RULES` in `harness/settings.mjs`): `.env*`, keys, cloud credentials
   and captures are denied for reads AND writes in every mode, yolo included.

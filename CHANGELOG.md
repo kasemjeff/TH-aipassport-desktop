@@ -158,6 +158,29 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Fixed
 
+- **The token bootstrap refuses same-site pages, and an Origin must be the
+  exact host.** `isBrowserSameOrigin` accepted a page from any loopback port
+  — another local dev server, say — because it only asked whether the Origin
+  was loopback, and a `sec-fetch-site: same-site` header did not stop it.
+  The gate now refuses every site value but `same-origin`, and a bare Origin
+  has to match the request's host and port exactly; both cases come back 403
+  (`harness/rpc.mjs`, `test/auth.test.mjs`).
+- **The install handover checks the installer's hash at the moment it runs.**
+  The helper that runs the installer was handed the digest and its comment
+  said it re-checked the file — it never did, so the gap between the shell's
+  check and the helper's start had no check in it at all. The helper now
+  re-hashes the artifact with the app's own Node, runs nothing that is not
+  inside the app's own downloads directory, and runs nothing at all on a
+  mismatch, while still bringing the app back; and a handover command whose
+  `sha256` is not a 64-character hex digest is refused at the door
+  (`desktop/src-tauri/src/main.rs`).
+- **`tauri build` alone now has its sidecar.** `beforeBuildCommand` was
+  empty, so a build through `npm run tauri:build` — as opposed to
+  `npm run desktop:build`, which fetches the sidecar itself — failed on a
+  fresh checkout and could ship a sidecar left over from an earlier build.
+  The hook now runs `npm run desktop:sidecar` before every build
+  (`desktop/src-tauri/tauri.conf.json`).
+
 - **The window stops lying in small ways** (the desktop audit's small batch):
   the six-hour update poll no longer stacks a fresh banner per poll — a
   version is said once and a newer one replaces the bar in place
@@ -299,6 +322,27 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   protocol mirror and marker grammar never drift undetected.
 
 ### Changed
+
+- **The window's CSP connects to itself, not to any loopback port.**
+  `connect-src` allowed `http://127.0.0.1:*` and `http://localhost:*` — every
+  local port, not just the backend the page is served from. The page loads
+  from the backend and speaks to nothing else, so the policy now says
+  `'self'`, in the shell's declaration and the served header alike
+  (`harness/rpc.mjs`, `desktop/src-tauri/tauri.conf.json`,
+  `test/hardening.test.mjs`).
+- **A project header has to name a real folder.** The `x-aipass-project`
+  header rode into every call as the project scope unchecked — a relative
+  path would have resolved against the backend's working directory, and any
+  other string would have become a harness nobody asked for. A value that is
+  not an absolute path to an existing directory is refused
+  (`harness/rpc.mjs`, `test/desktop.test.mjs`).
+- **The sidecar's Node is pinned to a major.** The packaged app shipped
+  whatever Node the build machine had, so two machines built two different
+  runtimes. `fetch-node.mjs` now refuses to copy when the machine's Node is
+  not the pinned major (`REQUIRED_NODE_MAJOR`) — moving the pin is a
+  deliberate bump of one number (`desktop/sidecar/fetch-node.mjs`,
+  `test/platform.test.mjs`).
+
 
 - **The mode moved beside the composer, and temperature moved into the sheet.**
   The two knobs sat on opposite ends of the same mistake: the work mode — the

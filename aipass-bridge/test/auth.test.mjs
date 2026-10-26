@@ -218,6 +218,19 @@ test('rpc: /rpc gated, /token is same-origin-browser-only', async () => {
       headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.test' },
     }).then((r) => r.status);
     assert.equal(cross, 403);
+    // A same-site page — another local dev server on another port — is a
+    // different origin even though it is loopback too: the token must not
+    // cross the port boundary.
+    const sameSite = await fetch(`${base}/token`, {
+      headers: { 'sec-fetch-site': 'same-site', origin: 'http://127.0.0.1:3000' },
+    }).then((r) => r.status);
+    assert.equal(sameSite, 403, 'a loopback origin on another port is not same-origin');
+    // No Sec-Fetch-Site at all: the Origin alone must be THIS host, port
+    // included — "it is loopback" is not the question.
+    const otherPort = await fetch(`${base}/token`, {
+      headers: { origin: 'http://127.0.0.1:3000' },
+    }).then((r) => r.status);
+    assert.equal(otherPort, 403, 'an Origin on another loopback port is refused on the port');
     // The bootstrapped token opens /events in the EventSource query form. The
     // stream never ends on its own — cancel it after the status check, or the
     // close() below waits on this live connection (7 s on Windows, 16 s on

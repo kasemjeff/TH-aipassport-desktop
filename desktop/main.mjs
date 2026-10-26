@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// aipass desktop — the entry point the window (or the browser, until the
-// Tauri shell exists) starts.
+// aipass desktop — the entry point the window starts, whatever holds it:
+// the Tauri shell's backend, or a plain browser page (`npm run desktop`).
 //
 // It owns exactly two things:
 //   1. the bridge, started if it is not already running, so nobody has to keep

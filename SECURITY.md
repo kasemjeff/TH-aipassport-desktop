@@ -220,7 +220,8 @@ Then restart the bridge and reload the extension.
   shell's declaration covers the asset protocol, which this window does not
   use. Scripts come from the app itself (no inline, no eval), `object-src`
   and `form-action` are locked down, the window cannot be framed, and
-  `connect-src` is the backend plus the loopback it is served from. The
+  `connect-src` is the backend itself — the page is served from it, so
+  `'self'` names exactly the one loopback origin it may talk to. The
   Tauri capability set is window + event only (no fs/shell/http/tray/menu),
   the page gets no `window.__TAURI__` at all, the installer no longer ships
   the developer test suite, and the Chrome extension's host access is the

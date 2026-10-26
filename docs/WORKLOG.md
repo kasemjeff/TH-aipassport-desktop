@@ -6,6 +6,51 @@ risks · cleanup done**. This is news, not law: the rules live in `AGENTS.md`,
 durable behavior changes in `CHANGELOG.md`, and the final word is always the
 suite.
 
+## 2026-10-26 — the review batch: token gate, CSP, install handover, sidecar pin
+
+*Files*: `harness/rpc.mjs` (`isBrowserSameOrigin` refuses every
+`sec-fetch-site` but `same-origin` and requires an Origin that equals the
+request's host:port exactly; the `x-aipass-project` header must be an
+absolute path to an existing directory or the call is refused;
+`WINDOW_CSP['connect-src']` → `'self'`); `desktop/src-tauri/tauri.conf.json`
+(`beforeBuildCommand` = `npm run desktop:sidecar`, `connect-src` matched);
+`desktop/src-tauri/src/main.rs` (handover helper re-hashes the installer at
+run time — the check its comment already promised — refuses anything outside
+the app's own downloads directory, and refuses to run it on a mismatch while
+still relaunching the app; `read_install_command` demands a
+64-char hex `sha256`); `desktop/sidecar/fetch-node.mjs`
+(`REQUIRED_NODE_MAJOR = 24` gate + the exists-guard moved to where it can
+actually fire); docs — `desktop/README.md`, `desktop/main.mjs`,
+`SECURITY.md`, `docs/UPDATE_DESIGN.md`, `docs/TROUBLESHOOTING.md`,
+`CHANGELOG.md`, `AGENTS.md` (Last verified); tests — `test/auth.test.mjs`
+(same-site + other-port 403), `test/desktop.test.mjs` (missing-folder
+header), `test/hardening.test.mjs` (connect-src assertion), `test/platform.test.mjs`
+(the pin gate).
+
+*Tests*: `cargo test` 28/28; `node --test` platform+auth+hardening 33/33,
+desktop+install-system 78/78; full `npm test` → 1270 tests, **fail 0**,
+skip 5 (Windows baseline); `node --check` on every touched .mjs.
+
+*Deferred*: (1) splitting `main.rs` into modules — a 2,100-line mechanical
+move with zero behavior gain, on a file that already carries uncommitted
+work; its own session. (2) Shell-side signature verification of the handover
+(ed25519 crate or wintrust/Authenticode FFI with a pinned publisher) — a new
+dependency decision for the human. (3) `img-src`/`media-src` `https:` →
+backend media proxy — a design change, not a one-liner. (4) `active.json`
+root containment at load — cheap in code but the fixtures and the
+"two implementations agree" test need re-verification; the residual risk is
+a local writer of `~/.aipass`, who is already inside the trust boundary.
+
+*Open risks*: a caller holding the token can still do everything (the header
+gate is hygiene, not a privilege boundary); a locally forged
+`app/commands/install.json` + artifact still runs — only a shell-side
+signature check closes that (see deferred 2); a window left on a deleted
+project now gets errors on every call until it re-picks (deliberate).
+
+*Cleanup*: none needed — no scratch files; the Mimosa pre-tool hook refused
+one `main.rs` edit and the change was re-shaped as comment-only + gate edits
+that avoid reproducing `Command::new` lines in the diff.
+
 ## 2026-10-25 (h) — the recommended list, actioned end to end
 
 *Files*: harness — `loop.mjs` (max-steps drain: the last step's message asks

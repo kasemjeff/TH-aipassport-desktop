@@ -908,6 +908,15 @@ test('two windows on two projects do not share state, and Apply writes only its 
   const applied = await env.call('apply', {}, { 'x-aipass-project': env.root });
   assert.equal(applied.written, 1, 'the first window applied its own change');
   assert.equal(fs.readFileSync(path.join(env.root, 'notes.md'), 'utf8'), 'line 2\n');
+
+  // The header is a claim about who is asking, so it has to name a real
+  // folder: a value that is not an existing directory is refused instead of
+  // becoming the project the call runs against.
+  await assert.rejects(
+    env.call('pending', {}, { 'x-aipass-project': path.join(env.root, 'no-such-folder') }),
+    /x-aipass-project must name an existing folder/,
+    'a header naming a missing folder is refused'
+  );
 });
 
 test('a session list belongs to the project the caller named', async (t) => {

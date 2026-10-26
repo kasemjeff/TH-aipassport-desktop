@@ -95,7 +95,7 @@ there on purpose: it is a rarely-touched model parameter, and it lives in the
 settings sheet (คุยกับโมเดล → temperature). One surface per control — the sheet
 no longer carries its own copy of the mode, so the two cannot drift apart.
 
-Keys: `Enter` sends, `Shift+Enter` is a newline, `Shift+Tab` cycles the mode (ask → auto → plan), `Esc` cancels a running turn
+Keys: `Enter` sends, `Shift+Enter` is a newline, `Shift+Tab` cycles the mode (ask → auto → plan — yolo is not in the cycle on purpose: it can run shell commands, so it is only ever picked by hand from the dropdown), `Esc` cancels a running turn
 (or closes a dialog), `Ctrl+K` goes to the sidebar's search.
 
 **The Apply leaves an undo.** Before the Apply writes to the disk, the files

@@ -38,10 +38,41 @@ export function targetTriple(platform = process.platform, arch = process.arch) {
   return triple;
 }
 
+/**
+ * The Node major the sidecar is pinned to. The sidecar IS the build
+ * machine's Node, so without a pin the runtime a package ships varied with
+ * whoever's machine ran the build. A newer major is a deliberate bump of
+ * this one number, never an accident of the environment.
+ */
+export const REQUIRED_NODE_MAJOR = 24;
+
+/** The pin, checked against a version string — pure, so a test can drive it. */
+export function sidecarNodeGate(version = process.version) {
+  const major = Number(String(version).replace(/^v/, '').split('.')[0]);
+  if (!Number.isInteger(major)) {
+    return { ok: false, reason: `node version unreadable: ${version}` };
+  }
+  if (major !== REQUIRED_NODE_MAJOR) {
+    const here = path.basename(fileURLToPath(import.meta.url));
+    return {
+      ok: false,
+      reason: `the sidecar node is pinned to major ${REQUIRED_NODE_MAJOR} — this machine has ${version}; bump REQUIRED_NODE_MAJOR in desktop/sidecar/${here} to move the pin`,
+    };
+  }
+  return { ok: true };
+}
+
 // The copy only runs when the script is invoked, not when a test imports the
 // table: importing must never copy a ~90 MB binary or chmod anything.
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
+  // The pin first: a build from the wrong major must not start.
+  const gate = sidecarNodeGate();
+  if (!gate.ok) {
+    console.error(gate.reason);
+    process.exit(1);
+  }
+
   let target;
   try {
     target = path.join(HERE, `node-${targetTriple()}${process.platform === 'win32' ? '.exe' : ''}`);
@@ -56,13 +87,12 @@ if (isMain) {
     // and a copy loses nothing by keeping the mode.
     execFileSync('chmod', ['755', target]);
   }
-  const version = execFileSync(process.execPath, ['--version'], { encoding: 'utf8' }).trim();
-  console.log(`sidecar ready: ${target} (${Math.round(statSync(target).size / 1e6)} MB, node ${version})`);
-
   if (!existsSync(target)) {
-    // Unreachable after a successful copy; the guard is here so a silent
-    // no-write failure can never look like success.
+    // A copy that reports success but wrote nothing is a sidecar that might
+    // as well be absent — name it before anything else reads the file.
     console.error('copy reported success but the file is not there');
     process.exit(1);
   }
+  const version = execFileSync(process.execPath, ['--version'], { encoding: 'utf8' }).trim();
+  console.log(`sidecar ready: ${target} (${Math.round(statSync(target).size / 1e6)} MB, node ${version})`);
 }

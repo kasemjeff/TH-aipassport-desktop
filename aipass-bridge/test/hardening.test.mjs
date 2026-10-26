@@ -292,7 +292,7 @@ test('the desktop config keeps its CSP and ships no test suite', (t) => {
   assert.equal(csp['script-src'], "'self'", 'scripts come from the app itself — no inline, no eval');
   assert.equal(csp['object-src'], "'none'");
   assert.equal(csp['base-uri'], "'self'");
-  assert.match(String(csp['connect-src']), /http:\/\/127\.0\.0\.1/, 'the window must still reach the loopback backend');
+  assert.equal(csp['connect-src'], "'self'", 'the window is served by the loopback backend, so self is the loopback');
   // The window's media loads by consent (md.js paints no src until the reader
   // clicks), and what it does load never crosses plaintext: a URL that leaves
   // the machine unwrapped is readable by every hop on the way.

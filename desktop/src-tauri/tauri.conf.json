@@ -7,7 +7,7 @@
     "frontendDist": "../ui",
     "devUrl": "http://127.0.0.1:8790",
     "beforeDevCommand": "npm run desktop:backend",
-    "beforeBuildCommand": ""
+    "beforeBuildCommand": "npm run desktop:sidecar"
   },
   "app": {
     "withGlobalTauri": false,
@@ -20,7 +20,7 @@
         "img-src": "'self' data: blob: https:",
         "media-src": "'self' data: blob: https:",
         "font-src": "'self' data:",
-        "connect-src": "'self' http://127.0.0.1:* http://localhost:*",
+        "connect-src": "'self'",
         "base-uri": "'self'",
         "form-action": "'none'",
         "frame-ancestors": "'none'",
