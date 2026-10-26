@@ -78,7 +78,7 @@ jobs:
         run: cargo install tauri-cli --version "^2" --locked
 
       - name: Cache the cargo build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
