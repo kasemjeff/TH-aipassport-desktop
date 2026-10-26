@@ -123,7 +123,7 @@ jobs:
       # the app would turn down, so a mismatch stops the release here rather
       # than at the first person whose app fetches the feed.
       - name: Publish the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*
