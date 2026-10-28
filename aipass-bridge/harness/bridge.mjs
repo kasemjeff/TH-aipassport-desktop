@@ -254,8 +254,36 @@ export function sendRecoverable(err) {
     || /bridge returned 5\d\d\b/.test(m);
 }
 
+/**
+ * A refusal that names the context window — the one send-failure a rotation
+ * heals. The single-message protocol means the server holds the whole
+ * conversation, so "the prompt is too long" is about what it already holds
+ * plus this one message: summarising and rotating to a fresh conversation
+ * fits the same message again. The shapes are the ones providers actually
+ * send, trimmed to what an error text can carry; a bare 400 with no reason is
+ * NOT one — guessing would burn a summary call on every odd refusal.
+ */
+const CONTEXT_OVERFLOW_TEXT = /context (?:length|window)|prompt is too long|maximum context (?:size|length)|exceeds the context(?: window)?|too many tokens|please reduce the length|input length.{0,60}exceed/i;
+
+export function isContextOverflow(err) {
+  if (!err || err.streamed || err.name === 'AbortError') return false;
+  return CONTEXT_OVERFLOW_TEXT.test(String(err.message ?? err));
+}
+
 /** A wait as a note reads it: seconds when it has any, milliseconds below. */
 export const waitLabel = (ms) => (ms >= 1000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms)}ms`);
+
+/**
+ * A ladder wait, de-synchronised by ±10%. The waits are shared constants, so
+ * parallel runs that hit the same refusal in the same moment would otherwise
+ * retry in lock-step and keep the same window hot together — the retry-storm
+ * shape pi-mono's own ladder grew jitter for. Zero stays zero: the env
+ * override '0' the tests use keeps its meaning.
+ */
+export function jitterWait(ms) {
+  if (!(ms > 0)) return ms;
+  return Math.max(1, Math.round(ms * (0.9 + Math.random() * 0.2)));
+}
 
 const sleep = (ms, signal = null) => new Promise((resolve, reject) => {
   if (!signal) return void setTimeout(resolve, ms);
@@ -382,9 +410,9 @@ async function retrySend(what, { streamed = () => false, signal = null, rateWait
         throw err;
       }
       if (rate) {
-        const wait = rateWaits[rateTries++];
-        note?.(`rate limited by the edge (429) — waiting ${Math.round(wait / 1000)}s, then sending again`);
-        await sleep(wait);
+        const pause = jitterWait(rateWaits[rateTries++]);
+        note?.(`rate limited by the edge (429) — waiting ${Math.round(pause / 1000)}s, then sending again`);
+        await sleep(pause);
       } else {
         await sleep(SEND_RETRY_MS);
       }
@@ -714,9 +742,10 @@ export async function resilientSay(say, text, log = () => {}, parts = null, dept
     if (RATE_REFUSED.test(err.message)) {
       let waited = 0;
       for (const wait of rateWaits()) {
-        log('note', `rate limited by the edge — waiting ${waitLabel(wait)}, then sending the same message again`);
-        await sleep(wait);
-        waited += wait;
+        const pause = jitterWait(wait);
+        log('note', `rate limited by the edge — waiting ${waitLabel(pause)}, then sending the same message again`);
+        await sleep(pause);
+        waited += pause;
         try { return await say(text, parts); } catch (err2) {
           if (!RATE_REFUSED.test(err2.message)) throw err2;
           err = err2;
@@ -758,8 +787,9 @@ export async function resilientSay(say, text, log = () => {}, parts = null, dept
     // the content: wait it out and send the same message again before
     // touching it (the recording is on EDGE_WAITS_MS).
     for (const wait of edgeWaits()) {
-      log('note', `refused at the edge — waiting ${waitLabel(wait)}, then sending the same message again`);
-      await sleep(wait);
+      const pause = jitterWait(wait);
+      log('note', `refused at the edge — waiting ${waitLabel(pause)}, then sending the same message again`);
+      await sleep(pause);
       try { return await say(text, parts); } catch (err2) {
         if (!/\b40[39]\b/.test(err2.message)) throw err2;
       }

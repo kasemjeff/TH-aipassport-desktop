@@ -32,12 +32,16 @@ export const DEFAULT_MAX_WALL_CLOCK_MS = 1_800_000;
 /**
  * The moments a hook may be bound to.
  *
- * A hook is a command line the PERSON configured (harness/hooks.mjs): after a
- * change is staged, before a commit goes through, and when a run ends. The
- * list lives here because the settings file owns the shape of a setting, and
- * the hook runner reads the shape from here.
+ * A hook is a command line the PERSON configured (harness/hooks.mjs). The
+ * first three cover a change and a commit; the six added in wave 3.4 are the
+ * lifecycle — what a person wants before a call runs, every time a task is
+ * sent, and across a compaction. The list lives here because the settings file
+ * owns the shape of a setting, and the hook runner reads the shape from here.
  */
-export const HOOK_MOMENTS = ['afterWrite', 'beforeCommit', 'done'];
+export const HOOK_MOMENTS = [
+  'sessionStart', 'promptSubmit', 'beforeTool', 'afterTool',
+  'afterWrite', 'beforeCommit', 'preCompact', 'done', 'stop',
+];
 
 /**
  * The hooks a settings file holds, in the one shape the harness reads.
@@ -48,10 +52,11 @@ export const HOOK_MOMENTS = ['afterWrite', 'beforeCommit', 'done'];
  * setting that looks like protection and is not.
  *
  * @param {any} value what the settings file held
- * @returns {{afterWrite: string[], beforeCommit: string[], done: string[]}}
+ * @returns {Record<string, string[]>}
  */
 export function normalizeHooks(value) {
-  const out = { afterWrite: [], beforeCommit: [], done: [] };
+  const out = {};
+  for (const moment of HOOK_MOMENTS) out[moment] = [];
   if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
   for (const moment of HOOK_MOMENTS) {
     const raw = value[moment];
@@ -119,6 +124,11 @@ export const DEFAULTS = {
   // two borrowed temporary conversations, both generations accepted at once),
   // so the window ships it on; the CLI keeps its explicit --parallel-helpers.
   parallelHelpers: true,
+  // consecutive read-only calls of one reply (NEED/SEARCH/TREE/STAT/GLOB and
+  // friends) run beside each other. Reads cannot see different states, so
+  // this changes wall time, not semantics — the results still come back in
+  // marker order. False keeps the old serial walk.
+  parallelReads: true,
   // how hard the model thinks before each step: off | low | medium | high |
   // max. It rides every send as `thinking_level`; the bridge drops a level the
   // chosen model does not advertise, so the setting never breaks a run.
@@ -204,6 +214,19 @@ export const DEFAULTS = {
   // switch is here for a project whose past nobody wants in the model's
   // context.
   recall: true,
+  // TREE and STAT (and LIST -l): the preamble teaches the shape-of-the-folder
+  // markers when this is on. A read, not a power — the tools answer the same
+  // err:/confine rules either way; the switch only decides whether the model
+  // is told they exist.
+  explore: true,
+  // (helper presets) The machine's own SUBAGENT roles, beside the three
+  // built-ins: a map of name → { lead, run }. `lead` is the helper's own
+  // instructions; `run` (default false) says the helper may run commands —
+  // and still only where the run itself was given allowRun, so a preset can
+  // never widen the run's powers. Built-in names (verifier, reviewer,
+  // summariser) cannot be shadowed; a malformed entry is an error at the
+  // helper, named, never a silent fallback.
+  helperPresets: {},
 };
 
 /**
@@ -230,10 +253,12 @@ export const DEFAULTS = {
  * @property {boolean} [requirePlanApproval]  wait for a human before the work
  * @property {boolean} [subagent]             may the run call a helper
  * @property {boolean} [parallelHelpers]      may helpers run beside each other
+ * @property {boolean} [parallelReads]        may consecutive reads run beside each other
  * @property {boolean} [searchI]              the case-insensitive SEARCH
  * @property {boolean} [attach]               the ATTACH of a non-text file
  * @property {boolean} [webScratch]           the scratch conversation
  * @property {boolean} [recall]               may the model look into the past
+ * @property {boolean} [explore]              may the preamble teach TREE/STAT
  * @property {string|null} [conversation]     the conversation to send into
  * @property {boolean} [reuse]                reuse the bridge's conversation
  * @property {boolean} [permanent]            keep the conversation afterwards
@@ -250,6 +275,8 @@ export const DEFAULTS = {
  * @property {boolean} [slim]                 the compact first message
  * @property {string|null} [seedText]         the seed of a rotated conversation
  * @property {Array} [pluginTools]            the plugin markers this run may use
+ * @property {Array} [pluginSections]         the plugin blocks the turn-1 message carries
+ * @property {Object<string, {lead: string, run: string}>} [helperPresets] the machine's own SUBAGENT roles
  * @property {AbortSignal|null} [signal]      the run's stop switch
  * @property {Array|null} [parts]             the attachments of the first send
  */
@@ -283,15 +310,27 @@ export const HARNESS_OPTION_DEFAULTS = Object.freeze({
   // plan mode: the model writes a plan first, and waits for the human
   plan: false,
   requirePlanApproval: false,
+  // A review run: read a change and report findings, stage nothing. It is not
+  // a saved setting — a run is given it (the window's /review, the CLI's
+  // --review) and the next run is ordinary again — so it lives on the run's
+  // own sheet and not in DEFAULTS.
+  review: false,
+  reviewBase: null,
   // helpers: one at a time, or several beside each other
   subagent: false,
   parallelHelpers: false,
+  // consecutive read-only calls in one reply run beside each other. Reads
+  // cannot see different states, so this changes wall time, not semantics;
+  // results and events stay in marker order.
+  parallelReads: true,
   // what the preamble may offer the model
   searchI: false,
   attach: false,
   webScratch: false,
   // the RECALL marker: the model may ask what this project said before
   recall: true,
+  // TREE and STAT (and LIST -l): the preamble teaches them when this is on
+  explore: true,
   // the conversation the run sends into
   conversation: null,
   reuse: false,
@@ -315,6 +354,11 @@ export const HARNESS_OPTION_DEFAULTS = Object.freeze({
   slim: false,
   seedText: null,
   pluginTools: [],
+  // What a plugin contributed to the run's first message, and the machine's
+  // own helper roles beside SUBAGENT_ROLES. Wiring, not settings: the values
+  // arrive through the option sheet so the run reads one object.
+  pluginSections: [],
+  helperPresets: {},
   // the run's own switch, and the parts its first message carries
   signal: null,
   parts: null,

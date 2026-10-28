@@ -71,11 +71,18 @@ be separate processes:
    `tree/` into it;
 2. `process.env.AIPASS_HOME = <attempt>/home` (`harness/settings.mjs`
    `aipassHome`) and pass an explicit `store: new SessionStore(<attempt>/home/sessions)`;
-   restore the env after;
+   restore the env after; the real home's `.token` is pinned to `AIPASS_TOKEN`
+   for the attempt (read-only), because the loopback token is read per request
+   from `aipassHome()` — unpinned, every authed send would mint a token the
+   bridge does not know and answer 401;
 3. `new Harness({ root: <attempt>/tree, client: bridge, model, store, events, options: {
-   maxSteps, thinking, maxCredits, mode: 'auto', allowRun } })` — `auto` is the
-   CLI's own mode (`agent.mjs`): writes stage without asking, shell follows
-   `allowRun` (`permissions.mjs` evaluate);
+   maxSteps, thinking, maxCredits, mode: 'yolo', allowRun } })` — `yolo` is the
+   unattended surface's mode: writes stage, and the shell follows `allowRun`
+   because nobody here can answer a question. (`auto` asks about every shell
+   command since 2026-10-21 — permissions.mjs — and a denied ask reads as
+   "the person watching declined"; the eval runner shipped that bug until
+   2026-10-25, refused every RUN, and the replay suite never caught it because
+   no replay transcript exercises the shell gate.)
 4. `await h.run(taskText)`, then `h.apply(null)` — apply-then-check, the end
    state the CLI's one question produces; a run that died still gets scored, as
    the live smoke's write-after-429 did;
@@ -111,7 +118,7 @@ by `stats.mjs` `collectRuns`; the raw JSONL under
 | metric | field | notes |
 |---|---|---|
 | outcome | check exit code | new; `stopReason: 'done'` is never success |
-| stop | `run_stats.stopReason` | done / done-unverified / steps / stalled / stagnation / error / plan-rejected |
+| stop | `run_stats.stopReason` | done / done-unverified / goal-rounds / steps / stalled / stagnation / error / plan-rejected |
 | calls | `run_stats.tools` (`{n, fail, ms}` per kind); `run_stats.steps` = executed marker calls (`toolsRun`) | refusal rate = Σfail/Σn |
 | turns | `run_stats.turns` (older lines: `stepMs.length`) | one entry per conversation turn |
 | nudges / stagnations / verify / firewall | `nudges`, `stagnations`, `verifyPrompts`, `firewallNotes` | direct |
@@ -373,6 +380,14 @@ window's picker) is an audited change — the suite exists to make it one:
    `wall median`); `stats`' `avg step` tracks the same number day to day.
    There is no latency gate — upstream lag is not ours — but a candidate
    that doubles wall time at equal cost is visible in the artifacts above.
+
+**The 3-attempt floor is measured, not assumed** (`attempts-floor`,
+2026-10-25): two consecutive `--all` matrices at attempts 3 flipped no task
+between mostly-solved (≥ 2/3) and mostly-unsolved (≤ 1/3) — the floor stays 3,
+and a per-task read across attempts is gate-stable on the cheap default
+(`evals/results/2026-10-25T11-10-30-777-live.jsonl`,
+`evals/results/2026-10-25T11-57-10-229-live.jsonl`). A flip in a future pair
+names the task gate-unstable and raises its floor here before it gates again.
 
 **Safety evidence expires.** A safety row older than 30 days is not evidence
 for a model change — re-run the safety set live before the gate. A safety

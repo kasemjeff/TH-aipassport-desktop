@@ -461,6 +461,7 @@
     'time-limited': 'หมดเวลา — หยุด',
     steps: 'ครบจำนวนรอบ',
     'done-unverified': 'เสร็จแต่ยังไม่ผ่านการตรวจ',
+    'goal-rounds': 'ครบรอบเป้าหมาย — หยุด',
     ask: 'รอคำตอบจากคุณ',
   };
 
@@ -522,6 +523,15 @@
           : d.verdict === 'pass' ? `ตรวจผ่านแล้ว (${d.ran} command)`
             : d.verdict === 'fail' ? `ตรวจไม่ผ่าน (${d.ran} command) — ส่งผลให้โมเดลแก้ต่อ`
               : 'ตรวจแล้ว ไม่มีคำสั่งให้รัน');
+        break;
+      case 'goal_round':
+        addNote(`เป้าหมายยังไม่เสร็จ — เริ่มรอบ ${d.round}/${d.max}`);
+        break;
+      case 'goal_done':
+        addNote(`ปิดเป้าหมายแล้ว${d.done ? ` — ${d.done}` : ''}`);
+        break;
+      case 'goal_blocked':
+        addNote(`เป้าหมายติด (${d.reason || 'ไม่ระบุเหตุผล'}) — บอกโมเดลได้ที่ /goal resume`);
         break;
       case 'budget':
         addNote(`ใช้ budget ครบ (${d.used}) — หยุด`);

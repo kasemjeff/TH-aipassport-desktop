@@ -380,7 +380,6 @@ export class PermissionEngine {
     // names two paths, and the destination is the one a rule like
     // `dist/** → deny` was written to stop.
     const tokens = arg.trim().split(/\s+/).filter(Boolean);
-    const file = tokens[0] ?? '';
     const screened = [...tokens, ...extra].filter(Boolean);
     for (const rule of this.rules) {
       if (!named(rule)) continue;
@@ -397,7 +396,6 @@ export class PermissionEngine {
     // narrowing stays meaningful). Only silence — no user rule naming the
     // file at all — falls through to the floor.
     const secrets = [...new Set([...arg.trim().split(/\s+/).filter(Boolean), ...extra])];
-    if (file && !secrets.includes(file)) secrets.unshift(file);
     const userScopedOut = (f) => this.rules.some((r) =>
       Array.isArray(r.kinds) && !r.kinds.some((k) => kinds.includes(k)) && globMatch(r.pattern, f));
     for (const rule of SECRET_RULES) {

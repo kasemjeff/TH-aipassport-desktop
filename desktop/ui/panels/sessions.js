@@ -9,13 +9,20 @@
 // into the settings sheet, and the sheet asks the rail for them.
 
 
+/* The one name rule the window's own inputs share with the library, and the
+   sentence a "use" action drops into the composer (the SKILL word is the
+   model's own wire protocol, desktop/AGENTS.md): the draft names the playbook
+   the way the loop expects it loaded, and the reader appends the actual task. */
+export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]*$/i;
+export const skillUsePhrase = (name) => `อ่านคู่มือ ${name} (SKILL ${name}) และทำตามคู่มือนั้นสำหรับงานนี้: `;
+
 /**
  * The rail: the session list, the folds, the playbooks and the facts.
  *
  * @param {object} ctx the window it draws into
  */
 export function createSessionsPanel(ctx) {
-  const { $, el, state, rpc, clickable, addNote, addCommandOut } = ctx;
+  const { $, el, state, rpc, clickable, addNote, addCommandOut, hideModal, openModal } = ctx;
 
   /* Thai day words for the session list. The backend names a session after the
    moment it started ("2026-10-17 09:07"), and a wall of those spells the same
@@ -269,23 +276,73 @@ async function refreshSkills() {
   return state.skills;
 }
 
+/** How a library's role label reads on screen. */
+const ROLE_TH = { user: 'ผู้ใช้', project: 'โปรเจกต์', configured: 'ตั้งไว้', 'built-in': 'ในตัว' };
+
+/**
+ * Invoke a playbook: the draft is filled with the phrase that makes the next
+ * run load it, and the draft storage is synced through the one saveDraft the
+ * composer listens with — an assignment fires no input event.
+ */
+function useSkill(name) {
+  const task = $('task');
+  task.value = skillUsePhrase(name);
+  ctx.saveDraft?.();
+  task.focus();
+  addCommandOut(`เติมคำเรียกคู่มือ "${name}" ในช่องพิมพ์แล้ว — พิมพ์งานต่อท้ายแล้วส่ง`);
+}
+
+/**
+ * Remove a playbook this person installed. The delete is armed by the first
+ * click and done by the second — a button that destroys on the click that
+ * aims at "ดู" is how a playbook is lost to a mis-aimed pointer.
+ */
+async function removeSkillRow(btn, s, ul) {
+  if (btn.dataset.arm !== '1') {
+    btn.dataset.arm = '1';
+    btn.textContent = 'ยืนยันลบ?';
+    return;
+  }
+  const target = s.role === 'project' ? 'project' : 'user';
+  const done = await rpc('skills.remove', { name: s.name, target }).catch((err) => ({ error: err.message }));
+  if (done.error) { addNote(`ลบไม่ได้: ${done.error}`); return; }
+  addCommandOut(`ลบคู่มือ ${s.name} ออกจาก${target === 'project' ? 'โปรเจกต์ (.aipass/skills)' : 'ผู้ใช้ (~/.aipass/skills)'}แล้ว`);
+  renderSkillList(ul, await refreshSkills());
+}
+
 /**
  * The playbooks, drawn as a list you can open.
  *
  * A playbook opens in place, under its own row: the sheet is a modal of its
  * own, and a second modal on top of it would take the settings away while you
- * read.
+ * read. Each row carries the invoke and (for the libraries a person may write)
+ * the remove — the list is where a playbook is managed, not only named.
  */
 function renderSkillList(ul, skills = state.skills) {
   ul.textContent = '';
   if (!skills.length) {
-    ul.append(el('li', 'dim', '(ยังไม่มีคู่มือ — วางไฟล์ .md ในโฟลเดอร์คู่มือด้านบน)'));
+    ul.append(el('li', 'dim', '(ยังไม่มีคู่มือ — กด "ติดตั้งคู่มือ…" หรือวางไฟล์ .md ในโฟลเดอร์คู่มือ)'));
     return;
   }
   for (const s of skills) {
     const li = el('li');
-    li.append(el('span', 'name', s.name));
-    li.title = s.file ?? '';
+    const row = el('div', 'skill-row');
+    const name = el('span', 'name', s.name);
+    name.title = s.file ?? '';
+    row.append(name);
+    if (s.role) row.append(el('span', 'role dim', ROLE_TH[s.role] ?? s.role));
+    const actions = el('span', 'skill-actions');
+    const use = el('button', 'mini', 'ใช้');
+    use.title = 'เติมคำเรียกคู่มือนี้ในช่องพิมพ์ — แล้วพิมพ์งานต่อท้าย';
+    use.onclick = (ev) => { ev.stopPropagation(); useSkill(s.name); };
+    actions.append(use);
+    if (s.role === 'user' || s.role === 'project') {
+      const del = el('button', 'mini danger', 'ลบ');
+      del.onclick = (ev) => { ev.stopPropagation(); void removeSkillRow(del, s, ul); };
+      actions.append(del);
+    }
+    row.append(actions);
+    li.append(row);
     const view = el('pre', 'dim skill-body', '');
     view.hidden = true;
     // Selecting a line of the playbook is not asking to close it.
@@ -299,6 +356,83 @@ function renderSkillList(ul, skills = state.skills) {
     li.append(view);
     ul.append(li);
   }
+}
+
+/**
+ * The install dialog: a name, a library, and the markdown itself.
+ *
+ * The file is read in the page (FileReader), so no path crosses to the
+ * backend — the backend receives text and a whitelisted name, the same two
+ * things a paste carries. Overwriting an existing playbook asks once.
+ */
+function installSkillDialog({ onInstalled } = {}) {
+  $('modal-title').textContent = 'ติดตั้งคู่มือ (playbook)';
+  const body = $('modal-body');
+  body.textContent = '';
+
+  const nameIn = el('input');
+  nameIn.placeholder = 'ชื่อคู่มือ — a-z 0-9 และ - เช่น deploy-check';
+  nameIn.setAttribute('aria-label', 'ชื่อคู่มือ');
+  nameIn.style.width = '100%';
+
+  const targetSel = el('select');
+  targetSel.setAttribute('aria-label', 'ไลบรารีปลายทาง');
+  for (const [value, label] of [['user', 'ผู้ใช้ — ~/.aipass/skills'], ['project', 'โปรเจกต์ — .aipass/skills']]) {
+    const opt = el('option', null, label);
+    opt.value = value;
+    targetSel.append(opt);
+  }
+
+  const textIn = el('textarea');
+  textIn.placeholder = 'เนื้อหา markdown ของคู่มือ — วางที่นี่ หรือกดเลือกไฟล์ .md';
+  textIn.setAttribute('aria-label', 'เนื้อหาคู่มือ');
+  textIn.rows = 10;
+  textIn.style.width = '100%';
+
+  const pick = document.createElement('input');
+  pick.type = 'file';
+  pick.accept = '.md,.markdown,.txt,text/markdown,text/plain';
+  pick.hidden = true;
+  pick.addEventListener('change', () => {
+    const f = pick.files?.[0];
+    if (!f) return;
+    if (!nameIn.value.trim()) nameIn.value = f.name.replace(/\.(md|markdown|txt)$/i, '');
+    const reader = new FileReader();
+    reader.onload = () => { textIn.value = String(reader.result ?? ''); };
+    reader.readAsText(f);
+  });
+  const fileBtn = el('button', 'mini', 'เลือกไฟล์ .md…');
+  fileBtn.onclick = () => pick.click();
+
+  const row = el('div', 'skill-install-row');
+  row.append(nameIn, targetSel);
+  body.append(row, textIn, fileBtn, pick);
+
+  const install = el('button', 'primary', 'ติดตั้ง');
+  install.onclick = async () => {
+    const name = nameIn.value.trim();
+    const text = textIn.value;
+    const target = targetSel.value;
+    if (!SKILL_NAME_RE.test(name)) { addNote('ชื่อคู่มือใช้ได้เฉพาะ a-z 0-9 และ - (เริ่มด้วยตัวอักษรหรือตัวเลข)'); return; }
+    if (!text.trim()) { addNote('ยังไม่มีเนื้อหา — วาง markdown หรือเลือกไฟล์ .md ก่อน'); return; }
+    const send = (overwrite) => rpc('skills.install', { name, text, target, overwrite });
+    let done = await send(false).catch((err) => ({ error: err.message }));
+    if (done.error && /already exists/.test(done.error)) {
+      if (typeof confirm === 'function' && !confirm(`มีคู่มือ "${name}" อยู่แล้ว — เขียนทับ?`)) { addNote('ยกเลิกการเขียนทับ'); return; }
+      done = await send(true).catch((err) => ({ error: err.message }));
+    }
+    if (done.error) { addNote(`ติดตั้งไม่ได้: ${done.error}`); return; }
+    addCommandOut(`ติดตั้งคู่มือ ${name} ลง${target === 'project' ? 'โปรเจกต์ (.aipass/skills)' : 'ผู้ใช้ (~/.aipass/skills)'}แล้ว${done.overwritten ? ' (เขียนทับ)' : ''}`);
+    hideModal();
+    await refreshSkills();
+    await onInstalled?.();
+  };
+
+  $('modal-actions').textContent = '';
+  const close = el('button', null, 'ปิด');
+  close.onclick = hideModal;
+  $('modal-actions').append(install, close);
+  openModal();
 }
 
 /**
@@ -330,7 +464,7 @@ async function renderMemoryFacts(ul, head) {
   return facts;
 }
 
-  return { refreshSessions, refreshSkills, renderSkillList, renderMemoryFacts, sessionDay, sessionBucket };
+  return { refreshSessions, refreshSkills, renderSkillList, renderMemoryFacts, useSkill, installSkillDialog, sessionDay, sessionBucket };
 }
 
 export default createSessionsPanel;

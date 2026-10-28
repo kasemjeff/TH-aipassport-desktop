@@ -94,8 +94,11 @@ const PORT_BUSY_EXIT = 43;
  *
  *   script    the app's own modules and nothing else — no inline, no eval
  *   style     'unsafe-inline' because a plugin panel may style itself
- *   img/media the model's own pictures and clips, from the web
- *   connect   this backend, and the loopback it is served from
+ *   img/media the model's own pictures and clips, https only, and not until
+ *             the reader clicks the slot into loading (md.js paints no src —
+ *             the URL of a fetched picture is a channel out of the machine)
+ *   connect   the backend itself — the page is served from it, so 'self'
+ *             names exactly the one loopback origin it may talk to
  *
  * The object is the shape tauri.conf.json wants, so the two can be compared
  * key by key.
@@ -104,10 +107,10 @@ export const WINDOW_CSP = {
   'default-src': "'none'",
   'script-src': "'self'",
   'style-src': "'self' 'unsafe-inline'",
-  'img-src': "'self' data: blob: https: http:",
-  'media-src': "'self' data: blob: https: http:",
+  'img-src': "'self' data: blob: https:",
+  'media-src': "'self' data: blob: https:",
   'font-src': "'self' data:",
-  'connect-src': "'self' http://127.0.0.1:* http://localhost:*",
+  'connect-src': "'self'",
   'base-uri': "'self'",
   'form-action': "'none'",
   'frame-ancestors': "'none'",
@@ -210,10 +213,18 @@ const isLocalRequest = (req) => {
 const isBrowserSameOrigin = (req) => {
   if (process.env.AIPASS_ALLOW_REMOTE === '1') return false;
   if (!loopbackHost(req.headers.host)) return false;
-  if (req.headers['sec-fetch-site'] === 'same-origin') return true;
+  // A browser that names its context has already decided the answer:
+  // same-site — another local dev server on another port — is a different
+  // origin even though it is loopback too, so it is refused before the
+  // Origin header is read at all.
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin') return false;
+  // Without the header, the Origin must be THIS origin — host and port, not
+  // merely loopback: a check that only asks "is it 127.0.0.1?" passes a page
+  // served by any other local server.
   const origin = req.headers['origin'];
   if (origin) {
-    try { return loopbackHost(new URL(origin).host); } catch { return false; }
+    try { return new URL(origin).host === String(req.headers.host).toLowerCase(); } catch { return false; }
   }
   return false;
 };
@@ -526,6 +537,12 @@ export function createRpc({
         // The RECALL marker: the model may ask what this project said before.
         recall: appSettings.get('recall'),
         parallelHelpers: appSettings.get('parallelHelpers'),
+        // The reading switches: consecutive reads may run beside each other,
+        // and the preamble may teach TREE/STAT. Reads, not powers — on by
+        // default; these lines are what makes a `false` in the file mean
+        // anything at all.
+        explore: appSettings.get('explore'),
+        parallelReads: appSettings.get('parallelReads'),
         // The window's bootstrap start: the same git status + package.json
         // snapshot the CLI asks for with `--snapshot`. On by default here
         // because the window's user pays the same discovery round trips and
@@ -540,6 +557,8 @@ export function createRpc({
         repeatGuard: appSettings.get('repeatGuard'),
         repeatGuardMax: appSettings.get('repeatGuardMax'),
         attempts: appSettings.get('attempts'),
+        // The machine's own helper roles beside the built-ins (SUBAGENT_ROLES).
+        helperPresets: appSettings.get('helperPresets'),
         // (docs/SPEC_CHECKER.md) The declared check and the strict Verify gate.
         verifyCommand: appSettings.get('verifyCommand'),
         requireCheck: appSettings.get('requireCheck'),
@@ -634,6 +653,12 @@ export function createRpc({
       // settings say the machine has been told to let it through.
       allowFetch: appSettings.get('allowFetch'),
       parallelHelpers: appSettings.get('parallelHelpers'),
+      // The reading switches, and RECALL with them: a save re-applies onto
+      // every harness the backend holds, so the file says the same thing to a
+      // harness built last week as to one built now.
+      recall: appSettings.get('recall'),
+      explore: appSettings.get('explore'),
+      parallelReads: appSettings.get('parallelReads'),
       // (Thai pack) the language policy and the loop guards
       replyLanguage: appSettings.get('replyLanguage'),
       langCheck: appSettings.get('langCheck'),
@@ -641,6 +666,9 @@ export function createRpc({
       repeatGuard: appSettings.get('repeatGuard'),
       repeatGuardMax: appSettings.get('repeatGuardMax'),
       attempts: appSettings.get('attempts'),
+      // The machine's own helper roles beside the built-ins: a save here is
+      // live on every harness the backend holds, like every other sheet key.
+      helperPresets: appSettings.get('helperPresets'),
       // The declared check and the strict Verify gate, re-applied so a save in
       // the sheet is live on every harness the backend holds.
       verifyCommand: appSettings.get('verifyCommand'),
@@ -1148,6 +1176,16 @@ export function createRpc({
         const params = { ...(msg.params ?? {}) };
         if (params.project == null) {
           const scope = String(req.headers['x-aipass-project'] ?? '').trim();
+          // A header is a claim about who is asking, not a parameter: it has
+          // to name a real folder on this machine, absolutely. Anything else
+          // — a relative path (which would resolve against this backend's
+          // cwd), a URL, junk — is refused rather than turned into the
+          // project the call runs against.
+          const real = path.isAbsolute(scope)
+            && (() => { try { return fs.statSync(scope).isDirectory(); } catch { return false; } })();
+          if (scope && !real) {
+            return json(res, 200, { ok: false, error: `x-aipass-project must name an existing folder — got: ${scope}` });
+          }
           if (scope) params.project = scope;
         }
         try {

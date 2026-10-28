@@ -13,7 +13,7 @@ import { openCommandFor } from '../harness/open-command.mjs';
 // the bookkeeping from the module that owns it.
 import { openBrowser } from '../harness/rpc.mjs';
 import { recordBrowser, closeOpenedBrowsers } from '../harness/browser.mjs';
-import { targetTriple } from '../../desktop/sidecar/fetch-node.mjs';
+import { targetTriple, sidecarNodeGate, REQUIRED_NODE_MAJOR } from '../../desktop/sidecar/fetch-node.mjs';
 
 const URL_UNDER_TEST = 'https://example.com/a?b=1&c=2';
 const WINDOWS_CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
@@ -113,4 +113,19 @@ test('the sidecar asks for the right Tauri triple on every machine it ships to',
   assert.equal(targetTriple('linux', 'x64'), 'x86_64-unknown-linux-gnu');
   assert.equal(targetTriple('linux', 'arm64'), 'aarch64-unknown-linux-gnu');
   assert.throws(() => targetTriple('darwin', 'ia32'), /add it to the table/, 'an unmapped pair is named, not guessed');
+});
+
+test('the sidecar node is pinned to one major, and a different one is named', () => {
+  // The sidecar is the build machine's Node, so without the pin a package's
+  // runtime varied with whoever ran the build. The gate is what fetch-node
+  // checks before it copies anything.
+  const pinned = sidecarNodeGate(`v${REQUIRED_NODE_MAJOR}.18.0`);
+  assert.equal(pinned.ok, true, `the pinned major passes: ${pinned.reason ?? ''}`);
+  const newer = sidecarNodeGate(`v${REQUIRED_NODE_MAJOR + 1}.1.0`);
+  assert.equal(newer.ok, false, 'a newer major does not ride through');
+  assert.match(newer.reason, /pinned to major/);
+  assert.match(newer.reason, /bump REQUIRED_NODE_MAJOR/, 'the fix is named, not just refused');
+  const older = sidecarNodeGate(`v${REQUIRED_NODE_MAJOR - 1}.14.0`);
+  assert.equal(older.ok, false, 'an older major is refused too');
+  assert.equal(sidecarNodeGate('not-a-version').ok, false, 'an unreadable version is refused');
 });

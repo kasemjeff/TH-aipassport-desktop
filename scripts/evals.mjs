@@ -11,7 +11,8 @@
 //   evals/results/        one JSONL per run — one row per attempt
 //
 // One attempt is: copy tree/ into a throwaway dir, drive the Harness facade
-// in-process (mode 'auto': writes stage, shell follows allowRun), apply the
+// in-process (mode 'yolo': the unattended surface — writes stage, the shell
+// follows allowRun because nobody here can answer a question), apply the
 // overlay, then run the task's own check command in the applied copy. Exit 0
 // is the only "solved" — no model self-report, no judge.
 //
@@ -33,9 +34,11 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Harness } from '../aipass-bridge/harness/harness.mjs';
 import { BridgeClient } from '../aipass-bridge/harness/bridge.mjs';
+import { tokenPath } from '../aipass-bridge/harness/authtoken.mjs';
 import { SessionStore, APP_VERSION } from '../aipass-bridge/harness/session.mjs';
 import { Emitter } from '../aipass-bridge/harness/events.mjs';
 import { preamble } from '../aipass-bridge/harness/protocol.mjs';
+import { setGoal } from '../aipass-bridge/harness/goal.mjs';
 import { thaiRatio } from '../aipass-bridge/harness/lang.mjs';
 
 export const EVALS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'evals');
@@ -146,6 +149,9 @@ function readTask(dir, id, kind) {
     pair: typeof spec.pair === 'string' ? spec.pair : null,
     category: typeof spec.category === 'string' && spec.category.trim() ? spec.category.trim() : null,
     liveOnly: spec.liveOnly === true,
+    // The experiment hook: a task may name the project goal the run chases
+    // (`goal-rounds` in experiments/queue.json). Absent = today's run.
+    goal: typeof spec.goal === 'string' && spec.goal.trim() ? spec.goal.trim().replace(/\s+/g, ' ') : null,
     budget: readBudget(spec.budget, id),
   };
 }
@@ -445,6 +451,19 @@ export async function runAttempt(task, {
   });
 
   const prevHome = process.env.AIPASS_HOME;
+  // The loopback token is read per request from aipassHome() — which the swap
+  // below empties (a fresh attempt home has no .token), so every authed send
+  // would mint a token the bridge does not know and answer 401. Pin the real
+  // home's token for the attempt — read-only: the runner never mints into the
+  // caller's home, so a missing file stays missing and the send answers 401
+  // with the row saying so. The finally restores the environment.
+  const prevToken = process.env.AIPASS_TOKEN;
+  if (prevToken === undefined) {
+    try {
+      const pinned = fs.readFileSync(tokenPath(prevHome), 'utf8').trim();
+      if (pinned) process.env.AIPASS_TOKEN = pinned;
+    } catch { /* no token file where the caller pointed — nothing to pin */ }
+  }
   process.env.AIPASS_HOME = homeDir;
   let runResult = null;
   let runError = null;
@@ -453,13 +472,22 @@ export async function runAttempt(task, {
   let wallTimer = null;
   const started = Date.now();
   try {
+    // A named goal lives in the attempt's own home (the env swap above), so
+    // the run chases it and the store dies with the attempt — a task can
+    // measure the round chase without touching the caller's real goal.
+    if (task.goal) setGoal(treeDir, task.goal);
     harness = new Harness({
       root: treeDir,
       client: bridge ?? undefined,
       model: used.model,
       store: new SessionStore(path.join(homeDir, 'sessions')),
       events,
-      options: { maxSteps: used.maxSteps, thinking: used.thinking, mode: 'auto', allowRun: used.allowRun, maxCredits: used.maxCredits },
+      // yolo, not auto: auto asks about every shell command (permissions.mjs,
+      // since 2026-10-21) and this surface answers no questions — a denied
+      // ask reads as "the person watching declined". allowRun still owns
+      // whether the shell exists at all; yolo is the mode where "shell
+      // follows allowRun" holds unattended.
+      options: { maxSteps: used.maxSteps, thinking: used.thinking, mode: 'yolo', allowRun: used.allowRun, maxCredits: used.maxCredits },
     });
     wallTimer = setTimeout(() => {
       wallKilled = true;
@@ -484,6 +512,8 @@ export async function runAttempt(task, {
     if (wallTimer) clearTimeout(wallTimer);
     if (prevHome === undefined) delete process.env.AIPASS_HOME;
     else process.env.AIPASS_HOME = prevHome;
+    if (prevToken === undefined) delete process.env.AIPASS_TOKEN;
+    else process.env.AIPASS_TOKEN = prevToken;
   }
   const wallMs = Date.now() - started;
   const sessionFile = harness?.session?.file ?? null;

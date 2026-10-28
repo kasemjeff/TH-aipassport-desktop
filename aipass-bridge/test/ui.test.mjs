@@ -586,6 +586,21 @@ test('a stop that found nothing to stop says so instead of pretending', async ()
   assert.equal(node('send').textContent, 'ส่ง', 'the button is free again — there was nothing to stop');
 });
 
+test('/stop with nothing to stop brings the working bar back down', async () => {
+  // The palette stop used to put the bar up by itself and, hearing "there was
+  // nothing to stop", never took it down — a window that kept beating for a
+  // run that did not exist, because the command asked the backend with its
+  // own thin stop instead of the send button's cancelRun.
+  const backend = { ...BACKEND, cancel: () => ({ ok: false, running: false, reason: 'no run in /tmp/proj' }) };
+  const { node, tick } = await bootApp(backend);
+  node('task').value = '/stop';
+  node('task').dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.match(node('log').textContent, /หยุดไม่ได้/, 'the window says what the stop found');
+  assert.equal(node('send').textContent, 'ส่ง', 'the button is free again');
+  assert.equal(node('working').classList.contains('hidden'), true, 'and the bar is down — nothing is working');
+});
+
 test('the model list holds only models that can talk', async () => {
   // The bridge offers image, video and music models too; selecting one would
   // fail every run, so the dropdown is filtered and named for humans.
@@ -1027,6 +1042,47 @@ test('a longer checklist keeps the reading position', async () => {
   assert.equal(ul.scrollTop, 40, 'the scroll position survives the rebuild');
 });
 
+test('rows that land in one burst ask the bottom once, after the burst', async () => {
+  // A step boundary drops a burst of rows — the step note, the tool rows, the
+  // next bubble — and every row used to read the layout the moment it landed:
+  // N synchronous layouts inside one turn, and the window hitched at every
+  // step. The burst now shares one frame, which asks the question once,
+  // against the burst's final state.
+  const { node, tick } = await bootApp(BACKEND);
+  const log = node('log');
+  let reads = 0;
+  Object.defineProperty(log, 'scrollHeight', { get() { reads += 1; return 1000; } });
+  Object.defineProperty(log, 'clientHeight', { get() { return 400; } });
+  // Drain the boot's last frames first: this test counts reads, and a banner
+  // from a late boot frame must not land in the count.
+  for (let i = 0; i < 8; i++) await tick();
+  reads = 0;
+  log.scrollTop = 600; // 1000 − 600 − 400 = 0 — pinned at the bottom
+  globalThis.__stream.emit('note', { text: 'one' });
+  globalThis.__stream.emit('note', { text: 'two' });
+  globalThis.__stream.emit('note', { text: 'three' });
+  // The load-bearing number: the old code read the layout once per row, right
+  // here, mid-burst. Coalescing means the burst reads nothing while it lands.
+  assert.equal(reads, 0, 'the burst reads no layout while it lands');
+  assert.equal(log.scrollTop, 600, 'nothing scrolls mid-burst');
+  await tick();
+  assert.equal(log.scrollTop, 1000, 'the frame after the burst follows to the bottom');
+});
+
+test('a reader who scrolled up is not yanked by the next burst', async () => {
+  // The follow is conditional on the reader being at the bottom, and the
+  // coalescing must not change that: a deferred check still reads THEIR
+  // position, not the one the window had when the row landed.
+  const { node, tick } = await bootApp(BACKEND);
+  const log = node('log');
+  Object.defineProperty(log, 'scrollHeight', { get() { return 1000; } });
+  Object.defineProperty(log, 'clientHeight', { get() { return 400; } });
+  log.scrollTop = 0; // 600px away from the bottom — reading, not following
+  globalThis.__stream.emit('note', { text: 'a row they were not reading yet' });
+  await tick(); await tick();
+  assert.equal(log.scrollTop, 0, 'the row lands, the scroll stays where the reader put it');
+});
+
 test('a malformed todo frame is dropped, not a crash', async () => {
   // The card renders wire data. A frame with no items (an older backend, a
   // truncated relay) used to throw inside the stream handler — mid-run.
@@ -1379,6 +1435,52 @@ test('a link in the chat opens in the browser, not in the window', async () => {
   );
 });
 
+test('web media in a reply waits for the reader to load it', async () => {
+  // The paint path: a picture the model addressed on the open web reaches the
+  // bubble as a slot that names its address and carries no src — the fetch
+  // waits for the reader's click (transcript.js wires it), because the URL
+  // leaves the machine the moment the element loads.
+  const { node, tick } = await bootApp(BACKEND);
+  globalThis.__stream.emit('assistant_delta', { text: 'นี่กราฟครับ\n\n![chart](https://example.com/chart.png?d=1)\n' });
+  await tick();
+  const bubble = node('log').children.find((c) => c.className.includes('assistant'));
+  const html = bubbleHtml(bubble);
+  assert.ok(html.includes('data-md-src="https://example.com/chart.png?d=1"'), html);
+  assert.ok(!/\ssrc=/i.test(html), 'nothing is fetched on paint');
+});
+
+test('a click or an Enter on a media slot loads it', async () => {
+  // The consent wiring: transcript.js delegates the click and the Enter or
+  // Space of the slot's button role to loadDeferredMedia. The bubble's markup
+  // is a string in the fake DOM, so the slot is hosted on a real node — the
+  // delegated listener and the swap are the real code under test.
+  const { node } = await bootApp(BACKEND);
+  const log = node('log');
+  const slot = new El('img');
+  slot.className = 'md-image md-media-deferred';
+  slot.dataset.mdSrc = 'https://example.com/cat.png?d=1';
+  log.append(slot);
+  slot.dispatch('click');
+  assert.equal(slot.src, 'https://example.com/cat.png?d=1', 'the click gave the element its source');
+  assert.equal(slot.className, 'md-image', 'the slot mark is spent');
+
+  const video = new El('video');
+  video.className = 'md-video md-media-deferred';
+  video.dataset.mdSrc = 'https://example.com/clip.mp4';
+  log.append(video);
+  video.dispatch('keydown', { key: 'Enter' });
+  assert.equal(video.src, 'https://example.com/clip.mp4');
+  assert.equal(video.controls, true, 'the player appears once it is asked for');
+  assert.equal(video.preload, 'metadata');
+
+  // A slot whose address is spent (or was never one) loads nothing again.
+  const spent = new El('img');
+  spent.className = 'md-image md-media-deferred';
+  log.append(spent);
+  spent.dispatch('click');
+  assert.equal(spent.src, undefined);
+});
+
 test('a finished run folds its working trail and leaves the result open', async () => {
   // The run used to leave every step on screen — the answer sat at the bottom
   // of a wall of rows. On done/ask the trail folds under one line and the
@@ -1571,6 +1673,29 @@ test('a typed draft survives a reload', async () => {
   node('task').dispatch('input');
   assert.equal(store.get('aipass.draft'), 'a paragraph worth keeping', 'the draft is stored as you type');
   void tick;
+});
+
+test('the draft is gone once the task it held is sent', async () => {
+  // sendTask emptied the textarea with an assignment, and an assignment
+  // fires no input event — the storage kept the SENT text, and the next boot
+  // came back pre-filled with work that was already done.
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+  };
+  const { node, tick } = await bootApp(BACKEND);
+  node('task').value = 'the text that was sent';
+  node('task').dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.equal(store.get('aipass.draft'), '', 'the sent text is not stored as a draft');
+
+  // A command goes through the same composer and the same clear.
+  node('task').value = '/status';
+  node('task').dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.equal(store.get('aipass.draft'), '', 'and a sent command clears the draft too');
 });
 
 test('the session list filters as you type', async () => {
@@ -1931,6 +2056,86 @@ test('the memory page shows carried facts, and forget-all clears them', async ()
   assert.match(list.textContent, /ยังไม่มี/, 'and says so instead of going blank');
 });
 
+test('the goal page shows the objective and moves it without a model turn', async () => {
+  // The other door to the same file `aipass goal` writes: the sheet is where a
+  // person looks to find out what the project is chasing, and the CLI stays
+  // the way to script it.
+  let goal = { objective: 'ship the parser', status: 'active', rounds: 1, maxRounds: 3, done: null, blocked: null };
+  let setParams = null;
+  const { node, calls, tick } = await bootApp({
+    ...BACKEND,
+    'goal.get': () => ({ goal }),
+    'goal.set': (params) => {
+      setParams = params;
+      goal = { ...goal, objective: params.objective, maxRounds: params.maxRounds ?? goal.maxRounds, status: 'active', rounds: 0 };
+      return { goal };
+    },
+    'goal.pause': () => { goal = { ...goal, status: 'paused' }; return { goal }; },
+    'goal.clear': () => { goal = null; return { ok: true }; },
+  });
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+
+  const shell = node('modal-body').children.find((c) => /settings/.test(c.className));
+  const rail = shell.children.find((c) => /settings-nav/.test(c.className));
+  const tab = rail.children.find((b) => /เป้าหมาย/.test(b.textContent));
+  assert.ok(tab, 'the sheet grew a goal category');
+  tab.dispatch('click');
+  await tick();
+
+  const pages = shell.children.find((c) => /settings-pages/.test(c.className));
+  const page = pages.children.find((p) => p.dataset.page === 'goal');
+  assert.ok(page, 'the goal page is in the sheet');
+  const walk = (n, out = []) => { out.push(n); for (const c of n.children ?? []) walk(c, out); return out; };
+  const at = (id) => walk(page).find((n) => n.id === id);
+  assert.match(at('goal').textContent, /ship the parser/, 'the objective is on the page');
+  assert.match(at('goal').textContent, /รอบ 1\/3/, 'with where the rounds stand');
+  assert.equal(at('goal-objective').value, 'ship the parser');
+  assert.equal(at('goal-rounds').value, '3');
+
+  at('goal-objective').value = 'ship the parser and its tests';
+  at('goal-set').dispatch('click');
+  await tick(); await tick();
+  assert.equal(setParams.objective, 'ship the parser and its tests');
+  assert.equal(setParams.force, true, 'replacing a live goal is the explicit save');
+  assert.ok(calls.includes('goal.set'));
+
+  at('goal-toggle').dispatch('click');
+  await tick(); await tick();
+  assert.ok(calls.includes('goal.pause'), 'the pause button reaches the backend');
+  assert.equal(at('goal-head').textContent, 'เป้าหมายของโปรเจกต์ (paused)');
+
+  at('goal-clear').dispatch('click');
+  await tick(); await tick();
+  assert.ok(calls.includes('goal.clear'));
+  assert.match(at('goal').textContent, /ยังไม่มีเป้าหมาย/, 'the page says it is empty instead of going blank');
+});
+
+test('the /goal command reads the goal and moves it from the composer', async () => {
+  // Same file, same verbs as `aipass goal`: the composer is the quick look,
+  // the terminal and the settings page are the other two doors.
+  let goal = { objective: 'ship the parser', status: 'active', rounds: 1, maxRounds: 8, done: null, blocked: null };
+  const { node, calls, tick } = await bootApp({
+    ...BACKEND,
+    'goal.get': () => ({ goal }),
+    'goal.pause': () => { goal = { ...goal, status: 'paused' }; return { goal }; },
+  });
+  const task = node('task');
+  task.value = '/goal';
+  task.dispatch('keydown', { key: 'Enter' }); // the palette selects it and leaves "/goal "
+  await tick();
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.match(node('log').textContent, /ship the parser/, 'the objective is named');
+  assert.match(node('log').textContent, /รอบ 1\/8/, 'with the round it is on');
+
+  task.value = '/goal pause';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.ok(calls.includes('goal.pause'), 'the verb reaches the backend');
+  assert.match(node('log').textContent, /พักเป้าหมายแล้ว/);
+});
+
 test('an apply refreshes the file panel, so the new file is on screen', async () => {
   // The panel is a listing from a moment ago; a just-applied file used to stay
   // invisible until somebody reloaded the window or walked out of the folder.
@@ -2018,37 +2223,59 @@ test('the effort level is picked in the composer, not buried in settings', async
   assert.equal(/thinking level/.test(node('modal-body').textContent), false, 'the sheet does not ask for the effort anymore');
 });
 
-test('the temperature chip sits beside the effort chip and writes through', async () => {
-  // Sampling temperature is a per-message knob too: it rides beside the effort
-  // chip and writes through settings.set the moment it changes; null means the
-  // server's per-model default, so the chip boots at "default".
+test('temperature lives in the settings sheet, not beside the composer', async () => {
+  // The temperature chip used to sit beside the effort chip on the theory that
+  // both ride the next message. They do not age the same: effort is a
+  // per-message judgement call, temperature a rarely-touched model parameter,
+  // and a knob nobody turns has no business in the row read on every message.
+  // The sheet's คุยกับโมเดล page owns it now, and the window itself stopped
+  // wiring #temperature — a stray change event reaches nothing.
   const { node, sent, tick } = await bootApp(BACKEND);
-  assert.equal(node('temperature').value, 'default', 'the chip boots at the default');
-
   node('temperature').value = '0.7';
   node('temperature').dispatch('change');
   await tick();
-  assert.deepEqual(sent.at(-1), { method: 'settings.set', params: { temperature: 0.7 } }, 'a pick is a number on the wire');
+  assert.equal(sent.filter((c) => c.method === 'settings.set').length, 0, 'the composer no longer writes temperature');
 
-  node('temperature').value = 'default';
-  node('temperature').dispatch('change');
-  await tick();
-  assert.deepEqual(sent.at(-1), { method: 'settings.set', params: { temperature: null } }, 'default clears it back to null');
+  node('settings-btn').dispatch('click');
+  await tick(); await tick(); await tick();
+  const page = sheetPage(node, 'model');
+  assert.ok(page, 'the model page is in the sheet');
+  const selects = [];
+  const walk = (n) => {
+    if (n.tagName === 'SELECT') selects.push(n);
+    for (const c of n.children ?? []) walk(c);
+  };
+  walk(page);
+  const temp = selects.find((s) => s.options.some((o) => o.value === '0.7'));
+  assert.ok(temp, 'the sheet carries the temperature select');
+  assert.equal(temp.options.find((o) => o.value === 'default')?.selected, true, 'a saved null boots at default');
+  // And the mode is NOT a row here anymore: it lives beside the composer,
+  // where the message it governs is written. Two surfaces for one control
+  // drift, so the sheet stopped carrying its copy.
+  assert.equal(selects.some((s) => s.options.some((o) => o.value === 'ask')), false, 'the sheet no longer asks for the mode');
+
+  temp.value = '0.7';
+  temp.dispatch('change');
+  const save = node('modal-actions').children.find((b) => /save|บันทึก/.test(b.textContent));
+  assert.ok(save, 'a save button exists');
+  save.dispatch('click');
+  await tick(); await tick();
+  const savedTemperature = sent.filter((c) => c.method === 'settings.set').at(-1)?.params?.temperature;
+  assert.equal(savedTemperature, 0.7, 'the sheet writes temperature as a number');
 });
 
-test('the saved settings land in the header chips together', async () => {
-  // The mode, the effort and the temperature are ONE apply path: a settings
-  // change lands in all three chips at once, and none of them is left showing
-  // what the machine no longer believes.
-  const saved = { ...BACKEND['settings.get'](), mode: 'auto', requirePlanApproval: true, thinking: 'high', temperature: 0.7 };
+test('the saved settings land in the composer controls together', async () => {
+  // The mode and the effort are ONE apply path: a settings change lands in
+  // both at once, and neither is left showing what the machine no longer
+  // believes.
+  const saved = { ...BACKEND['settings.get'](), mode: 'auto', requirePlanApproval: true, thinking: 'high' };
   const backend = { ...BACKEND, 'settings.get': () => saved, 'settings.set': () => saved };
   const { node, tick } = await bootApp(backend);
   assert.equal(node('mode').value, 'plan', 'the mode chip shows the plan view');
   assert.equal(node('thinking').value, 'high', 'the effort chip shows the saved level');
-  assert.equal(node('temperature').value, '0.7', 'the temperature chip shows the saved number');
 
-  // And a save from the sheet moves all three at once, because the sheet
-  // asks the same one path to apply what it just wrote.
+  // And a save from the sheet moves both at once, because the sheet asks the
+  // same one path to apply what it just wrote.
   node('settings-btn').dispatch('click');
   await tick(); await tick();
   const save = node('modal-actions').children.find((b) => /save|บันทึก/.test(b.textContent));
@@ -2057,7 +2284,6 @@ test('the saved settings land in the header chips together', async () => {
   await tick(); await tick();
   assert.equal(node('mode').value, 'plan', 'the mode chip still shows the plan view');
   assert.equal(node('thinking').value, 'high', 'the effort chip still shows the saved level');
-  assert.equal(node('temperature').value, '0.7', 'the temperature chip still shows the saved number');
 });
 
 test('shift+tab cycles ask, auto and plan — and writes each through', async () => {
@@ -2612,6 +2838,65 @@ test('a token refusal does not send the reader to the extension popup', async ()
   assert.match(text, /ปฏิเสธ token/, 'but it is still a token refusal');
 });
 
+test('a banner the transcript was emptied under comes back on the next look', async () => {
+  // A new session cleared #log, and the token banner's sync still held the
+  // bar it had painted — a node no longer in the document. The sync saw the
+  // state still failing and a bar "already up", and the notice never came
+  // back. The clear now forgets the bars, and the next look repaints the
+  // ones that still apply.
+  const backend = {
+    ...BACKEND,
+    status: () => ({ ...BACKEND.status(), extensions: 0, extensionToken: 'missing' }),
+    'model.set': () => ({ ok: true }),
+  };
+  const { node, tick } = await bootApp(backend, { token: 'tok' });
+  await tick(); await tick();
+  const bar = () => node('log').children.find((c) => /needs-tab/.test(c.className ?? ''));
+  assert.ok(bar(), 'the token banner is up');
+
+  node('new-session').dispatch('click');
+  await tick(); await tick(); await tick();
+  assert.ok(!bar(), 'the clear took the banner with it');
+
+  // The next look at the state — here a model switch, which ends in the same
+  // refreshHeader the ten-second poll uses — repaints it.
+  node('task').value = '/model m';
+  node('task').dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick(); await tick();
+  assert.ok(bar(), 'and the banner is back — the state is still missing');
+});
+
+test('a cleared transcript starts its trim count over', async () => {
+  // The trim marker survived a clear as a detached node: the next trim
+  // counted the last session's rows into this one, and — the marker being
+  // out of the document — cut rows without the line that says how many at
+  // all. A new session starts its account from zero.
+  const entries = Array.from({ length: 305 }, (_, i) => ({ type: 'task', text: `task ${i}` }));
+  const backend = {
+    ...BACKEND,
+    snapshot: () => ({
+      status: { root: '/tmp/proj', running: false },
+      session: { id: 's1', title: 'one' },
+      entries,
+      pending: [],
+      asks: {},
+    }),
+  };
+  const { node, tick } = await bootApp(backend);
+  globalThis.__stream.emit('open', {});
+  await tick(); await tick(); await tick();
+  const first = node('log').textContent.match(/ตัด (\d+) รายการ/);
+  assert.ok(first, 'the trim is counted — 305 rows in a 300-row window');
+
+  node('new-session').dispatch('click');
+  await tick(); await tick(); await tick();
+  globalThis.__stream.emit('open', {});
+  await tick(); await tick(); await tick();
+  const second = node('log').textContent.match(/ตัด (\d+) รายการ/);
+  assert.ok(second, 'and the new transcript still says what it dropped');
+  assert.equal(second[1], first[1], 'and the count starts over — the last session\'s rows are not carried in');
+});
+
 test('the window names the extension\'s token when that is what is missing', async () => {
   // "extensions: 0" hides two jobs: the extension was never loaded, or the
   // bridge refused it for want of the token. The bridge says which, and the
@@ -3094,6 +3379,41 @@ test('the rail starts a session, and the foot opens the rest of the app', async 
   assert.match(node('modal-title').textContent, /วิธีใช้/);
 });
 
+test('the ? key opens the guide the welcome card promises', async () => {
+  // The welcome card says "กด ? เพื่อดูวิธีใช้ทั้งหมด", and no key did that —
+  // a promise the keys did not keep. It opens now, from anywhere the window
+  // itself has the focus; a form field keeps its question marks. (The sheet
+  // is closed by Escape first: the fake does not carry the HTML's initial
+  // class, so "closed" has to be a state the window itself set.)
+  const { node, tick } = await bootApp(BACKEND);
+  const key = (ev) => globalThis.document.dispatch('keydown', { preventDefault() {}, ...ev });
+  key({ key: 'Escape' });
+  await tick();
+  key({ key: '?', target: { tagName: 'TEXTAREA' } });
+  await tick();
+  assert.equal(node('modal').classList.contains('hidden'), true, 'a form field keeps its ?');
+
+  // A modified ? belongs to nobody here: the shell's own chords keep their
+  // meaning, and none of them opens the guide.
+  key({ key: '?', ctrlKey: true });
+  key({ key: '?', metaKey: true });
+  key({ key: '?', altKey: true });
+  await tick();
+  assert.equal(node('modal').classList.contains('hidden'), true, 'modified ? keys do not open it');
+
+  key({ key: '?' });
+  await tick();
+  assert.equal(node('modal').classList.contains('hidden'), false, '? opens the guide');
+  assert.match(node('modal-title').textContent, /วิธีใช้/);
+
+  // The sheet is open: it keeps its own keys — the guide is not replaced
+  // under the reader.
+  key({ key: '?' });
+  await tick();
+  assert.equal(node('modal').classList.contains('hidden'), false, 'an open sheet is left open');
+  assert.match(node('modal-title').textContent, /วิธีใช้/);
+});
+
 test('the rail carries no playbook row and no plugin row — the settings sheet has both', async () => {
   // Two folded headings used to sit in the rail: "คู่มือ" and "ปลั๊กอิน".
   // Clicking one opened a box you had to guess at, in a column whose job is the
@@ -3146,6 +3466,102 @@ test('a playbook opens in place, under its own row', async () => {
   row.dispatch('click');
   await tick(); await tick();
   assert.equal(body.hidden, true, 'clicking it again puts it away');
+});
+
+/* ------------------------------------------------- invoking and installing */
+
+test('"/skill <name>" fills the composer with the phrase that makes the next run load it', async () => {
+  const { node, calls, tick } = await bootApp({
+    ...BACKEND,
+    'skills.load': () => ({ name: 'writing', file: 'skills/writing.md', text: '# writing\n' }),
+  });
+  const task = node('task');
+  task.value = '/skill writing';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.ok(calls.includes('skills.load'), 'the backend confirms the name before the draft is filled');
+  assert.match(task.value, /SKILL writing/, 'the draft names the playbook the way the loop loads it');
+});
+
+test('"/skill" with a name that is not in the library says so, and fills nothing', async () => {
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'skills.load': () => { throw new Error('no such skill: ghost. Use SKILL list to see the library.'); },
+  });
+  const task = node('task');
+  task.value = '/skill ghost';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  assert.equal(task.value, '', 'a playbook that is not there fills no draft');
+  assert.match(node('log').textContent, /no such skill/, 'the refusal names the problem');
+});
+
+test('a playbook row carries the invoke, and names the library it loads from', async () => {
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'skills.list': () => [{ name: 'writing', file: 'skills/writing.md', role: 'user' }],
+  });
+  const task = node('task');
+  task.value = '/skills';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  const list = node('modal-body').children.find((c) => /skill-list/.test(c.className));
+  const row = list.children[0];
+  assert.match(row.textContent, /ผู้ใช้/, 'the row says which library the playbook loads from');
+  const actions = row.children.find((c) => /skill-row/.test(c.className)).children.find((c) => /skill-actions/.test(c.className));
+  const use = actions.children.find((b) => b.textContent === 'ใช้');
+  use.dispatch('click');
+  await tick();
+  assert.match(task.value, /SKILL writing/, 'the composer carries the invocation');
+});
+
+test('the install dialog sends the paste to the backend and refreshes the list', async () => {
+  let installed = null;
+  let lists = 0;
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'skills.list': () => { lists += 1; return [{ name: 'writing', file: 'skills/writing.md', role: 'user' }]; },
+    'skills.install': (params) => { installed = params; return { name: params.name, file: '/skills/deploy.md', target: params.target, overwritten: false }; },
+  });
+  const task = node('task');
+  task.value = '/skills';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  node('modal-actions').children.find((b) => b.textContent === 'ติดตั้งคู่มือ…').dispatch('click');
+  await tick();
+  const body = node('modal-body');
+  const nameRow = body.children.find((c) => /skill-install-row/.test(c.className));
+  nameRow.children[0].value = 'deploy-check';
+  nameRow.children[1].value = 'user';
+  body.children.find((c) => c.tagName === 'TEXTAREA').value = '# deploy\none\n';
+  node('modal-actions').children.find((b) => b.textContent === 'ติดตั้ง').dispatch('click');
+  await tick(); await tick();
+  assert.deepEqual(installed, { name: 'deploy-check', text: '# deploy\none\n', target: 'user', overwrite: false }, 'the dialog sent name, text and target');
+  assert.ok(lists >= 2, 'the list was refreshed after the install');
+  assert.equal(node('modal').classList.contains('hidden'), true, 'the dialog is gone');
+});
+
+test('a remove is armed by the first click and done by the second', async () => {
+  const removed = [];
+  const { node, tick } = await bootApp({
+    ...BACKEND,
+    'skills.list': () => [{ name: 'writing', file: 'skills/writing.md', role: 'user' }],
+    'skills.remove': (params) => { removed.push(params); return { name: params.name, target: params.target, removed: true }; },
+  });
+  const task = node('task');
+  task.value = '/skills';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick(); await tick();
+  const row = node('modal-body').children.find((c) => /skill-list/.test(c.className)).children[0];
+  const actions = row.children.find((c) => /skill-row/.test(c.className)).children.find((c) => /skill-actions/.test(c.className));
+  const del = actions.children.find((b) => b.textContent === 'ลบ');
+  del.dispatch('click');
+  await tick();
+  assert.deepEqual(removed, [], 'the first click only arms the button');
+  assert.equal(del.textContent, 'ยืนยันลบ?', 'and the button says it is armed');
+  del.dispatch('click');
+  await tick(); await tick();
+  assert.deepEqual(removed, [{ name: 'writing', target: 'user' }], 'the second click removes from the library the row names');
 });
 
 test('the search field is a field, and it counts the history it filters', async () => {
@@ -3215,6 +3631,57 @@ test('the update notice is a banner with one button, and the click is the consen
     await new Promise((r) => setTimeout(r, 100));
   }
   assert.equal(window_.reloaded, 1, 'and the window reloads once the backend is back');
+});
+
+test('the six-hour poll does not stack the update notice', async () => {
+  // The check runs at boot and every six hours: the same available version
+  // used to append a fresh bar each poll, and a long-open window ended with
+  // a stack of identical notices. A version is said once; a NEWER version
+  // replaces the bar instead of joining it.
+  const available = () => ({
+    ok: true,
+    checkedAt: Date.now(),
+    fromCache: false,
+    stale: false,
+    reason: null,
+    current: { content: '0.2.0', shell: '0.2.0', source: 'bundle' },
+    available: {
+      content: { version: '0.2.1', file: 'aipass-content-0.2.1.json.gz', bytes: 1, sha256: 'a'.repeat(64), notes: '', minShell: '0.2.0' },
+    },
+  });
+  const backend = { ...BACKEND, 'update.check': available };
+  const window_ = await bootApp(backend);
+  const { node, tick } = window_;
+  await tick(); await tick();
+
+  const runUpdate = async () => {
+    node('task').value = '/update';
+    node('task').dispatch('keydown', { key: 'Enter' });
+    await tick(); await tick(); await tick();
+  };
+  await runUpdate();
+  await runUpdate();
+  await runUpdate();
+  const bars = node('log').children.filter((c) => (c.className ?? '').includes('update-bar'));
+  assert.equal(bars.length, 1, `one notice, however many polls — got ${bars.length}`);
+});
+
+test('the slash button starts an empty composer and never eats typed text', async () => {
+  const { node, tick } = await bootApp(BACKEND);
+  await tick();
+
+  // Empty composer: the button behaves like typing "/" — the composer gets
+  // the slash and the palette renders from it.
+  node('task').value = '';
+  node('slash-btn').dispatch('click');
+  await tick();
+  assert.equal(node('task').value, '/', 'an empty composer gets the slash');
+
+  // Typed text is the person's answer in progress — the button only focuses.
+  node('task').value = 'กำลังพิมพ์ครึ่งทาง';
+  node('slash-btn').dispatch('click');
+  await tick();
+  assert.equal(node('task').value, 'กำลังพิมพ์ครึ่งทาง', 'typed text survives the button');
 });
 
 test('the shell update says the app will close, and an unsigned installer is refused', async () => {
@@ -3386,6 +3853,29 @@ test('the apply says the write can be taken back', async () => {
   node('apply').dispatch('click');
   await tick(); await tick();
   assert.match(node('log').textContent, /ย้อนกลับได้ที่จุด #cp-9/, 'the window names the way back');
+});
+
+test('a double-clicked apply writes once, and listens again once it settles', async () => {
+  // The buttons answer faster than the rpc does: a second press on an
+  // unanswered Apply used to send the same write twice, the second landing
+  // after the pending list had been rebuilt under it. While one is in flight
+  // the buttons are not listening; once it settles, a deliberate press works.
+  const { node, tick, calls } = await bootApp({
+    ...BACKEND,
+    apply: () => ({ written: 1, deleted: 0, files: ['a.js'], checkpoint: { id: 'cp-1', createdAt: 1, files: ['a.js'] } }),
+    pending: () => [{ file: 'a.js', added: 1, removed: 0 }],
+  });
+  globalThis.__stream.emit('diff_update', { changes: [{ file: 'a.js', added: 1, removed: 0 }] });
+  await tick();
+  node('apply').dispatch('click');
+  node('apply').dispatch('click'); // the first call is still in flight
+  node('discard').dispatch('click'); // same staging area — also not listening
+  await tick(); await tick();
+  assert.equal(calls.filter((m) => m === 'apply').length, 1, 'the double click sent one write');
+  assert.equal(calls.includes('discard'), false, 'a discard cannot interleave with an apply in flight');
+  node('apply').dispatch('click'); // a deliberate press, after it settled
+  await tick(); await tick();
+  assert.equal(calls.filter((m) => m === 'apply').length, 2, 'and the settled press is listened to again');
 });
 
 test('the git page commits with a message, and refuses an empty one', async () => {

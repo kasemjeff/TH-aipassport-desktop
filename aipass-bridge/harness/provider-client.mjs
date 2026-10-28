@@ -357,15 +357,33 @@ export class ApiProviderClient {
   #requestBody({ model, messages, thinkingLevel, temperature }) {
     if (this.kind === 'anthropic') {
       const budget = ANTHROPIC_BUDGET[thinkingLevel] ?? null;
+      const mapped = messages.map((m) => ({
+        role: m.role,
+        content: Array.isArray(m.content)
+          ? m.content
+          : [{ type: 'text', text: String(m.content ?? '') }],
+      }));
+      // Prompt-cache breakpoints. The history is append-only and re-sent
+      // verbatim every turn, so its prefix is byte-stable — the one thing a
+      // prefix cache needs. Marking the first message (the protocol preamble,
+      // the biggest stable block) and the end of the last complete turn lets
+      // the provider read that prefix at the cached rate instead of charging
+      // it full every turn. Two markers, never more (the API caps at four);
+      // a cache below the provider's minimum length simply does not land, so
+      // marking a short history is harmless. A spec that says
+      // `promptCache: false` sends no markers.
+      if (this.spec.promptCache !== false && mapped.length) {
+        const mark = (m) => {
+          const block = m.content[m.content.length - 1];
+          if (block && typeof block === 'object') block.cache_control = { type: 'ephemeral' };
+        };
+        mark(mapped[0]);
+        if (mapped.length >= 3) mark(mapped[mapped.length - 2]);
+      }
       const body = {
         model,
         max_tokens: Number(this.spec.maxTokens) > 0 ? Number(this.spec.maxTokens) : 8192,
-        messages: messages.map((m) => ({
-          role: m.role,
-          content: Array.isArray(m.content)
-            ? m.content
-            : [{ type: 'text', text: String(m.content ?? '') }],
-        })),
+        messages: mapped,
         stream: true,
       };
       if (budget) {

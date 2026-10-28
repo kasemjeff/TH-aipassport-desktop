@@ -33,7 +33,7 @@ aipass-bridge/harness/      the agent core, shared with `aipass agent`
 
 Nothing in `aipass-bridge/agent.mjs` was rewritten: it now calls the same
 harness modules, so the CLI and the window cannot drift apart. The CLI's own
-tests (`aipass-bridge/test/agent.test.mjs`, 58 of them) pass unchanged, which
+tests (`aipass-bridge/test/agent.test.mjs`) pass unchanged, which
 is the proof.
 
 ## The constraint that shaped everything
@@ -87,9 +87,15 @@ stall) keeps the whole trail open, and a row with a button on it — carry on,
 open the chat tab — is never folded away. The moon in the header flips
 the theme, and the choice is written through.
 
-Header: project, model, permission mode — three controls, one thin row.
+The thin top row carries the project and the connection state; the controls
+that govern the next message live where the message is written — the composer's
+chip row holds the **mode** (โหมดการทำงาน: ask / auto / yolo / plan), the
+provider, the model and the effort level, in that order. Temperature is not
+there on purpose: it is a rarely-touched model parameter, and it lives in the
+settings sheet (คุยกับโมเดล → temperature). One surface per control — the sheet
+no longer carries its own copy of the mode, so the two cannot drift apart.
 
-Keys: `Enter` sends, `Shift+Enter` is a newline, `Shift+Tab` cycles the mode (ask → auto → plan), `Esc` cancels a running turn
+Keys: `Enter` sends, `Shift+Enter` is a newline, `Shift+Tab` cycles the mode (ask → auto → plan — yolo is not in the cycle on purpose: it can run shell commands, so it is only ever picked by hand from the dropdown), `Esc` cancels a running turn
 (or closes a dialog), `Ctrl+K` goes to the sidebar's search.
 
 **The Apply leaves an undo.** Before the Apply writes to the disk, the files
@@ -114,7 +120,7 @@ Typing `/` in the composer opens the palette: arrows move, `Enter`/`Tab` picks,
 | `/model` `/model <id>` | pick a model, or set one by id |
 | `/provider` `/provider <id>` | switch who answers the run — AiPASS or an added API provider |
 | `/models` | list the models that can hold a conversation, with the current one marked |
-| `/mode` `/mode ask\|auto\|yolo` | permission level, with what each one means |
+| `/mode` `/mode ask\|auto\|yolo\|plan` | the work mode, with what each one means |
 | `/status` | bridge, extensions, model, credits, pending count |
 | `/paint` | the paint cache's hit/miss counters — how often a frame re-rendered instead of appending |
 | `/conversations` | switch which bridge conversation the model is remembering |
@@ -128,6 +134,7 @@ Typing `/` in the composer opens the palette: arrows move, `Enter`/`Tab` picks,
 | `/open` `/open <path>` | read a file in the project |
 | `/skills` | the playbooks on disk |
 | `/memory` | the facts the app carries between sessions (`/memory clear` forgets them) — the same list as the sheet's page |
+| `/goal` | the project's one durable objective — `/goal set "…"`, `pause`, `resume`, `done`, `block`, `clear`; `aipass goal` is the same file |
 | `/mcp` | the MCP servers and the tools they offer (they are managed in the sheet's 🔌 MCP page) |
 | `/symbols <file>\|<name>` | the code-navigation index: what a file declares, or where a name is defined and used — the same index the `SYMBOLS`/`DEF`/`REFS` markers use, asked from the window |
 | `/diff` `/apply` `/discard` | the pending-change buffer |
@@ -374,7 +381,8 @@ Methods: `status`, `models`, `credits`, `conversations`, `config.set`,
 `plugins.list|reload|inspect|install|remove|enable|disable`,
 `mcp.list|reload|add|remove|enable|disable|test`, `panel.render`,
 `projects.list|add|remove|switch`, `providers.list`, `provider.set|save|remove|test`,
-`memory.list|clear`, `settings.get|set|reset`, `rules.get|set`,
+`memory.list|clear`, `goal.get|set|pause|resume|done|block|clear`,
+`settings.get|set|reset`, `rules.get|set`,
 `browser.open`, `waf.table`, `snapshot`.
 
 **The window says which project it is on.** Every call carries an
@@ -577,19 +585,18 @@ What it holds: default model (+ the **thinking level** the model reasons at
 before each step — edited from the composer's effort chip in the window, or
 `/thinking` in the terminal; it streams into a fold labeled `✻ reasoning…` and
 closes when the turn ends, and only models that advertise thinking levels
-honour it), the **sampling temperature** (`temperature`, 0..2 — edited from
-the composer's temperature chip beside the effort chip; `null` leaves it to
-the server's per-model default, and a value outside the range is clamped),
-write
-permission (`ask` / `auto` / `yolo`), `allowRun`, `maxSteps` (0 = no cap, the
-shipped default), the per-run caps `maxToolCalls` / `maxWallClockMs` (the sheet
-asks for the wall clock in minutes), plan mode (+
-whether a plan waits for approval), helpers on/off, the compaction budget
-(**budget**, **reserve**, and the share at which it rotates —
-`compactAtPercent`, 40 by default), playbook folders, the project list, the
-current root, enabled plugins, theme, the chat tab URL and whether a run that
-needs one opens it — and the **declared check**: `verifyCommand` (the one
-command the checker must treat as the project's check, replacing
+honour it), the **sampling temperature** (`temperature`, 0..2 — edited in the
+sheet's คุยกับโมเดล page; `null` leaves it to the server's per-model default,
+and a value outside the range is clamped), the **work mode** (`ask` / `auto` /
+`yolo` — edited from the mode chip beside the composer, and `plan` rides
+`plan` + `requirePlanApproval` as the chip's plan view), `allowRun`, `maxSteps`
+(0 = no cap, the shipped default), the per-run caps `maxToolCalls` /
+`maxWallClockMs` (the sheet asks for the wall clock in minutes), helpers on/off,
+the compaction budget (**budget**, **reserve**, and the share at which it
+rotates — `compactAtPercent`, 40 by default), playbook folders, the project
+list, the current root, enabled plugins, theme, the chat tab URL and whether a
+run that needs one opens it — and the **declared check**: `verifyCommand` (the
+one command the checker must treat as the project's check, replacing
 `.aipass/check.txt` when set) and `requireCheck` (refuse a DONE while that
 check is still failing; the run ends as `done-unverified` instead of accepting
 it). Both are off by default, so the checker stays advisory until a project
@@ -660,7 +667,13 @@ setup(ctx) {
 }
 ```
 
-Tools the model can call arrive as `MARKER rest-of-line` — or as a block ending
+The built-in markers the model reaches for most often are `NEED file|dir`,
+`SEARCH`, `TREE`, `STAT`, `LIST -l`, `GLOB`, `SYMBOLS`, `DEF`, `REFS`,
+`RECALL`, `EDIT`, `CREATE`, `RUN`, `VERIFY` and `GIT`. `TREE` shows a folder's
+shape, `STAT` one path's metadata, `LIST -l` adds size and modified time to a
+listing, and `SEARCH` takes `-i` plus `-A`/`-B`/`-C` context flags.
+
+Tools the model can call arrive as `MARKER rest-of-line` - or as a block ending
 in `END` when `takesBody` is true — and their result comes back exactly like a
 NEED or SEARCH result. The preamble grows one paragraph listing them while a
 run is in flight. Every tool rides the same permission gate a built-in of that

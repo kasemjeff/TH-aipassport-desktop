@@ -23,7 +23,7 @@ import { renderGitTab, renderMediaTab, renderScheduleTab } from './panels/tools.
  * @param {object} ctx the window it draws into
  */
 export function createSettings(ctx) {
-  const { $, el, state, rpc, addNote, addCommandOut, friendly, applyTheme, refreshHeader, refreshSkills, renderSkillList, renderMemoryFacts, applySettingsToUi, stageLabel, fillProviders, paintPluginPanels, hideModal, openModal } = ctx;
+  const { $, el, state, rpc, addNote, addCommandOut, friendly, applyTheme, refreshHeader, refreshSkills, renderSkillList, renderMemoryFacts, installSkillDialog, applySettingsToUi, stageLabel, fillProviders, paintPluginPanels, hideModal, openModal } = ctx;
 
 
 /* The pages of the sheet — one tab each. A tab renders its own page and
@@ -51,6 +51,10 @@ const saveEmptyTab = () => ({ patch: {}, problems: [] });
 const saveModelTab = (sheet) => {
   const d = sheet.draft;
   const problems = [];
+  // The temperature select speaks in strings ('default' / '0.7'); the settings
+  // file stores null or a number, so the sheet converts on the way out — the
+  // same trick the wall-clock minutes below play.
+  const temperature = d.temperature == null || d.temperature === 'default' ? null : Number(d.temperature);
   // Check before writing: a budget under its reserve is a mistake the person
   // should hear about — not a setting that quietly misbehaves on the next
   // run. Zero steps is no mistake: it is the deliberate "no cap".
@@ -94,7 +98,7 @@ const saveModelTab = (sheet) => {
     problems,
     patch: {
       defaultModel: d.defaultModel,
-      mode: d.mode,
+      temperature,
       allowRun: d.allowRun,
       // The two switches the harness option sheet owns. They are sent only
       // when the machine has them: a backend that does not know the key
@@ -108,8 +112,6 @@ const saveModelTab = (sheet) => {
       maxWallClockMs: Math.round(maxWallClockMin) * 60_000,
       maxCredits: d.maxCredits,
       maxResult: d.maxResult,
-      plan: d.plan,
-      requirePlanApproval: d.requirePlanApproval,
       subagent: d.subagent,
       replyLanguage: d.replyLanguage,
       langCheck: d.langCheck,
@@ -371,14 +373,96 @@ const renderMemoryTab = async (page, sheet) => {    // What the app remembers be
     page.append(head, list, clear);
     await renderMemoryFacts(list, head);
 };
+/**
+ * The goal tab: the one objective every run in this project is chasing.
+ *
+ * It is not a setting of one run (that is the plan) and not something the app
+ * remembers (that is memory): it is the person's answer to "what am I actually
+ * trying to finish". Setting and replacing use the form; pause/resume and
+ * clear act at once, like the memory page, because they answer an ongoing run
+ * and waiting for "บันทึก" would be a trap.
+ */
+const renderGoalTab = async (page) => {
+  const head = el('div', 'set-title');
+  head.id = 'goal-head';
+  const list = el('ul', 'list dim goal-list');
+  list.id = 'goal';
+  const objective = el('textarea');
+  objective.id = 'goal-objective';
+  objective.rows = 3;
+  objective.placeholder = 'สิ่งที่โปรเจกต์นี้ต้องทำให้เสร็จ';
+  const rounds = el('input');
+  rounds.id = 'goal-rounds';
+  rounds.type = 'number';
+  rounds.min = '1';
+  rounds.max = '64';
+  rounds.title = 'จำนวนครั้งที่โมเดลจะถูกส่งกลับไปทำต่อ เมื่อสั่ง DONE ทั้งที่เป้าหมายยังไม่จบ';
+  const save = el('button', 'primary', 'บันทึกเป้าหมาย');
+  save.id = 'goal-set';
+  const toggle = el('button', 'mini', 'พักเป้าหมาย');
+  toggle.id = 'goal-toggle';
+  const clear = el('button', 'mini', 'ลบเป้าหมาย');
+  clear.id = 'goal-clear';
+  const out = el('p', 'install-out dim', '');
+  out.id = 'goal-out';
+  let goal = null;
+
+  async function paint() {
+    const res = await rpc('goal.get').catch(() => null);
+    goal = res?.goal ?? null;
+    head.textContent = goal ? `เป้าหมายของโปรเจกต์ (${goal.status})` : 'เป้าหมายของโปรเจกต์';
+    list.textContent = '';
+    if (!goal) {
+      list.append(el('li', 'dim', 'ยังไม่มีเป้าหมาย — ใส่ข้อความแล้วกดบันทึก'));
+    } else {
+      list.append(el('li', null, goal.objective));
+      list.append(el('li', 'dim', `สถานะ ${goal.status} · รอบ ${goal.rounds}/${goal.maxRounds}${goal.blocked ? ` · ติด: ${goal.blocked}` : ''}${goal.done ? ` · เสร็จ: ${goal.done}` : ''}`));
+    }
+    objective.value = goal?.objective ?? '';
+    rounds.value = String(goal?.maxRounds ?? 8);
+    toggle.hidden = !goal || !['active', 'paused'].includes(goal.status);
+    toggle.textContent = goal?.status === 'paused' ? 'ทำต่อ' : 'พักเป้าหมาย';
+    clear.hidden = !goal;
+    out.className = 'install-out dim';
+    out.textContent = goal ? 'บันทึกข้อความใหม่ = แทนที่เป้าหมายเดิมและเริ่มนับรอบใหม่' : '';
+  }
+
+  const act = (fn) => async () => {
+    try { await fn(); } catch (err) { out.className = 'install-out err'; out.textContent = friendly(err.message); return; }
+    await paint();
+  };
+  save.onclick = act(async () => {
+    const text = objective.value.trim();
+    if (!text) throw new Error('ใส่เป้าหมายก่อน');
+    if (goal?.objective === text) throw new Error('เป้าหมายนี้บันทึกอยู่แล้ว — แก้ข้อความก่อนถ้าจะเริ่มใหม่');
+    const n = Number(rounds.value);
+    await rpc('goal.set', { objective: text, maxRounds: Number.isFinite(n) && n > 0 ? n : undefined, force: true });
+  });
+  toggle.onclick = act(async () => { await rpc(goal?.status === 'paused' ? 'goal.resume' : 'goal.pause'); });
+  clear.onclick = act(async () => { await rpc('goal.clear'); });
+
+  const actions = el('div', 'plugin-actions');
+  actions.append(save, toggle, clear);
+  const roundsLabel = el('label', 'dim', 'รอบสูงสุด (1-64)');
+  roundsLabel.append(rounds);
+  page.append(head, list, objective, roundsLabel, actions, out);
+  await paint();
+};
 const renderSkillsDirsTab = async (page, sheet) => {    const group = el('div', 'set-group');
-    group.append(sheet.row('โฟลเดอร์คู่มือ', 'ทีละ path ต่อบรรทัด · ลองโฟลเดอร์ในโปรเจกต์ก่อน แล้วค่อย ~/.aipass/skills · /skills = ดูที่มี · รายการรีเฟรชเองเมื่อบันทึก', sheet.control({ key: 'skillsDirs', type: 'textarea' })));
+    group.append(sheet.row('โฟลเดอร์คู่มือ', 'ทีละ path ต่อบรรทัด · ลองโฟลเดอร์ในโปรเจกต์ก่อน แล้วค่อย ~/.aipass/skills · /skill <ชื่อ> = เรียก · /skills = ดูที่มี · รายการรีเฟรชเองเมื่อบันทึก', sheet.control({ key: 'skillsDirs', type: 'textarea' })));
     page.append(group);
     // The playbooks those folders hold, right under the folders: the list
     // used to be a folded row in the rail, and the answer belongs next to
-    // the thing that decides what is in it.
+    // the thing that decides what is in it. Installing is here too — the
+    // folder row and the button that fills it are one story.
+    const head = el('h5', 'set-title heading', 'คู่มือที่มี');
+    const install = el('button', 'mini', 'ติดตั้งคู่มือ…');
+    install.onclick = () => installSkillDialog({
+      onInstalled: async () => renderSkillList(list, await refreshSkills()),
+    });
+    head.append(install);
     const list = el('ul', 'list dim skill-list');
-    page.append(el('h5', 'set-title heading', 'คู่มือที่มี'), list);
+    page.append(head, list);
     renderSkillList(list, await refreshSkills());
 };
 const renderPluginsTab = async (page, sheet) => {    let live = sheet.details;
@@ -848,25 +932,44 @@ const renderHealthTab = async (page, sheet) => {    // One button, same answers 
  * The hooks tab: the person's own commands, at the moments that matter.
  *
  * A hook is a command line the person wrote, run by the harness at a named
- * moment — after the run stages a change, before a commit goes through, or
- * when the run ends. The command's verdict comes back to the model (and, for
- * the last one, to the person as a note), so "run the linter after every
- * edit" is a setting rather than a habit.
+ * moment — before a call runs, when a session or a task starts, after a
+ * change is staged, before a commit, or when the run ends. The command's
+ * verdict comes back to the model (and, for the end moments, to the person as
+ * a note), so "run the linter after every edit" is a setting rather than a
+ * habit.
  *
  * @param {object} page
  * @param {object} sheet
  */
 const renderHooksTab = async (page, sheet) => {
   const group = el('div', 'set-group');
+  group.append(sheet.row('ตอนเริ่มบทสนทนา (sessionStart)',
+    'รันครั้งเดียวก่อนงานแรกของบทสนทนา — ผลถูกส่งให้โมเดลเป็นบริบทจากคุณ ไม่ใช่คำสั่งของโปรเจกต์',
+    sheet.control({ key: 'hooks.sessionStart', type: 'textarea' })));
+  group.append(sheet.row('ตอนส่งงาน (promptSubmit)',
+    'รันก่อนทุกงานที่คุณส่ง — ผลถูกส่งให้โมเดลเป็นบริบทจากคุณ',
+    sheet.control({ key: 'hooks.promptSubmit', type: 'textarea' })));
+  group.append(sheet.row('ก่อนใช้เครื่องมือ (beforeTool)',
+    'รันก่อนทุกเครื่องมือ — exit ที่ไม่ใช่ 0 จะปฏิเสธ call นั้น และทุกโหมดต้องเคารพ',
+    sheet.control({ key: 'hooks.beforeTool', type: 'textarea' })));
+  group.append(sheet.row('หลังใช้เครื่องมือ (afterTool)',
+    'รันหลังทุกเครื่องมือ — สิ่งที่พิมพ์ถูกต่อท้ายผลลัพธ์ที่โมเดลอ่าน',
+    sheet.control({ key: 'hooks.afterTool', type: 'textarea' })));
   group.append(sheet.row('หลังแก้ไฟล์ (afterWrite)',
     'รันคำสั่งนี้ทุกครั้งที่รันเตรียมการแก้ไฟล์ — เช่น "npm run lint" — ผลของคำสั่งกลับไปหาโมเดล',
     sheet.control({ key: 'hooks.afterWrite', type: 'textarea' })));
   group.append(sheet.row('ก่อน commit (beforeCommit)',
     'รันก่อน commit — ถ้าคำสั่งล้มเหลว commit จะไม่เกิดขึ้น',
     sheet.control({ key: 'hooks.beforeCommit', type: 'textarea' })));
+  group.append(sheet.row('ก่อนบีบบริบท (preCompact)',
+    'รันก่อนสรุปบทสนทนาและเริ่ม conversation ใหม่ — ผลถูกรวมไว้ใน summary',
+    sheet.control({ key: 'hooks.preCompact', type: 'textarea' })));
   group.append(sheet.row('ตอนจบรัน (done)',
     'รันตอนรันจบ — ผลขึ้นที่คนใช้เป็นบันทึกในบทสนทนา',
     sheet.control({ key: 'hooks.done', type: 'textarea' })));
+  group.append(sheet.row('ตอนหยุดกลางทาง (stop)',
+    'รันเมื่อรันจบโดยไม่ได้ DONE (หยุดเอง เกินงบ หรือตัน) — ผลขึ้นเป็นบันทึก',
+    sheet.control({ key: 'hooks.stop', type: 'textarea' })));
   page.append(group);
   const note = el('p', 'settings-empty');
   note.append('คำสั่งหนึ่งบรรทัดต่อ hook — เช่น "npm run lint" หรือ "npm test" · คำสั่งที่ล้มเหลวจะถูกบอก ไม่ทำให้รันตาย');
@@ -874,7 +977,7 @@ const renderHooksTab = async (page, sheet) => {
 };
 
 /**
- * The hooks save: the three moments, and nothing else.
+ * The hooks save: all nine moments, and nothing else.
  *
  * @param {object} sheet
  * @returns {TabSave}
@@ -886,11 +989,22 @@ const TABS = [
     id: 'model',
     icon: '🤖',
     title: 'คุยกับโมเดล',
-    sub: 'โมเดล สิทธิ์ และขีดจำกัดของแต่ละรัน',
+    // The mode (สิทธิ์/plan) is deliberately NOT a row here: it decides what
+    // the NEXT message may do, so it lives beside the composer where the
+    // message is written — one surface per control, or two copies drift.
+    sub: 'โมเดล temperature และขีดจำกัดของแต่ละรัน — โหมดการทำงาน (สิทธิ์/plan) อยู่ข้างช่องพิมพ์ที่หน้าแชต',
     save: saveModelTab,
     fields: [
       { key: 'defaultModel', label: 'โมเดลเริ่มต้น', type: 'text', note: 'id ของโมเดล — ดูรายการได้ที่ /models หรือกดที่หัวหน้าต่าง' },
-      { key: 'mode', label: 'สิทธิ์แก้ไฟล์', type: 'select', options: [['ask', 'ถามก่อนเขียนทุกไฟล์'], ['auto', 'เขียนเลยไม่ถาม'], ['yolo', 'เขียน + รันคำสั่ง shell']] },
+      { key: 'temperature', label: 'temperature (ความสุ่มของคำตอบ)', type: 'select', options: [
+        ['default', 'default — ปล่อยตามค่าเริ่มต้นของแต่ละโมเดล'],
+        ['0', '0 — นิ่ง ตอบเหมือนเดิมทุกครั้ง'],
+        ['0.3', '0.3 — ต่ำ เหมาะกับงานโค้ด'],
+        ['0.7', '0.7 — สมดุล'],
+        ['1', '1.0 — หลากหลายขึ้น'],
+        ['1.5', '1.5 — สูง'],
+        ['2', '2.0 — สุ่มสูงสุด'],
+      ], note: 'ยิ่งต่ำยิ่งคงที่ ยิ่งสูงยิ่งหลากหลาย — งานที่ต้องแม่นใช้ต่ำ งานร่างไอเดียใช้สูงได้' },
       { key: 'allowRun', label: 'อนุญาตให้รันคำสั่ง shell', type: 'checkbox', note: 'ปิด = โมเดลแก้ไฟล์ได้อย่างอื่นไม่ได้' },
       { key: 'allowGitWrite', label: 'ให้โมเดลเขียน git ได้ (ปิดไว้เป็นค่าเริ่มต้น)', type: 'checkbox', note: 'โมเดลสั่ง GIT stage/commit/branch เองได้ — ยังถามก่อนตามโหมดสิทธิ์เหมือนเดิม' },
       { key: 'allowVerify', label: 'ให้โมเดลใช้ marker VERIFY ได้ (ปิดไว้เป็นค่าเริ่มต้น)', type: 'checkbox', note: 'โมเดลขอรันเช็คของโปรเจกต์เองได้ (VERIFY) — คำสั่งเช็คเป็นงาน shell จึงถูกถามตามโหมดสิทธิ์' },
@@ -899,8 +1013,6 @@ const TABS = [
       { key: 'maxWallClockMin', label: 'เวลาสูงสุดต่อคำสั่ง (นาที)', type: 'number', note: 'เพดานเวลา — งานที่ค้างจะหยุดเอง (ค่าเริ่มต้น 30)' },
       { key: 'maxCredits', label: 'เพดานเครดิตต่อคำสั่ง', type: 'number', note: '0 = ไม่จำกัด — หยุดงานเมื่อใช้เครดิตถึงเพดาน (เช็คกับยอดที่แคชไว้ ~30 วิ ต่อครั้ง)' },
       { key: 'maxResult', label: 'สูงสุดกี่ byte ต่อผลเครื่องมือ', type: 'number', note: '0 = ค่าเริ่มต้น (3000) — ที่เหลือ spill ลงดิสก์ให้อ่านต่อได้; ใหญ่ขึ้น = รอบน้อยลง' },
-      { key: 'plan', label: 'plan mode', type: 'checkbox', note: 'โมเดลร่างแผนก่อนลงมือ' },
-      { key: 'requirePlanApproval', label: 'รอให้อนุมัติแผนก่อนทำ', type: 'checkbox', note: 'ใช้ได้ก็ต่อเมื่อ plan mode เปิด' },
       { key: 'subagent', label: 'ให้เรียก helper ย่อย', type: 'checkbox', note: 'งานยาวถูกแบ่งให้ตัวช่วย แล้วรีพอร์ตกลับ' },
       { key: 'replyLanguage', label: 'ภาษาที่ตอบผู้ใช้', type: 'select', options: [['th', 'ไทย — ค่าเริ่มต้น'], ['en', 'English']], note: 'โค้ด คำสั่ง และพาธเป็นอังกฤษเสมอ ไม่ว่าตัวนี้จะตั้งไว้อย่างไร' },
       { key: 'langCheck', label: 'เตือนเมื่อลืมตอบไทย', type: 'checkbox', note: 'ตรวจสัดส่วนอักษรไทยของข้อความปิดงานก่อนรับ DONE — เตือนหนึ่งครั้ง' },
@@ -921,6 +1033,7 @@ const TABS = [
   { id: 'media', icon: '🎨', title: 'สร้างสื่อ', sub: 'รูป วิดีโอ และเสียงจากโมเดลสื่อ', custom: 'media', render: renderMediaTab, save: saveEmptyTab },
   { id: 'schedule', icon: '⏰', title: 'ตารางเวลา', sub: 'งานที่ทำตามเวลา — ต้องมี bridge และแท็บที่ล็อกอินอยู่', custom: 'schedule', render: renderScheduleTab, save: saveEmptyTab },
   { id: 'memory', icon: '🧠', title: 'ความจำข้ามเซสชัน', sub: 'สิ่งที่แอปจำไว้จากบทสนทนาก่อน ๆ — ดูได้ ลบได้ทันที', custom: 'memory', render: renderMemoryTab, save: saveEmptyTab },
+  { id: 'goal', icon: '🎯', title: 'เป้าหมาย (goal)', sub: 'เป้าหมายระยะยาวของโปรเจกต์ — ทุก run เห็นข้อความเดียวกัน', custom: 'goal', render: renderGoalTab, save: saveEmptyTab },
   { id: 'window', icon: '🪟', title: 'หน้าต่าง', sub: 'ธีมและหน้า chat ที่ใช้เชื่อมต่อ', save: saveWindowTab, fields: [
     { key: 'theme', label: 'ธีม', type: 'select', options: [['dark', 'มืด'], ['light', 'สว่าง'], ['auto', 'ตามเครื่อง']], note: 'สลับดูได้ทันทีตอนเลือก' },
     { key: 'chatUrl', label: 'หน้า chat ที่ล็อกอินอยู่', type: 'text', note: 'bridge ใช้ tab นี้พูดกับโมเดล' },
@@ -928,7 +1041,7 @@ const TABS = [
   ] },
   { id: 'skills', icon: '📘', title: 'คู่มือ (playbook)', sub: 'โฟลเดอร์ที่ใช้ค้นหาคู่มือ', custom: 'skillsDirs', render: renderSkillsDirsTab, save: saveSkillsTab },
   { id: 'rules', icon: '🛡️', title: 'กฎไฟล์', sub: 'path ที่มีกฎละเว้นโหมด — first match wins', custom: 'rules', render: renderRulesTab, save: saveRulesTab },
-  { id: 'hooks', icon: '🪝', title: 'hooks (คำสั่งของคุณ)', sub: 'คำสั่งที่รันเองหลังแก้ไฟล์ · ก่อน commit · ตอนจบรัน', custom: 'hooks', render: renderHooksTab, save: saveHooksTab },
+  { id: 'hooks', icon: '🪝', title: 'hooks (คำสั่งของคุณ)', sub: 'คำสั่งที่รันเอง — ตั้งแต่เริ่มบทสนทนา ก่อน/หลังเครื่องมือ ถึงตอนจบ', custom: 'hooks', render: renderHooksTab, save: saveHooksTab },
   // Health is pull-based on purpose (docs/RELIABILITY.md): no daemon pages
   // anyone, so the check lives where the person already looks — one button,
   // same answers as `aipass doctor` + `npm run stats -- --alerts`.
@@ -951,6 +1064,9 @@ async function openSettings() {
   // The wall-clock budget is stored in milliseconds; the sheet asks in
   // minutes, because typing 1800000 to mean half an hour is a trap.
   draft.maxWallClockMin = Math.max(1, Math.round(Number(settings.maxWallClockMs ?? 1_800_000) / 60_000));
+  // The temperature select speaks in strings; null — "the model's own
+  // default" — is what the option named 'default' shows.
+  draft.temperature = settings.temperature == null ? 'default' : String(settings.temperature);
 
   $('modal-title').textContent = 'การตั้งค่า';
   $('modal').classList.add('settings-sheet');

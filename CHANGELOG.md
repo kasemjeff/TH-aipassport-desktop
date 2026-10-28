@@ -5,8 +5,314 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ## [Unreleased]
 
+### Added
+
+- **A project can carry one durable goal, and a run works it in rounds.** The
+  plan/TODO dies with the run and the memory store holds facts, so nothing
+  answered "what am I actually trying to finish". `aipass goal set "<objective>"`
+  stores one goal per project (`~/.aipass/goal`, owner-only, atomic) and every
+  run carries it — the first message, a rotation seed, or a follow-up task.
+  While it is active a plain DONE earns another round instead of ending the
+  run, up to the goal's cap (8 by default, 1–64); at the cap the goal is
+  recorded `blocked: round-limit` and the run stops as `goal-rounds`. The model
+  can only `GOAL DONE` or `GOAL BLOCKED <reason>`, never rewrite the objective.
+  The person controls it without spending a model turn (`aipass goal show |
+  set | pause | resume | done | block | clear | path`), and a pause or clear
+  typed mid-run wins because every mutation re-reads the store. Helpers and the
+  checker run with the goal off, and the preamble stays byte-identical when no
+  goal is set (`harness/goal.mjs`, `harness/loop.mjs`, `harness/run/gates.mjs`,
+  `harness/protocol.mjs`, `aipass-bridge/goal.mjs`, `test/goal.test.mjs`).
+  `aipass relocate` re-keys the goal with the rest of the project's data; the
+  window reads and moves it without a model turn (`/goal`, the settings sheet's
+  goal page, the three event notes), and an eval task may name the goal its
+  attempt chases (`harness/relocate.mjs`, `harness/rpc/settings.mjs`,
+  `desktop/ui/*`, `scripts/evals.mjs`).
+- **A project's own rules ride the first message.** `AGENTS.md` at the run's
+  root (or its `CLAUDE.md` / `GEMINI.md` ancestor) is read once, capped at
+  8 KB, and pasted into turn 1 as the owner's standing conventions; every
+  rotation seed carries it too. The preamble frames it as project content:
+  it adds conventions, never lifts the permission or secret rules, and a file
+  whose real path leaves the root is not read at all
+  (`harness/instructions.mjs`, `harness/protocol.mjs`, `harness/loop.mjs`,
+  `harness/harness.mjs`, `test/instructions.test.mjs`; off-switch
+  `AIPASS_INSTRUCTIONS=off`, cap `AIPASS_INSTRUCTIONS_MAX_BYTES`).
+- **Playbooks can be installed, invoked and removed from the window.** The
+  library used to grow only by hand — a person dropped `.md` files into a
+  folder and hoped the list caught up. The skills list now carries the whole
+  life of a playbook: `/skill <name>` fills the composer with the phrase that
+  makes the next run load it (the backend confirms the name first), each row
+  names the library it loads from (user / project / configured / built-in)
+  with a ใช้ button beside it, and an install dialog takes a paste or a
+  picked `.md` file into `~/.aipass/skills` or the project's
+  `.aipass/skills` — a whitelisted name, an overwrite that asks once, and a
+  remove that is armed by the first click and refuses to claim success when
+  the playbook actually loads from somewhere it cannot delete
+  (`harness/skills.mjs`, `harness/rpc/files.mjs`, `desktop/ui/panels/sessions.js`,
+  `desktop/ui/commands.js`, `desktop/ui/app.js`, `test/skills.test.mjs`,
+  `test/ui.test.mjs`).
+- **The last step closes instead of digging.** A run with a step cap spent
+  its final round trip on new questions as readily as on the answer, and
+  ended with work asked for but never summarised. The last step's message
+  now asks for the close-out — what was done, what changed, what is open,
+  ending with DONE (`harness/loop.mjs`, `test/step-cap.test.mjs`;
+  opencode's forced drain, adapted to a protocol with no `toolChoice` knob —
+  a reply that asks anyway still runs, and the `step_limit` ending stays the
+  truth).
+- **The send ladders carry jitter.** The rate, edge and recovery waits are
+  shared constants; parallel runs refused in the same moment retried in
+  lock-step and kept the same window hot together. Each wait now carries
+  ±10% (`jitterWait`, `harness/bridge.mjs` + `run/send.mjs`) — pi-mono's own
+  ladder grew the same jitter for the same reason. Zero stays zero, so the
+  tests' env override keeps its meaning.
+
+- **A send refused for context size now heals itself, once.** A provider
+  refusal that names the context window ("prompt is too long", "context
+  length exceeded", and the other shapes providers actually send —
+  `isContextOverflow` in `harness/bridge.mjs`) used to end the run as an
+  error. The server holds the whole conversation, so summarising and rotating
+  to a fresh one fits the same message again: the loop now summarises,
+  rotates, and resends the step once per run (`test/overflow-recovery.test.mjs`).
+  The first send is excluded — a first message too big on its own is not
+  something a rotation shrinks — and a second overflow ends the run as the
+  error it is, with its record.
+- **A new session carries the facts it needs, not all of them.** The
+  cross-session memory used to ride into every session's first message whole
+  — up to 50 facts × 200 characters, roughly 2,500 tokens, most of it about
+  work the task never touched. The carry is picked now (`carryFacts` in
+  `harness/memory-store.mjs`): the facts the task names take the seats first,
+  then the newest of the rest, under a byte budget
+  (`AIPASS_MEMORY_BUDGET`, 2,400 characters). The pick deletes nothing — the
+  store keeps every fact, the recall still reaches all of it, and the same
+  facts and task render byte-identically (`test/memory-carry.test.mjs`).
+- **The memory tier stopped paying twice.** A save whose merged facts are
+  byte-identical to the file skips the atomic write (a compaction that
+  re-emits known facts used to rewrite the store every rotation), and a
+  recall keeps the session tails it parsed while the files' stats stand
+  still — an append changes the stat, and that is the invalidation
+  (`harness/memory-store.mjs`, `test/memory-carry.test.mjs`).
+- **An Anthropic provider asks for the prompt cache.** The history is
+  append-only and re-sent verbatim every turn, so the client now marks the
+  first message (the protocol preamble) and the end of the last complete
+  turn with `cache_control` breakpoints — the stable prefix is read at the
+  cached rate instead of being charged full on every turn. A provider spec
+  that says `promptCache: false` sends no markers; other kinds never did
+  (`harness/provider-client.mjs`, `harness/providers.mjs`,
+  `test/providers.test.mjs`).
+- **A stream that died mid-answer leaves the transcript honest.** When a send
+  delivered words and then died — a stop, or a refusal after the answer
+  started — the message is now recorded as sent and the delivered prefix is
+  recorded as an `interrupted: true` assistant entry, because the server
+  received both and the person read them; a run that resumes (or a session
+  that is read back) sees what was on screen instead of a hole. A send that
+  delivered nothing still records nothing — the retry path may resend, and a
+  duplicate user entry would be a lie about what the server ever received
+  (`harness/run/send.mjs`, `test/interrupted-anchor.test.mjs`; the same shape
+  dsh's loop calls the interrupted anchor).
+- **The RUN execution world has one owner.** `harness/execution.mjs` now
+  holds the whole answer to "against what tree does a command run": the world
+  is plain when nothing is staged and a projection (`sandbox.mjs`) when
+  something is, the shell runner and its tree-kill live there, and the
+  stop/exit endings and output path mapping are its contract — RUN and
+  VERIFY both execute through it. Behavior is unchanged (the run-overlay and
+  tools-aci suites pin it); the tool layer keeps the guards and the text
+  policy, and a second world — worktree-local or remote — is a branch there,
+  not a second copy of the RUN tool (`harness/execution.mjs`,
+  `harness/tools.mjs`; the same seam shape dsh's capability-seams map carries).
+- **A plugin can teach the run's first message.** `ctx.preamble.section(name,
+  fn)` registers a named paragraph that rides the preamble — built fresh per
+  run, attributed "From the … extension", appended after the machine's own
+  words in load order. An empty or failing builder is dropped (a plugin must
+  never break a run), a second plugin claiming a taken name fails at load,
+  and with nothing registered the preamble is byte-identical to the bytes the
+  recorded replay pins. The shape follows the dsh system-prompt registry,
+  cut to this harness's size
+  (`harness/plugins.mjs`, `harness/protocol.mjs`, `test/preamble-sections.test.mjs`).
+- **The machine can define its own helper roles.** Settings
+  `helperPresets` names extra shapes a SUBAGENT `role:` line may ask for —
+  `name → { lead, run }` — judged by the same rule a built-in is: read-only
+  by construction, `run` true only where the run itself was given
+  `allowRun`. A built-in name (verifier, reviewer, summariser) cannot be
+  shadowed, a malformed entry is an error at the helper named (never a
+  silent fallback), and role lines match without letter case. The same idea
+  dsh's agent-preset registry carries, at this harness's size
+  (`harness/settings.mjs`, `harness/loop.mjs#resolveHelperPreset`,
+  `harness/harness.mjs`, `harness/rpc.mjs`, `test/helper-presets.test.mjs`).
+- **A message typed mid-run reaches the model without stopping anything.** The
+  window's composer no longer goes dead while a run works: sending queues the
+  text on the harness (`run.inject`), and the loop carries it with the next
+  step's paste — the one message the protocol allows — framed as a mid-run
+  note. From the second step on, so the preamble message is never touched;
+  said once; logged like everything the model sees; refused with the text put
+  back in the composer when no run is in flight or the run ended first
+  (`inject_orphaned`); capped at twenty messages of 20,000 characters so a
+  paste storm cannot outrun the compaction budget
+  (`harness/harness.mjs`, `harness/loop.mjs`, `harness/rpc/session.mjs`,
+  `desktop/ui/app.js`, `test/inject.test.mjs`).
+- **The event map is a contract.** `docs/EVENTS.md` names every event the
+  harness emits — all fifty-plus, with who fires it and who reads it — and
+  `test/event-map.test.mjs` holds the table equal to the code in both
+  directions, so a renamed or new event fails the suite until the map says
+  so. A plugin's `ctx.events.on(type, fn)` points at the map. `tool_start`
+  joins the vocabulary: a call admitted for execution, in marker order,
+  before its result — the pair a watcher needs
+  (`docs/EVENTS.md`, `harness/loop.mjs`, `test/event-map.test.mjs`; the IDE
+  extension's protocol mirror learned the same names in the same change).
+- **The configuration catalog is a contract.** `docs/CONFIG.md` names every
+  `AIPASS_*` environment variable the product reads (backend, bridge, build),
+  every settings key, and every harness option, with the default each
+  carries; `test/config-catalog.test.mjs` holds all three tables equal to
+  the code both ways. It caught two ghosts on the way in: comments naming
+  `AIPASS_SKILLS_DIR` and `AIPASS_MAX_RESULT` — switches that never existed
+  (`docs/CONFIG.md`, `test/config-catalog.test.mjs`, `harness/skills.mjs`).
+- **The loop can see the shape of a project before it opens files.** Three
+  reading markers join the protocol: `TREE <path> [-L n]` draws a folder's
+  shape (directories first, bounded depth), `STAT <path>` answers one path's
+  kind, size, line count and modified time, and `NEED dir <path> -l` lists one
+  level with each entry's size and time. `SEARCH` grew ripgrep-style context
+  flags (`-C 2`, `-A` / `-B`, bounded at 10 lines). All read-only, taught in
+  the preamble behind the `explore` switch, and a file the run has staged
+  shows in the tree and the stat before it reaches the disk
+  (`aipass-bridge/harness/tools.mjs`, `protocol.mjs`).
+- **Consecutive reads of one reply run beside each other.** A reply of five
+  `NEED` lines paid serialization five times for nothing — reads cannot see
+  different states. Up to six read-only calls now run as a bounded group when
+  `parallelReads` is on; results and events still re-assemble in marker
+  order, and a write always ends the group (`aipass-bridge/harness/loop.mjs`,
+  `docs/LOOP_DESIGN.md`).
+- **The context manager's rotation trigger is reachable from a terminal.**
+  `AIPASS_COMPACT_AT_PERCENT` names the share-of-budget rotation the window's
+  settings sheet owns — the one tuning channel a run without a settings
+  object has, and the lever the experiment queue's rotation arms squeeze
+  through (`aipass-bridge/harness/compact.mjs`, `docs/HARNESS_DESIGN.md`).
+
 ### Fixed
 
+- **The token bootstrap refuses same-site pages, and an Origin must be the
+  exact host.** `isBrowserSameOrigin` accepted a page from any loopback port
+  — another local dev server, say — because it only asked whether the Origin
+  was loopback, and a `sec-fetch-site: same-site` header did not stop it.
+  The gate now refuses every site value but `same-origin`, and a bare Origin
+  has to match the request's host and port exactly; both cases come back 403
+  (`harness/rpc.mjs`, `test/auth.test.mjs`).
+- **The install handover checks the installer's hash at the moment it runs.**
+  The helper that runs the installer was handed the digest and its comment
+  said it re-checked the file — it never did, so the gap between the shell's
+  check and the helper's start had no check in it at all. The helper now
+  re-hashes the artifact with the app's own Node, runs nothing that is not
+  inside the app's own downloads directory, and runs nothing at all on a
+  mismatch, while still bringing the app back; and a handover command whose
+  `sha256` is not a 64-character hex digest is refused at the door
+  (`desktop/src-tauri/src/main.rs`).
+- **`tauri build` alone now has its sidecar.** `beforeBuildCommand` was
+  empty, so a build through `npm run tauri:build` — as opposed to
+  `npm run desktop:build`, which fetches the sidecar itself — failed on a
+  fresh checkout and could ship a sidecar left over from an earlier build.
+  The hook now runs `npm run desktop:sidecar` before every build
+  (`desktop/src-tauri/tauri.conf.json`).
+
+- **The window stops lying in small ways** (the desktop audit's small batch):
+  the six-hour update poll no longer stacks a fresh banner per poll — a
+  version is said once and a newer one replaces the bar in place
+  (`ui/banners.js`, `test/ui.test.mjs`); the "/" button starts an empty
+  composer instead of overwriting what was being typed (`ui/app.js`); the
+  model picker no longer offers non-chat entries the chat cannot use
+  (`ui/commands.js`); a stale "no chat tab" note no longer survives a
+  session reset or a project switch (`resetTranscript`); and two Thai typos
+  ("จากงว" → "จากงบ", "โควตตาเกิด" → "โควตาหมด").
+- **A failed backend spawn is death the person can see.** A release build
+  has no console: the `expect()` on a failed spawn died silently and the
+  window simply never came. It is a native message box now — std-only
+  `MessageBoxW`, no new dependency — naming the error and the log path
+  (`desktop/src-tauri/src/main.rs`).
+- **The window navigates only at OUR backend.** The readiness wait stays a
+  cheap TCP loop, but the verdict before the window points anywhere is the
+  same probe the spawn gate asked: a port another program took between the
+  gate and navigation opens a named error, not a stranger's server.
+- **The suite and the build lane run on the mirror.** Both workflows filtered
+  their push trigger to `master`, but the `TH-aipassport-harness` mirror's
+  default branch is `main` — a push there never ran CI at all, and the
+  mirror's pull requests sat unverified. Both filters now name both branches
+  (`.github/workflows/test.yml`, `.github/workflows/build.yml`).
+- **A projection that cannot be built no longer falls back to the real tree.**
+  When the staged copy failed to materialise (disk full, a locked path, a
+  planted file at the sandbox root), the command silently ran in the REAL
+  project — where the staged edits are invisible (the stale-tree lie the
+  projection exists to fix) and a write lands on the user's tree over staged
+  work. It refuses now: `err: the projection could not be built (…)` — the
+  command never runs, nothing on disk changes, and the model can retry or
+  escalate (`test/run-overlay.test.mjs`).
+- **A run that dies by exception now says it.** `runTask`'s `finished` event
+  is what the window's run row and the person's `done` hook key on; a run
+  that threw before the loop's ending never emitted it, so the window showed
+  a run that never ended and a tools-table done-subscription left behind
+  fired the hook on the NEXT run's end. `harness.run` emits the ending its
+  loop could not (`harness/harness.mjs`).
+- **A background helper that finishes too late is announced.** A background
+  SUBAGENT finishing during the final step (or after the run) had no next
+  send to ride — its result landed in a transcript note only. The run's end
+  now emits a note naming the helper and saying plainly that the model never
+  saw it (`harness/loop.mjs`).
+- **A closing sentence is the run's summary.** A prose-only ending after real
+  work recorded `run.summary` as the literal word "done"; the actual sentence
+  rode only a UI event field. The synthetic ending carries the prose now, so
+  run_stats and the window agree (`harness/loop.mjs`).
+- **A check that never ran is not seeded as a failing one.** The rotation
+  seed read "The last check of the staged tree did not pass (none)" when the
+  checker could not run at all — sending the fresh conversation hunting for a
+  failure that does not exist. The `none` verdict gets its own sentence
+  (`harness/compact.mjs`, `test/compact.test.mjs`).
+- **Live evals run the shell again, and authenticate.** Two breaks the replay
+  suite could not see: the runner drove its attempts in `auto`, which has
+  asked about every shell command since 2026-10-21 — an eval answers no
+  question, so every RUN was refused ("the person watching declined") and
+  `allow-clean-run` failed on every attempt; and the attempt's `AIPASS_HOME`
+  swap emptied the token path, so every authed send minted a token the bridge
+  did not know and answered 401. Attempts now run `yolo` (the unattended
+  mode — `allowRun` still owns whether the shell exists) and pin the real
+  home's token read-only for the attempt (`scripts/evals.mjs`); a replay test
+  exercises the shell gate, and a second one pins the token across the swap.
+- **The reading switches in the settings file are no longer dead keys.** The
+  reading batch shipped its side of the run sheet
+  (`HARNESS_OPTION_DEFAULTS`) but the settings file's schema never learned
+  `explore` or `parallelReads`, and the backend never carried either key off
+  the file — so the only sentence the file could say was the default, and a
+  save of `recall` was re-applied to every key but itself. The schema ships
+  both defaults (`aipass-bridge/harness/settings.mjs`), the backend's boot
+  sheet and save walk carry all three (`harness/rpc.mjs`,
+  `harness/rpc/settings.mjs`), and `false` in the file now means false.
+- **One failed spawn no longer ends the shell's supervision.** The desktop
+  supervisor read an empty child slot as "healthy", so the first transient
+  spawn error (a locked file, a busy antivirus) left the app running with
+  nothing behind it and the page redialling into the void forever. An empty
+  slot nobody adopted now falls through to the same backoff a crash gets
+  (`desktop/src-tauri/src/main.rs` `empty_slot_needs_a_spawn`); an adopted
+  backend — somebody else's process that the window already talks to — is
+  still left alone, and the log says "could not be started" instead of a
+  false "exited".
+- **`/stop` with nothing to stop brings the working bar back down.** The
+  palette's stop asked the backend with its own thin copy of the stop, and
+  hearing "there was nothing to stop" never took the bar down — a window that
+  kept beating for a run that did not exist. The command now reaches the send
+  button's `cancelRun` through the context (`desktop/ui/commands.js`), whose
+  guard and answer were already right.
+- **The sent draft no longer resurrects after a reload.** The composer stored
+  the draft on every input event, but sending cleared the textarea with an
+  assignment, which fires no input event — the next boot came back pre-filled
+  with work that was already done. The storage is synced with the clear
+  (`desktop/ui/app.js` `sendTask`).
+- **The `?` key keeps the welcome card's promise.** The card says "กด ? เพื่อดูวิธีใช้ทั้งหมด"
+  and no key did that; it now opens the guide from anywhere the window itself
+  has the focus, while a form field keeps its question marks
+  (`desktop/ui/app.js` document keydown).
+- **A cleared transcript keeps its account honest.** Emptying `#log` (a new
+  session, a project switch, opening another session) stranded the pieces
+  that hold references into it: the trim marker survived detached, so the
+  next trim counted the last session's rows into this one and cut rows
+  without the line that says how many, and the pinned banners — the
+  extension's token, the model catalog — were never repainted by their own
+  syncs, which saw a bar "already up". One `resetTranscript()` clears the
+  state with the DOM (`desktop/ui/app.js`, `transcript.js` `resetLog`,
+  `banners.js` `reset`).
 - **SSE cleanup catches half-open connections through the ping probe.** A connection
   that drops silently without sending a TCP FIN (such as a sleeping laptop or proxy drop)
   no longer hangs in the bridge client set or fanout subscriber list forever. The 15s ping
@@ -17,6 +323,23 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   in-flight promise lock (`tabPromise`), ensuring all concurrent jobs run in the same tab
   and preventing conflicting browser sessions. `popup.js` delegates tab opening to the
   background worker to reuse any existing open tab.
+- **The window no longer hitches at step boundaries.** A step boundary drops a
+  burst of rows (the step note, the tool rows, the next bubble) and every row
+  used to ask "are we at the bottom?" the moment it landed — a `scrollHeight`
+  read forces a layout of the whole transcript, so a burst of N rows paid N
+  synchronous layouts in one turn. The rows now share one frame: the burst
+  marks the need, and the frame asks once against its final state
+  (`desktop/ui/app.js` `scrollDown`). The reader who scrolled up is still not
+  yanked — the deferred check reads their position, not the window's.
+- **Scrollback outside the view stops costing layout and paint.** Transcript
+  rows now carry `content-visibility: auto`, so an hour-old session lays out
+  and paints what is on screen instead of every row it ever showed
+  (`desktop/ui/styles.css`).
+- **A double-clicked Apply or Discard writes once.** The buttons answered
+  faster than the rpc: a second press on an unanswered Apply sent the same
+  write twice. While one is in flight the buttons are not listening, and the
+  guard releases when it settles (`desktop/ui/app.js` `applyChecked`,
+  `discardAll`).
 - **The desktop window watchdog asks the exact project and bounds silent streams.**
   The watchdog probe passes `{ root: state.root }` to `rpc('status')` to inspect the actual
   active project instead of assuming the default. If the run has completed at the backend
@@ -29,6 +352,53 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Changed
 
+- **The window's CSP connects to itself, not to any loopback port.**
+  `connect-src` allowed `http://127.0.0.1:*` and `http://localhost:*` — every
+  local port, not just the backend the page is served from. The page loads
+  from the backend and speaks to nothing else, so the policy now says
+  `'self'`, in the shell's declaration and the served header alike
+  (`harness/rpc.mjs`, `desktop/src-tauri/tauri.conf.json`,
+  `test/hardening.test.mjs`).
+- **A project header has to name a real folder.** The `x-aipass-project`
+  header rode into every call as the project scope unchecked — a relative
+  path would have resolved against the backend's working directory, and any
+  other string would have become a harness nobody asked for. A value that is
+  not an absolute path to an existing directory is refused
+  (`harness/rpc.mjs`, `test/desktop.test.mjs`).
+- **The sidecar's Node is pinned to a major.** The packaged app shipped
+  whatever Node the build machine had, so two machines built two different
+  runtimes. `fetch-node.mjs` now refuses to copy when the machine's Node is
+  not the pinned major (`REQUIRED_NODE_MAJOR`) — moving the pin is a
+  deliberate bump of one number (`desktop/sidecar/fetch-node.mjs`,
+  `test/platform.test.mjs`).
+
+
+- **The mode moved beside the composer, and temperature moved into the sheet.**
+  The two knobs sat on opposite ends of the same mistake: the work mode — the
+  one control that decides what the next run may do — lived as a small select
+  in the top bar where nobody looks mid-sentence, while temperature, a
+  rarely-touched model parameter, held a chip in the composer row read on every
+  message. They swapped places: the mode is the first chip beside the composer
+  now (Shift+Tab still cycles it), and temperature is a row on the sheet's
+  คุยกับโมเดล page. The sheet also stopped carrying its own copy of the mode and
+  the plan switches — two surfaces for one control drift — so a sheet save no
+  longer re-stamps the mode from values read when the sheet opened
+  (`desktop/ui/index.html`, `desktop/ui/app.js`, `desktop/ui/settings.js`).
+- **Web media in a reply loads only when the reader asks for it.** A picture or
+  clip the model addressed on the open web used to be fetched the moment the
+  bubble painted it, so a prompt-injected reply could carry the conversation's
+  secrets out to a server of its own choosing inside an image URL's query
+  string — `referrerpolicy` covers only the Referer header, and `loading="lazy"`
+  still fetches as soon as the reply is on screen. The window now paints such
+  media as an empty slot that names its address (`data-md-src`); the reader's
+  click, or the Enter key of the slot's button role, is what sets the source
+  (`desktop/ui/md.js` `loadDeferredMedia`, wired in `transcript.js`). One origin
+  is excepted: media addressed on `aipass.net` and its subdomains — the account's
+  own — renders at once, for those hosts already hold the whole conversation; the
+  allowlist is pinned to the origin the extension's host permissions cover. The
+  media policy in both the backend and the shell drops `http:` with it — what is
+  fetched by consent is still never fetched over plaintext — and the shell's
+  capability grants nothing at all, since the page invokes no Tauri command.
 - **Node 20 is enough to run this.** The floor was Node 22, and it was never a
   technical requirement: the runtime imports `node:*` builtins that all exist
   in Node 20, and the `node:test` features the suite uses — the `lcov`

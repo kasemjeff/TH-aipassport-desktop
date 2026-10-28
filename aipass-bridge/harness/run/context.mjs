@@ -43,6 +43,10 @@ export class RunContext {
     this.events = ctx.events ?? null;
     this.subagent = ctx.subagent ?? null;
     this.check = ctx.check ?? null;
+    // The project's goal controller (harness/goal.mjs), when the run is
+    // allowed to chase one. `false` turns it off for helpers and the checker:
+    // a sub-run is a bounded subtask, not a second owner of the goal.
+    this.goal = ctx.goal ?? null;
     this.approvePlan = ctx.approvePlan ?? null;
     this.runPluginTool = ctx.runPluginTool ?? null;
     this.compactor = ctx.compactor ?? null;
@@ -50,6 +54,11 @@ export class RunContext {
     this.listingShown = ctx.listingShown ?? null;
     this.onConversationDead = ctx.onConversationDead ?? null;
     this.onConversationSettled = ctx.onConversationSettled ?? null;
+    // Messages the person typed while the run was in flight (Harness.inject):
+    // the loop drains this queue at the top of every step after the first, so
+    // they ride the next paste — the one message the protocol allows — instead
+    // of interrupting the run or waiting for it to end.
+    this.injected = Array.isArray(ctx.injected) ? ctx.injected : null;
     this.first = ctx.first !== false;
     // The raw sheet, as the caller wrote it, and the clamped one the run
     // reads. Both are needed: the raw sheet carries the flags the gates ask
@@ -131,6 +140,11 @@ export class RunContext {
     this.langPrompts = 0;
     this.langSent = false;
 
+    /* --- the review check --------------------------------------------------- */
+    // A review's closing message must name findings (or say there are none);
+    // one nudge, then the answer stands — the same shape as the language hook.
+    this.reviewPrompted = false;
+
     /* --- evidence novelty --------------------------------------------------- */
     this.novelResults = 0;
     this.repeatedResults = 0;
@@ -171,6 +185,10 @@ export class RunContext {
     /* --- helpers --------------------------------------------------------------- */
     this.backgroundJobs = new Map();
     this.reportedBg = new Set();
+    this.jobsPromptSent = false;
+
+    /* --- the overflow recovery (one compact-and-retry per run) ------------------ */
+    this.overflowRetried = false;
 
     /* --- the clock -------------------------------------------------------------- */
     this.runStart = Date.now();

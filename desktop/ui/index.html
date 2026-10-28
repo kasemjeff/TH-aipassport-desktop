@@ -14,8 +14,8 @@
      aipass desktop — the window.
 
      LAYOUT
-       #bar    thin top row: project · permission · status · context · help ·
-               theme · settings.
+       #bar    thin top row: project · status · context · help · theme ·
+               settings.
        #side   264px sidebar: brand, "แชทใหม่", the search field, then the
                work — history and the project's files. Both lists fold away — the rail is narrow and two lists want it. The foot holds the two
                doors to the rest of the app (ตั้งค่า / วิธีใช้).
@@ -23,7 +23,10 @@
                only mirrors it into aria-expanded).
         #chat   one grid, rows stacked: #meta, then the stage (#log), then
                 #pending, #attachments and #composer. The composer carries the
-                model and the effort level — both ride the next message.
+                mode, the model and the effort level — all of them ride the
+                next message. Temperature is NOT here: a rarely-touched model
+                parameter belongs to the settings sheet (คุยกับโมเดล →
+                temperature), not to a row read on every message.
                 The stage carries the worktree bar above the transcript: when
                 the run works in a worktree, the bar says which one and where
                 it lives.
@@ -73,8 +76,9 @@
      The JS only mirrors the checkbox into aria-expanded. -->
 <input type="checkbox" id="nav-toggle" class="nav-toggle" aria-hidden="true" tabindex="-1" />
 
-<!-- One slim row. The essentials only: what am I working on, how much may it
-     change, and is it even connected. Everything else is /, ?, or the gear. -->
+<!-- One slim row. The essentials only: what am I working on, and is it even
+     connected. How much a run may change (the mode) sits beside the composer
+     where the message is written; everything else is /, ?, or the gear. -->
 <header id="bar">
   <button type="button" class="icon-btn burger" id="side-toggle" aria-controls="side" aria-expanded="true" aria-label="พับ/ขยายเมนูข้าง" title="พับ/ขยายเมนูข้าง">☰</button>
   <div class="brand"><span class="brand-dot" aria-hidden="true"></span>aipass</div>
@@ -83,15 +87,6 @@
     <select id="project" aria-label="โปรเจกต์" title="โปรเจกต์"></select>
   </label>
   <button id="add-project" class="icon-btn" title="เปิดโฟลเดอร์อื่น" aria-label="เปิดโฟลเดอร์อื่น">+</button>
-
-  <label class="field" title="สิทธิ์แก้ไฟล์">
-    <select id="mode" aria-label="โหมดสิทธิ์แก้ไฟล์" title="โหมด: สิทธิ์แก้ไฟล์ + plan · Shift+Tab วนโหมด">
-      <option value="ask" title="ถามก่อนเขียนทุกไฟล์">ask</option>
-      <option value="auto" title="เขียนเลยไม่ถาม">auto</option>
-      <option value="yolo" title="เขียน+รันคำสั่งได้">yolo</option>
-      <option value="plan" title="ร่างแผนให้อนุมัติก่อน แล้วทำตามแผน">plan</option>
-    </select>
-  </label>
 
   <span class="grow"></span>
   <div class="status" id="status"></div>
@@ -291,6 +286,18 @@
           <input type="file" id="file-picker" multiple hidden />
           <button type="button" id="attach-btn" class="round-btn" title="แนบรูป/ไฟล์/วิดีโอ" aria-label="แนบรูป ไฟล์ หรือวิดีโอ">+</button>
           <button type="button" id="slash-btn" class="hint-pill" title="ดูคำสั่งทั้งหมด">/ คำสั่ง</button>
+          <!-- The mode is the one setting that decides everything the run
+               might do — may it write, may it run, must it plan first — so it
+               lives where the message is written, ahead of who answers.
+               Shift+Tab cycles it from anywhere in the window. -->
+          <span class="model-chip" title="โหมดการทำงาน — สิทธิ์แก้ไฟล์ + plan · Shift+Tab วนโหมด">
+            <select id="mode" aria-label="โหมดการทำงาน (สิทธิ์แก้ไฟล์ + plan)" title="โหมดการทำงาน — ask ถามก่อนเขียน · auto เขียนเลย · yolo เขียน+รันคำสั่ง · plan ร่างแผนให้อนุมัติก่อน · Shift+Tab วนโหมด">
+              <option value="ask" title="ถามก่อนเขียนทุกไฟล์">ask</option>
+              <option value="auto" title="เขียนเลยไม่ถาม">auto</option>
+              <option value="yolo" title="เขียน+รันคำสั่งได้">yolo</option>
+              <option value="plan" title="ร่างแผนให้อนุมัติก่อน แล้วทำตามแผน">plan</option>
+            </select>
+          </span>
           <span class="model-chip" title="ผู้ให้บริการ — ใครตอบรันนี้ (สลับได้ที่นี่)">
             <select id="provider" aria-label="ผู้ให้บริการ" title="ผู้ให้บริการ — AiPASS หรือ API อื่น"></select>
           </span>
@@ -306,17 +313,6 @@
               <option value="medium">effort medium</option>
               <option value="high">effort high</option>
               <option value="max">effort max</option>
-            </select>
-          </span>
-          <span class="model-chip effort-chip" title="temperature — ความคิดสร้างสรรค์/การสุ่มของการตอบ (0 นิ่ง … 2 หลากหลาย); default = ค่าเริ่มต้นของโมเดล">
-            <select id="temperature" aria-label="ความสุ่มของคำตอบ (temperature)" title="temperature — ความคิดสร้างสรรค์/การสุ่มของการตอบ">
-              <option value="default">temp default</option>
-              <option value="0">temp 0</option>
-              <option value="0.3">temp 0.3</option>
-              <option value="0.7">temp 0.7</option>
-              <option value="1">temp 1.0</option>
-              <option value="1.5">temp 1.5</option>
-              <option value="2">temp 2.0</option>
             </select>
           </span>
           <span class="grow"></span>

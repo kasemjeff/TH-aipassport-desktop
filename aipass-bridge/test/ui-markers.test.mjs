@@ -41,6 +41,7 @@ const REPLIES = [
   'A fence:\n```\nNEED file quoted.js\nEDIT x\nEND\n```\nBut DONE for real.',
   '~~~\nRUN\nrm nothing\nEND\n~~~\nthen NEED file real.js',
   'NEEDdir is not a marker\nbut this is: NEED file z.js',
+  'GOAL DONE the parser ships\nDONE shipped it',
   'NEED events.mjs\nDONE read it',
   'NEED desktop/\nDONE listed the folder',
   'NEED list desktop\nNEED ls src\nNEED list\nDONE listed them all',

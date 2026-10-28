@@ -158,6 +158,7 @@ const HELP = `aipass — de.aipass.net from your terminal
   aipass setup-assistant configure custom assistant
   aipass setup           first-run setup: Node, PATH, token, bridge, browser pages
   aipass memory          list/clear facts carried across sessions for this project
+  aipass goal            set/show the one durable goal this project is working toward
   aipass sessions        list/archive/restore this project's conversations
   aipass relocate        re-key a project's stored data after its folder moved
   aipass scale "task"    test-time scaling: run a task N times, keep the best
@@ -219,6 +220,11 @@ switch (cmd) {
 
   case 'memory':
     finish(await run('memory.mjs', rest));
+    break;
+
+  case 'goal':
+    // The goal is a local file, like memory: no bridge, no model turn.
+    finish(await run('goal.mjs', rest));
     break;
 
   case 'sessions':

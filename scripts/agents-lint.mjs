@@ -26,7 +26,7 @@ const GUIDE_FILES = [
   { rel: 'AGENTS.md', budget: 218 },
   { rel: 'aipass-bridge/AGENTS.md', budget: 130 },
   { rel: 'aipass-bridge/test/AGENTS.md', budget: 90 },
-  { rel: 'aipass-bridge/test/CONTRACTS.md', budget: 108 },
+  { rel: 'aipass-bridge/test/CONTRACTS.md', budget: 142 },
   { rel: 'desktop/AGENTS.md', budget: 88 },
 ];
 

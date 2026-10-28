@@ -49,7 +49,9 @@ aipass is two layers, and it matters which is which.
 - **`aipass-bridge/harness/`** — the agent core: the run loop, the file tools,
   the marker protocol, sessions on disk, the compaction budget, permissions and
   path rules, the WAF, providers, plugins, MCP. The window drives the harness;
-  `aipass agent` drives the same one, so the two can never drift apart.
+  `aipass agent` drives the same one; the VS Code panel in
+  [`ide-extension/`](./ide-extension/README.md) drives the same backend — the
+  surfaces cannot drift apart.
 
 **The bridge, the Chrome extension and the CLI are upstream, and we extend
 them.** They started life as
@@ -115,7 +117,7 @@ is demoted, not quietly kept.
 window, nothing to install to run it. The suite is plain `node --test` and it
 drives the real bridge as a subprocess with a scriptable stand-in for the
 extension, so a green run means the HTTP surface works, not that a mock was
-happy. CI runs Windows, macOS and Linux on two Node versions.
+happy. CI runs Windows, macOS and Linux on Node 20, 22 and 24.
 
 **Thai-first, and it says so.** The reply-language policy, the Thai/English
 eval pairs and a window written in Thai first — not translated into it.
@@ -125,7 +127,7 @@ eval pairs and a window written in Thai first — not translated into it.
 ```text
       ┌───────────────────── ours ─────────────────────┐
       │  desktop window  ──┐                            │
-      │                    ├──▶ harness                  │
+      │  vs code panel   ──┼──▶ harness                  │
       │  aipass agent (CLI)┘    loop · tools · protocol │
       │                           sessions · permissions │
       │                           WAF · providers        │
@@ -157,9 +159,15 @@ and the CLI*, below.
 
 ### One command
 
+From a fresh clone, this is the whole machine setup:
+
 ```bash
-aipass setup            # or: npm run setup, from the repo
+git clone https://github.com/kasemjeff/TH-aipassport-harness.git
+cd TH-aipassport-harness
+npm run setup
 ```
+
+(`aipass setup` is the same command, once `aipass` is on your PATH.)
 
 `setup` is idempotent — re-run it any time, and re-running it after moving the
 repo repairs the PATH link. It does six things, in this order:
@@ -168,8 +176,8 @@ repo repairs the PATH link. It does six things, in this order:
 2. **State directory** — creates `~/.aipass/` (`0700`) and mints the loopback
    token at `~/.aipass/.token` (`0600`).
 3. **PATH** — puts `aipass` on your PATH: `npm link` on Windows, a symlink
-   into `~/.local/bin` or `~/bin` elsewhere, with the manual line printed if
-   neither works.
+   into `~/.local/bin` or `~/bin` elsewhere (falling back to `npm link`),
+   with the manual commands printed if none of that works.
 4. **Clipboard** — copies the token, so pasting it into the extension popup
    is one keystroke.
 5. **Bridge** — starts it, or adopts the one already running, and waits for
@@ -199,7 +207,10 @@ npm run tauri:build     # NSIS on Windows, .app/.dmg on macOS, deb/appimage on L
 ```
 
 The packaged build carries the Node runtime inside it, so the machine that
-installs it needs no Node of its own.
+installs it needs no Node of its own. *Building* it is the part that needs
+more: the Rust toolchain and the Tauri CLI (`cargo install tauri-cli --version
+"^2"`). The whole procedure — sidecars, signing, what each platform ships —
+is [`docs/INSTALL.md`](./docs/INSTALL.md).
 
 ### Where the state lives
 
@@ -239,6 +250,10 @@ aipass dev          # the bridge alone, logs in this terminal (Ctrl+C to stop)
 aipass              # the chat TUI, in a second terminal
 aipass agent "task" # the file agent from the command line
 ```
+
+An editor person? [`ide-extension/`](./ide-extension/README.md) installs a
+**VS Code panel** that drives the same agent from the editor — send a task,
+watch the run, approve the staged changes, without leaving the window.
 
 `aipass` lives at `aipass-bridge/bin/aipass.mjs`; without putting it on your
 PATH, `node aipass-bridge/bin/aipass.mjs` is the same thing.
@@ -378,7 +393,7 @@ that opens the moment you type `/`.
 | `/clear`, `/help` | clear the screen / palette help |
 
 The CLI is also the way into the harness: `aipass agent "task"`, `aipass scale`,
-`aipass providers`, `aipass memory`, `aipass mcp`, `aipass plugin`. The full
+`aipass providers`, `aipass memory`, `aipass goal`, `aipass mcp`, `aipass plugin`. The full
 command list, the conversation rules and the known limits live in
 [`aipass-bridge/README.md`](./aipass-bridge/README.md).
 
@@ -390,11 +405,12 @@ command list, the conversation rules and the known limits live in
 |---|---|---|
 | `AIPASS_PORT` / `AIPASS_HOST` | `8787` / `127.0.0.1` | where the bridge listens |
 | `AIPASS_MODEL` | `gemini-3.1-flash-lite` | model when a request names none |
-| `AIPASS_MODEL_FILTER` | `chat` | `all` also lists image and video generators |
+| `AIPASS_MODEL_FILTER` | `all` | `chat` narrows the model list to text-drivable models |
 | `AIPASS_CONVERSATION_ID` | — | pin one conversation instead of "most recent" |
 | `AIPASS_ASSISTANT_ID` | — | bind new conversations to a custom assistant |
 | `AIPASS_TOOL_VISIBILITY` | `reasoning` | `reasoning` · `text` · `off` |
 | `AIPASS_IDLE_TIMEOUT_MS` | `180000` | when a quiet run counts as idle |
+| `AIPASS_BRIDGE_IDLE_MS` | `600000` | the bridge exits itself when nothing uses it; `0` never exits |
 | `AIPASS_MEDIA_TIMEOUT_MS` | `900000` | how long a generation may take |
 | `AIPASS_TOKEN` / `AIPASS_REQUIRE_AUTH` | `~/.aipass/.token` / on | loopback bearer token (see *The bridge and the CLI*) |
 | `AIPASS_CORS_ORIGIN` | — | allow one browser origin (off by default) |
@@ -422,14 +438,21 @@ The design and operations docs live in [`docs/`](./docs/):
 | [`docs/UPDATE_DESIGN.md`](./docs/UPDATE_DESIGN.md) | the update system: the shell and the content as two versioned halves, the signed feed, the phases |
 | [`docs/MATURITY.md`](./docs/MATURITY.md) | capability status — production vs experimental, owners, what changes a status |
 | [`docs/TEST_PLAN.md`](./docs/TEST_PLAN.md) | the test design: layers L1–L5, cases, pass criteria, what each layer cannot prove |
+| [`docs/CONFIG.md`](./docs/CONFIG.md) | every switch the product reads — env vars, settings keys, harness options — held equal to the code by a test |
+| [`docs/EVENTS.md`](./docs/EVENTS.md) | every event the harness emits, who fires it and who reads it — held equal to the code by a test |
+| [`docs/UX.md`](./docs/UX.md) | the UX design for the CLI, the window, the extension popup and first-run setup, with what has shipped |
+| [`docs/PLUGINS_MCP_DESIGN.md`](./docs/PLUGINS_MCP_DESIGN.md) | how plugins and MCP servers are installed, enabled, updated and removed |
+| [`docs/META_HARNESS.md`](./docs/META_HARNESS.md) | the harness tuning itself: the meta loop that turns eval evidence into harness changes |
+| [`docs/FEATURE_GAPS.md`](./docs/FEATURE_GAPS.md) | the gap list a batch of work closes — every row names the test that proves it |
 
 The behavior-level change history is [`CHANGELOG.md`](./CHANGELOG.md); it is
 what release notes are cut from.
 
 Component-level docs sit next to their code:
 [`aipass-bridge/README.md`](./aipass-bridge/README.md) (the upstream bridge and
-CLI), [`aipass-bridge/docs/DOCS.md`](./aipass-bridge/docs/DOCS.md) and
-[`desktop/README.md`](./desktop/README.md) (the window and native builds). For
+CLI), [`aipass-bridge/docs/DOCS.md`](./aipass-bridge/docs/DOCS.md),
+[`desktop/README.md`](./desktop/README.md) (the window and native builds), and
+[`ide-extension/README.md`](./ide-extension/README.md) (the VS Code panel). For
 contributing see [`CONTRIBUTING.md`](./CONTRIBUTING.md); for reporting a
 vulnerability, [`SECURITY.md`](./SECURITY.md).
 
@@ -453,7 +476,9 @@ aipass/
 │  └─ agent.mjs             the file agent — a thin front for the harness
 ├─ docs/                    design and operations docs — see Documentation above
 ├─ evals/                   task fixtures — smoke set, holdout, Thai/English pairs
-├─ scripts/                 test runner, QA loop, verify, evals
+├─ experiments/             the experiment queue: what was tried, what it cost
+├─ ide-extension/           the VS Code panel — one more surface on the same backend
+├─ scripts/                 test runner, QA loop, verify, evals, the build lanes
 ├─ public/                  static pages and the README image
 └─ package.json             npm run shortcuts — nothing to install
 ```
@@ -463,7 +488,7 @@ aipass/
 ```bash
 npm run setup   # first-run machine setup: Node, PATH, token, bridge, browser pages
 npm test        # the whole suite (bridge, extension, harness, window logic)
-npm run check   # npm test and npm run qa in one go — the pre-push pair
+npm run check   # agents:lint + the suite + qa + the coverage gates — the pre-push set
 npm run qa      # static checks + suite + fake-DOM window + live status
 npm run verify  # suite + a sandboxed live smoke of the bridge and backend
 npm run evals   # score agent runs against task checks

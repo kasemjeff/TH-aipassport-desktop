@@ -1,12 +1,13 @@
 // relocate.mjs — re-key a project's data after its folder moved.
 //
 // Everything the app stores for a project is keyed by its absolute path:
-// `sessions/<slug>/`, `memory/<hash>.json`, the `rules.json` entry, the
-// project list in `settings.json`. That is what makes a backup a plain folder
-// copy — and what made a move silent: a home copied to another machine (or a
-// project renamed) kept every byte and lost every association, with sessions
-// invisible in the picker, facts not loading and rules not applying, all of it
-// sitting on disk under the old spelling.
+// `sessions/<slug>/`, `memory/<hash>.json`, `goal/<hash>.json`, the
+// `rules.json` entry, the project list in `settings.json`. That is what makes a
+// backup a plain folder copy — and what made a move silent: a home copied to
+// another machine (or a project renamed) kept every byte and lost every
+// association, with sessions invisible in the picker, facts and the goal not
+// loading and rules not applying, all of it sitting on disk under the old
+// spelling.
 //
 // This module is the remap. It reads only from the home directory — the old
 // folder does not need to exist anymore, which is the normal state after the
@@ -19,6 +20,7 @@ import { Settings, aipassHome } from './settings.mjs';
 import { SessionStore } from './session.mjs';
 import { RulesStore } from './rules.mjs';
 import { moveMemory } from './memory-store.mjs';
+import { moveGoal } from './goal.mjs';
 
 /**
  * Point every per-project store at `to` instead of `from`.
@@ -28,7 +30,7 @@ import { moveMemory } from './memory-store.mjs';
  * @param {string} opts.to    where the project lives now (must exist)
  * @param {string} [opts.home] the install's home directory (tests, AIPASS_HOME)
  * @returns {{from: string, to: string, sessions: object, facts: number,
- *            rules: object, settings: boolean}}
+ *            goal: object|null, rules: object, settings: boolean}}
  */
 export function relocateProject({ from, to, home = aipassHome() } = {}) {
   if (!from || !to) throw new Error('relocate needs both paths: <old> <new>');
@@ -44,7 +46,8 @@ export function relocateProject({ from, to, home = aipassHome() } = {}) {
 
   const sessions = new SessionStore(path.join(home, 'sessions')).reassign(fromAbs, toAbs);
   const facts = moveMemory(fromAbs, toAbs, path.join(home, 'memory'));
+  const goal = moveGoal(fromAbs, toAbs, path.join(home, 'goal'));
   const rules = new RulesStore(path.join(home, 'rules.json')).moveRoot(fromAbs, toAbs);
   const settings = new Settings(home).moveProject(fromAbs, toAbs);
-  return { from: fromAbs, to: toAbs, sessions, facts, rules, settings };
+  return { from: fromAbs, to: toAbs, sessions, facts, goal, rules, settings };
 }

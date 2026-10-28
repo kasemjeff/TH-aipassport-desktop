@@ -16,10 +16,12 @@ import { createTools } from './tools.mjs';
 import { PermissionEngine } from './permissions.mjs';
 import { SessionStore } from './session.mjs';
 import { Compactor, DEFAULT_MODEL_BUDGETS } from './compact.mjs';
-import { loadMemory, saveMemory, clearMemory } from './memory-store.mjs';
+import { loadMemory, saveMemory, clearMemory, carryFacts } from './memory-store.mjs';
 import { McpManager } from './mcp.mjs';
-import { runTask, applyOverlay, SUBAGENT_ROLES } from './loop.mjs';
+import { runTask, applyOverlay, resolveHelperPreset } from './loop.mjs';
 import { preamble as buildPreamble } from './protocol.mjs';
+import { loadProjectInstructions } from './instructions.mjs';
+import { loadGoal } from './goal.mjs';
 import { RulesStore } from './rules.mjs';
 import { sweepSandboxes } from './sandbox.mjs';
 import { loadGitignore } from './gitignore.mjs';
@@ -77,6 +79,13 @@ export class Harness {
    * told it to stop.
    */
   #stopAsked = false;
+  /**
+   * Messages the person typed while a run was in flight (inject()). The loop
+   * drains the queue at the top of every step after the first, so each one
+   * rides the next paste instead of interrupting the run; whatever a run ends
+   * with goes back to the window as `inject_orphaned` rather than vanishing.
+   */
+  #injected = [];
 
   /**
    * @param {object} opts
@@ -246,10 +255,19 @@ export class Harness {
       skills: this.skills,
       bridge: this.bridge,
       model: this.bridge.model,
-      allowRun: this.options.allowRun,
+      // A review run is read-only by construction: the four mutating markers
+      // answer `err:`, the shell and git's write side are off whatever the
+      // permission mode says, and the note tells the model why. The loop
+      // repeats the refusal, so a caller with a hand-built table cannot widen
+      // it either.
+      allowRun: this.options.review ? false : this.options.allowRun,
+      readOnly: Boolean(this.options.review),
+      readOnlyNote: this.options.review
+        ? 'this is a review run — it reads and reports, it cannot change the project. Name a finding with its file and line instead.'
+        : null,
       // The write side of git: off unless the run was given the power, so a
       // run never changes the repository on its own.
-      allowGitWrite: Boolean(this.options.allowGitWrite),
+      allowGitWrite: this.options.review ? false : Boolean(this.options.allowGitWrite),
       // The check a VERIFY runs: the run's declared command, and the checker
       // that produces a verdict when there is no command to run. The checker
       // is the run's own — a run that may not use a helper has no checker
@@ -495,7 +513,11 @@ export class Harness {
         attach: Boolean(this.options.attach),
         verify: Boolean(this.options.allowVerify),
         recall: Boolean(this.options.recall),
+        explore: Boolean(this.options.explore),
         plugins: this.options.pluginTools ?? [],
+        sections: this.options.pluginSections ?? [],
+        instructions: loadProjectInstructions(this.root),
+        goal: loadGoal(this.root),
         lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
       staged: this.#stagedList(),
@@ -608,7 +630,11 @@ export class Harness {
         attach: Boolean(this.options.attach),
         verify: Boolean(this.options.allowVerify),
         recall: Boolean(this.options.recall),
+        explore: Boolean(this.options.explore),
         plugins: this.options.pluginTools ?? [],
+        sections: this.options.pluginSections ?? [],
+        instructions: loadProjectInstructions(this.root),
+        goal: loadGoal(this.root),
         lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
       }),
       staged,
@@ -762,7 +788,11 @@ export class Harness {
             // The RECALL marker: the model may ask what this project said
             // before. The same reason - the preamble's bytes are pinned.
             recall: Boolean(this.options.recall),
+            explore: Boolean(this.options.explore),
             plugins: this.options.pluginTools ?? [],
+            sections: this.options.pluginSections ?? [],
+            instructions: loadProjectInstructions(this.root),
+            goal: loadGoal(this.root),
             lang: this.options.replyLanguage === 'en' ? 'en' : 'th',
           }),
           staged: this.#stagedList(),
@@ -779,9 +809,15 @@ export class Harness {
       // Cross-session memory: on the first run of a session, carry forward the
       // facts persisted from earlier sessions so the model does not rediscover
       // them. Only on the first run — a later run in the same session already
-      // has them in context.
-      const effectiveTask = isFirst && this.#crossSessionMemory.length
-        ? `Facts carried from earlier sessions (durable; re-check anything that may have gone stale):\n${this.#crossSessionMemory.map((f) => '- ' + f).join('\n')}\n\nTask: ${task}`
+      // has them in context. The carry is picked under a byte budget
+      // (carryFacts): the task's own facts first, then the newest of the rest
+      // — the store keeps everything, the first message takes what this task
+      // needs.
+      const carried = isFirst && this.#crossSessionMemory.length
+        ? carryFacts(this.#crossSessionMemory, task)
+        : [];
+      const effectiveTask = carried.length
+        ? `Facts carried from earlier sessions (durable; re-check anything that may have gone stale):\n${carried.map((f) => '- ' + f).join('\n')}\n\nTask: ${task}`
         : task;
 
       // One checker for this run: the DONE gate and a VERIFY ask the SAME
@@ -789,6 +825,14 @@ export class Harness {
       // accepted cannot come from two different judges.
       const checker = this.#makeChecker(task);
 
+      // The loop ends every run it walks out of with a `finished` — the event
+      // the window's run row and the person's `done` hook key on. A run that
+      // dies by exception never says it: the window would show a run that
+      // never ended, and a tools-table done-subscription left behind would
+      // fire on the NEXT run's end. Say it here when the loop could not.
+      let loopSaidFinished = false;
+      const saidFinished = () => { loopSaidFinished = true; };
+      this.events.on('finished', saidFinished);
       try {
         return await runTask(effectiveTask, {
           bridge: this.bridge,
@@ -837,6 +881,9 @@ export class Harness {
           // (listing delta) The per-conversation listing memory the loop reads
           // and updates; see #listingShown.
           listingShown: this.#listingShown,
+          // (mid-run inject) The queue the person's mid-run messages wait in;
+          // the loop drains it at the top of each step after the first.
+          injected: this.#injected,
           options: {
             ...this.options,
             signal: this.abort.signal,
@@ -844,7 +891,17 @@ export class Harness {
           },
           first: isFirst,
         });
+      } catch (e) {
+        if (!loopSaidFinished) {
+          this.events.emit('finished', {
+            summary: `the run failed: ${e?.message ?? e}`,
+            steps: 0, stopReason: 'error', spent: null, credits: null,
+            check: null, changes: [], todo: [],
+          });
+        }
+        throw e;
       } finally {
+        this.events.off('finished', saidFinished);
         // (resume) A conversation this run made that never took a message —
         // the first send died, or a rotation's seed never went out — is
         // dropped: the next run starts from the transcript again instead of
@@ -869,6 +926,14 @@ export class Harness {
       // compaction that fails - has to clear the flag too, or one bad run
       // locks the project out for the rest of the process's life.
       this.running = false;
+      // (mid-run inject) Messages typed mid-run that no step carried — the run
+      // ended first, or it died before its bookkeeping — go back to the window
+      // as an event, never vanish in the queue. The normal ending drains here
+      // too, so the loop does not need its own end-of-run sweep.
+      if (this.#injected.length) {
+        const texts = this.#injected.splice(0);
+        this.events.emit('inject_orphaned', { texts });
+      }
     }
   }
 
@@ -955,6 +1020,30 @@ export class Harness {
     return this.#stopAsked;
   }
 
+  /**
+   * A message the person typed while the run was in flight.
+   *
+   * It neither starts a run nor interrupts the one going: it waits in the
+   * queue and rides the next paste — the one message the protocol allows —
+   * where the model reads it as part of the task. No run, no queue: the
+   * answer says so (`refused`), and the window puts the text back in the
+   * composer. A queue is capped at both ends — twenty messages, twenty
+   * thousand characters each — so a paste storm cannot outrun the compaction
+   * budget that guards every message the run sends.
+   */
+  inject(text) {
+    const clean = String(text ?? '').trim();
+    if (!clean) return { queued: this.#injected.length, running: this.running, refused: 'no text given' };
+    if (!this.running) return { queued: this.#injected.length, running: false, refused: 'no run in flight' };
+    if (this.#injected.length >= 20) return { queued: this.#injected.length, running: true, refused: 'queue full (20)' };
+    const capped = clean.length > 20_000
+      ? `${clean.slice(0, 20_000)}\n\n(message cut at 20,000 characters)`
+      : clean;
+    this.#injected.push(capped);
+    this.events.emit('inject_queued', { n: this.#injected.length });
+    return { queued: this.#injected.length, running: true };
+  }
+
   pendingChanges() {
     return this.overlay.changes().map(({ file, added, removed, deleted, isNew }) => ({ file, added, removed, deleted, isNew }));
   }
@@ -984,7 +1073,12 @@ export class Harness {
    */
   #makeHelper() {
     return async (task, role = null) => {
-      const spec = role ? (SUBAGENT_ROLES[role] ?? null) : null;
+      // The loop has already refused an unknown or malformed role line; the
+      // resolve here is the same pure function, so the spec the helper is
+      // built from cannot be a different one than the gate judged.
+      const resolved = resolveHelperPreset(role, this.options.helperPresets);
+      if (resolved.error) return resolved.error;
+      const spec = resolved.spec;
       const brief = spec ? `${spec.lead}\n\nTask: ${task}` : task;
       // A verifier may RUN checks, but only where the run itself may: the
       // child narrows the parent's permissions, never widens them.
@@ -1006,7 +1100,7 @@ export class Harness {
       // The event bus travels too: a helper that fetches a URL or attaches a
       // file asks a question, and a question with nobody to answer it is a
       // refusal — the parent's window is where that question belongs.
-      const childPermissions = new PermissionEngine({ mode: 'yolo', allowRun: canRun, rules: this.permissions.rules, events: this.events });
+      const childPermissions = new PermissionEngine({ mode: 'yolo', allowRun: canRun && !this.options.review, rules: this.permissions.rules, events: this.events });
       // The helper borrows its own conversation (P2-B) instead of moving the
       // bridge's current one and restoring it afterwards — the old dance left
       // the parent pointing at the child's conversation if anything died
@@ -1022,9 +1116,13 @@ export class Harness {
           bridge: this.bridge,
           tools: createTools({
             root: this.root, overlay: child, skills: this.skills, bridge: this.bridge,
-            model: this.bridge.model, allowRun: canRun, events: this.events,
-            readOnly: Boolean(spec),
-            readOnlyNote: spec ? 'this helper is read-only — report it in your summary instead.' : null,
+            model: this.bridge.model, allowRun: canRun && !this.options.review, events: this.events,
+            readOnly: Boolean(spec) || Boolean(this.options.review),
+            readOnlyNote: spec
+              ? 'this helper is read-only — report it in your summary instead.'
+              : this.options.review
+                ? 'this is a review run — it reads and reports, it cannot change the project.'
+                : null,
             conversation: helperConversation, temporary: true,
             signal: this.abort.signal,
           }),
@@ -1034,9 +1132,15 @@ export class Harness {
           events: this.events,
           conversation: helperConversation,
           conversationTemporary: helperConversation ? true : null,
+          // The project goal belongs to the parent run: a helper neither
+          // spends its rounds nor can mark it complete.
+          goal: false,
           // A helper is a bounded subtask: its cap is 8, and a capped parent
           // can only lower it — an uncapped parent does not uncap a helper.
-          options: { ...this.options, maxSteps: this.options.maxSteps > 0 ? Math.min(this.options.maxSteps, 8) : 8, subagent: false, allowRun: canRun, signal: this.abort.signal },
+          // It is not a session either: the person's lifecycle hooks fire for
+          // the run they started, not once per helper, and a parent's review
+          // does not make every helper a review.
+          options: { ...this.options, maxSteps: this.options.maxSteps > 0 ? Math.min(this.options.maxSteps, 8) : 8, subagent: false, review: false, lifecycleHooks: false, allowRun: canRun && !this.options.review, signal: this.abort.signal },
           first: true,
         });
       } catch (err) {
@@ -1195,6 +1299,9 @@ export class Harness {
           events: childEvents,
           conversation: checkerConversation,
           conversationTemporary: true,
+          // The checker is a read-only verdict, not a goal owner: it must not
+          // spend a round or be refused a DONE by the parent's goal.
+          goal: false,
           options: {
             ...this.options,
             // The checker is run-and-report, bounded at 6: an uncapped parent
@@ -1203,6 +1310,11 @@ export class Harness {
             plan: false,
             requirePlanApproval: false,
             subagent: false,
+            // The checker is not a session and not a review: the person's
+            // lifecycle hooks belong to the run they started, and the parent's
+            // review gate must not ask the checker for findings.
+            review: false,
+            lifecycleHooks: false,
             signal: this.abort.signal,
           },
           first: true,

@@ -154,6 +154,30 @@ test('a code-navigation marker without its argument is prose, not a broken call'
   assert.equal(attemptedMarker('SYMBOLS'), true, 'but it is read as an attempt');
 });
 
+test('TREE and STAT are calls, not prose', () => {
+  const reply = 'TREE src -L 2\nTREE\nSTAT src/app.ts\nDONE looked';
+  const calls = parse(reply);
+  assert.deepEqual(calls.map((c) => [c.kind, c.arg]), [
+    ['tree', 'src -L 2'],
+    ['tree', ''],
+    ['stat', 'src/app.ts'],
+    ['done', 'looked'],
+  ]);
+  assert.doesNotMatch(prose(reply), /TREE|STAT/, 'the wire is not repeated as prose');
+  assert.deepEqual(parse('STAT').map((c) => c.kind), [], 'a bare STAT is a shape mistake');
+  assert.equal(attemptedMarker('STAT'), true, 'but it is read as an attempt');
+});
+
+test('the preamble teaches TREE and STAT only when asked', () => {
+  const off = preamble({});
+  assert.doesNotMatch(off, /^TREE /m, 'the tuned bytes stay untouched by default');
+  assert.doesNotMatch(off, /^STAT /m);
+  const on = preamble({ explore: true });
+  assert.match(on, /^TREE src$/m);
+  assert.match(on, /^STAT src\/app\.ts$/m);
+  assert.match(on, /NEED dir src -l/);
+});
+
 test('the preamble keeps the answer itself in the message, above the DONE', () => {
   // Recorded live: a WEB-search run closed with a "summary done" line while the
   // findings never left the pasted result — a one-line bubble for a request

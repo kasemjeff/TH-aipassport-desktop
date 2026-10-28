@@ -428,9 +428,11 @@ lines, no dependencies.
 
 | line | effect |
 |---|---|
-| `NEED dir <path>` (or `NEED list` / `NEED ls`) | list a directory |
+| `NEED dir <path>` (or `NEED list` / `NEED ls`) | list a directory — `-l` adds each entry's size and modified time |
 | `NEED file <path> [a-b]` | read a file with a line-number gutter; optional range |
-| `SEARCH <text>` | grep the tree → `file:line: excerpt` (max 50 hits) |
+| `TREE <path> [-L n]` | the shape of a folder, directories first — two levels below the path unless `-L` says otherwise |
+| `STAT <path>` | one path's kind, size, line count and modified time |
+| `SEARCH <text>` | grep the tree → `file:line: excerpt` (max 50 hits) — `-i` drops letter case, `-C 2` (or `-A` / `-B`) shows that many lines around each hit |
 | `EDIT <p>` / `FIND` … / `NEW` … / `END` | replace an exact snippet — refused unless `FIND` matches **one** place |
 | `CREATE <p>` … `END` | create / overwrite a file |
 | `RUN` … `END` | shell via `execSync` (the platform shell: `/bin/sh` / `cmd.exe`) — **only with `--allow-run`** |

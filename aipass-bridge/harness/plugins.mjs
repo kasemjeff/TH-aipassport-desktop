@@ -15,7 +15,12 @@
 //                             declaration of trust)
 //   panel({id, title, render}) add a section to the window's sidebar
 //   settings.define({key, …}) add a setting the window renders for you
-//   events.on(type, fn)       watch a run as it happens
+//   events.on(type, fn)       watch a run as it happens — every type the
+//                             harness emits is named in docs/EVENTS.md, and
+//                             test/event-map.test.mjs holds the two equal
+//   preamble.section(name, fn) add your own paragraph to the run's first
+//                             message — the fn returns the text, fresh per
+//                             run, and an empty or failing one is dropped
 //
 // Everything runs in this process, with the same access the harness has —
 // including the filesystem. That is the deal: plugins are code you chose to
@@ -85,6 +90,7 @@ export class PluginManager {
     this._panels = [];
     this._tools = new Map(); // marker → {impl, takesBody, description, plugin, risk}
     this._settingDefs = [];
+    this._preamble = new Map(); // name → {fn, plugin}
   }
 
   get defaultDir() { return this.dir; }
@@ -133,13 +139,14 @@ export class PluginManager {
     };
   }
 
-  /** The four registration tables, copied for a rollback. */
+  /** The five registration tables, copied for a rollback. */
   #snapshot() {
     return {
       methods: new Map(this._methods),
       tools: new Map(this._tools),
       panels: [...this._panels],
       settingDefs: [...this._settingDefs],
+      preamble: new Map(this._preamble),
     };
   }
 
@@ -149,6 +156,7 @@ export class PluginManager {
     this._tools = tables.tools;
     this._panels = tables.panels;
     this._settingDefs = tables.settingDefs;
+    this._preamble = tables.preamble;
   }
 
   async load() {
@@ -158,6 +166,7 @@ export class PluginManager {
     this._panels = [];
     this._tools.clear();
     this._settingDefs = [];
+    this._preamble.clear();
 
     for (const file of this.discover()) {
       // Registrations are live the moment setup() makes them, so a failure
@@ -292,6 +301,25 @@ export class PluginManager {
           this._settingDefs.push({ plugin: name, ...def });
         },
       },
+
+      preamble: {
+        // One named paragraph in the run's first message. The name is what
+        // the model sees as the section's source, so it must be a word, and
+        // a second plugin claiming the same name fails the later load — the
+        // first owner keeps the slot, the way a built-in marker cannot be
+        // shadowed. The fn is called fresh per run, so the text can read the
+        // world; an empty or failing result is dropped at build time.
+        section: (sectionName, text) => {
+          if (typeof sectionName !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(sectionName)) {
+            throw new Error(`preamble.section(name, fn): name must be 1-64 chars of letters, digits, dot, dash or underscore, got ${JSON.stringify(sectionName)}`);
+          }
+          if (typeof text !== 'function') throw new Error('preamble.section(name, fn) — fn returns the paragraph text');
+          if (this._preamble.has(sectionName)) {
+            throw new Error(`preamble section "${sectionName}" is already owned by ${this._preamble.get(sectionName).plugin}`);
+          }
+          this._preamble.set(sectionName, { fn: text, plugin: name });
+        },
+      },
     };
   }
 
@@ -309,6 +337,7 @@ export class PluginManager {
       toolDefs: this.toolTable(),
       panels: this._panels.map((p) => ({ id: p.id, title: p.title, plugin: p.plugin })),
       settings: this._settingDefs,
+      preamble: [...this._preamble.keys()],
     };
   }
 
@@ -324,6 +353,11 @@ export class PluginManager {
     return [...this._tools.entries()].map(([marker, def]) => ({
       marker, takesBody: def.takesBody, description: def.description, plugin: def.plugin, risk: def.risk ?? null,
     }));
+  }
+
+  /** The preamble sections, in load order; the loop builds them per run. */
+  preambleSections() {
+    return [...this._preamble.entries()].map(([name, def]) => ({ name, text: def.fn, plugin: def.plugin }));
   }
 
   async runTool(marker, { arg = '', body = '' } = {}) {

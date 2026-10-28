@@ -7,7 +7,7 @@
 // The paint cache lives with the painter: a frame that leaves the settled
 // layer standing is a hit, and only the tail re-parses.
 
-import { renderMarkdown, splitMarkdownStable } from './md.js';
+import { renderMarkdown, splitMarkdownStable, loadDeferredMedia } from './md.js';
 import { restoreText } from './waf-restore.js';
 import { scan, transcript } from './markers.js';
 
@@ -65,6 +65,21 @@ function boundLog() {
   trimMarker.textContent = `… ตัด ${trimmedRows} รายการเก่าออกจากหน้าต่าง — บทสนทนาทั้งหมดยังอยู่ในไฟล์ session`;
 }
 
+/**
+ * Empty the transcript, and drop the trim state with it.
+ *
+ * A clear that only touched the DOM left the trim state standing: the marker
+ * survived as a detached node the next trim still recognised, so rows went
+ * WITHOUT the "ตัด N รายการ" line that explains the hole, and the count
+ * carried the previous session's rows into this one. A new session starts
+ * its account from zero.
+ */
+function resetLog() {
+  log.textContent = '';
+  trimMarker = null;
+  trimmedRows = 0;
+}
+
 function addTask(text) {
   const msg = el('div', 'msg task');
   const body = el('div', 'body');
@@ -103,7 +118,10 @@ function ensureAssistant() {
   // boxless by CSS): the window used to re-parse the whole reply per frame,
   // which is exactly the cost that grows with the answer. The cache fields
   // keep what has already been rendered, so a frame only touches the tail.
-  state.assistant = { el: body, text: '', tail: '', stableEl: null, tailEl: null, stableText: '', stableHtml: '' };
+  state.assistant = {
+    el: body, text: '', pendingText: [], tail: '',
+    stableEl: null, tailEl: null, stableText: '', stableHtml: '',
+  };
   // The last bubble outlives the step boundary that closes it: the step's
   // headline comes after that boundary, and it is the first line of the prose
   // this bubble is already showing.
@@ -128,7 +146,7 @@ function ensureAssistant() {
 function bubbleSays(bubble, text) {
   const wanted = restoreText(String(text ?? '').trim());
   if (!bubble || !wanted) return false;
-  return transcript(bubble.text, state.pluginTools)
+  return transcript(`${bubble.text}${(bubble.pendingText ?? []).join('')}`, state.pluginTools)
     .split('\n')
     .some((l) => restoreText(l.trim()) === wanted);
 }
@@ -157,6 +175,10 @@ function paintCacheStats() {
 }
 
 function paintAssistant(a) {
+  if (a.pendingText?.length) {
+    a.text += a.pendingText.join('');
+    a.pendingText = [];
+  }
   // Painted as a settled stretch plus a moving tail (splitMarkdownStable):
   // the settled layer renders once and only ever gains text, so a frame
   // re-parses just the tail instead of the whole answer. A cache miss — the
@@ -260,7 +282,10 @@ function queuePaint(bubble = null) {
 
 function assistantText(delta) {
   const a = ensureAssistant();
-  a.text += delta;
+  // Deltas can arrive much faster than a browser frame. Keep them as one
+  // pending chunk so the hot path does not repeatedly flatten a growing
+  // reply string before the coalesced painter needs it.
+  a.pendingText.push(delta);
   queuePaint(a);
 }
 
@@ -272,6 +297,7 @@ function assistantText(delta) {
  */
 function assistantSummary(text) {
   const a = ensureAssistant();
+  paintAssistant(a);
   const line = String(text ?? '').trim() || 'done';
   const visible = transcript(a.text, state.pluginTools).trim();
   if (visible && visible.toLowerCase().includes(line.toLowerCase())) return;
@@ -374,6 +400,7 @@ const TOOL_LABEL = {
   git: 'Git', fetch: 'Fetch', web: 'Web', skill: 'Skill', attach: 'Attach',
   plan: 'Plan', todo: 'Todo', subagent: 'Agent', plugin: 'Plugin',
   symbols: 'Symbols', def: 'Definition', refs: 'References', jobs: 'Jobs',
+  goal: 'Goal',
 };
 
 /**
@@ -420,6 +447,28 @@ log.addEventListener('click', (ev) => {
   rpc('browser.open', { url: href }).catch(() => {});
 });
 
+/**
+ * Web media in a reply waits for the reader's consent (md.js paints it as a
+ * slot with no src — the URL leaves the machine the moment the element
+ * loads, and the prose naming it is untrusted). The click, and the Enter or
+ * Space of the slot's button role, are the whole consent surface; the swap
+ * itself lives in md.js so it is pinned without a DOM. The handlers are
+ * named bindings — an anonymous arrow is reported by V8 as `anonymous_N`,
+ * and the N moves between evaluations, which would make the coverage
+ * gate's union count phantom functions.
+ */
+const loadSlot = (ev) => {
+  const media = ev.target?.closest?.('.md-media-deferred');
+  if (media) loadDeferredMedia(media);
+};
+const loadSlotByKey = (ev) => {
+  if (ev.key !== 'Enter' && ev.key !== ' ') return;
+  const media = ev.target?.closest?.('.md-media-deferred');
+  if (media) { ev.preventDefault?.(); loadDeferredMedia(media); }
+};
+log.addEventListener('click', loadSlot);
+log.addEventListener('keydown', loadSlotByKey);
+
 function addTool({ kind, arg, ok, head, lines = [], sources = [] }) {
   const row = document.createElement('details');
   row.className = ok ? 'tool' : 'tool bad';
@@ -443,7 +492,7 @@ function addTool({ kind, arg, ok, head, lines = [], sources = [] }) {
 }
 
 
-  return { addTask, addNote, addCommandOut, assistantText, assistantSummary, replayAssistant, thinkingText, foldThinking, endTurn, foldRun, addTool, paintCacheStats, bubbleSays };
+  return { addTask, addNote, addCommandOut, assistantText, assistantSummary, replayAssistant, thinkingText, foldThinking, endTurn, foldRun, addTool, paintCacheStats, bubbleSays, resetLog };
 }
 
 export default createTranscript;

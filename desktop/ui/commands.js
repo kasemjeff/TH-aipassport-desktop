@@ -9,6 +9,10 @@
 // The palette and the handlers live together because a command IS its handler:
 // the entry in the list names the work, and the work is right below it.
 
+// The one name rule the library enforces, shared with the install dialog —
+// the window refuses a name the backend would refuse, before the round trip.
+import { SKILL_NAME_RE } from './panels/sessions.js';
+
 
 /**
  * The commands: the palette and the handlers behind it.
@@ -16,7 +20,7 @@
  * @param {object} ctx the window it draws into
  */
 export function createCommands(ctx) {
-  const { $, el, state, rpc, friendly, scrollDown, addNote, addCommandOut, paintCacheStats, hideModal, openModal, fillModels, refreshModels, fillProviders, refreshHeader, refreshMeta, checkForUpdate, openHelp, openSettings, showMemory, showMcp, showSymbols, listModels, pickConversation, freshConversation, attachPath, clipPaste, startNewSession, resumeSession, forkSession, togglePlan, showSkills, showPendingDiff, applyChecked, discardAll, pickProject, openFile, pickFile, setWorking, showCheckpoints, exportSession, showSessionTree, showGitStatus, showSchedule, showMediaModels, showWorktrees } = ctx;
+  const { $, el, state, rpc, friendly, scrollDown, addNote, addCommandOut, sendTask, paintCacheStats, hideModal, openModal, fillModels, refreshModels, fillProviders, refreshHeader, refreshMeta, checkForUpdate, openHelp, openSettings, showMemory, showGoal, showMcp, showSymbols, listModels, pickConversation, freshConversation, attachPath, clipPaste, startNewSession, resumeSession, forkSession, togglePlan, showSkills, useSkill, showPendingDiff, applyChecked, discardAll, pickProject, openFile, pickFile, setWorking, cancelRun, showCheckpoints, exportSession, showSessionTree, showGitStatus, showSchedule, showMediaModels, showWorktrees } = ctx;
 
 
 /* Every command the app has, reachable by typing "/". The header carries three
@@ -27,7 +31,7 @@ const COMMANDS = [
   { cmd: 'model', desc: 'เปลี่ยนโมเดล — /model หรือ /model <id>', args: true, run: (arg) => (arg ? setModel(arg) : pickModel()) },
   { cmd: 'provider', desc: 'สลับผู้ให้บริการ — /provider หรือ /provider <id>', args: true, run: (arg) => (arg ? setProvider(arg) : pickProvider()) },
   { cmd: 'models', desc: 'ดูรายการโมเดลที่ใช้คุยได้', run: listModels },
-  { cmd: 'mode', desc: 'สิทธิ์แก้ไฟล์ — /mode ask|auto|yolo', args: true, run: (arg) => (arg ? setMode(arg) : pickMode()) },
+  { cmd: 'mode', desc: 'โหมดการทำงาน — /mode ask|auto|yolo|plan', args: true, run: (arg) => (arg ? setMode(arg) : pickMode()) },
   { cmd: 'status', desc: 'สถานะ bridge / extension / tab / credits', run: showStatus },
   { cmd: 'update', desc: 'เช็กและติดตั้งเวอร์ชันใหม่ — /update', run: () => checkForUpdate({ force: true, quiet: false }) },
   { cmd: 'paint', desc: 'สถิติ paint cache ของการสตรีม — hit/miss ต่อเฟรม', run: showPaintStats },
@@ -35,6 +39,7 @@ const COMMANDS = [
   { cmd: 'fresh', desc: 'เริ่มบทสนทนาบน bridge ใหม่ (ความจำ wiped)', run: freshConversation },
   { cmd: 'compact', desc: 'บีบบริบททันที (สรุปงานเก่าแล้วเริ่ม conversation ใหม่)', run: compactNow },
   { cmd: 'memory', desc: 'ดู facts ที่จำข้าม session — /memory clear ลืมทั้งหมด', args: true, run: (arg) => showMemory(arg) },
+  { cmd: 'goal', desc: 'เป้าหมายระยะยาวของโปรเจกต์ — /goal set|pause|resume|done|block|clear', args: true, run: (arg) => showGoal(arg) },
   { cmd: 'mcp', desc: 'ดู servers/tools จาก MCP (จัดการที่ /settings → MCP)', run: showMcp },
   { cmd: 'symbols', desc: 'ดู declarations ของไฟล์ หรือที่ที่ชื่อถูกนิยาม — /symbols <file|name>', args: true, run: (arg) => showSymbols(arg) },
   { cmd: 'new', desc: 'เริ่มบทสนทนาใหม่ในหน้าต่าง', run: startNewSession },
@@ -47,7 +52,9 @@ const COMMANDS = [
   { cmd: 'image', desc: 'แนบรูปจาก path — /image <path>', args: true, run: (arg) => attachPath(arg, 'image') },
   { cmd: 'open', desc: 'เปิดดูไฟล์ — /open <path>', args: true, run: (arg) => (arg ? openFile(arg) : pickFile()) },
   { cmd: 'skills', desc: 'คู่มือ (playbook) ที่มี', run: showSkills },
+  { cmd: 'skill', desc: 'เรียกคู่มือ — /skill <ชื่อ> (ไม่ใส่ชื่อ = เปิดรายการ)', args: true, run: (arg) => (arg ? invokeSkill(arg) : showSkills()) },
   { cmd: 'diff', desc: 'ดูการเปลี่ยนแปลงที่รอเขียน', run: showPendingDiff },
+  { cmd: 'review', desc: 'รีวิวการเปลี่ยนแปลง — อ่านอย่างเดียว ไม่แก้อะไร (/review [base])', args: true, run: (arg) => reviewChange(arg) },
   { cmd: 'apply', desc: 'เขียนไฟล์ที่อนุมัติลงดิสก์', run: applyChecked },
   { cmd: 'discard', desc: 'ทิ้งไฟล์ที่รออยู่ทั้งหมด', run: discardAll },
   // The undo of a write, the transcript as a file, and the tree of the
@@ -65,8 +72,13 @@ const COMMANDS = [
   { cmd: 'project', desc: 'เลือกโฟลเดอร์โปรเจกต์', run: pickProject },
   { cmd: 'settings', desc: 'ตั้งค่าทั้งหมด', run: openSettings },
   // A stop is a request with an answer: the bar says the run is winding down,
-  // and the run's own end takes the bar down.
-  { cmd: 'stop', desc: 'ยกเลิกรันที่กำลังทำ', run: () => { setWorking(true, { label: 'กำลังหยุด…' }); return rpc('cancel', { root: state.root ?? undefined }).then((res) => addCommandOut(res && res.ok === false ? `หยุดไม่ได้ — ไม่มีรันที่กำลังทำอยู่${res.reason ? ` (${res.reason})` : ''}` : 'ยกเลิกแล้ว')); } },
+  // and the run's own end takes the bar down. The stop itself is the send
+  // button's cancelRun — the one stop there is, whose guard keeps a second
+  // /stop from racing the first and whose answer brings the bar back down
+  // when the backend says there was nothing to stop. (This command used to
+  // ask the backend by itself, and left the bar beating for a run that did
+  // not exist.)
+  { cmd: 'stop', desc: 'ยกเลิกรันที่กำลังทำ', run: () => cancelRun() },
 ];
 
 const slash = { open: false, items: [], index: 0 };
@@ -241,7 +253,11 @@ function pickProvider() {
 function pickModel() {
   state.modelPicker = true;
   refreshModels().then((res) => {
-    const list = res?.data ?? res?.models ?? [];
+    const all = res?.data ?? res?.models ?? [];
+    // The site's catalog carries non-chat entries too (embedding and friends);
+    // a picker that lists them offers a choice the chat cannot use. A list
+    // with no kind at all (a provider that does not say) keeps every row.
+    const list = all.filter((m) => typeof m === 'string' || !m?.kind || m.kind === 'chat');
     $('modal-title').textContent = 'เลือกโมเดล';
     const body = $('modal-body');
     body.textContent = '';
@@ -273,7 +289,7 @@ function setMode(mode) {
 }
 
 function pickMode() {
-  $('modal-title').textContent = 'สิทธิ์ในการแก้ไฟล์';
+  $('modal-title').textContent = 'โหมดการทำงาน';
   const body = $('modal-body');
   body.textContent = '';
   const rows = [
@@ -298,9 +314,44 @@ function pickMode() {
   openModal();
 }
 
+/**
+ * Invoke a playbook by name: the composer is filled with the phrase that makes
+ * the next run load it, after the backend confirms the name exists — a draft
+ * that names a playbook that is not there is a task that silently loses its
+ * manual. The reader types the task on and sends.
+ */
+async function invokeSkill(name) {
+  const bare = String(name ?? '').trim();
+  if (!SKILL_NAME_RE.test(bare)) { addNote('ชื่อคู่มือใช้ได้เฉพาะ a-z 0-9 และ - — ดูรายการที่ /skills'); return; }
+  const found = await rpc('skills.load', { name: bare }).catch((err) => ({ error: err.message }));
+  if (found.error) { addNote(`ไม่มีคู่มือ "${bare}" — ${found.error}`); return; }
+  useSkill(bare);
+}
+
+/**
+ * /review — one run that reads a change and reports it.
+ *
+ * The floor is the backend's: the tool table is built read-only and the loop
+ * refuses every mutating marker, so this handler only names what is under
+ * review and starts the run. The CLI's --review reaches the same floor.
+ */
+async function reviewChange(arg) {
+  if (state.running) {
+    addNote('มีรันอยู่ — กดหยุดก่อน แล้วสั่ง /review อีกครั้ง');
+    return;
+  }
+  const base = String(arg ?? '').trim();
+  addCommandOut(base
+    ? `รีวิวการเปลี่ยนแปลงเทียบกับ ${base} — อ่านอย่างเดียว ไม่แก้อะไร`
+    : 'รีวิวการเปลี่ยนแปลงที่รออยู่ (staged) — อ่านอย่างเดียว ไม่แก้อะไร');
+  await sendTask(base ? `Review the change against ${base}.` : 'Review the staged change.', {
+    review: true,
+    reviewBase: base || undefined,
+  });
+}
+
 /** Rotate the context now: the model summarises what it has done, that summary
- *  is recorded in the session, and the next run starts from it. */
-async function compactNow() {
+ *  is recorded in the session, and the next run starts from it. */async function compactNow() {
   const before = await rpc('status').then((s) => s.context).catch(() => null);
   addCommandOut(`บีบบริบท… ใช้ ${before?.used?.toLocaleString?.() ?? '?'} / ${before?.budget?.toLocaleString?.() ?? '?'} token — สรุปงานเก่าก่อน`);
   const done = await rpc('compact').catch((err) => ({ error: err.message }));
@@ -335,7 +386,7 @@ function refreshMeter(status = null) {
     const pct = use.percent;
     slot.textContent = `context ${pct}%`;
     slot.className = `context ${pct >= 85 ? 'full' : pct >= 60 ? 'warm' : ''}`;
-    slot.title = `ใช้ไป ~${use.used.toLocaleString()} จากงว ${use.budget.toLocaleString()} token (สำรอง ${use.reserved.toLocaleString()} สำหรับคำตอบ)\n`
+    slot.title = `ใช้ไป ~${use.used.toLocaleString()} จากงบ ${use.budget.toLocaleString()} token (สำรอง ${use.reserved.toLocaleString()} สำหรับคำตอบ)\n`
       + `${use.entries} รายการในบทสนทนา — ครบงบแล้วมันจะสรุปเก่าไว้แล้วเริ่มบทใหม่ให้เอง (/compact บีบได้เอง)`;
     if (use.needsCompaction && !state.needsCompaction) {
       state.needsCompaction = true;

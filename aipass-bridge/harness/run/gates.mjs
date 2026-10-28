@@ -17,6 +17,7 @@
 import path from 'node:path';
 import { posix } from '../overlay.mjs';
 import { thaiRatio } from '../lang.mjs';
+import { hasFindings } from '../review.mjs';
 import { RunContext } from './context.mjs';
 
 /**
@@ -110,6 +111,35 @@ export function createDoneGates(run) {
   };
 
   /**
+   * The goal gate: while the person's project goal is active, a plain DONE is
+   * not the end. Each refused DONE buys one more round, up to the goal's own
+   * cap; at the cap the goal is recorded blocked and the run stops.
+   *
+   * The controller re-reads the store before every change, so a `aipass goal
+   * pause|clear` typed in another window while this run was working is
+   * respected — a run cannot resurrect a goal the person put down.
+   *
+   * Called only when a step is left to carry the nudge: a round that would
+   * never reach the model must not be spent (dsh's rule).
+   *
+   * @returns {{stop: boolean, msg: string|null}|null}
+   */
+  const goalGate = () => {
+    const out = run.goal?.done();
+    if (!out) return null;
+    if (out.stop) {
+      run.summary = out.summary;
+      run.stopReason = 'goal-rounds';
+      run.note(`goal: ${out.summary}`);
+      run.emit('note', { text: out.summary });
+      return { stop: true, msg: null };
+    }
+    run.note(`goal round: DONE refused — round ${out.rounds} of ${out.maxRounds}`);
+    run.emit('goal_round', { round: out.rounds, max: out.maxRounds });
+    return { stop: false, msg: out.msg };
+  };
+
+  /**
    * The language hook: ask for a Thai rewrite of the closing message, once.
    *
    * A short closing never triggers it (a dozen letters is a glance, not a
@@ -158,7 +188,59 @@ export function createDoneGates(run) {
     return `Before I take that as done: the plan/TODO this run recorded still lists ${open.length} open item(s):\n${named}${open.length > cap ? `\n… and ${open.length - cap} more` : ''}\n\nIf they are finished, send a TODO list with [x] on them; if any is dropped, say which and why; otherwise continue with the open items and then say DONE. A DONE after this message ends the run either way.`;
   };
 
-  return { finishCheck, unverifiedDone, refuseUnverifiedDone, replyLangMsg, openTodoMsg };
+  /**
+   * The background-command gate: a run does not say DONE over a job it left
+   * running.
+   *
+   * The first DONE earns one nudge that names the jobs and the two ways out
+   * (wait and poll, or stop). A DONE after that is accepted only as an end
+   * that says so: the run stops with `jobs-running` and the summary names the
+   * output files, so the person is not told the work finished when a build is
+   * still going. A job that finished between steps is already not counted.
+   *
+   * @param {boolean} canNudge whether a step is left to carry the nudge
+   * @returns {{stop: boolean, msg: string|null}}
+   */
+  const jobsGate = (canNudge) => {
+    const running = [...run.backgroundJobs.values()].filter((j) => j.kind === 'run' && j.status === 'running');
+    if (!running.length) return { stop: false, msg: null };
+    const ids = running.map((j) => j.id);
+    if (!run.jobsPromptSent && canNudge) {
+      run.jobsPromptSent = true;
+      run.note(`background commands still running: ${ids.join(', ')} — asking before DONE`);
+      run.emit('note', { text: `background command(s) ${ids.join(', ')} are still running — asking the model to wait or stop them before DONE` });
+      const lines = running.map((j) => `- ${j.id}: ${j.task} — output: ${j.outputRel}`);
+      return { stop: false, msg: `Before DONE: the background command(s) this run started are still running:\n${lines.join('\n')}\n\nPoll with JOBS until they finish, or end one with JOBS stop <id> (the whole tree). A DONE you send anyway ends the run and leaves the job to the person.` };
+    }
+    run.summary = `DONE with background command(s) still running: ${ids.join(', ')} — their output is in ${running.map((j) => j.outputRel).join(', ')}`;
+    run.stopReason = 'jobs-running';
+    run.note(`background commands left running at DONE: ${ids.join(', ')}`);
+    run.emit('note', { text: run.summary });
+    return { stop: true, msg: null };
+  };
+
+  /**
+   * The review check: a review's closing message must carry the findings it
+   * exists to produce.
+   *
+   * One nudge, then the answer stands — the language hook's shape. The gate
+   * is advisory on purpose: a wrong-shaped answer is still the model's
+   * answer, and refusing to end would spend steps to no one's benefit. The
+   * FLOOR is elsewhere (the loop refuses every mutating marker), so this only
+   * decides whether the report reads as a report.
+   *
+   * @returns {string|null} the nudge that rides back, or null
+   */
+  const reviewMsg = () => {
+    if (!run.options.review || run.reviewPrompted) return null;
+    if (hasFindings(run.summary)) return null;
+    run.reviewPrompted = true;
+    run.note('review check: the closing message carried no findings block — asking once');
+    run.emit('note', { text: 'review check: asking for the findings list' });
+    return 'Review check: this run is a review, and the closing message did not carry findings. Send the list — one line per finding, "blocker|major|minor path:line — what is wrong — the smallest fix" — or write "no findings" and name what you read.';
+  };
+
+  return { finishCheck, unverifiedDone, refuseUnverifiedDone, goalGate, replyLangMsg, openTodoMsg, jobsGate, reviewMsg };
 }
 
 export default createDoneGates;

@@ -83,6 +83,19 @@ fn busy_outcome(owner: PortOwner) -> BusyOutcome {
     }
 }
 
+/// The decision, apart from the talking: does an empty child slot need a
+/// spawn?
+///
+/// A `None` slot is two different situations with opposite answers, and
+/// reading both as "healthy" is what ended supervision on the first failed
+/// spawn — the app kept running with nothing behind it. An adopted backend
+/// is left alone (the window already talks to it; a second spawn on the
+/// port could only die there). An empty slot nobody adopted is filled on
+/// the next tick, under the ordinary backoff.
+fn empty_slot_needs_a_spawn(adopted: bool) -> bool {
+    !adopted
+}
+
 /// Does this exit count towards "the content tree is broken"?
 ///
 /// A busy port is not the tree's fault. The rollback exists for a promoted
@@ -197,6 +210,12 @@ fn read_install_command(home: &std::path::Path) -> Option<InstallCommand> {
         return None;
     }
     let sha256 = json.get("sha256")?.as_str()?.to_string();
+    // A value that is not a SHA-256 hex digest describes nothing: the
+    // handover compares it byte for byte against the artifact's real digest,
+    // so a malformed one could only ever fail late. Refuse it at the door.
+    if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
     Some(InstallCommand {
         version,
         file: name,
@@ -565,6 +584,43 @@ fn note(msg: &str) {
     }
 }
 
+/// The backend log's path, for the messages that name it.
+fn backend_log_path() -> std::path::PathBuf {
+    aipass_home().join("logs").join("desktop-backend.log")
+}
+
+/// A native message box, for the deaths a release build cannot print.
+///
+/// `windows_subsystem = "windows"` means no console: an `expect()` on a
+/// failed spawn used to die silently and the window simply never came. The
+/// dialog is std-only — `MessageBoxW` straight from user32 — so the
+/// no-new-dependency rule holds.
+#[cfg(windows)]
+fn alert(title: &str, body: &str) {
+    use std::os::windows::ffi::OsStrExt;
+    let wide = |s: &str| -> Vec<u16> {
+        let mut v: Vec<u16> = std::ffi::OsStr::new(s).encode_wide().collect();
+        v.push(0);
+        v
+    };
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBoxW(hwnd: isize, text: *const u16, caption: *const u16, kind: u32) -> i32;
+    }
+    let text = wide(body);
+    let caption = wide(title);
+    // MB_ICONERROR (0x10), MB_SETFOREGROUND (0x10000) so it is not painted
+    // behind the taskbar on a cold start.
+    unsafe {
+        MessageBoxW(0, text.as_ptr(), caption.as_ptr(), 0x10 | 0x1_0000);
+    }
+}
+
+#[cfg(not(windows))]
+fn alert(_title: &str, body: &str) {
+    eprintln!("{body}");
+}
+
 /// The backend child, kept restartable.
 ///
 /// The window outlives a backend crash — the page's EventSource redials and
@@ -586,6 +642,13 @@ struct Backend {
     /// Set once the port has been found to be held by something that is not
     /// our backend, so the situation is named once instead of on every retry.
     port_busy: AtomicBool,
+    /// Set when the child slot is empty because the shell ADOPTED a backend
+    /// that was already answering on the port: nobody here owns that process,
+    /// so nobody here may respawn it. The other way the slot comes to hold
+    /// no child — a spawn that failed — must keep trying, which is why the
+    /// two need a word each: a `None` child used to read as "healthy", and
+    /// one failed spawn ended supervision for good.
+    adopted: AtomicBool,
     node: String,
     /// Where the app's files may be, in the order they are tried. The root
     /// is picked on every spawn, so a promoted content tree is picked up
@@ -735,12 +798,21 @@ impl Backend {
         };
         if !exited {
             // A live child clears the episode: the next crash starts from the
-            // first backoff step, not from wherever the last one left off.
-            *self.fails.lock().unwrap() = 0;
-            *self.content_fails.lock().unwrap() = 0;
-            *self.next_try.lock().unwrap() = Instant::now();
-            self.port_busy.store(false, Ordering::SeqCst);
-            return;
+            // first backoff step, not from wherever the last one left off. An
+            // adopted backend does too — and more: nobody here owns it, so
+            // nobody here may respawn it (the window is pointed at that port
+            // already). An empty slot that is NEITHER of those is a spawn that
+            // failed, and it falls through to the same backoff a crash gets:
+            // one transient spawn error (a locked file, a busy antivirus) used
+            // to end supervision for good, leaving the app running with
+            // nothing behind it and the page redialling into the void.
+            if guard.is_some() || !empty_slot_needs_a_spawn(self.adopted.load(Ordering::SeqCst)) {
+                *self.fails.lock().unwrap() = 0;
+                *self.content_fails.lock().unwrap() = 0;
+                *self.next_try.lock().unwrap() = Instant::now();
+                self.port_busy.store(false, Ordering::SeqCst);
+                return;
+            }
         }
         // A backend that asked to be restarted is not a crash: it promoted a
         // new content tree and needs a new process to run it. The backoff
@@ -752,7 +824,7 @@ impl Backend {
                 *self.next_try.lock().unwrap() = Instant::now();
                 note("backend asked for a restart (a new content version) — starting it again");
                 match self.spawn() {
-                    Ok(kid) => *guard = Some(kid),
+                    Ok(kid) => { *guard = Some(kid); self.adopted.store(false, Ordering::SeqCst); }
                     Err(err) => note(&format!("backend restart failed: {err}")),
                 }
                 return;
@@ -773,7 +845,7 @@ impl Backend {
                 *self.next_try.lock().unwrap() = Instant::now();
                 note("backend was stopped by a console control event — starting it again, the content tree is fine");
                 match self.spawn() {
-                    Ok(kid) => *guard = Some(kid),
+                    Ok(kid) => { *guard = Some(kid); self.adopted.store(false, Ordering::SeqCst); }
                     Err(err) => note(&format!("backend restart failed: {err}")),
                 }
                 return;
@@ -791,6 +863,7 @@ impl Backend {
                         *self.content_fails.lock().unwrap() = 0;
                         *self.next_try.lock().unwrap() = Instant::now();
                         *guard = None;
+                        self.adopted.store(true, Ordering::SeqCst);
                         self.port_busy.store(false, Ordering::SeqCst);
                         note("another aipass backend is answering on the port — it is adopted, and no second one is started");
                         return;
@@ -850,21 +923,21 @@ impl Backend {
         *next = Instant::now() + delay;
         // A crash loop that always lands on the same code is one bug, not N:
         // after five straight failures the note says so instead of adding
-        // another identical line.
+        // another identical line. And nothing exited when the START failed —
+        // the note says that, rather than a false "exited".
+        let what = status
+            .map(|s| format!("backend exited ({s})"))
+            .unwrap_or_else(|| "backend could not be started".into());
         if *fails >= 5 {
             note(&format!(
-                "backend exited ({}) — {} straight failures, same note suppressed until it recovers or the code changes",
-                status.map(|s| format!("{s}")).unwrap_or_else(|| "unknown".into()),
+                "{what} — {} straight failures, same note suppressed until it recovers or the code changes",
                 *fails,
             ));
         } else {
-            note(&format!(
-                "backend exited ({}) — restart attempt {fails}",
-                status.map(|s| format!("{s}")).unwrap_or_else(|| "unknown".into()),
-            ));
+            note(&format!("{what} — restart attempt {fails}"));
         }
         match self.spawn() {
-            Ok(kid) => *guard = Some(kid),
+            Ok(kid) => { *guard = Some(kid); self.adopted.store(false, Ordering::SeqCst); }
             Err(err) => note(&format!("backend restart failed: {err}")),
         }
     }
@@ -920,7 +993,11 @@ impl Backend {
         helper
             .arg("--install-and-relaunch")
             .arg(&artifact)
-            .arg(&exe);
+            .arg(&exe)
+            // The digest rides along: the helper re-checks the file at the
+            // moment it runs it, closing the gap between this check and the
+            // helper's start.
+            .arg(&command.sha256);
         // Detached: the helper has to outlive this process, which is about to
         // exit.
         #[cfg(windows)]
@@ -997,16 +1074,51 @@ fn handover_helper() -> Option<Result<(), Box<dyn std::error::Error>>> {
     let at = args.iter().position(|a| a == "--install-and-relaunch")?;
     let installer = args.get(at + 1)?.clone();
     let app = args.get(at + 2)?.clone();
+    let expected = args.get(at + 3).cloned().unwrap_or_default();
     note(&format!("the handover helper is running {installer}"));
+    // The digest rides along so the file is verified again HERE, at the
+    // moment it is about to run: the gap between the shell's check and this
+    // process's start is exactly the window in which a swapped artifact
+    // would take the installer's place. A hash that stopped matching says
+    // the file on disk is not what the release key signed — the installer
+    // slot below is emptied, so nothing runs, and the app still comes back.
+    let node = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
+        .and_then(|dir| find_node(&dir, None))
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| "node".to_string());
+    // The only thing a handover may name is the artifact the shell itself
+    // placed in its own downloads directory — the same containment the
+    // command file is held to — so a helper invocation that points anywhere
+    // else is not a handover and runs nothing.
+    let in_downloads = std::path::Path::new(&installer).starts_with(command_paths(&aipass_home()).1);
+    let verified = in_downloads
+        && hash_with_node(&node, std::path::Path::new(&installer), &aipass_home())
+            .map(|digest| digest.eq_ignore_ascii_case(&expected))
+            .unwrap_or(false);
+    // An empty program name cannot start, which is the point: the spawn
+    // below errors, the log already carries the real reason, and the only
+    // thing that still happens is the relaunch at the bottom.
+    let installer = if verified {
+        installer
+    } else {
+        note("the installer's hash no longer matches what the handover checked — nothing was run");
+        String::new()
+    };
     // The installer is silent on Windows and does its work; the exit code
-    // says whether it did.
+    // says whether it did. When the re-check above emptied the slot, this is
+    // where the run dies — the error names the empty program, and the real
+    // reason is already in the log above.
     let status = Command::new(&installer).arg("/S").status();
     match status {
         Ok(s) if s.success() => note("the installer finished"),
         Ok(s) => note(&format!("the installer exited {s}")),
         Err(err) => note(&format!("the installer could not be run: {err}")),
     }
-    // And the app comes back.
+    // And the app comes back either way: the build that is installed still
+    // works, and a person who asked for an update must not be left with no
+    // app at all because the artifact went bad in the gap.
     match Command::new(&app).spawn() {
         Ok(_) => note("the app is back"),
         Err(err) => note(&format!("the app could not be started again: {err}")),
@@ -1064,6 +1176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 content_fails: Mutex::new(0),
                 next_try: Mutex::new(Instant::now()),
                 port_busy: AtomicBool::new(false),
+                adopted: AtomicBool::new(false),
                 node: node_path(&exe_dir, resource_dir.as_deref()),
                 candidates,
                 port: backend_port,
@@ -1080,10 +1193,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // that has never heard of aipass. The probe asks the question the
             // launcher asks, through the app's own Node.
             if backend.port_owner() != PortOwner::Ours {
-                let kid = backend
-                    .spawn()
-                    .expect("could not start the aipass backend — is Node installed?");
-                *backend.child.lock().unwrap() = Some(kid);
+                match backend.spawn() {
+                    Ok(kid) => *backend.child.lock().unwrap() = Some(kid),
+                    Err(err) => {
+                        // A failed spawn is death the person can see: a
+                        // release build has no console to print a panic on,
+                        // and the expect() that stood here died silently —
+                        // the window simply never came, with nothing named.
+                        alert(
+                            "aipass desktop",
+                            &format!(
+                                "เริ่ม backend ของ aipass ไม่สำเร็จ:\n{err}\n\nตรวจว่ามี Node ติดตั้ง และดู log ได้ที่\n{}",
+                                backend_log_path().display()
+                            ),
+                        );
+                        return Err(err.into());
+                    }
+                }
+            } else {
+                // The empty child slot must stay empty: the window is pointed
+                // at the backend already answering, and the supervisor would
+                // read the slot as "a spawn that failed" and fill it with a
+                // second backend that could only die on the same port.
+                backend.adopted.store(true, Ordering::SeqCst);
             }
 
             // Watch the child for as long as the app lives. The window's
@@ -1111,6 +1243,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
             std::thread::sleep(std::time::Duration::from_millis(150));
+            // The window navigates only at OUR backend. The TCP loop above is
+            // the cheap wait; the probe — the same question the spawn asked —
+            // is the verdict before the window points anywhere. A port another
+            // program took between the spawn gate and here would otherwise
+            // open the window onto a stranger's server.
+            if !port_open() {
+                alert(
+                    "aipass desktop",
+                    &format!(
+                        "backend ไม่ตอบบนพอร์ต {backend_port} — หน้าต่างเปิดไม่ได้\n\nดู log ได้ที่\n{}",
+                        backend_log_path().display()
+                    ),
+                );
+                return Err(format!("the backend never answered on port {backend_port}").into());
+            }
+            if backend.port_owner() == PortOwner::Stranger {
+                alert(
+                    "aipass desktop",
+                    &format!(
+                        "พอร์ต {backend_port} ถูกโปรแกรมอื่นใช้อยู่ หน้าต่าง aipass จึงเปิดที่นี่ไม่ได้\n\nตั้ง AIPASS_DESKTOP_PORT เป็นพอร์ตว่างแล้วเริ่มใหม่ (log อยู่ที่\n{})",
+                        backend_log_path().display()
+                    ),
+                );
+                return Err(format!("port {backend_port} is not the aipass backend").into());
+            }
+            // `Unknown` passes: the spawn gate above already demanded a real
+            // "ours" before starting one, and a probe that cannot answer does
+            // not get to invent a verdict the window is blocked on.
 
             let window = tauri::WebviewWindowBuilder::new(
                 app,
@@ -1813,6 +1973,17 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_slot_is_respawned_unless_it_was_adopted() {
+        // A slot with no child in it used to read as "healthy", so one failed
+        // spawn (a locked file, a busy antivirus) ended supervision for good —
+        // the app kept running with nothing behind it. The slot is filled
+        // again on the next tick. An adopted backend is the exception: nobody
+        // here owns it, and a second spawn on the port could only die there.
+        assert!(empty_slot_needs_a_spawn(false));
+        assert!(!empty_slot_needs_a_spawn(true));
+    }
+
+    #[test]
     fn a_busy_port_is_not_a_broken_content_tree() {
         // The content rollback is about a tree that breaks the backend. A
         // port that is taken is not the tree's fault, and rolling back
@@ -1988,6 +2159,23 @@ mod tests {
         assert_eq!(write("windows", "C:\\evil.exe"), None, "a drive is refused");
         assert_eq!(write("up", "..\\evil.exe"), None, "a way up is refused");
         assert_eq!(write("empty", ""), None, "an empty name is refused");
+
+        // The hash has to be a SHA-256 hex digest: anything else describes
+        // nothing the handover could compare against.
+        let write_sha = |_label: &str, sha: &str| {
+            std::fs::write(
+                commands.join("install.json"),
+                format!(
+                    "{{\"version\":\"0.3.0\",\"file\":\"aipass-desktop-0.3.0-windows-x64-setup.exe\",\"sha256\":\"{}\"}}",
+                    sha
+                ),
+            )
+            .expect("command");
+            read_install_command(&home).is_some()
+        };
+        assert!(write_sha("good", &"a".repeat(64)), "a hex digest of the right length is read");
+        assert!(!write_sha("short", &"a".repeat(63)), "a digest that is too short is refused");
+        assert!(!write_sha("not-hex", &"g".repeat(64)), "a non-hex digest is refused");
     }
 
     #[test]

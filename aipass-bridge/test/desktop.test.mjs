@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { startBridge, FakeExtension, scripted, tempDir, freePort, startRpcServer } from './harness.mjs';
 import { createRpc, staticFileFor } from '../harness/rpc.mjs';
 import { Settings } from '../harness/settings.mjs';
+import { loadGoal } from '../harness/goal.mjs';
 import { SessionStore } from '../harness/session.mjs';
 import { backendIsUp } from '../harness/backend-probe.mjs';
 import { UNAUTHORIZED, loadOrMintToken } from '../harness/authtoken.mjs';
@@ -131,6 +132,29 @@ test('a desktop run ships the bootstrap snapshot in turn 1', async (t) => {
   assert.match(first.text, /test: node --test/);
 });
 
+test('the goal is one file the window and the CLI share', async (t) => {
+  // The window's settings sheet and `aipass goal` are two ways to say the same
+  // thing, so the RPC methods read and write the store the CLI owns.
+  const env = await startRpc({ files: { 'a.txt': 'x' } });
+  t.after(() => env.stop());
+
+  assert.equal((await env.call('goal.get')).goal, null, 'a fresh project has no goal');
+  const set = await env.call('goal.set', { objective: '  ship   goal rounds ', maxRounds: 3 });
+  assert.equal(set.goal.objective, 'ship goal rounds');
+  assert.equal(set.goal.maxRounds, 3);
+  assert.equal(loadGoal(env.root).status, 'active', 'the CLI reads the file the window wrote');
+
+  await assert.rejects(env.call('goal.set', { objective: 'another one' }), /already has an active goal/);
+  assert.equal((await env.call('goal.pause')).goal.status, 'paused');
+  assert.equal((await env.call('goal.resume')).goal.status, 'active');
+  assert.equal((await env.call('goal.done', { done: 'shipped' })).goal.status, 'complete');
+  assert.equal(loadGoal(env.root).done, 'shipped');
+  assert.equal((await env.call('goal.block', { reason: 'needs a credential' })).goal.blocked, 'needs a credential');
+  await env.call('goal.clear');
+  assert.equal((await env.call('goal.get')).goal, null);
+  assert.equal(loadGoal(env.root), null);
+});
+
 test('settings.set carries verifyCommand and requireCheck into the harness', async (t) => {
   const env = await startRpc({ files: { 'a.txt': 'hello' } });
   t.after(() => env.stop());
@@ -140,6 +164,33 @@ test('settings.set carries verifyCommand and requireCheck into the harness', asy
   assert.equal(next.requireCheck, true);
   assert.equal(env.rpc.harness.options.verifyCommand, 'node check.mjs');
   assert.equal(env.rpc.harness.options.requireCheck, true);
+});
+
+test('the reading switches reach the harness from the file and from a save', async (t) => {
+  // The reading batch's keys — `explore`, `parallelReads`, and `recall`
+  // beside them. The boot sheet reads them off the settings file, and a save
+  // re-applies them onto the harness the backend already holds. A key the
+  // applier never carried was a dead key: `false` in the file said nothing,
+  // and a save changed nothing.
+  const home = tempDir();
+  fs.writeFileSync(path.join(home, 'settings.json'), JSON.stringify({
+    explore: false, parallelReads: false, recall: false,
+  }));
+  const env = await startRpc({
+    files: { 'a.txt': 'hello' },
+    rpcOptions: { settings: new Settings(home, 'settings.json') },
+  });
+  t.after(() => env.stop());
+
+  assert.equal(env.rpc.harness.options.explore, false, 'the boot sheet reads the file');
+  assert.equal(env.rpc.harness.options.parallelReads, false);
+  assert.equal(env.rpc.harness.options.recall, false);
+
+  const next = await env.call('settings.set', { explore: true, parallelReads: true, recall: true });
+  assert.equal(next.explore, true);
+  assert.equal(env.rpc.harness.options.explore, true, 'a save re-applies live');
+  assert.equal(env.rpc.harness.options.parallelReads, true);
+  assert.equal(env.rpc.harness.options.recall, true);
 });
 
 test('discard drops the pending change without touching the disk', async (t) => {
@@ -881,6 +932,15 @@ test('two windows on two projects do not share state, and Apply writes only its 
   const applied = await env.call('apply', {}, { 'x-aipass-project': env.root });
   assert.equal(applied.written, 1, 'the first window applied its own change');
   assert.equal(fs.readFileSync(path.join(env.root, 'notes.md'), 'utf8'), 'line 2\n');
+
+  // The header is a claim about who is asking, so it has to name a real
+  // folder: a value that is not an existing directory is refused instead of
+  // becoming the project the call runs against.
+  await assert.rejects(
+    env.call('pending', {}, { 'x-aipass-project': path.join(env.root, 'no-such-folder') }),
+    /x-aipass-project must name an existing folder/,
+    'a header naming a missing folder is refused'
+  );
 });
 
 test('a session list belongs to the project the caller named', async (t) => {

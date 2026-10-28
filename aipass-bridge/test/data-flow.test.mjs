@@ -14,6 +14,7 @@ import { Settings } from '../harness/settings.mjs';
 import { SessionStore } from '../harness/session.mjs';
 import { RulesStore } from '../harness/rules.mjs';
 import { loadMemory, saveMemory } from '../harness/memory-store.mjs';
+import { loadGoal, setGoal } from '../harness/goal.mjs';
 import { relocateProject } from '../harness/relocate.mjs';
 import { tempDir, freePort, startRpcServer } from './harness.mjs';
 
@@ -155,6 +156,7 @@ test('a moved project keeps its sessions, facts, rules and list entry', async (t
   await new Promise((r) => setTimeout(r, 5));
   store.archiveIdle(oldRoot, { olderThanMs: 1, keepId: kept.id });
   saveMemory(oldRoot, ['the build is npm run build'], path.join(home, 'memory'));
+  setGoal(oldRoot, 'ship the release', { dir: path.join(home, 'goal') });
   const rules = new RulesStore(path.join(home, 'rules.json'));
   rules.setRules(oldRoot, [{ pattern: 'vendor/**', decision: 'deny' }]);
   rules.addGrant(oldRoot, 'write', 'src/config.ts');
@@ -163,6 +165,7 @@ test('a moved project keeps its sessions, facts, rules and list entry', async (t
   const out = relocateProject({ from: oldRoot, to: newRoot, home });
   assert.equal(out.from, path.resolve(oldRoot));
   assert.equal(out.facts, 1);
+  assert.equal(out.goal.objective, 'ship the release');
   assert.equal(out.rules.rules, 1);
   assert.equal(out.settings, true);
 
@@ -182,6 +185,10 @@ test('a moved project keeps its sessions, facts, rules and list entry', async (t
   // Facts load for the project at its new home; the old file is gone.
   assert.deepEqual(loadMemory(newRoot, path.join(home, 'memory')), ['the build is npm run build']);
   assert.deepEqual(loadMemory(oldRoot, path.join(home, 'memory')), []);
+
+  // The goal travelled too: a moved project is still chasing the same objective.
+  assert.equal(loadGoal(newRoot, path.join(home, 'goal')).objective, 'ship the release');
+  assert.equal(loadGoal(oldRoot, path.join(home, 'goal')), null);
 
   // Rules and grants follow the key; the file still parses as one store.
   assert.deepEqual(rules.forRoot(newRoot).rules, [{ pattern: 'vendor/**', decision: 'deny' }]);

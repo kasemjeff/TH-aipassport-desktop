@@ -16,9 +16,9 @@
 
 /** The markers the loop itself owns plus the built-in tool table. */
 export const BUILTIN_KINDS = new Set([
-  'skill', 'list', 'read', 'write', 'replace', 'search', 'run', 'glob', 'git',
-  'fetch', 'delete', 'move', 'attach', 'web', 'symbols', 'def', 'refs', 'recall',
-  'plan', 'todo', 'subagent', 'jobs', 'done', 'ask', 'verify',
+  'skill', 'list', 'read', 'write', 'replace', 'search', 'tree', 'stat', 'run', 'glob',
+  'git', 'fetch', 'delete', 'move', 'attach', 'web', 'symbols', 'def', 'refs', 'recall',
+  'plan', 'todo', 'subagent', 'goal', 'jobs', 'done', 'ask', 'verify',
 ]);
 
 /**
@@ -28,7 +28,8 @@ export const BUILTIN_KINDS = new Set([
  */
 const ARG_GUARDS = {
   read: 'err: NEED needs a file or directory path.',
-  search: 'err: give me some text to search for. (SEARCH -i text matches without letter case.)',
+  search: 'err: give me some text to search for. (SEARCH -i text matches without letter case; -C 2 shows two lines around each hit.)',
+  stat: 'err: STAT needs a file or directory path — STAT src/app.ts',
   glob: 'err: give me a glob pattern, e.g. **/*.ts',
   git: 'err: give me a git subcommand, e.g. status',
   fetch: 'err: give me a URL to fetch, starting with http:// or https://',
@@ -39,6 +40,7 @@ const ARG_GUARDS = {
   def: 'err: DEF needs a name — DEF foo',
   refs: 'err: REFS needs a name — REFS foo',
   recall: 'err: RECALL needs something to look for — RECALL <what you want to remember>',
+  goal: 'err: GOAL takes DONE or BLOCKED <reason> — e.g. GOAL DONE the parser ships.',
 };
 
 /**
@@ -72,6 +74,11 @@ export function validateCall(call, { pluginTools = [], runPluginTool = null } = 
   if (ARG_GUARDS[kind] && !arg.trim()) return ARG_GUARDS[kind];
   if (kind === 'move' && arg.trim().split(/\s+/).length < 2) {
     return 'err: MOVE needs a source and a destination: MOVE <from> <to>.';
+  }
+  // The goal has exactly two actions, and the objective belongs to the person:
+  // an unrecognised word is refused here rather than silently ignored.
+  if (kind === 'goal' && !/^(?:done|blocked)\b/i.test(arg.trim())) {
+    return 'err: GOAL takes DONE or BLOCKED <reason> — e.g. GOAL DONE the parser ships.';
   }
 
   // Body-shaped kinds. A body is the marker's payload; a missing one is a

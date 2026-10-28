@@ -100,6 +100,7 @@ aipass "question" # one-shot answer from CLI
 | `aipass credits` | check credit quota |
 | `aipass doctor` | node / bridge / extension / model diagnostics |
 | `aipass memory` | list/clear the facts carried across sessions for this project |
+| `aipass goal` | set/show the one durable goal this project is working toward |
 | `aipass relocate` | re-key a project's stored data after its folder moved |
 | `aipass setup-assistant` | configure custom coding assistant |
 | `aipass status` | node / bridge / extension check |

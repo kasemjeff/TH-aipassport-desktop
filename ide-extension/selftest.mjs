@@ -152,7 +152,8 @@ check('the event list is the one the window consumes', () => {
     'task_start', 'assistant_delta', 'reasoning_delta', 'step', 'thinking',
     'tool', 'note', 'firewall_note', 'done_line', 'finished', 'cancelled',
     'error', 'todo', 'diff_update', 'permission_request', 'plan_request',
-    'needs_tab', 'tab_opened', 'applied', 'discarded', 'hello', 'ping',
+    'needs_tab', 'tab_opened', 'applied', 'discarded', 'injected',
+    'inject_orphaned', 'hello', 'ping',
   ];
   for (const name of required) {
     assert.ok(protocol.EVENT_NAMES.includes(name), `missing event: ${name}`);
@@ -243,6 +244,8 @@ check('every keyword of the grammar is dropped, not only the ones we remember', 
   const shapes = {
     NEED: 'NEED file src/app.js',
     SEARCH: 'SEARCH something',
+    TREE: 'TREE src',
+    STAT: 'STAT src/app.js',
     GLOB: 'GLOB src/**/*.js',
     SYMBOLS: 'SYMBOLS src/app.js',
     DEF: 'DEF someName',

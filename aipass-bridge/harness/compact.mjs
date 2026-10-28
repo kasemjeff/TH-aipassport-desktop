@@ -94,11 +94,14 @@ export class Compactor {
    *                                     { 'flash': 100_000 }. Unknown models get
    *                                     contextTokens — conservative by default.
    * @param {number} opts.reserveTokens  headroom to leave for the reply
-   * @param {number} [opts.compactAtPercent] share of the budget at which a rotation
-   *                                     fires early. null (the default) leaves the
-   *                                     budget-minus-reserve ceiling in sole charge,
-   *                                     which is what the CLI runs on; the window's
-   *                                     settings sheet owns that knob.
+ * @param {number} [opts.compactAtPercent] share of the budget at which a rotation
+ *                                     fires early. null (the default) leaves the
+ *                                     budget-minus-reserve ceiling in sole charge,
+ *                                     which is what the CLI runs on; the window's
+ *                                     settings sheet owns that knob.
+ *                                     `AIPASS_COMPACT_AT_PERCENT` names it for a
+ *                                     terminal run — the rotation arms in the
+ *                                     experiment queue squeeze through it.
    * @param {number} opts.keepRecentBytes recent traffic never summarised away
    * @param {boolean} [opts.elideStaleResults] the elision tier: cut stale,
    *                                     bulky sends in the summarisation
@@ -122,7 +125,15 @@ export class Compactor {
     this.contextTokens = envPositive('AIPASS_CONTEXT_TOKENS', contextTokens);
     this.keepRecentBytes = envPositive('AIPASS_KEEP_RECENT_BYTES', keepRecentBytes);
     this.reserveTokens = reserveTokens;
-    this.compactAtPercent = compactAtPercent == null ? null : Math.min(100, Math.max(1, Number(compactAtPercent)));
+    // The share-of-budget trigger is the window settings sheet's knob; the env
+    // sibling exists for the same reason the others do — a terminal run (and
+    // the eval runner) builds no settings object. A low share is also how a
+    // fixture-sized task crosses two rotations, which is what the rotation
+    // arms in experiments/queue.json measure on.
+    const envPct = Number(process.env.AIPASS_COMPACT_AT_PERCENT);
+    const sheetPct = compactAtPercent == null ? null : Number(compactAtPercent);
+    const pct = Number.isFinite(envPct) && envPct > 0 ? envPct : sheetPct;
+    this.compactAtPercent = pct == null ? null : Math.min(100, Math.max(1, Math.round(pct)));
     this.elideStaleResults = envFlag('AIPASS_ELIDE', Boolean(elideStaleResults));
     this.carryMemory = envFlag('AIPASS_MEMORY', carryMemory !== false);
   }
@@ -363,7 +374,12 @@ ${transcript}`;
         ? `\nStaged but not on disk yet (Apply has not happened):\n${staged.map((s) => `- ${s}`).join('\n')}`
         : '',
       lastCheck
-        ? `\nThe last check of the staged tree did not pass (${lastCheck.verdict}):\n${String(lastCheck.text ?? '').slice(0, 600)}`
+        ? (lastCheck.verdict === 'none'
+          // A check that never ran is not a failing one: the seed used to read
+          // "did not pass (none)", and a fresh conversation would go hunting
+          // for a failure that does not exist.
+          ? `\nNothing has verified the staged tree yet — no check has run:\n${String(lastCheck.text ?? '').slice(0, 600)}`
+          : `\nThe last check of the staged tree did not pass (${lastCheck.verdict}):\n${String(lastCheck.text ?? '').slice(0, 600)}`)
         : '',
       Array.isArray(todo) && todo.length
         ? `\nThe plan/TODO checklist this run recorded, as it stands — keep it in step (send TODO with [x] as items finish):\n${todo.map((i) => `- [${i.done ? 'x' : ' '}] ${i.text}`).join('\n')}`

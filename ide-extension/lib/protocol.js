@@ -45,11 +45,13 @@ const EVENT_NAMES = Object.freeze([
   'hello', 'ping',
   // the run
   'task_start', 'assistant_delta', 'reasoning_delta', 'step', 'thinking',
-  'tool', 'note', 'firewall_note', 'nudge', 'give_up', 'ignore_done',
+  'tool_start', 'tool', 'note', 'firewall_note', 'nudge', 'give_up', 'ignore_done',
   'stagnation', 'repeat_block', 'verify_prompt', 'check_start', 'check_end',
   'lang_prompt', 'budget', 'step_limit', 'error', 'todo', 'diff_update',
   'compacted', 'helper_start', 'helper_end', 'subagent_start', 'subagent_end',
   'plugin_call', 'ask', 'done_line', 'cancelled', 'finished', 'run_stats',
+  'goal_round', 'goal_done', 'goal_blocked',
+  'inject_queued', 'injected', 'inject_orphaned',
   // the questions the backend asks the client
   'permission_request', 'plan_request',
   // the machine around the run
@@ -308,8 +310,8 @@ const FENCE_LINE = /^\s*(```|~~~)/;
  * harness must be added here, or it would reach the reader as raw wire.
  */
 const MARKER_KEYWORDS = Object.freeze([
-  'NEED', 'SEARCH', 'GLOB', 'SYMBOLS', 'DEF', 'REFS', 'RECALL', 'SKILL', 'GIT', 'VERIFY',
-  'FETCH', 'WEB', 'DELETE', 'MOVE', 'EDIT', 'CREATE', 'ATTACH', 'FIND', 'NEW',
+  'NEED', 'SEARCH', 'TREE', 'STAT', 'GLOB', 'SYMBOLS', 'DEF', 'REFS', 'RECALL', 'SKILL', 'GIT', 'VERIFY',
+  'FETCH', 'WEB', 'DELETE', 'MOVE', 'EDIT', 'CREATE', 'ATTACH', 'FIND', 'NEW', 'GOAL',
   'END', 'RUN', 'PLAN', 'TODO', 'SUBAGENT', 'TASK', 'ASK', 'DONE', 'JOBS',
 ]);
 
@@ -319,6 +321,8 @@ const SINGLE_MARKERS = [
   /^\s*NEED\s+(?:dir|list|ls)\s*$/i,
   /^\s*NEED\s+\S/i,
   /^\s*SEARCH\s+/i,
+  /^\s*TREE\b/i,
+  /^\s*STAT\s+/i,
   /^\s*GLOB\s+/i,
   /^\s*SYMBOLS\s+/i,
   /^\s*DEF\s+/i,
@@ -350,12 +354,14 @@ const BLOCK_MARKERS = [
 ];
 
 // The lines that belong to a block: its own body markers, plus the ones that
-// stand alone (JOBS polls the helpers, DONE ends the run).
+// stand alone (JOBS polls the helpers, GOAL is the model's word on the
+// project's goal, DONE ends the run).
 const BLOCK_BODY = [
   /^\s*FIND\s*$/i,
   /^\s*NEW\s*$/i,
   /^\s*END\s*$/i,
   /^\s*JOBS\s*$/i,
+  /^\s*GOAL\b/i,
   /^\s*(?:\*{1,3}|#{1,6}\s*)?DONE\b/i,
 ];
 

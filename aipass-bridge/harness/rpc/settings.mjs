@@ -14,6 +14,7 @@ import path from 'node:path';
 import { formatLogLine } from '../log-line.mjs';
 import { publicSpec, AIPASS_PROVIDER } from '../providers.mjs';
 import { clientFor } from '../provider-client.mjs';
+import { loadGoal, setGoal, pauseGoal, resumeGoal, completeGoal, blockGoal, clearGoal } from '../goal.mjs';
 // The settings file's own schema: the keys a save may write. The defaults are
 // that schema — a key the file has never heard of is not a setting.
 import { DEFAULTS } from '../settings.mjs';
@@ -257,6 +258,11 @@ export function createSettingsMethods(ctx) {
         for (const key of ['replyLanguage', 'langCheck', 'minThaiRatio', 'repeatGuard', 'repeatGuardMax', 'attempts', 'verifyCommand', 'requireCheck']) {
           if (params[key] != null) h.options[key] = appSettings.get(key);
         }
+        // The reading switches: the preamble and the read group read their
+        // options per run, so a save is live on the next one.
+        for (const key of ['recall', 'explore', 'parallelReads']) {
+          if (params[key] != null) h.options[key] = appSettings.get(key);
+        }
         // The playbook folders are per project, so each harness rebuilds its
         // own list. The plugin list is one module for the whole backend and is
         // reloaded once below.
@@ -321,6 +327,28 @@ export function createSettingsMethods(ctx) {
     },
     async 'memory.clear'(params = {}) {
       targetFor(params).clearCrossSessionMemory();
+      return { ok: true };
+    },
+
+    /* ------------------------------------------------------------------ goal */
+    // One goal per project, in the same file `aipass goal` writes, so the
+    // window and the terminal cannot disagree about what is being finished.
+    async 'goal.get'(params = {}) {
+      return { goal: loadGoal(targetFor(params).root) };
+    },
+    async 'goal.set'(params = {}) {
+      const goal = setGoal(targetFor(params).root, params.objective, {
+        maxRounds: params.maxRounds,
+        force: params.force === true,
+      });
+      return { goal };
+    },
+    async 'goal.pause'(params = {}) { return { goal: pauseGoal(targetFor(params).root) }; },
+    async 'goal.resume'(params = {}) { return { goal: resumeGoal(targetFor(params).root) }; },
+    async 'goal.done'(params = {}) { return { goal: completeGoal(targetFor(params).root, params.done) }; },
+    async 'goal.block'(params = {}) { return { goal: blockGoal(targetFor(params).root, params.reason) }; },
+    async 'goal.clear'(params = {}) {
+      clearGoal(targetFor(params).root);
       return { ok: true };
     },
 

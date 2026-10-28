@@ -140,3 +140,106 @@ test('the spill locator starts where the head really ended, not where the byte c
   const page = await tools.read(`${loc[1]} ${loc[2]}-${Number(loc[2]) + 1}`);
   assert.match(page, new RegExp(`row ${firstMissing} `), 'the row after the head is the row the range starts with');
 });
+
+/* The exploration tools: TREE, STAT, LIST -l, and SEARCH's context flags. */
+
+test('TREE shows a folder shape, directories first, and honours -L', async () => {
+  const dir = mkTracked({
+    'src/app.js': 'x',
+    'src/lib/util.js': 'x',
+    'docs/readme.md': 'x',
+    'node_modules/pkg/index.js': 'x',
+    '.env': 'SECRET=1',
+  });
+  const tools = toolsIn(dir);
+  const out = await tools.tree('src');
+  assert.match(out, /^src\/$/m, 'the requested folder is named');
+  assert.match(out, /^  lib\/$/m);
+  assert.match(out, /^    util\.js$/m);
+  assert.match(out, /^  app\.js$/m);
+  assert.doesNotMatch(out, /node_modules|\.env/, 'the usual noise stays out');
+
+  const shallow = await tools.tree('src -L 1');
+  assert.match(shallow, /lib\//);
+  assert.doesNotMatch(shallow, /util\.js/, '-L 1 stops below the first level');
+  assert.match(await tools.tree('src -L 99'), /TREE -L takes 1\.\.6/);
+});
+
+test('TREE includes a file this run staged, before it reaches the disk', async () => {
+  const dir = mkTracked({ 'src/app.js': 'x' });
+  const overlay = new Overlay(dir);
+  const tools = createTools({ root: dir, overlay });
+  overlay.set(path.join(dir, 'src', 'new.js'), 'staged\n');
+  const out = await tools.tree('src');
+  assert.match(out, /new\.js/, "a staged file is part of the run's view");
+});
+
+test('STAT names kind, size, lines and modified time', async () => {
+  const dir = mkTracked({ 'a.txt': 'one\ntwo\n' });
+  const tools = toolsIn(dir);
+  const file = await tools.stat('a.txt');
+  assert.match(file, /^a\.txt: file, 8 B, 2 line\(s\), modified \d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
+  const folder = await tools.stat('.');
+  assert.match(folder, /^\.: directory, 1 entry/);
+  assert.match(await tools.stat('missing.txt'), /^err: no such file or directory: missing\.txt/);
+});
+
+test('STAT reports the staged version, not the disk copy', async () => {
+  const dir = mkTracked({ 'a.txt': 'one\n' });
+  const overlay = new Overlay(dir);
+  const tools = createTools({ root: dir, overlay });
+  overlay.set(path.join(dir, 'a.txt'), 'one\ntwo\nthree\n');
+  const out = await tools.stat('a.txt');
+  assert.match(out, /3 line\(s\)/);
+  assert.match(out, /staged this run/);
+});
+
+test('LIST -l adds size and modified time, before or after the path', async () => {
+  const dir = mkTracked({ 'a.txt': '12345', 'sub/b.txt': 'x' });
+  const tools = toolsIn(dir);
+  const out = await tools.list('-l .');
+  assert.match(out, /5 B\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}\s+a\.txt/);
+  assert.match(out, /dir\s+sub\//);
+  const tail = await tools.list('. -l');
+  assert.match(tail, /5 B\s+.*a\.txt/, 'the flag also works after the path');
+  const names = await tools.list('.');
+  assert.doesNotMatch(names, /\d{4}-\d{2}-\d{2}/, 'the default listing stays names only');
+});
+
+test('SEARCH -C/-A/-B set the context window', async () => {
+  const dir = mkTracked({ 'app.js': 'one\ntwo\nneedle\nfour\nfive\nsix\n' });
+  const tools = toolsIn(dir);
+  const both = await tools.search('-C 2 needle');
+  assert.match(both, /app\.js:1- one/);
+  assert.match(both, /app\.js:2- two/);
+  assert.match(both, /app\.js:3: needle/);
+  assert.match(both, /app\.js:4- four/);
+  assert.match(both, /app\.js:5- five/);
+  assert.doesNotMatch(both, /app\.js:6-/);
+
+  const after = await tools.search('-A 1 needle');
+  assert.doesNotMatch(after, /app\.js:2-/, 'an explicit window starts at zero on the other side');
+  assert.match(after, /app\.js:4- four/);
+
+  const before = await tools.search('-B1 needle');
+  assert.match(before, /app\.js:2- two/);
+  assert.doesNotMatch(before, /app\.js:4-/);
+
+  assert.match(await tools.search('-C 99 needle'), /takes 0\.\.10/);
+});
+
+test('EDIT retries a FIND block that differs only in line endings or trailing spaces', async () => {
+  const dir = mkTracked({
+    'crlf.txt': 'alpha\r\nbeta\r\ngamma\r\n',
+    'spaces.txt': 'alpha   \nbeta\n',
+  });
+  const overlay = new Overlay(dir);
+  const tools = createTools({ root: dir, overlay });
+  const crlf = await tools.replace('crlf.txt', ['alpha\nbeta', 'ALPHA\nBETA']);
+  assert.match(crlf, /line endings and trailing spaces were normalized/);
+  assert.equal(overlay.readAt(path.join(dir, 'crlf.txt')), 'ALPHA\r\nBETA\r\ngamma\r\n', 'the file keeps its CRLF endings');
+
+  const spaces = await tools.replace('spaces.txt', ['alpha\nbeta', 'ALPHA\nBETA']);
+  assert.match(spaces, /line endings and trailing spaces were normalized/);
+  assert.equal(overlay.readAt(path.join(dir, 'spaces.txt')), 'ALPHA\nBETA\n');
+});

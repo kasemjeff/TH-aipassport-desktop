@@ -53,6 +53,11 @@ export function normalizeOptions(options = {}) {
   const useSlim = Boolean(sheet.slim);
   const seedText = sheet.seedText ?? null;
   const pluginTools = sheet.pluginTools ?? [];
+  // What plugins contributed to the turn-1 message, and the machine's own
+  // helper roles. Both ride the sheet so the run reads one object; neither
+  // is a number to clamp, only a list to carry.
+  const pluginSections = Array.isArray(sheet.pluginSections) ? sheet.pluginSections : [];
+  const helperPresets = sheet.helperPresets && typeof sheet.helperPresets === 'object' ? sheet.helperPresets : {};
   // (Thai pack) Language policy. `replyLanguage` is what the preamble tells
   // the model; `langCheck` is the stop hook that measures it — the closing
   // message's share of Thai letters (code and URLs excluded) must reach
@@ -71,6 +76,7 @@ export function normalizeOptions(options = {}) {
   return {
     maxSteps, maxStepsWire, maxToolCalls, maxWallClockMs, maxCredits,
     model, thinking, temperature, useSlim, seedText, pluginTools,
+    pluginSections, helperPresets,
     replyLanguage, langCheck, minThaiRatio, repeatGuard, repeatGuardMax,
   };
 }

@@ -16,6 +16,11 @@ path outranks a gap that adds a surface. A gap the repo already declares
 ("not shipped", "won't build") is a policy, not a gap — those stay as they are
 unless a named failure says the policy is wrong.
 
+> **The next wave.** The 2026-10-28 comparison against Claude Code 2.1.312,
+> Codex CLI 0.165.0 and DeepSeek Harness lives in
+> [`FEATURE_GAPS_WAVE3.md`](./FEATURE_GAPS_WAVE3.md). This file stays as the
+> record of the batch below.
+
 **Where the batch stands (2026-10-21).** Wave 1 landed — every row below
 carries its own status, and the evidence is the test title named in the
 row. Wave 2 landed too: the window has the checkpoint list and the restore

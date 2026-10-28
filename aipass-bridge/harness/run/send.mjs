@@ -16,7 +16,7 @@
 // conversation), the recoverable waits and the final "error" are three
 // different endings and they used to be one `catch` block deep inside a
 // thousand-line function.
-import { resilientSay, recoverWaits, sendRecoverable, waitLabel } from '../bridge.mjs';
+import { resilientSay, recoverWaits, sendRecoverable, isContextOverflow, jitterWait, waitLabel } from '../bridge.mjs';
 import { RunContext } from './context.mjs';
 
 /**
@@ -44,20 +44,43 @@ export function createSender(run) {
    * @param {any} [withParts]
    */
   const say = async (text, withParts = null) => {
-    const res = await run.bridge.chat({
-      message: text,
-      parts: withParts ?? null,
-      model: run.sheet.model,
-      thinkingLevel: run.sheet.thinking,
-      temperature: run.sheet.temperature,
-      ...(run.conversation ? { conversation: run.conversation, temporary: run.conversationTemporary } : {}),
-      signal: run.options.signal ?? null,
-      onText: (/** @type {string} */ t) => run.emit('assistant_delta', { text: t }),
-      onReasoning: (/** @type {string} */ t) => run.emit('reasoning_delta', { text: t }),
-    });
-    run.session?.append('user', { text, bytes: Buffer.byteLength(text) });
-    run.session?.append('assistant', { text: res.text, reasoning: res.reasoning });
-    return res.text;
+    // What streamed before the send died. A send that delivered words the
+    // person SAW is a different failure from one that delivered nothing: the
+    // message reached the server's context either way, and the transcript
+    // has to hold what was on screen — dsh calls this the interrupted anchor.
+    let delivered = '';
+    try {
+      const res = await run.bridge.chat({
+        message: text,
+        parts: withParts ?? null,
+        model: run.sheet.model,
+        thinkingLevel: run.sheet.thinking,
+        temperature: run.sheet.temperature,
+        ...(run.conversation ? { conversation: run.conversation, temporary: run.conversationTemporary } : {}),
+        signal: run.options.signal ?? null,
+        onText: (/** @type {string} */ t) => { delivered += t; run.emit('assistant_delta', { text: t }); },
+        onReasoning: (/** @type {string} */ t) => run.emit('reasoning_delta', { text: t }),
+      });
+      run.session?.append('user', { text, bytes: Buffer.byteLength(text) });
+      run.session?.append('assistant', { text: res.text, reasoning: res.reasoning });
+      return res.text;
+    } catch (err) {
+      // (interrupted anchor) Deltas streamed, then the send died — a stop, or
+      // a refusal that arrives after the answer started (`err.streamed`, which
+      // the rewrite chain never resends over). The words reached the server
+      // and the person's screen, so both sides are recorded: the message as
+      // sent, and the delivered prefix marked `interrupted` — the next send's
+      // reply continues a conversation whose transcript holds what came
+      // before it, instead of pretending nothing streamed. A failure with
+      // nothing delivered records nothing: the retry path may resend the same
+      // message, and a duplicate user entry would be a lie about what the
+      // server ever received.
+      if (delivered) {
+        run.session?.append('user', { text, bytes: Buffer.byteLength(text) });
+        run.session?.append('assistant', { text: delivered, interrupted: true });
+      }
+      throw err;
+    }
   };
 
   /**
@@ -102,7 +125,11 @@ export function createSender(run) {
    *   - a dead conversation → one swap, on the run's first send only
    *   - a refusal      → the bounded recovery, and then `error`
    *
-   * @returns {Promise<{reply: string|null, stopReason: string|null}>}
+   * A refusal that names the context window comes back as
+   * `{ stopReason: 'error', overflow: <message> }` instead — the loop owns
+   * the rotation that heals it, and re-fires the error ending when it cannot.
+   *
+   * @returns {Promise<{reply: string|null, stopReason: string|null, overflow?: string}>}
    */
   const send = async () => {
     const recover = recoverWaits();
@@ -157,18 +184,28 @@ export function createSender(run) {
             continue;
           }
         }
+        // (overflow) A refusal that names the context window is the one
+        // failure a rotation heals — but the rotation is the loop's to run
+        // (it owns the summariser and the seed). Hand the shape up instead of
+        // ending here: the loop retries once on a fresh conversation, or
+        // re-fires this error ending when it cannot. The error event and the
+        // note are deferred with it — a send the rotation recovers must not
+        // read as a failure in the transcript.
+        if (isContextOverflow(why)) {
+          return { reply: null, stopReason: 'error', overflow: String(why.message ?? why) };
+        }
         // A send that delivered nothing and heals by waiting — the extension's
         // cycle, a tab mid-reload, a rate window, a 403 the rewrite chain could
         // not clear — is paused and given the same message again before it is
         // allowed to end the run (sendRecoverable says which shapes; the waits
         // are bounded). The ending below is what stays when they are spent.
         if (attempt < recover.length && sendRecoverable(why)) {
-          const wait = recover[attempt];
+          const pause = jitterWait(recover[attempt]);
           run.sendRecoveries += 1;
-          const line = `the send was refused — waiting ${waitLabel(wait)}, then sending it again (recovery ${attempt + 1}/${recover.length})`;
+          const line = `the send was refused — waiting ${waitLabel(pause)}, then sending it again (recovery ${attempt + 1}/${recover.length})`;
           run.note(line);
           run.emit('firewall_note', { text: line });
-          await sleep(wait);
+          await sleep(pause);
           continue;
         }
         run.emit('error', { message: why.message });

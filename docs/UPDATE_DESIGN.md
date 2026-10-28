@@ -312,10 +312,9 @@ export function rollback({ home });
 `AIPASS_BRIDGE` and `AIPASS_HOME`, and the only way to point the app at a
 local feed for a test.
 
-**The check is not on the page.** The window's CSP has
-`connect-src 'self' http://127.0.0.1:* http://localhost:*` and
-`withGlobalTauri` is off, so the page cannot reach the feed and does not need
-to: the backend fetches it and answers over the existing `/rpc`. The page
+**The check is not on the page.** The window's CSP has `connect-src 'self'`
+and `withGlobalTauri` is off, so the page cannot reach the feed and does not
+need to: the backend fetches it and answers over the existing `/rpc`. The page
 gains no new privilege (`desktop/AGENTS.md`: "the page is granted nothing it
 does not use").
 

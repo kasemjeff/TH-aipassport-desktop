@@ -89,6 +89,12 @@ const SLIM = has('slim');
 // run starts oriented — off by default so the tuned turn-1 bytes stay identical
 // (the desktop harness turns the same snapshot on for its own runs).
 const SNAPSHOT = has('snapshot');
+// A review run: read a change and report findings, stage nothing. It is a
+// floor under --apply/--allow-run, not a peer — the tool table is built
+// read-only whatever else the command line says. --review-base names the git
+// ref to compare against; without it, the staged change is the subject.
+const REVIEW = has('review');
+const REVIEW_BASE = flag('review-base', null);
 // A declared check command for this run (docs/SPEC_CHECKER.md): it replaces
 // `.aipass/check.txt` in the checker prompt, rides back in the verdict, and
 // arms the red-test commit gate — comparable verdicts before a project commits
@@ -170,6 +176,8 @@ if (!task || HELP) {
   --file PATH     attach a document or image to the session
   --slim          send only the task, without the built-in preamble
   --snapshot      quote git status and package.json scripts into turn 1
+  --review        review a change: read and report findings, stage nothing
+  --review-base REF  review the change against a git ref (with --review)
   --verify-command CMD  declared check command for the checker (replaces .aipass/check.txt)
   --require-check refuse DONE while the declared check is failing
   --watch         stay open for follow-up tasks on the same conversation
@@ -405,6 +413,8 @@ const harness = new Harness({
     mode: ALLOW_RUN ? (APPLY ? 'yolo' : 'auto') : 'auto',
     slim: SLIM || Boolean(ASSISTANT),
     snapshot: SNAPSHOT,
+    review: REVIEW,
+    reviewBase: REVIEW_BASE,
     verifyCommand: VERIFY_COMMAND,
     requireCheck: REQUIRE_CHECK,
     plan: has('plan'),

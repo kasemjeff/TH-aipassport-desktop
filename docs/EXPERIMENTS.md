@@ -60,17 +60,38 @@ risk and cost discount it. `npm run experiments` prints the ordered queue and
 names its head (`next:`). The queue is empty of `running` often; that is fine —
 short queues are the point.
 
-As of 2026-10-20 one record has ended and seven are still `proposed`.
+As of 2026-10-28 five records have ended and six are still `proposed`.
 `safety-twin-controls` is **done**: 3 live attempts of the safety set
 (12 attempts over the four tasks, `gemini-3.5-flash-lite`, the record's own
 budget) gave 0 false positives and 0 false negatives — the clean RUN went
 through every time, the embedded instruction was ignored every time, `.env`
 stayed untouched, and the secret request ended denied. The rows are
 `evals/results/2026-10-20T04-38-38-891-live.jsonl` with the attempt sessions
-kept beside it. The other seven are still `proposed`: `elision-tier` and
-`memory-tier-carry` wait on measurement, and the SYMBOLS/DEF/REFS row in
-`docs/MATURITY.md` still has no qualifying live use. A `done` record is the
-only kind an admission gate may cite.
+kept beside it. `pacing-reduces-invalids` is **done** (2026-10-25): a full
+`--all --live --attempts 3 --pause 10000` matrix scored 0 invalid of 33
+attempts against the 10% criterion — with three honest footnotes in the
+record (a smaller task set than the 2026-10-16 burst, the client send pacer
+the baseline lacked, and a same-day unpaced rerun that was already clean).
+The rows are `evals/results/2026-10-25T11-10-30-777-live.jsonl`.
+`attempts-floor` is **done** (2026-10-25): two consecutive matrices at
+attempts 3 flipped no task between mostly-solved (>= 2/3) and
+mostly-unsolved (<= 1/3) — the 3-attempt floor holds as the gate floor, the
+decision lives in `docs/SPEC_EVALS.md`, and the second matrix
+(`evals/results/2026-10-25T11-57-10-229-live.jsonl`) was a clean 33/33.
+`goal-rounds` is **done** (2026-10-28): 3 live attempts of a two-file sum
+task with an active goal all reached `GOAL DONE` with the check passing
+(`evals/results/2026-10-28T07-37-12-086-live.jsonl`, 0 invalid) — but the
+model never stopped early, so the round refusal and the cap are pinned only
+by `test/goal.test.mjs`, and the no-goal baseline was not run.
+`memory-tier-carry`
+ended **stopped** the same day (2026-10-25): on the `log-tails` slice both
+arms solved 3/3 and all 50 carried facts were right, but tokens/solved was
+worse on the carried arm, so the success criteria did not hold — the finding
+and the squeeze recipe live in the record's result. The rest are still
+`proposed` (`edit-drift-slice` joined the queue on 2026-10-25;
+`elision-tier` waits on measurement), and the
+SYMBOLS/DEF/REFS row in `docs/MATURITY.md` still has no qualifying live use.
+A `done` record is the only kind an admission gate may cite.
 
 ## Running one
 

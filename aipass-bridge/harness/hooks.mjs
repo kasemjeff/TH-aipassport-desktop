@@ -9,6 +9,18 @@
 //   beforeCommit — before a git commit goes through (the write side of git)
 //   done         — when a run ends
 //
+// Wave 3.4 grew the list from three to nine. The six added moments are the
+// ones people ask for first — stop a call before it runs, put a note in front
+// of the session, carry something across a compaction:
+//
+//   sessionStart — once, before the first task of a session
+//   promptSubmit — before every task the person sends
+//   beforeTool   — before one tool call; a non-zero exit refuses that call,
+//                  and no permission mode can override the person's command
+//   afterTool    — after one tool call; what it prints rides the result
+//   preCompact   — before the conversation is summarised and rotated
+//   stop         — when a run ends without a DONE (cancelled, budget, stalled)
+//
 // Four rules shape every hook:
 //
 //   1. An ARGV ARRAY, never a shell string. The same rule the git wrapper
@@ -170,10 +182,10 @@ export async function loadHooks(dir = aipassHome()) {
  * Run one hook command and report what it said.
  *
  * @param {string} command the command line the person configured
- * @param {{root: string, timeoutMs?: number, signal?: AbortSignal|null}} opts
+ * @param {{root: string, timeoutMs?: number, signal?: AbortSignal|null, env?: Record<string, string>|null}} opts
  * @returns {Promise<{ok: boolean, code: number|null, output: string, note: string, command: string}>}
  */
-export async function runHook(command, { root, timeoutMs = HOOK_TIMEOUT_MS, signal = null } = {}) {
+export async function runHook(command, { root, timeoutMs = HOOK_TIMEOUT_MS, signal = null, env = null } = {}) {
   const text = String(command ?? '').trim();
   const failed = (note) => ({ ok: false, code: null, output: '', note, command: text });
   if (!text) return { ok: true, code: null, output: '', note: '', command: text };
@@ -200,6 +212,11 @@ export async function runHook(command, { root, timeoutMs = HOOK_TIMEOUT_MS, sign
         cwd: root,
         windowsHide: true,
         shell: false,
+        // The moment and the call ride the environment, so one script can be
+        // configured for several moments and read what it is looking at. A
+        // variable the caller did not set stays out rather than becoming the
+        // string "undefined".
+        env: env ? { ...process.env, ...env } : process.env,
         // A POSIX group leader is what lets the tree-kill reach the
         // grandchildren; on Windows the tree is addressed by taskkill /T.
         detached: process.platform !== 'win32',
@@ -279,6 +296,27 @@ function verdictLine(moment, result) {
 }
 
 /**
+ * What a moment's hooks SAID, without the exit-0 verdict lines.
+ *
+ * A lifecycle hook that prints nothing has nothing to add, and a line saying
+ * "exit 0" on every tool call would be noise in the transcript. A failure is
+ * still named: "reported, not fatal" means the model reads it. The caller
+ * decides where the text goes — the task, the tool result, the summary.
+ *
+ * @param {{moment: string, ran: Array<{ok: boolean, output: string, note: string, command: string}>}|null} result
+ * @returns {string}
+ */
+export function hookSaid(result) {
+  const lines = [];
+  for (const r of result?.ran ?? []) {
+    const said = String(r.output ?? '').trim();
+    if (said) lines.push(said);
+    else if (!r.ok) lines.push(verdictLine(result.moment, r));
+  }
+  return lines.join('\n');
+}
+
+/**
  * Run the hooks of one moment, in order, and report every verdict.
  *
  * The list is the chain: every command runs, so no verdict is hidden behind
@@ -286,16 +324,19 @@ function verdictLine(moment, result) {
  * gate a `beforeCommit` moment uses.
  *
  * @param {string} moment one of HOOK_MOMENTS
- * @param {{root: string, hooks?: object|null, timeoutMs?: number, signal?: AbortSignal|null}} opts
+ * @param {{root: string, hooks?: object|null, timeoutMs?: number, signal?: AbortSignal|null, env?: Record<string, string>|null}} opts
  * @returns {Promise<{moment: string, ok: boolean, ran: Array<object>, text: string}>}
  */
-export async function runHooks(moment, { root, hooks = null, timeoutMs = HOOK_TIMEOUT_MS, signal = null } = {}) {
+export async function runHooks(moment, { root, hooks = null, timeoutMs = HOOK_TIMEOUT_MS, signal = null, env = null } = {}) {
   const conf = hooks ? normalizeHooks(hooks) : await loadHooks();
   const list = Array.isArray(conf?.[moment]) ? conf[moment] : [];
   if (!list.length) return { moment, ok: true, ran: [], text: '' };
+  // Every hook knows which moment it is running for, without the settings file
+  // repeating it in each command line.
+  const fullEnv = { AIPASS_HOOK: moment, ...(env ?? {}) };
   const ran = [];
   for (const command of list) {
-    ran.push(await runHook(command, { root, timeoutMs, signal }));
+    ran.push(await runHook(command, { root, timeoutMs, signal, env: fullEnv }));
   }
   const lines = [];
   for (const result of ran) {
@@ -306,4 +347,4 @@ export async function runHooks(moment, { root, hooks = null, timeoutMs = HOOK_TI
   return { moment, ok: ran.every((r) => r.ok), ran, text: lines.join('\n') };
 }
 
-export default { HOOK_MOMENTS, HOOK_TIMEOUT_MS, loadHooks, parseCommandLine, runHook, runHooks };
+export default { HOOK_MOMENTS, HOOK_TIMEOUT_MS, loadHooks, parseCommandLine, runHook, runHooks, hookSaid };

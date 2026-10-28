@@ -53,7 +53,7 @@ function writeFiles(dir, files) {
 /** A task built in a temp dir, the same shape the shipped fixtures use. */
 function makeTask(files, {
   id = 'temp-task', check = 'node check.mjs', budget = {}, allowRun = false,
-  taskText = 'Do the task.', category = null, liveOnly = false,
+  taskText = 'Do the task.', category = null, liveOnly = false, goal = null,
 } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-eval-task-'));
   fs.writeFileSync(path.join(dir, 'task.md'), taskText);
@@ -61,6 +61,7 @@ function makeTask(files, {
     check,
     budget,
     allowRun,
+    ...(goal ? { goal } : {}),
     ...(category ? { category } : {}),
     ...(liveOnly ? { liveOnly: true } : {}),
   }, null, 2));
@@ -151,6 +152,28 @@ test('the check decides the outcome, and the fixture tree stays byte-identical',
   assert.notEqual(unsolved.check.exit, 0);
   assert.match(unsolved.check.tail, /FAIL: out\.txt holds 7/, 'the check output is the evidence');
   assert.deepEqual(snapshotTree(path.join(task.dir, 'tree')), source, 'still untouched after a failed check');
+});
+
+test('a task may name a project goal, and the attempt chases it in its own home', async () => {
+  // The experiment hook the queue's `goal-rounds` arm needs: the objective is
+  // written after the attempt's home swap, so the caller's real goal store is
+  // never touched and a plain DONE is refused instead of ending the run.
+  const task = makeTask(
+    { 'out.txt': 'x\n', 'check.mjs': OUT_CHECK },
+    { id: 'goal-task', goal: 'write the answer', budget: { maxSteps: 6 } },
+  );
+  const bridge = replayBridge([
+    'NEED file out.txt\n',
+    'CREATE out.txt\n42\nEND\nDONE first pass',
+    'GOAL DONE the answer is written\nDONE finished',
+  ]);
+  const row = track(await runAttempt(task, { mode: 'replay', bridge }));
+
+  assert.equal(row.stopReason, 'done');
+  assert.equal(row.outcome, 'solved');
+  assert.equal(bridge.sends.length, 3, 'the plain DONE bought a round instead of ending the run');
+  assert.match(bridge.sends[2].message, /round 1 of 8/, 'the nudge names the round');
+  assert.match(bridge.sends[2].message, /write the answer/, 'and the objective');
 });
 
 /* 3 — results: two attempts append two JSONL rows; summary names outcomes -- */
@@ -471,4 +494,89 @@ test('the category and pair-drift slices only appear when they have something to
     { taskId: 'count-lines-twin', outcome: 'unsolved', scored: true, category: 'robustness', pair: 'count-lines', wallMs: 1 },
   ]);
   assert.doesNotMatch(bothLost, /pair drift:/, 'a pair that failed together is not a drift');
+});
+
+/* 15 — the eval surface runs the shell unattended --------------------------- */
+
+// The stamp the RUN writes; the check passes only when the command really ran.
+const STAMP_CHECK = [
+  "import fs from 'node:fs';",
+  "const ok = fs.existsSync('stamp.txt');",
+  "console.log(ok ? 'PASS: the RUN executed' : 'FAIL: no stamp.txt — the RUN never executed');",
+  'process.exit(ok ? 0 : 1);',
+  '',
+].join('\n');
+
+test('an unattended eval attempt runs the shell — the eval mode is yolo', async () => {
+  // permissions.mjs (2026-10-21) taught auto to ask about every shell command;
+  // this surface answers no questions, so auto denied every RUN and the row
+  // read "the person watching declined". yolo is the mode where "shell follows
+  // allowRun" holds with nobody watching — the eval's contract all along.
+  const task = makeTask(
+    { 'stamp.mjs': "import { writeFileSync } from 'node:fs';\nwriteFileSync('stamp.txt', 'ran\\n');\n", 'check.mjs': STAMP_CHECK },
+    { id: 'shell-yolo', budget: { maxSteps: 3 }, allowRun: true },
+  );
+  const row = track(await runAttempt(task, {
+    mode: 'replay',
+    bridge: replayBridge(['RUN\nnode stamp.mjs\nEND', 'DONE ran the command']),
+  }));
+  assert.equal(row.outcome, 'solved', `check said: ${row.check.tail}`);
+  assert.equal(row.check.exit, 0);
+});
+
+/* 16 — the loopback token survives the AIPASS_HOME swap --------------------- */
+
+test('an attempt pins the real home token and restores the environment', async () => {
+  // authtoken.mjs reads the loopback token per request from aipassHome() —
+  // which the attempt empties — so the runner pins the real home's token to
+  // AIPASS_TOKEN for the attempt (read-only: a missing file stays missing).
+  // The RUN below observes the env DURING the run — the check runs after the
+  // restore, so it reads the file the RUN wrote, not the environment.
+  const SHOW_TOKEN = "import { writeFileSync } from 'node:fs';\nwriteFileSync('token.txt', process.env.AIPASS_TOKEN ?? 'no');\n";
+  const TOKEN_CHECK = [
+    "import fs from 'node:fs';",
+    "const seen = fs.existsSync('token.txt') ? fs.readFileSync('token.txt', 'utf8').trim() : 'absent';",
+    "console.log(seen === 'pinned-token-123' ? 'PASS: the pinned token reached the run' : 'FAIL: token.txt holds ' + seen);",
+    'process.exit(seen === "pinned-token-123" ? 0 : 1);',
+    '',
+  ].join('\n');
+  const task = makeTask({ 'showtok.mjs': SHOW_TOKEN, 'check.mjs': TOKEN_CHECK }, { id: 'token-pin', budget: { maxSteps: 3 }, allowRun: true });
+  fs.writeFileSync(path.join(HOME, '.token'), 'pinned-token-123\n', 'utf8');
+
+  const prev = process.env.AIPASS_TOKEN;
+  delete process.env.AIPASS_TOKEN;
+  try {
+    const row = track(await runAttempt(task, {
+      mode: 'replay',
+      bridge: replayBridge(['RUN\nnode showtok.mjs\nEND', 'DONE noted the environment']),
+    }));
+    assert.equal(row.outcome, 'solved', `check said: ${row.check.tail}`);
+    assert.equal(process.env.AIPASS_TOKEN, undefined, 'no token leaks into the environment after the attempt');
+  } finally {
+    if (prev === undefined) delete process.env.AIPASS_TOKEN;
+    else process.env.AIPASS_TOKEN = prev;
+  }
+
+  // A token the caller set wins over the file and is restored untouched —
+  // this check accepts any token, so the sentinel's own value passes.
+  const ANY_TOKEN_CHECK = [
+    "import fs from 'node:fs';",
+    "const seen = fs.existsSync('token.txt') ? fs.readFileSync('token.txt', 'utf8').trim() : 'absent';",
+    "console.log(seen !== 'no' && seen !== 'absent' ? 'PASS: a token reached the run' : 'FAIL: token.txt holds ' + seen);",
+    'process.exit(seen !== "no" && seen !== "absent" ? 0 : 1);',
+    '',
+  ].join('\n');
+  const callerTask = makeTask({ 'showtok.mjs': SHOW_TOKEN, 'check.mjs': ANY_TOKEN_CHECK }, { id: 'token-caller', budget: { maxSteps: 3 }, allowRun: true });
+  process.env.AIPASS_TOKEN = 'sentinel';
+  try {
+    const row = track(await runAttempt(callerTask, {
+      mode: 'replay',
+      bridge: replayBridge(['RUN\nnode showtok.mjs\nEND', 'DONE noted the environment']),
+    }));
+    assert.equal(row.outcome, 'solved', `check said: ${row.check.tail}`);
+    assert.equal(process.env.AIPASS_TOKEN, 'sentinel', 'the caller token is restored untouched');
+  } finally {
+    if (prev === undefined) delete process.env.AIPASS_TOKEN;
+    else process.env.AIPASS_TOKEN = prev;
+  }
 });

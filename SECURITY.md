@@ -220,7 +220,8 @@ Then restart the bridge and reload the extension.
   shell's declaration covers the asset protocol, which this window does not
   use. Scripts come from the app itself (no inline, no eval), `object-src`
   and `form-action` are locked down, the window cannot be framed, and
-  `connect-src` is the backend plus the loopback it is served from. The
+  `connect-src` is the backend itself — the page is served from it, so
+  `'self'` names exactly the one loopback origin it may talk to. The
   Tauri capability set is window + event only (no fs/shell/http/tray/menu),
   the page gets no `window.__TAURI__` at all, the installer no longer ships
   the developer test suite, and the Chrome extension's host access is the
@@ -301,7 +302,8 @@ Three classes, one rule each:
 - **The repository (public):** code, docs and fixtures. Never secrets —
   `*.har` and `aipass*.md` captures are git-ignored for exactly this reason.
 - **The machine store, `~/.aipass/` (sensitive):** sessions (your text
-  verbatim), uploads, logs and eval rows. Copyable and deletable by category
+  verbatim), goals (the objective you typed — it is sent to the model with
+  every run), uploads, logs and eval rows. Copyable and deletable by category
   (`docs/DATA_FORMATS.md`); treat it like a drawer of documents, not a cache.
 - **Secrets (never read by the model):** anything matching the
   `SECRET_RULES` floor above, plus `~/.aipass/.token`. The token is a
@@ -378,6 +380,13 @@ change. The honest residuals are the "Known limits" below.
 
 ## Known limits, not bugs
 
+- The project's own instruction file (`AGENTS.md`, or `CLAUDE.md` /
+  `GEMINI.md`) is pasted into the first message as standing conventions. It is
+  repository content, not a privilege: the permission floor, the secret screen
+  and the overlay still decide what happens, and the preamble says the file
+  cannot lift them. A repository you do not trust can still try to steer the
+  model with it — review it like code before running an agent there
+  (`harness/instructions.mjs`; `AIPASS_INSTRUCTIONS=off` turns it off).
 - Every message appears in your account's chat history. This drives the real
   product.
 - The agent's `--allow-run` executes shell commands in the project root. It is off

@@ -346,20 +346,21 @@ test('a settings file that cannot be read is surfaced, not silently defaulted', 
 });
 
 test('the settings carry every value the applier reads', () => {
-  // The applier in rpc.mjs reads `searchI`, `attach` and `webScratch` off
-  // the settings and assigns them onto the harness options. A key that was
-  // not there read as `undefined` and overwrote the harness's own default
-  // with nothing.
-  for (const key of ['searchI', 'attach', 'webScratch']) {
+  // The applier in rpc.mjs reads the run's switches off the settings and
+  // assigns them onto the harness options. A key that was not there read as
+  // `undefined` and overwrote the harness's own default with nothing — how
+  // the reading batch's `explore` and `parallelReads` went dead in the file:
+  // the run sheet had them, the settings file's schema did not.
+  const switches = ['searchI', 'attach', 'webScratch', 'recall', 'explore', 'parallelReads'];
+  for (const key of switches) {
     assert.ok(key in DEFAULTS, `${key} is part of the settings`);
     assert.equal(typeof DEFAULTS[key], 'boolean', `${key} is a switch`);
   }
   const dir = scratch();
   try {
     const s = new Settings(dir, 'settings.json');
-    assert.equal(s.get('searchI'), false);
-    assert.equal(s.get('attach'), false);
-    assert.equal(s.get('webScratch'), false);
+    for (const key of ['searchI', 'attach', 'webScratch']) assert.equal(s.get(key), false);
+    for (const key of ['recall', 'explore', 'parallelReads']) assert.equal(s.get(key), true);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

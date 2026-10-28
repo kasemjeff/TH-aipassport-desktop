@@ -26,6 +26,8 @@ import {
   REMINDER, REMINDER_HEAD, REMINDER_TAIL, prose, parse, parseTodo, mergeTodo, READING, attemptedMarker,
   preamble as buildPreamble,
 } from './protocol.mjs';
+import { loadProjectInstructions } from './instructions.mjs';
+import { createGoalController } from './goal.mjs';
 import { decode } from './bridge.mjs';
 import { classify, classifyPlugin, isGitCommit } from './permissions.mjs';
 import { posix, DELETED } from './overlay.mjs';
@@ -37,6 +39,8 @@ import { sharedWriteRefusal } from './sandbox.mjs';
 import { parseGitArg } from './git.mjs';
 import { PATHY, pathVariants, beYearNote } from './argguard.mjs';
 import { validateCall } from './validate.mjs';
+import { reviewBrief } from './review.mjs';
+import { runHooks, hookSaid } from './hooks.mjs';
 import { RunContext } from './run/context.mjs';
 import { createBudgets } from './run/budgets.mjs';
 import { createDoneGates } from './run/gates.mjs';
@@ -51,6 +55,17 @@ export { normalizeOptions } from './run/options.mjs';
 // and which files count as code for the verification nudge.
 const MUTATING = new Set(['write', 'replace', 'delete', 'move']);
 const CODE_FILE = /\.(m?js|cjs|tsx?|jsx|py|rb|go|rs|java|cs|php|swift|kt|c|h|cpp|hpp|sh|ps1|css|html?|sql)$/i;
+// Consecutive reads with no write between them cannot see different states,
+// so the loop runs a small group of them beside each other. The set is
+// deliberately local and side-effect-free: no RUN, no GIT (a read-only
+// subcommand can still take a lock), no FETCH/WEB (network), no RECALL (the
+// session store). Results and events are still processed in marker order.
+const PARALLEL_READS = new Set(['read', 'list', 'search', 'tree', 'stat', 'glob', 'symbols', 'def', 'refs']);
+const PARALLEL_READ_GROUP = 6;
+
+// The final step's send carries the close-out ask — see the drain comment at
+// the top of the step loop.
+const LAST_STEP_NOTE = 'This is the last step this run has budget for. Do not ask for anything new — read the results above and write your closing answer now: what was done, what changed, and what is still open, ending with DONE on its own line plus one sentence about the work.';
 
 // (chain guard) After a change has failed in the same reply, only calls whose
 // outcome cannot touch the tree keep running — reads, exfil, control markers.
@@ -190,15 +205,30 @@ export async function runTask(taskText, ctx = {}) {
   const {
     maxSteps, maxStepsWire, maxToolCalls, maxWallClockMs, maxCredits,
     model, thinking, temperature, useSlim, seedText, pluginTools,
+    pluginSections, helperPresets,
     replyLanguage, repeatGuard, repeatGuardMax,
   } = run.sheet;
+
+  // (goal rounds) The project's one durable objective, when it has an active
+  // one and this run may chase it. The controller is the run's, and every read
+  // is fresh: a `aipass goal pause|clear` typed mid-run wins over this snapshot.
+  // Helpers and the checker pass `goal: false` — a bounded subtask must not
+  // consume the parent's rounds or mark the parent's goal complete.
+  run.goal = ctx.goal === false ? null : (ctx.goal ?? createGoalController(overlay.root));
+  const activeGoal = run.goal?.current() ?? null;
 
   // The three stages of one run.
   const budgets = createBudgets(run);
   const gates = createDoneGates(run);
   const sender = createSender(run);
 
-  overlay.clear();
+  // A review reads the staged tree, so it must not clear it first. The brief
+  // is built before anything else touches the overlay: the diff it carries is
+  // the change under review.
+  const reviewText = run.options.review
+    ? reviewBrief(taskText, { overlay, base: run.options.reviewBase ?? null })
+    : null;
+  if (!run.options.review) overlay.clear();
 
   session?.append('task', { text: taskText });
   events?.emit('task_start', { task: taskText, maxSteps: maxStepsWire });
@@ -246,6 +276,12 @@ export async function runTask(taskText, ctx = {}) {
       ? `\nTop level: unchanged since my last listing of it — every entry is the same.`
       : `\nTop level right now:\n${listing}`);
 
+  // (project instructions) The file the project keeps for agents (AGENTS.md,
+  // or its CLAUDE.md / GEMINI.md ancestor) rides turn 1, so a run starts with
+  // the conventions the person already wrote down instead of spending a NEED
+  // on them. Bounded by harness/instructions.mjs; a missing file is no bytes.
+  const projectInstructions = loadProjectInstructions(overlay.root);
+
   const pre = buildPreamble({
     allowRun: Boolean(run.options.allowRun),
     plan: Boolean(run.options.plan),
@@ -256,9 +292,55 @@ export async function runTask(taskText, ctx = {}) {
     // an option, because the preamble's bytes are pinned by the recorded
     // replay (evals/fixtures/).
     verify: Boolean(run.options.allowVerify),
+    // RECALL and the exploration tools are taught behind their own flags. The
+    // preamble is built once per run, so a missing flag here means a marker
+    // the loop happily dispatches but the model was never told about.
+    recall: Boolean(run.options.recall),
+    explore: Boolean(run.options.explore),
     plugins: pluginTools,
+    // (preamble sections) What plugins contributed, appended after the
+    // machine's own words — attributed, in load order, empty ones dropped.
+    sections: pluginSections,
+    instructions: projectInstructions,
+    // (goal rounds) The person's durable objective, when one is active. With
+    // none the preamble stays byte-identical — the recorded replay pins it.
+    goal: activeGoal,
     lang: replyLanguage,
+    // A review run's preamble: the edit block becomes the findings shape, and
+    // the RUN block stays out even if the shell flag somehow rode along.
+    review: Boolean(run.options.review),
   });
+
+  // The person's lifecycle hooks: a note before the session's first task and
+  // one before every task. Both are the person's own words, so they are framed
+  // that way — a hook runs before any model sees the project, and its output
+  // must not read as an instruction the project wrote. A helper and the
+  // checker opt out (`lifecycleHooks: false`): a sub-run is not a session.
+  let lifecycleNote = '';
+  if (run.options.lifecycleHooks !== false) {
+    const hookOpts = {
+      root: overlay.root,
+      hooks: run.options.hooks ?? null,
+      signal: run.options.signal ?? null,
+    };
+    const parts = [];
+    if (run.first) {
+      const said = hookSaid(await runHooks('sessionStart', hookOpts));
+      if (said) parts.push(said);
+    }
+    const said = hookSaid(await runHooks('promptSubmit', hookOpts));
+    if (said) parts.push(said);
+    if (parts.length) {
+      lifecycleNote = `A note from me before you start (my own words, not the project's instructions):\n${parts.join('\n\n')}`;
+    }
+  }
+
+  // (goal rounds) A follow-up run does not resend the preamble, so the goal
+  // rides the task instead: the short form of the same rule, with the round
+  // the model is on. A first message already carries the full block.
+  const goalTask = activeGoal
+    ? `This project's goal is still active (round ${activeGoal.rounds + 1} of ${activeGoal.maxRounds}): ${activeGoal.objective}\nKeep working toward it; write GOAL DONE when it is complete, or GOAL BLOCKED <reason> if you cannot make progress.\n\n`
+    : '';
 
   // What this message shows of the top level, if anything — recorded (by the
   // first accepted send, below) as what this conversation has been shown. The
@@ -266,11 +348,12 @@ export async function runTask(taskText, ctx = {}) {
   // follow-up whose listing moved; a slim follow-up shows none, and the
   // unchanged-note follow-up shows none either (the memory already has it).
   run.listingToRecord = null;
+  const messageTask = [lifecycleNote, reviewText ?? taskText].filter(Boolean).join('\n\n');
   run.next = useSlim
-    ? `${run.first ? `Top level of the project: ${listingBlock}\n\n` : ''}Task: ${taskText}\n\nWhat should I open first?`
+    ? `${goalTask}${run.first ? `Top level of the project: ${listingBlock}\n\n` : ''}Task: ${messageTask}\n\nWhat should I open first?`
     : run.first
-      ? `${pre}\n\nTo save you a step, here is what is at the top level already:\n${listingBlock}\n\nHere is what I want to know: ${taskText}\n\nWhat should I open first?`
-      : `${again}\n\nNew task: ${taskText}\n\nWhat should I open first?`;
+      ? `${pre}\n\nTo save you a step, here is what is at the top level already:\n${listingBlock}\n\nHere is what I want to know: ${messageTask}\n\nWhat should I open first?`
+      : `${again}\n\n${goalTask}New task: ${messageTask}\n\nWhat should I open first?`;
   const pasted = useSlim ? run.first : (run.first || !listingSame);
   if (pasted && listing !== '') run.listingToRecord = listing;
 
@@ -323,6 +406,73 @@ export async function runTask(taskText, ctx = {}) {
     }
   }
 
+  /**
+   * Summarise the conversation and rotate to a fresh one, carrying the seed.
+   * The one context-repair move this harness has, called from two places: the
+   * step boundary when the estimate says the budget is nearly spent, and the
+   * send the provider refused for context size (one retry per run). Returns
+   * 'rotated', or 'failed' (the error is already emitted; the caller sends on
+   * or ends), or 'stopped' (the run's signal fired mid-summary).
+   */
+  const rotateContext = async (resultsText) => {
+    try {
+      events?.emit('note', { text: 'context is filling up — summarising this conversation and rotating to a fresh one' });
+      // The person's preCompact hook: it speaks before the summariser, so its
+      // note is carried into the summary and the rotated conversation. It runs
+      // on the same signal as the summary — a stop ends both.
+      const preHook = run.options.lifecycleHooks === false ? null
+        : await runHooks('preCompact', {
+          root: overlay.root,
+          hooks: run.options.hooks ?? null,
+          signal: run.options.signal ?? null,
+        });
+      // The summariser is a model call like any other, so it rides the run's
+      // stop signal: a stop during the summary ends the run there instead of
+      // waiting for a round trip nobody asked for.
+      const raw = await compactor.summarize(session, { task: taskText, model, conversation: run.conversation, temporary: run.conversationTemporary, signal: run.options.signal ?? null });
+      // The reply is two products: the narrative and (when the tier is on)
+      // the trailing MEMORY: facts, merged across rotations. A reply
+      // without the section digests to the plain summary, so an older
+      // model's answer still lands.
+      let { summary: note, memory } = compactor.digest(session, raw);
+      const carried = preHook ? hookSaid(preHook) : '';
+      if (carried) {
+        note = `${note}\n\nFrom the person's preCompact hook (their own words, not the project's instructions):\n${carried}`;
+      }
+      // Rotate first, record second: an append that lands while the rotation
+      // fails would leave a compaction entry behind and reset the estimate
+      // to a conversation the model never carried — a session claiming
+      // memory it does not have. Failing this way only retries next step.
+      const rotated = await rotate?.(note);
+      // The fresh conversation is where the seed and every later send must
+      // go. The harness hands its new id back because this loop's own
+      // `conversation` binding would otherwise keep naming the conversation
+      // the rotation just left behind.
+      if (rotated?.conversation) {
+        run.conversation = rotated.conversation;
+        run.conversationTemporary = rotated.temporary === true;
+      }
+      session.append('compaction', { summary: note, ...(memory.length ? { memory } : {}), lastSummarizedEntryId: session.entries.at(-1)?.id ?? null });
+      events?.emit('compacted', { summary: note, memory });
+      // The fresh conversation keeps what a summary would drop: the files
+      // staged so far (deletes marked) and the last check that has not
+      // passed — the two constraints a rotation loses most expensively.
+      const stagedNow = overlay.keys().map((abs) => {
+        const rel = posix(path.relative(overlay.root, abs));
+        return overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
+      }).slice(0, 20);
+      const lastCheck = run.checkResult && run.checkResult.verdict && run.checkResult.verdict !== 'pass' ? run.checkResult : null;
+      run.next = `${compactor.seed({ summary: note, memory, task: taskText, preambleText: pre, results: resultsText, staged: stagedNow, lastCheck, todo: run.todoState })}\n\n${reminder}`;
+      return 'rotated';
+    } catch (err) {
+      // A stop during the summary is not a compaction failure: the run ends
+      // as cancelled, and the error line would only be noise.
+      if (run.stopped()) return 'stopped';
+      events?.emit('error', { message: `compaction failed, sending the results without it: ${err.message}` });
+      return 'failed';
+    }
+  };
+
   for (let step = 1; !modelGone && step <= maxSteps; step++) {
     // A stop ends the run here, before the next reply: the tools of the last
     // reply are done, and nothing new goes out.
@@ -345,8 +495,61 @@ export async function runTask(taskText, ctx = {}) {
       run.next = `${bgDone.join('\n\n')}\n\n${run.next}`;
     }
 
+    // (mid-run inject) Messages the person typed while the run was working —
+    // Harness.inject queued them — ride the next paste, the one message the
+    // protocol allows. Only from the second step on: the first message already
+    // carries the preamble and the task, and a note bolted onto it would read
+    // as part of the protocol. Whatever is still queued when the run ends goes
+    // back to the window (harness.mjs's orphan drain), never vanishes.
+    if (step > 1 && run.injected?.length) {
+      const notes = run.injected.splice(0);
+      run.next = `${notes.map((t) => `The person sent this while the run was in progress — read it as part of the task:\n\n${t}`).join('\n\n')}\n\n${run.next}`;
+      run.note(`the person sent ${notes.length} message(s) mid-run — delivered with this step`);
+      run.emit('injected', { n: notes.length });
+    }
+
+    // (max-steps drain) The final step is for closing, not for digging: a run
+    // that spends its last round trip on a new question ends with the answer
+    // it never wrote. The model cannot be stopped from calling tools here —
+    // but it can be asked, and a reply that asks anyway still runs; the
+    // step_limit ending below stays the truth (opencode's forced drain,
+    // adapted to a protocol with no toolChoice knob).
+    if (step === maxSteps && step > 1) run.next = `${LAST_STEP_NOTE}\n\n${run.next}`;
+
     // The send. The reply comes back with the stage that owns the ladder.
-    const sent = await sender.send();
+    let sent = await sender.send();
+    // (overflow recovery, one attempt) A send the provider refused for
+    // context size is the one send-failure a rotation heals: the server holds
+    // the whole conversation, so summarising and rotating to a fresh one fits
+    // the same message again. The first send is excluded — its size was
+    // already settled by the pre-run compaction, and a first message too big
+    // on its own is not something a rotation shrinks. One attempt per run: a
+    // retry that overflows too is a run that ends as the error it is.
+    if (sent.stopReason === 'error' && sent.overflow && run.sends > 0
+        && !run.overflowRetried && compactor && session && rotate) {
+      run.overflowRetried = true;
+      const line = 'the send was refused because the context is full — summarising this conversation, rotating to a fresh one, and sending this step again';
+      run.note(line);
+      events?.emit('note', { text: line });
+      // The pending message without its trailing reminder — the seed appends
+      // its own frame, and a protocol reminder twice reads as noise. The
+      // compositions that end in something else (a gate message after the
+      // reminder) pass whole: the seed's tail is a carrier, not a parser.
+      const pendingText = run.next.endsWith(reminder)
+        ? run.next.slice(0, run.next.length - reminder.length).replace(/\n+$/, '')
+        : run.next;
+      const outcome = await rotateContext(pendingText);
+      if (outcome === 'stopped') { run.stopReason = 'cancelled'; break; }
+      if (outcome === 'rotated') sent = await sender.send();
+    }
+    // The overflow error that was not recovered — no rotation available, the
+    // one attempt already spent, or the rotation itself failed: its record
+    // was deferred by the sender, so it is written here, once.
+    if (sent.stopReason === 'error' && sent.overflow && !run.sendError) {
+      run.sendError = sent.overflow;
+      run.note(`the send failed: ${sent.overflow}`);
+      events?.emit('error', { message: sent.overflow });
+    }
     if (sent.stopReason) { run.stopReason = sent.stopReason; break; }
     let reply = sent.reply;
 
@@ -382,7 +585,11 @@ export async function runTask(taskText, ctx = {}) {
       // `NEED list desktop` followed by prose parsed to nothing, and the run
       // was marked done 633ms later with the nudges never sent. A marker-shaped
       // line earns the nudge that teaches the shape instead.
-      const effectiveDone = done || (run.toolsRun > 0 && proseText && !attemptedMarker(reply) ? { kind: 'done', arg: 'done' } : null);
+      const effectiveDone = done || (run.toolsRun > 0 && proseText && !attemptedMarker(reply)
+        // The synthetic ending carries the closing prose, not the bare word:
+        // run.summary and the stats row read the arg, and a summary of "done"
+        // said nothing a run_stats row could use.
+        ? { kind: 'done', arg: proseText } : null);
       if (effectiveDone) {
         const cleanArg = (effectiveDone.arg || proseText || 'done').replace(/^[-—–:]\s*/, '').trim();
         run.summary = cleanArg || 'done';
@@ -399,6 +606,32 @@ export async function runTask(taskText, ctx = {}) {
         // refused. The failure report already rode back once; a further DONE
         // is the model choosing to end over evidence that disagrees.
         if (gates.refuseUnverifiedDone()) break;
+        // A background command the run started is not the model's to forget:
+        // one nudge to poll or stop it, then a DONE over a live job is an end
+        // that says so (`jobs-running`), not a silent finish.
+        const jobsGate = gates.jobsGate(step < maxSteps);
+        if (jobsGate.stop) break;
+        if (jobsGate.msg) {
+          run.next = `${jobsGate.msg}\n\n${reminder}`;
+          continue;
+        }
+        // The review check: a review that ends without findings did not
+        // review. One nudge, then the answer stands (advisory, like language).
+        const reviewMsg = step < maxSteps ? gates.reviewMsg() : null;
+        if (reviewMsg) {
+          run.next = `${reviewMsg}\n\n${reminder}`;
+          continue;
+        }
+        // The goal gate: a plain DONE while the person's goal is active buys
+        // another round, or stops the run when the goal's own cap is spent.
+        // Only with a step left — a round that never reaches the model is not
+        // a round.
+        const goalGate = step < maxSteps ? gates.goalGate() : null;
+        if (goalGate?.stop) break;
+        if (goalGate?.msg) {
+          run.next = `${goalGate.msg}\n\n${reminder}`;
+          continue;
+        }
         const todoMsg = step < maxSteps ? gates.openTodoMsg() : null;
         if (todoMsg && step < maxSteps) {
           run.next = `${todoMsg}\n\n${reminder}`;
@@ -508,7 +741,7 @@ export async function runTask(taskText, ctx = {}) {
       // A poll is not an action: the same JOBS call twice is a wait for a
       // background job, not a loop, and the guard's "nothing changed in
       // between" is false — the job's own state changes.
-      if (repeatGuard && !['plan', 'todo', 'subagent', 'done', 'jobs'].includes(call.kind)) {
+      if (repeatGuard && !['plan', 'todo', 'subagent', 'goal', 'done', 'jobs'].includes(call.kind)) {
         const seen = run.repeatSeen.get(sig) ?? { count: 0, mark: -1 };
         seen.count += 1;
         if (seen.count >= 3 && seen.mark === run.mutations) {
@@ -522,6 +755,30 @@ export async function runTask(taskText, ctx = {}) {
         run.repeatSeen.set(sig, seen);
       }
       let out;
+      // The person's beforeTool hook: a non-zero exit refuses this one call,
+      // and no permission mode overrides it — the person's command is final.
+      // plan and todo are markers, not tools, so they do not pass through it.
+      if (run.options.lifecycleHooks !== false && call.kind !== 'plan' && call.kind !== 'todo') {
+        const gate = await runHooks('beforeTool', {
+          root: overlay.root,
+          hooks: run.options.hooks ?? null,
+          signal: run.options.signal ?? null,
+          env: {
+            AIPASS_TOOL: call.kind,
+            AIPASS_TOOL_ARG: String(call.arg ?? ''),
+            AIPASS_TOOL_BODY: (typeof call.body === 'string' ? call.body : JSON.stringify(call.body ?? '')).slice(0, 8000),
+          },
+        });
+        if (!gate.ok) {
+          const why = gate.ran.filter((r) => !r.ok).map((r) => {
+            const said = String(r.output ?? '').trim();
+            return `${r.command} ${r.note}`.trim() + (said ? `\n${said}` : '');
+          }).join('\n');
+          session?.append('note', { text: `beforeTool hook refused ${call.kind} ${call.arg ?? ''}` });
+          events?.emit('note', { text: `a beforeTool hook refused ${call.kind} ${call.arg ?? ''}` });
+          return `err: a beforeTool hook refused this call — ${why || 'the hook failed'}.`;
+        }
+      }
       try { out = String(await execute(call, run)); } catch (err) { out = `err: ${err.message}`; }
       if (/^err:/i.test(out.trimStart()) && PATHY.has(call.kind) && call.arg != null) {
         for (const alt of pathVariants(call.arg)) {
@@ -542,6 +799,7 @@ export async function runTask(taskText, ctx = {}) {
     };
 
     const results = [];
+    const prefetched = new Map(); // index → { text, ms } for a read group run beside itself
     let brokenBy = null;    // the first change that failed in this reply …
     let chainNoted = false; // … and whether the skip was spoken yet
     for (let i = 0; i < work.length; i++) {
@@ -589,14 +847,75 @@ export async function runTask(taskText, ctx = {}) {
       }
       run.toolsRun += 1;
       const callStartedAt = Date.now();
-      const result = helperResults && call.kind === 'subagent'
-        ? helperResults[i]
-        : await guarded(call);
-      // A serial call is timed where it ran; a parallel SUBAGENT carries the
-      // wall time measured at its fan-out (its `await` already happened).
-      const callMs = helperResults && call.kind === 'subagent'
-        ? (helperMs.get(call) ?? 0)
-        : Date.now() - callStartedAt;
+      // (event map, docs/EVENTS.md) The call is admitted for execution —
+      // emitted in marker order, before its result event, so a watcher can
+      // pair them. A parallel read group's later members may already be
+      // running by the time their start fires: the order here is the wire's,
+      // not the wall clock's.
+      events?.emit('tool_start', { kind: call.kind, arg: label });
+      let result;
+      let callMs;
+      if (helperResults && call.kind === 'subagent') {
+        result = helperResults[i];
+        // A parallel SUBAGENT carries the wall time measured at its fan-out
+        // (its `await` already happened).
+        callMs = helperMs.get(call) ?? 0;
+      } else if (prefetched.has(i)) {
+        ({ text: result, ms: callMs } = prefetched.get(i));
+      } else if (run.options.parallelReads !== false && PARALLEL_READS.has(call.kind)) {
+        // The read group: this call and the consecutive safe reads after it.
+        // Bounded by the tool budget, so a reply of a hundred NEEDs cannot
+        // start more work than the serial loop would have allowed.
+        const group = [i];
+        const room = Math.max(0, maxToolCalls - run.toolsRun);
+        const cap = Math.min(PARALLEL_READ_GROUP, 1 + room);
+        for (let j = i + 1; j < work.length && group.length < cap; j++) {
+          if (!PARALLEL_READS.has(work[j].kind)) break;
+          group.push(j);
+        }
+        if (group.length > 1) {
+          const outs = await Promise.all(group.map(async (j) => {
+            const startedAt = Date.now();
+            // A stop between the group's start and this call's slot still
+            // means the call never started — the same promise the serial
+            // loop makes.
+            if (run.stopped()) {
+              return { text: 'err: the run was stopped before this call', ms: Date.now() - startedAt };
+            }
+            try {
+              return { text: String(await guarded(work[j])), ms: Date.now() - startedAt };
+            } catch (err) {
+              return { text: `err: ${err.message}`, ms: Date.now() - startedAt };
+            }
+          }));
+          group.forEach((j, k) => prefetched.set(j, outs[k]));
+          ({ text: result, ms: callMs } = prefetched.get(i));
+        } else {
+          result = await guarded(call);
+          callMs = Date.now() - callStartedAt;
+        }
+      } else {
+        result = await guarded(call);
+        callMs = Date.now() - callStartedAt;
+      }
+      // The person's afterTool hook: what it printed rides the result the
+      // model reads. A hook that exits 0 and prints nothing adds nothing —
+      // the verdict line alone would be noise on every call. plan and todo
+      // are markers, not tools.
+      if (run.options.lifecycleHooks !== false && call.kind !== 'plan' && call.kind !== 'todo') {
+        const after = await runHooks('afterTool', {
+          root: overlay.root,
+          hooks: run.options.hooks ?? null,
+          signal: run.options.signal ?? null,
+          env: {
+            AIPASS_TOOL: call.kind,
+            AIPASS_TOOL_ARG: String(call.arg ?? ''),
+            AIPASS_TOOL_BODY: (typeof call.body === 'string' ? call.body : JSON.stringify(call.body ?? '')).slice(0, 8000),
+          },
+        });
+        const said = hookSaid(after);
+        if (said) result = `${result}\n\n[the person's afterTool hook]\n${said}`;
+      }
       const text = String(result);
       const [head, ...rest] = text.split('\n');
       // Tools answer with an `err: …` prefix when they failed (the tool
@@ -730,10 +1049,18 @@ export async function runTask(taskText, ctx = {}) {
       // when no step is left to carry the failure report, the DONE must not be
       // accepted just because the continuation had nowhere to go.
       if (!(checkMsg && step < maxSteps) && gates.refuseUnverifiedDone()) break;
-      const todoMsg = !checkMsg && step < maxSteps ? gates.openTodoMsg() : null;
-      const langMsg = (checkMsg || todoMsg) ? null : gates.replyLangMsg(proseText, run.summary, work.length === 0);
+      // The goal gate: a plain DONE while the person's goal is active buys
+      // another round, or stops the run when the goal's own cap is spent. A
+      // check that still has a step to ride is answered first, so the round is
+      // spent on goal work, not on a fix the DONE never survived.
+      const goalGate = !checkMsg && step < maxSteps ? gates.goalGate() : null;
+      if (goalGate?.stop) break;
+      const todoMsg = !checkMsg && !goalGate?.msg && step < maxSteps ? gates.openTodoMsg() : null;
+      const langMsg = (checkMsg || todoMsg || goalGate?.msg) ? null : gates.replyLangMsg(proseText, run.summary, work.length === 0);
       if (checkMsg && step < maxSteps) {
         run.next = `${results.join('\n\n')}\n\n${reminder}\n\n${checkMsg}`;
+      } else if (goalGate?.msg && step < maxSteps) {
+        run.next = `${results.join('\n\n')}\n\n${reminder}\n\n${goalGate.msg}`;
       } else if (todoMsg && step < maxSteps) {
         run.next = `${results.join('\n\n')}\n\n${reminder}\n\n${todoMsg}`;
       } else if (langMsg && step < maxSteps) {
@@ -839,49 +1166,44 @@ export async function runTask(taskText, ctx = {}) {
     // measures it after outbound() rewrites, because that is the size the
     // server will actually receive.
     if (compactor && session && compactor.needsCompaction(session, { pending: run.next })) {
-      try {
-        events?.emit('note', { text: 'context is filling up — summarising this conversation and rotating to a fresh one' });
-        // The summariser is a model call like any other, so it rides the run's
-        // stop signal: a stop during the summary ends the run there instead of
-        // waiting for a round trip nobody asked for.
-        const raw = await compactor.summarize(session, { task: taskText, model, conversation: run.conversation, temporary: run.conversationTemporary, signal: run.options.signal ?? null });
-        // The reply is two products: the narrative and (when the tier is on)
-        // the trailing MEMORY: facts, merged across rotations. A reply
-        // without the section digests to the plain summary, so an older
-        // model's answer still lands.
-        const { summary: note, memory } = compactor.digest(session, raw);
-        // Rotate first, record second: an append that lands while the rotation
-        // fails would leave a compaction entry behind and reset the estimate
-        // to a conversation the model never carried — a session claiming
-        // memory it does not have. Failing this way only retries next step.
-        const rotated = await rotate?.(note);
-        // The fresh conversation is where the seed and every later send must
-        // go. The harness hands its new id back because this loop's own
-        // `conversation` binding would otherwise keep naming the conversation
-        // the rotation just left behind.
-        if (rotated?.conversation) {
-          run.conversation = rotated.conversation;
-          run.conversationTemporary = rotated.temporary === true;
-        }
-        session.append('compaction', { summary: note, ...(memory.length ? { memory } : {}), lastSummarizedEntryId: session.entries.at(-1)?.id ?? null });
-        events?.emit('compacted', { summary: note, memory });
-        // The fresh conversation keeps what a summary would drop: the files
-        // staged so far (deletes marked) and the last check that has not
-        // passed — the two constraints a rotation loses most expensively.
-        const stagedNow = overlay.keys().map((abs) => {
-          const rel = posix(path.relative(overlay.root, abs));
-          return overlay.isDeleted(abs) ? `${rel} (deleted)` : rel;
-        }).slice(0, 20);
-        const lastCheck = run.checkResult && run.checkResult.verdict && run.checkResult.verdict !== 'pass' ? run.checkResult : null;
-        run.next = `${compactor.seed({ summary: note, memory, task: taskText, preambleText: pre, results: results.join('\n\n'), staged: stagedNow, lastCheck, todo: run.todoState })}\n\n${reminder}`;
-      } catch (err) {
-        // A stop during the summary is not a compaction failure: the run ends
-        // as cancelled, and the error line would only be noise.
-        if (run.stopped()) { run.stopReason = 'cancelled'; break; }
-        events?.emit('error', { message: `compaction failed, sending the results without it: ${err.message}` });
-      }
+      // 'failed' lands here as it always did: the note is out and the error
+      // said, and the results still go — losing the step's work to a
+      // compaction error would be worse than an over-budget conversation.
+      const outcome = await rotateContext(results.join('\n\n'));
+      if (outcome === 'stopped') { run.stopReason = 'cancelled'; break; }
     }
     if (step === maxSteps) events?.emit('step_limit', {});
+  }
+
+  // A background command is the run's own child: a clean DONE already waited
+  // for it (the jobs gate), so one still alive here belongs to a run that was
+  // stopped, capped or failed. Leaving it behind would keep a server on a
+  // port and a folder locked after the person ended the work. It is stopped
+  // whole, and the output file stays where it is — the job's last line is
+  // still readable.
+  for (const [id, job] of run.backgroundJobs) {
+    if (job.kind !== 'run' || job.status !== 'running' || !job.stop) continue;
+    job.status = 'stopped';
+    await Promise.resolve(job.stop()).catch(() => {});
+    session?.append('note', { text: `background command ${id} was stopped when the run ended — output: ${job.outputRel}` });
+    events?.emit('note', { text: `background command ${id} was stopped with the run; its output is in ${job.outputRel}` });
+  }
+
+  // A background helper can outlive the step that started it: one that
+  // finished during the final step has no next send to ride, and one still
+  // running will finish after the run. The result is already in the
+  // transcript note; what went missing was the person's knowledge that this
+  // run never carried it to the model. Both are said, once, here.
+  for (const [id, job] of run.backgroundJobs) {
+    if (job.kind === 'run') continue; // a command's output is its file, not a summary to inject
+    if (job.status === 'done' && !run.reportedBg.has(id)) {
+      run.reportedBg.add(id);
+      events?.emit('note', { text: `background helper ${id}${job.role ? ` (${job.role})` : ''} finished after the run ended — its result is in the transcript, but the model never saw it.` });
+    } else if (job.status === 'running') {
+      void Promise.resolve(job.promise).then(() => {
+        events?.emit('note', { text: `background helper ${id}${job.role ? ` (${job.role})` : ''} finished (${job.status}) after the run ended — its result is in the transcript, but the model never saw it.` });
+      }).catch(() => { /* the job already recorded its own failure */ });
+    }
   }
 
   // A budget stop is the run's stop reason, recorded like every other ending.
@@ -950,6 +1272,26 @@ export async function runTask(taskText, ctx = {}) {
     todo: run.todoState.map((it) => ({ ...it })),
   });
 
+  // The stop moment: a run that ended without a DONE. It is not a duplicate of
+  // `done` — that fires when the run ends, this one only when it did not get
+  // to finish. No abort signal and a short timeout: the person already asked
+  // for the run to stop, and a hook must not hold the end open.
+  if (run.options.lifecycleHooks !== false && run.stopReason !== 'done') {
+    try {
+      const stopped = await runHooks('stop', {
+        root: overlay.root,
+        hooks: run.options.hooks ?? null,
+        timeoutMs: 10_000,
+        env: { AIPASS_STOP_REASON: run.stopReason },
+      });
+      const said = hookSaid(stopped);
+      if (said) {
+        session?.append('note', { text: said });
+        events?.emit('note', { text: said });
+      }
+    } catch { /* a hook that cannot run is not the run's end */ }
+  }
+
   return {
     summary: run.summary, stopReason: run.stopReason, steps: run.toolsRun, changes,
     credits: creditsAfter, spent, check: run.checkResult, todo: run.todoState.map((it) => ({ ...it })),
@@ -982,6 +1324,42 @@ export const SUBAGENT_ROLES = {
   },
 };
 
+/**
+ * The spec a `role:` line resolves to, built-ins first.
+ *
+ * The three built-in shapes are the tested ones; the machine may define more
+ * (settings `helperPresets`, name → { lead, run }), and a machine preset is
+ * judged by the same rule a built-in is: read-only by construction, and
+ * `run` true only where the run itself was given allowRun — so a preset can
+ * narrow the parent's powers, never widen them. A settings entry cannot
+ * shadow a built-in name (those shapes are pinned by the recorded replay),
+ * and a malformed entry is an error at the point of use — named, never a
+ * silent fallback to "no role".
+ *
+ * @param {string} role the name on the role line ('' = no role)
+ * @param {Record<string, {lead?: unknown, run?: unknown}>} [presets] the machine's own
+ * @returns {{ spec: {lead: string, run: boolean} | null, error: string | null }}
+ */
+export function resolveHelperPreset(role, presets = {}) {
+  const clean = String(role ?? '').trim().toLowerCase();
+  if (!clean) return { spec: null, error: null };
+  const builtin = SUBAGENT_ROLES[clean];
+  if (builtin) return { spec: builtin, error: null };
+  // The role line is matched without letter case, so a preset may be spelled
+  // however its author wrote it; the built-ins stay lowercase and unshadowed.
+  const userNames = Object.keys(presets ?? {}).filter((n) => n && !SUBAGENT_ROLES[n.toLowerCase()]);
+  const entryKey = userNames.find((n) => n.toLowerCase() === clean);
+  if (!entryKey) {
+    return { spec: null, error: `no helper role called "${clean}" — use one of: ${[...Object.keys(SUBAGENT_ROLES), ...userNames].join(', ')} (or drop the role line).` };
+  }
+  const entry = presets[entryKey];
+  const lead = typeof entry?.lead === 'string' ? entry.lead.trim() : '';
+  if (!lead) {
+    return { spec: null, error: `helper preset "${entryKey}" is malformed — it needs a "lead" instruction naming what the helper is and does` };
+  }
+  return { spec: { lead, run: entry?.run === true }, error: null };
+}
+
 /** One marker: run it behind the permission gate, or handle it here. */
 async function execute(call, run) {
   const { tools, permissions, events, subagent, todoState, session, options, runPluginTool, backgroundJobs } = run;
@@ -993,7 +1371,20 @@ async function execute(call, run) {
   // asked before it runs.
   const isVerify = call.kind === 'verify';
   if (isVerify && /[\r\n]/.test(String(call.arg ?? ''))) {
-    return 'err: VERIFY takes one command on its own line — a second line is a second call.';
+    return 'err: VERIFY takes one command on its own line - a second line is a second call.';
+  }
+
+  // The review floor. A review run reads and reports; it never stages a
+  // change. The facade already builds the tool table read-only, but the floor
+  // lives here too: a caller that hands a review run writable tools, or a mode
+  // of `yolo`, still cannot turn the review into a write. RUN is refused with
+  // the writes because a shell command is strictly more than an edit.
+  if (run.options.review) {
+    const mutating = ['write', 'replace', 'delete', 'move', 'run'].includes(call.kind);
+    const gitWrite = call.kind === 'git' && classify('git', call.body, call.arg) !== 'read';
+    if (mutating || gitWrite) {
+      return 'err: this is a review run — it reads and reports, it cannot change the project. Name a finding with its file and line instead.';
+    }
   }
 
   // One shape check before anything is dispatched: built-in tools, plugin
@@ -1017,17 +1408,41 @@ async function execute(call, run) {
     return `noted ${items.length} item(s)`;
   }
 
+  if (call.kind === 'goal') {
+    // GOAL is the model's only say over the person's objective: it can mark it
+    // complete or blocked, never rewrite it. A goal that is paused, cleared or
+    // already finished is not the model's to resolve.
+    if (!run.goal) return 'err: goals are turned off for this run';
+    const arg = String(call.arg ?? '').trim();
+    const done = /^DONE\b\s*(.*)$/i.exec(arg);
+    const blocked = /^BLOCKED\b\s*(.*)$/i.exec(arg);
+    if (!done && !blocked) return 'err: GOAL takes DONE or BLOCKED <reason> — e.g. GOAL DONE the parser ships.';
+    if (!run.goal.current()) return 'err: there is no active goal in this project — a person sets one with `aipass goal set "<what to finish>"`.';
+    if (done) {
+      const text = done[1].trim();
+      run.goal.complete(text);
+      run.note(`goal complete${text ? `: ${text}` : ''}`);
+      run.emit('goal_done', { done: text });
+      return `goal marked complete${text ? `: ${text}` : ''} — finish with DONE.`;
+    }
+    const reason = blocked[1].trim() || 'no reason given';
+    run.goal.block(reason);
+    run.note(`goal blocked: ${reason}`);
+    run.emit('goal_blocked', { reason });
+    return `goal marked blocked: ${reason} — finish with DONE and say what the person needs to decide.`;
+  }
+
   if (call.kind === 'subagent') {
     if (!subagent) return 'err: no helper is available in this run';
     const body = String(call.body ?? '');
     const background = /^\s*background:\s*(true|yes|1)\s*$/im.test(body);
     // The optional `role:` line narrows the helper before it starts: its own
-    // instructions and its own limits (SUBAGENT_ROLES). An unknown role is
-    // refused here, before anything starts, and the error names the set.
+    // instructions and its own limits (SUBAGENT_ROLES, plus the machine's
+    // own presets). An unknown or malformed role is refused here, before
+    // anything starts, and the error names the set.
     const role = (body.match(/^\s*role:\s*([A-Za-z][\w-]*)/im)?.[1] ?? '').toLowerCase();
-    if (role && !SUBAGENT_ROLES[role]) {
-      return `err: no helper role called "${role}" — use one of: ${Object.keys(SUBAGENT_ROLES).join(', ')} (or drop the role line).`;
-    }
+    const resolvedRole = resolveHelperPreset(role, options.helperPresets);
+    if (resolvedRole.error) return `err: ${resolvedRole.error}`;
     const taskLine = body.match(/^\s*task:\s*(.+)$/im)?.[1];
     const task = (taskLine ?? body.split('\n').find((l) => l.trim() && !/^\s*role:/i.test(l) && !/^\s*background:/i.test(l)) ?? '').trim();
     if (!task) return 'err: give the helper a task, on a `task:` line inside SUBAGENT';
@@ -1061,9 +1476,27 @@ async function execute(call, run) {
 
   if (call.kind === 'jobs') {
     if (!backgroundJobs || !backgroundJobs.size) return '(no background jobs)';
+    const stop = /^stop\s+(\S+)$/i.exec(String(call.arg ?? '').trim());
+    if (stop) {
+      const job = backgroundJobs.get(stop[1]);
+      if (!job) return `err: no background job ${stop[1]} — JOBS lists the ones this run started.`;
+      if (job.kind !== 'run' || !job.stop) {
+        return `err: ${stop[1]} is a helper run, not a command — it cannot be stopped from here; wait for its summary.`;
+      }
+      if (job.status !== 'running') return `${stop[1]} is already ${job.status}; nothing to stop.`;
+      await job.stop();
+      job.status = 'stopped';
+      return `stopped ${stop[1]} — the whole process tree, not the shell alone.`;
+    }
     const lines = [];
     for (const [id, job] of backgroundJobs) {
-      lines.push(`${id}: ${job.status}${job.role ? ` (${job.role})` : ''} — ${job.task.slice(0, 60)}${job.status !== 'running' ? '\n  ' + String(job.result).slice(0, 400) : ''}`);
+      const exit = job.exit != null ? ` (exit ${job.exit})` : '';
+      lines.push(`${id}: ${job.status}${exit}${job.role ? ` (${job.role})` : ''} — ${job.task.slice(0, 60)}`);
+      // A command's result is the file, not a summary: it can be megabytes,
+      // and the model reads the part it needs. A helper's result is a summary
+      // and rides here, as it always did.
+      if (job.kind === 'run') lines.push(`  output: ${job.outputRel}`);
+      else if (job.status !== 'running') lines.push('  ' + String(job.result).slice(0, 400));
     }
     return lines.join('\n');
   }
@@ -1148,11 +1581,58 @@ async function execute(call, run) {
         const what = call.kind === 'run' ? String(call.body ?? '').trim().split('\n')[0] : call.arg;
         return `err: the person watching declined ${call.kind} ${what}`.slice(0, 300);
       }
-      if (decision === 'always') { permissions.grant(call.kind, call.arg); }
+      // 'always' is recorded inside request()/answer(), where the command
+      // body is still in hand — a shell grant is keyed by its shape, which
+      // the bare arg of a RUN does not carry. Re-granting here would only
+      // re-set the same key, and for a run grant nothing at all.
     }
   }
 
+  if (call.kind === 'run' && call.background) return await startBackgroundCommand(call, run);
   return await tools[call.kind](call.arg, call.body);
+}
+
+/**
+ * Start one RUN as a job, register it in the run's table, and answer with the
+ * id at once.
+ *
+ * The tool owns the world and the output file; the loop owns the table, because
+ * JOBS, the DONE gate and the run's own end all read it. A stopped job is a
+ * status, not an exception: the model asked for it, and the tree is gone.
+ */
+async function startBackgroundCommand(call, run) {
+  const { tools, events, session, backgroundJobs } = run;
+  if (!backgroundJobs) return 'err: background commands are not available in this run';
+  let started;
+  try {
+    started = await tools.background('', call.body);
+  } catch (err) {
+    return `err: the background command could not start: ${String(err?.message ?? err).slice(0, 200)}`;
+  }
+  if (typeof started === 'string') return started;
+  const { id, outputRel, done, stop } = started;
+  const job = {
+    id,
+    kind: 'run',
+    task: String(call.body ?? '').trim().split('\n')[0].slice(0, 80),
+    status: 'running',
+    result: '',
+    outputRel,
+    exit: null,
+    stop,
+    promise: done,
+  };
+  backgroundJobs.set(id, job);
+  events?.emit('job_start', { id, kind: 'run', command: job.task });
+  void done.then(({ code, stopped }) => {
+    // `JOBS stop` already wrote 'stopped'; the close event must not overwrite
+    // it with 'error' just because the killed tree reported a non-zero code.
+    job.status = stopped || job.status === 'stopped' ? 'stopped' : (code === 0 ? 'done' : 'error');
+    job.exit = code;
+    events?.emit('job_end', { id, kind: 'run', code, stopped: Boolean(stopped) });
+    session?.append('note', { text: `background command ${id} ${job.status}${code != null ? ` (exit ${code})` : ''} — output: ${outputRel}` });
+  }).catch(() => { /* the job's own close is the result */ });
+  return `started background command ${id} — it keeps running while you work. Output: ${outputRel} (read it with NEED). Poll with JOBS; stop it with JOBS stop ${id}.`;
 }
 
 /**

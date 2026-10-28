@@ -89,11 +89,18 @@ export function loadMemory(root, dir = defaultDir()) {
 
 export function saveMemory(root, facts, dir = defaultDir()) {
   const merged = mergeFacts(loadMemory(root, dir), facts).slice(0, CAP);
+  const next = JSON.stringify(merged, null, 2) + '\n';
+  const file = storePath(root, dir);
+  // A compaction re-emits facts the store already holds, so most saves are
+  // no-ops — the merged list is byte-identical to what is on disk. Skipping
+  // the rewrite costs one read and saves the atomic write (temp file, rename,
+  // fsync) that would otherwise run on every rotation for nothing.
+  try { if (fs.readFileSync(file, 'utf8') === next) return merged; } catch { /* a file that cannot be read is written */ }
   // Temp file plus rename: a crash mid-save leaves the previous facts. The
   // direct overwrite this replaces could empty the file, and loadMemory reads
   // a broken file as "no facts" — the loss would look like a fresh project.
   // The mode is pinned on the new file, so the facts are the owner's alone.
-  try { writeFileAtomic(storePath(root, dir), JSON.stringify(merged, null, 2) + '\n', { mode: 0o600 }); } catch {}
+  try { writeFileAtomic(file, next, { mode: 0o600 }); } catch {}
   return merged;
 }
 
@@ -117,6 +124,70 @@ export function moveMemory(fromRoot, toRoot, dir = defaultDir()) {
 }
 
 export function memoryPath(root) { return storePath(root); }
+
+/* ------------------------------------------------------------------ carry
+ *
+ * What a new session's first message takes from the store. The store caps at
+ * 50 facts of 200 characters — 10,000 characters, roughly 2,500 tokens — and
+ * injecting ALL of it into every new session paid for facts the task never
+ * touched. The carry picks: the facts about this task first, then the newest
+ * of the rest, under a byte budget. Nothing is deleted from the store; a fact
+ * left out of one first message is still there for the next task, and the
+ * recall tool still reaches everything.
+ */
+
+/** The carry block's default budget, in characters (~600 tokens at 4 chars/token). */
+export const CARRY_BUDGET_CHARS = 2400;
+
+/**
+ * The budget, as the environment names it — the tuning channel a terminal run
+ * has (the same channel `AIPASS_CONTEXT_TOKENS` and friends use, for the same
+ * reason: the CLI builds no settings object).
+ */
+function carryBudget() {
+  const n = Number(process.env.AIPASS_MEMORY_BUDGET);
+  return Number.isFinite(n) && n > 0 ? n : CARRY_BUDGET_CHARS;
+}
+
+/**
+ * The facts this task's first message carries, picked under a byte budget.
+ *
+ * A fact the task names wins a seat over a newer fact it does not: the whole
+ * point of the carry is that the model does not rediscover what the project
+ * already knows, and a fact about the task at hand is the one it would have
+ * spent turns rediscovering. The rest fill what is left, newest first — the
+ * newest are what a live project is building on (the store itself drops the
+ * oldest on overflow). Whatever is picked renders in the stored order,
+ * oldest first, so the block reads as one continuous record — and the same
+ * facts and task always render byte-identically.
+ *
+ * @param {string[]} facts the stored facts, oldest first
+ * @param {string} task the task the first message is about
+ * @param {{budgetChars?: number}} [opts]
+ * @returns {string[]} the carried facts, oldest first
+ */
+export function carryFacts(facts, task, { budgetChars = carryBudget() } = {}) {
+  const list = (Array.isArray(facts) ? facts : []).map((f) => String(f).trim()).filter(Boolean);
+  if (!list.length || !(budgetChars > 0)) return [];
+  const words = queryWords(task);
+  const matched = [];
+  const rest = [];
+  for (let i = 0; i < list.length; i++) {
+    const low = list[i].toLowerCase();
+    (words.some((w) => low.includes(w)) ? matched : rest).push(i);
+  }
+  const picked = [];
+  let used = 0;
+  const take = (i) => {
+    const cost = list[i].length + 2; // the "- " bullet
+    if (used + cost > budgetChars) return;
+    used += cost;
+    picked.push(i);
+  };
+  for (const i of matched) take(i);
+  for (let n = rest.length - 1; n >= 0; n--) take(rest[n]);
+  return picked.sort((a, b) => a - b).map((i) => list[i]);
+}
 
 /* ------------------------------------------------------------------- recall
  *
@@ -218,6 +289,18 @@ export function excerptOf(text, words) {
 }
 
 /**
+ * The parsed tails, keyed by file and valid while the file's stat is
+ * unchanged. One recall walks up to 30 tails, and a run may recall several
+ * times — without this, every call re-read and re-parsed files it parsed a
+ * second ago. Sessions grow by appends (and a header rewrite), and both
+ * change the stat, so the check is the invalidation: a file that grew is
+ * re-read, a file that did not is answered from the cache. The array is
+ * shared read-only — recallEntries never mutates it.
+ */
+const TAIL_CACHE = new Map();
+const TAIL_CACHE_MAX = 64;
+
+/**
  * The entries of one session file, cheaply.
  *
  * A session file grows by appends and nothing trims it, so the recall does
@@ -230,11 +313,16 @@ export function excerptOf(text, words) {
  * @returns {Promise<Array<Record<string, any>>>}
  */
 async function readEntries(file, maxBytes) {
+  let stat = null;
+  try { stat = await fs.promises.stat(file); } catch { return []; }
+  const hit = TAIL_CACHE.get(file);
+  if (hit && hit.maxBytes === maxBytes && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) {
+    return hit.entries;
+  }
   let text = '';
   try {
     const handle = await fs.promises.open(file, 'r');
     try {
-      const stat = await handle.stat();
       const start = Math.max(0, stat.size - maxBytes);
       const buffer = Buffer.alloc(stat.size - start);
       if (buffer.length) await handle.read(buffer, 0, buffer.length, start);
@@ -259,6 +347,8 @@ async function readEntries(file, maxBytes) {
       if (entry && typeof entry === 'object' && !Array.isArray(entry)) entries.push(entry);
     } catch { /* a torn line is skipped, not fatal */ }
   }
+  if (TAIL_CACHE.size >= TAIL_CACHE_MAX) TAIL_CACHE.delete(TAIL_CACHE.keys().next().value);
+  TAIL_CACHE.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, maxBytes, entries });
   return entries;
 }
 
