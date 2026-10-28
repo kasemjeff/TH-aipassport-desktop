@@ -51,6 +51,10 @@ import { Emitter, EventFanout } from './events.mjs';
 import { ProviderStore, AIPASS_PROVIDER } from './providers.mjs';
 import { clientFor } from './provider-client.mjs';
 import { openBrowser } from './browser.mjs';
+// The schedule's own ticker: a task at 09:00 is the machine's promise, not the
+// window's. It is unref'd and locked in the store, so it never holds the
+// backend open and never runs a due entry twice.
+import { startScheduleTicker } from './schedule.mjs';
 // One resolver for "where the bridge is", shared with the harness's own client
 // and with desktop/main.mjs's probe: an explicit bridgeURL wins, otherwise
 // AIPASS_BRIDGE decides, otherwise the loopback default.
@@ -261,6 +265,10 @@ export function createRpc({
   // does), so a run never fails for want of a listener on 8787. Tests turn it
   // off — they run their own bridge on their own port.
   autostartBridge = true,
+  // Whether this backend ticks the schedule itself. On in the app: a task at
+  // 09:00 must run with the window closed. A test that owns the schedule file
+  // turns it off so its own runDue calls are the only ones.
+  scheduleTick = true,
   // The most a `/rpc` body may carry. A caller that needs a different cap
   // (a test) says so; the default is the one a real window needs.
   maxBody = MAX_BODY,
@@ -1257,6 +1265,14 @@ export function createRpc({
   });
 
   server.listen(port, '127.0.0.1');
+  // The schedule ticks itself from here. The timer is unref'd, so the backend
+  // still exits when its window does; the store's lock keeps this and the
+  // window's manual `schedule.runDue` from running one entry twice. Stopped
+  // with the server so a test that closes it leaves no timer behind.
+  if (scheduleTick) {
+    const ticker = startScheduleTicker();
+    server.on('close', () => ticker.stop());
+  }
   // The port the server ACTUALLY got, not the one it was asked for: port 0
   // means "any free port", and a probe-then-bind race (another suite on this
   // machine takes the port between the probe and the bind) is then impossible.

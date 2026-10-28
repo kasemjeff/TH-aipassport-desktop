@@ -7,6 +7,40 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Added
 
+- **A long command can run behind the run, and the run keeps working.** `RUN
+  background <command>` starts the command as a job and streams its scrubbed
+  output to `.aipass/spill/<id>.txt` (20 MB cap, tree-killed on stop), so a dev
+  server no longer has to fit in a 120 s tool call. `JOBS` lists what is live
+  and `JOBS stop <id>` ends one; a DONE sent over a live job is refused once and
+  then ends the run as `jobs-running`. The job uses the same project world a
+  foreground `RUN` does (`harness/execution.mjs`, `harness/tools.mjs`,
+  `harness/loop.mjs`, `harness/protocol.mjs`, `test/background-run.test.mjs`).
+- **`/review` reads a change without touching it.** A review run takes its
+  brief from the staged overlay diff (or `--review-base <ref>`), keeps the
+  overlay instead of clearing it, and runs with the read-only tool table —
+  edits, `RUN` and the git write side are refused under every mode, including
+  `yolo` — and the model answers in findings (`file:line`, severity, why),
+  nudged once if it reports prose without them. It is a per-run option, not a
+  saved setting (`harness/review.mjs`, `harness/loop.mjs`, `harness/tools.mjs`,
+  `harness/harness.mjs`, the window's `/review`, `test/review.test.mjs`).
+- **Hooks grew from three moments to nine.** Besides `afterWrite`,
+  `beforeCommit` and `done`, a person can now bind a command to
+  `sessionStart`, `promptSubmit`, `beforeTool`, `afterTool`, `preCompact` and
+  `stop`. `beforeTool`'s non-zero exit refuses that one call and no permission
+  mode overrides it; `afterTool`'s output rides the tool result; the lifecycle
+  output is framed as the person's own words (never as project instructions);
+  `preCompact` is carried into the summary; `stop` fires only when the run ends
+  without a DONE. Every hook keeps the argv-only rule, the timeout and the
+  secret screen, and the moment plus the call ride the environment
+  (`AIPASS_HOOK`, `AIPASS_TOOL*`, `AIPASS_STOP_REASON`). Helpers and the checker
+  run with the lifecycle hooks off (`harness/hooks.mjs`, `harness/settings.mjs`,
+  `harness/loop.mjs`, the window's hooks page, `test/hooks-events.test.mjs`).
+- **The schedule runs whether or not the window is open.** The backend starts
+  the ticker on boot and checks what is due on an interval, so a 09:00 task is
+  no longer lost when the window is closed. `schedule.lock` (exclusive create,
+  dead-or-hung takeover) makes the ticker, a manual `schedule.runDue` and a
+  second backend run one due entry once; the timer is unref'd and stops with the
+  server (`harness/schedule.mjs`, `harness/rpc.mjs`, `test/schedule-tick.test.mjs`).
 - **A project can carry one durable goal, and a run works it in rounds.** The
   plan/TODO dies with the run and the memory store holds facts, so nothing
   answered "what am I actually trying to finish". `aipass goal set "<objective>"`

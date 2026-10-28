@@ -42,6 +42,23 @@ here is still a synchronous call with a two-minute ceiling.
 
 ## Wave 3 — the rows
 
+**What landed in this batch.** Four rows are built and proven; one is blocked
+on a real boundary this build does not have; two are deferred, not quietly
+claimed:
+
+| row | state | proof |
+|---|---|---|
+| 3.1 OS sandbox | **not landed** — a Windows boundary needs a native helper (restricted token / AppContainer); a switch that was not enforced would be the one thing this project does not ship | — |
+| 3.2 background RUN + `JOBS` | landed | `test/background-run.test.mjs` |
+| 3.3 `REVIEW` | landed | `test/review.test.mjs` |
+| 3.4 hooks: three moments become nine | landed | `test/hooks-events.test.mjs` |
+| 3.5 `aipass acp` | deferred — a protocol edge, not a half one | — |
+| 3.6 `DIAGNOSE` via LSP | deferred — it needs a server lifecycle and an approval rule of its own | — |
+| 3.7 the schedule ticks itself | landed | `test/schedule-tick.test.mjs` |
+
+The comparison table below is the measurement taken on 2026-10-28, before this
+batch; it stays as the evidence of where the wave came from.
+
 ### 3.1 A RUN gets an OS boundary (`sandbox`)
 
 **Why it hurts.** The overlay already closes the *write* hole: a RUN writes in

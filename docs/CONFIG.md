@@ -144,7 +144,7 @@ drift this file exists to catch.
 | `attach` | `false` | the ATTACH marker in the preamble |
 | `webScratch` | `false` | web lookups in a throwaway conversation |
 | `uploads` | `null` | where staged uploads wait |
-| `hooks` | shipped | the person's own commands (afterWrite, beforeCommit, done) |
+| `hooks` | shipped | the person's own commands (nine moments, `sessionStart` … `stop`) |
 | `recall` | `true` | may the model look into this project's past (RECALL) |
 | `explore` | `true` | may the preamble teach TREE/STAT |
 | `helperPresets` | `{}` | the machine's own SUBAGENT roles: name → { lead, run }, beside the built-ins |

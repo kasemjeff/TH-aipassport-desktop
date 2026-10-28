@@ -294,6 +294,27 @@ Then restart the bridge and reload the extension.
 - **The WAF table has one owner** (`harness/waf.mjs`): the chat CLI's forked
   copy — already diverged — is gone, and a run pins its own conversation id
   (`harness/harness.mjs`), so surfaces cannot drift and runs cannot cross-talk.
+- **A hook gets the call, not the environment** (wave 3.4,
+  `harness/hooks.mjs`, `harness/loop.mjs`): a hook still runs as an argv array
+  with no shell, the run's root as cwd, a timeout and the secret screen on its
+  command; the new moments add only named variables — `AIPASS_HOOK`,
+  `AIPASS_TOOL`, `AIPASS_TOOL_ARG`, `AIPASS_TOOL_BODY` (capped at 8 KB) and
+  `AIPASS_STOP_REASON` — on top of the inherited environment, and the hook's
+  output is scrubbed before it becomes a transcript. A `beforeTool` refusal is
+  final under every mode, including `yolo`: the person's command is not a
+  permission question. A helper and the checker run with the lifecycle hooks
+  off, so a sub-run cannot trigger a command the person only bound to their own
+  session.
+- **A background job's output is a file a person can read** (wave 3.2,
+  `harness/execution.mjs`): `RUN background` writes through the same output
+  scrub and secret-diff screen as a foreground `RUN`, line-buffered, to
+  `.aipass/spill/<id>.txt` under the project root (the overlay hides that
+  directory from the project listing), capped at 20 MB, and stopped with a
+  tree-kill so a spawned child cannot outlive the job. The run reads it back
+  through the ordinary `read` tool, which means the project's path rules and
+  the secret floor apply to that read too. A job id is per run and its file is
+  overwritten by the next job of the same number, so the spill directory does
+  not grow without bound.
 
 ## Data classes
 

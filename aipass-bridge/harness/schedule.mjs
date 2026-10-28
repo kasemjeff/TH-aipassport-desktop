@@ -19,6 +19,11 @@
 // (harness/bridge-pid.mjs, harness/launcher.mjs): it records its own pid so
 // it can be found, it ends itself when its work is done, and it never keeps
 // the desktop backend alive.
+//
+// The backend ticks the schedule itself (startScheduleTicker): a task at 09:00
+// is the machine's promise, not the window's, and a closed window used to mean
+// a scheduler that never ran. One lock in the schedule store makes the ticker
+// and a manual `schedule.runDue` safe together — a due entry runs once.
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -36,6 +41,23 @@ export const SCHEDULE_MODE = 0o600;
 
 /** The file the running scheduled jobs are named in, the way bridge.pid names the bridge. */
 export const SCHEDULE_PID_FILE = 'schedule.pid';
+
+/**
+ * The one file that says "a process is looking at the schedule right now".
+ *
+ * Two surfaces can reach the store at once — the window's `schedule.runDue`
+ * and the backend's own ticker, or two backends on one machine. Without the
+ * lock both read the same "due" list before either writes `lastRunAt`, and a
+ * daily task runs twice. The lock is held for the read/spawn/write, not for
+ * the scheduled run itself: the child is detached and outlives it.
+ */
+export const SCHEDULE_LOCK_FILE = 'schedule.lock';
+
+/** How long a lock with a live owner may sit before it is treated as hung. */
+const LOCK_STALE_MS = 120_000;
+
+/** The ticker's interval. The schedule's unit is a minute, so this is enough. */
+export const SCHEDULE_TICK_MS = 60_000;
 
 const HARNESS_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -215,6 +237,54 @@ const spentEntry = (entry, at) => ({
 });
 
 /**
+ * Take the schedule's one lock, or say who holds it.
+ *
+ * `wx` is the whole mechanism: an exclusive create is atomic on every
+ * filesystem the app ships on, so the winner is the only process that reads
+ * the due list. A lock left by a process that is gone — a crash, a kill, a
+ * machine that lost power — is litter, and a lock whose owner is alive but
+ * older than any read has a right to be is hung; both are taken over once.
+ * The comparison uses the wall clock, not the caller's `now`, because the lock
+ * is about liveness and a test may judge entries at a synthetic time.
+ *
+ * @param {string} file
+ * @returns {Promise<string|null>} the token this process wrote, or null
+ */
+const takeLock = async (file) => {
+  const body = `${JSON.stringify({ pid: process.pid, at: Date.now() })}\n`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const handle = await fs.promises.open(file, 'wx', SCHEDULE_MODE);
+      try { await handle.writeFile(body); } finally { await handle.close(); }
+      return body;
+    } catch (err) {
+      if (/** @type {any} */ (err)?.code !== 'EEXIST') return false;
+      let held = null;
+      try { held = JSON.parse(await fs.promises.readFile(file, 'utf8')); } catch { /* unreadable: litter */ }
+      const age = Date.now() - Number(held?.at ?? 0);
+      const alive = Number.isInteger(held?.pid) && isRunning(held.pid);
+      if (alive && age >= 0 && age < LOCK_STALE_MS) return null;
+      try { await fs.promises.rm(file, { force: true }); } catch { return null; }
+    }
+  }
+  return null;
+};
+
+/**
+ * Drop the lock, but only if it is still the one this process wrote. A
+ * takeover replaces the file; a blind `rm` here would delete the new owner's.
+ *
+ * @param {string} file
+ * @param {string} token the body `takeLock` returned
+ */
+const releaseLock = async (file, token) => {
+  try {
+    if (await fs.promises.readFile(file, 'utf8') !== token) return;
+    await fs.promises.rm(file, { force: true });
+  } catch { /* already gone or taken over */ }
+};
+
+/**
  * The store of scheduled work.
  */
 export class ScheduleStore {
@@ -228,6 +298,11 @@ export class ScheduleStore {
   /** The file the running scheduled jobs are named in. */
   get pidFile() {
     return path.join(path.dirname(this.file), SCHEDULE_PID_FILE);
+  }
+
+  /** The file that keeps two backends from reading the same due list. */
+  get lockFile() {
+    return path.join(path.dirname(this.file), SCHEDULE_LOCK_FILE);
   }
 
   /**
@@ -365,23 +440,32 @@ export class ScheduleStore {
    * @param {Function} [opts.spawnFn] the spawn to use (a test's fake)
    * @param {string} [opts.cli] the CLI to run
    * @param {NodeJS.ProcessEnv} [opts.env]
-   * @returns {Promise<{ran: Array<Record<string, any>>, count: number, at: number}>}
+   * @returns {Promise<{ran: Array<Record<string, any>>, count: number, at: number, locked?: boolean}>}
    */
   async runDue({ now = Date.now(), spawnFn = spawn, cli = cliPath(), env = process.env } = {}) {
     const at = now instanceof Date ? now.getTime() : Number(now);
-    const entries = await this.read();
-    const due = entries.filter((e) => isDue(e, at));
-    const ran = [];
-    for (const entry of due) {
-      const pid = startDetached(entry, { spawnFn, cli, env });
-      ran.push({ id: entry.id, task: entry.task, root: entry.root, pid });
+    // One reader at a time. The lock covers the read/spawn/write, not the
+    // scheduled work: the child is detached. A caller that finds it held
+    // answers "nothing ran" rather than running the same entry twice.
+    const token = await takeLock(this.lockFile);
+    if (!token) return { ran: [], count: 0, at, locked: true };
+    try {
+      const entries = await this.read();
+      const due = entries.filter((e) => isDue(e, at));
+      const ran = [];
+      for (const entry of due) {
+        const pid = startDetached(entry, { spawnFn, cli, env });
+        ran.push({ id: entry.id, task: entry.task, root: entry.root, pid });
+      }
+      if (due.length) {
+        const ids = new Set(due.map((e) => e.id));
+        await this.write(entries.map((e) => (ids.has(e.id) ? spentEntry(e, at) : e)));
+        await this.recordPids(ran.map((r) => r.pid));
+      }
+      return { ran, count: ran.length, at };
+    } finally {
+      await releaseLock(this.lockFile, token);
     }
-    if (due.length) {
-      const ids = new Set(due.map((e) => e.id));
-      await this.write(entries.map((e) => (ids.has(e.id) ? spentEntry(e, at) : e)));
-      await this.recordPids(ran.map((r) => r.pid));
-    }
-    return { ran, count: ran.length, at };
   }
 }
 
@@ -445,9 +529,44 @@ export const remove = (id) => defaultStore().remove(id);
 export const due = (now = Date.now()) => defaultStore().due(now);
 
 /**
- * Run the tasks that are due.
+ * Run the work that is due.
  *
  * @param {object} [opts]
- * @returns {Promise<{ran: Array<Record<string, any>>, count: number, at: number}>}
+ * @returns {Promise<{ran: Array<Record<string, any>>, count: number, at: number, locked?: boolean}>}
  */
 export const runDue = (opts = {}) => defaultStore().runDue(opts);
+
+/**
+ * The machine's own ticker: run what is due on start and on an interval.
+ *
+ * The window is not the scheduler. A person who closes it still expects the
+ * task they set to run, and the backend is the process that outlives the
+ * window. The timer is unref'd, so it never keeps the backend alive; the
+ * store's lock makes this and a manual `schedule.runDue` safe together.
+ *
+ * @param {object} [opts]
+ * @param {ScheduleStore} [opts.store]
+ * @param {number} [opts.intervalMs]
+ * @param {object} [opts.runDue] extra options for the store's runDue (a test's spawn)
+ * @returns {{tick: () => void, stop: () => void}}
+ */
+export function startScheduleTicker({ store = defaultStore(), intervalMs = SCHEDULE_TICK_MS, runDue: runOpts = {} } = {}) {
+  let stopped = false;
+  const tick = () => {
+    if (stopped) return;
+    const now = runOpts.now ?? Date.now();
+    store.runDue({ ...runOpts, now }).catch(() => { /* the next tick retries */ });
+  };
+  // The start is a tick: a machine that was asleep at the scheduled minute is
+  // due now, and the store's rule is "once", not "on the minute".
+  tick();
+  const timer = setInterval(tick, intervalMs);
+  timer.unref?.();
+  return {
+    tick,
+    stop() {
+      stopped = true;
+      clearInterval(timer);
+    },
+  };
+}

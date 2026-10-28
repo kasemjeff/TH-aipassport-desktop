@@ -414,16 +414,26 @@ the person configured, bound to a moment (`settings.json` → `hooks`):
 
 | moment | when | what the verdict does |
 |---|---|---|
+| `sessionStart` | once, before the session's first task | its output is prepended to the task, framed as the person's own words — never as project instructions |
+| `promptSubmit` | before every task the person sends | the same framing, on that message |
+| `beforeTool` | before one tool call | a non-zero exit refuses that call, with the reason the model reads; no permission mode overrides it |
+| `afterTool` | after one tool call | what it printed is appended to the tool result; exit 0 with no output adds nothing |
 | `afterWrite` | after a change is staged — a write or an edit | rides back to the model with the tool result; a failing hook is reported and the change stays staged |
 | `beforeCommit` | before the model's `GIT commit` goes through | a failing hook refuses the commit, and the run continues: the model is told what the hook said |
+| `preCompact` | before the summariser runs | its output is carried into the summary, so it survives the rotation |
 | `done` | when the run ends | comes back to the person as a note, after the run's own answer — it does not change the result |
+| `stop` | when the run ends **without** a DONE (cancelled, budget, stalled) | comes back as a note; it does not fire on a DONE, so it is not a second `done` |
 
 Each hook runs as an argv array (never a shell string), with the run's root
 as its cwd and a timeout on it, and its output is screened for secrets
-before it becomes part of a transcript. A hook is the person's command, so it
-never asks the model — or the person — for permission. The `beforeCommit`
-moment rides the model's `GIT commit`; the window's own commit button is the
-person's, and it does not consult the hooks.
+before it becomes part of a transcript. The moment and the call ride the
+environment (`AIPASS_HOOK`, `AIPASS_TOOL`, `AIPASS_TOOL_ARG`,
+`AIPASS_TOOL_BODY`, `AIPASS_STOP_REASON`), so one script can serve several
+moments. A hook is the person's command, so it never asks the model — or the
+person — for permission. The `beforeCommit` moment rides the model's
+`GIT commit`; the window's own commit button is the person's, and it does not
+consult the hooks. A helper and the checker run with the lifecycle hooks off:
+a sub-run is not a session.
 
 ## Guards at a glance
 
