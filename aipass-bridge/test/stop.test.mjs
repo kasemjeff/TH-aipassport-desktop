@@ -63,7 +63,7 @@ test('a stop ends the tools that were still queued in the reply', async () => {
 
   const result = await runTask('read two files', {
     bridge, tools, overlay: new Overlay(dir), session,
-    options: { maxSteps: 5, signal: controller.signal },
+    options: { maxSteps: 5, signal: controller.signal, parallelReads: false },
     first: true,
   });
 

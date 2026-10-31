@@ -69,6 +69,25 @@ export function createBanners(ctx) {
     return btn;
   }
 
+  /** Put a short pairing code on the clipboard. */
+  function pairCodeButton() {
+    const btn = el('button', 'mini', 'จับคู่อัตโนมัติ');
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        const r = await rpc('pair.code');
+        if (!r?.code) { addNote('ขอ pairing code ไม่ได้ — ' + (r?.reason ?? '')); return; }
+        await navigator.clipboard.writeText(r.code);
+        addNote('วาง pairing code ลงคลิปบอร์ดแล้ว (' + r.code + ') — เปิด popup ของ extension → Advanced → "Pair from app"');
+      } catch {
+        addNote('ขอ pairing code ไม่ได้');
+      } finally {
+        btn.disabled = false;
+      }
+    };
+    return btn;
+  }
+ 
   /**
    * Show the extension's missing token, and take it down when it is fixed.
    *
@@ -233,10 +252,36 @@ export function createBanners(ctx) {
         // which — sending the reader to load an extension that is already
         // loaded is a dead end.
         if (readiness.extensionToken === 'missing') {
-          row.append(el('span', 'dim', 'ยังไม่ได้รับ token — '), tokenFixButton());
+          row.append(el('span', 'dim', 'ยังไม่ได้รับ token — '), tokenFixButton(), el('span', 'dim', ' หรือ '), pairCodeButton());
         } else {
-          row.append(el('span', 'dim', 'โหลดจากโฟลเดอร์ aipass-bridge/extension'));
+          row.append(el('span', 'dim', 'โหลดจากโฟลเดอร์ aipass-bridge/extension — '));
+          const openExt = el('button', 'mini', 'เปิดโฟลเดอร์');
+          openExt.onclick = () => rpc('shell.reveal', { path: readiness.extensionPath || 'aipass-bridge/extension' }).catch(() => {});
+          row.append(openExt);
+          row.append(el('span', 'dim', ' '));
+          const gh = el('button', 'mini', 'โหลดจาก GitHub');
+          gh.onclick = async () => {
+            gh.disabled = true;
+            try {
+              const r = await rpc('extension.install');
+              if (!r?.ok) { addNote('เปิดหน้า GitHub ไม่ได้ — ' + (r?.reason ?? '')); return; }
+              addNote('เปิดหน้า GitHub แล้ว — ดาวน์โหลด ZIP (Code → Download ZIP) แตกไฟล์ แล้ว Load unpacked จากโฟลเดอร์ aipass-bridge/extension');
+            } finally {
+              gh.disabled = false;
+            }
+          };
+          row.append(gh);
+          row.append(el('span', 'dim', ' '));
+          const openChromeExt = el('button', 'mini', 'เปิดหน้าติดตั้ง');
+          openChromeExt.onclick = () => rpc('browser.open', { url: 'chrome://extensions' }).catch(() => {});
+          row.append(openChromeExt);
         }
+      }
+      if (!ok && key === 'bridge' && readiness.chrome === false) {
+        row.append(el('span', 'dim', ' — ต้องติดตั้ง Chrome ก่อน'));
+        const dl = el('button', 'mini', 'ดาวน์โหลด Chrome');
+        dl.onclick = () => rpc('browser.open', { url: 'https://www.google.com/chrome/' }).catch(() => {});
+        row.append(dl);
       }
       if (!ok && key === 'bridge') row.append(el('span', 'dim', 'รัน aipass dev'));
       ready.append(row);
@@ -286,6 +331,8 @@ export function createBanners(ctx) {
       // until that happens; the banner flips it and offers the fix.
       tab: !state.needsTab,
       credits: credits ?? null,
+      chrome: st.chrome !== false,
+      extensionPath: st.extensionPath ?? null,
     });
   }
 

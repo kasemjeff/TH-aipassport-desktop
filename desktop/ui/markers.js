@@ -57,6 +57,8 @@ const SINGLE = [
   // RECALL — the model asks what this project said before. The question is
   // required, so the shape is parse()'s: the keyword needs its argument.
   { marker: 'RECALL', re: /^\s*RECALL\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'recall', arg: m[1].trim() }) },
+  { marker: 'RETRIEVE', re: /^\s*RETRIEVE\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'retrieve', arg: m[1].trim() }) },
+  { marker: 'DIAGNOSE', re: /^\s*DIAGNOSE\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'diagnose', arg: m[1].trim() }) },
   { marker: 'FETCH', re: /^\s*FETCH\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'fetch', arg: m[1].trim() }) },
   { marker: 'WEB', re: /^\s*WEB\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'web', arg: m[1].trim() }) },
   { marker: 'ATTACH', re: /^\s*ATTACH\s+(.+?)\s*$/i, pick: (m) => ({ kind: 'attach', arg: m[1].trim() }) },

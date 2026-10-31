@@ -105,6 +105,9 @@ const ADMIN = process.env.AIPASS_ADMIN === '1';
 // extension from every other local caller, and it changes with every bridge
 // run, so nothing about it is worth carrying around.
 const EXT_TOKEN = randomUUID();
+// One-time pairing codes for the extension to claim the loopback token without
+// a manual paste. code -> { expires, claimed }.
+const pairCodes = new Map();
 const ALLOWED_HOSTS = new Set([
   '127.0.0.1', 'localhost', '::1', '[::1]',
   ...(process.env.AIPASS_ALLOWED_HOSTS ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
@@ -1819,7 +1822,10 @@ const server = http.createServer(async (req, res) => {
   // Loopback bearer gate: everything except the health probes needs the token
   // (minted once at ~/.aipass/.token, overridable with AIPASS_TOKEN).
   // Preflight above stays open — browsers never carry auth on OPTIONS.
-  if (!(req.method === 'GET' && (path === '/status' || path === '/health'))) {
+  // Pairing endpoints are open: the extension has no loopback token yet, which
+  // is the whole point of pairing. The code itself is the secret.
+  const PAIR_OPEN = (path === '/pair/code' && req.method === 'GET') || (path === '/pair/claim' && req.method === 'POST');
+  if (!(PAIR_OPEN || (req.method === 'GET' && (path === '/status' || path === '/health')))) {
     if (!authorized(req)) {
       if (path === '/ext/events') noteUnauthenticatedExtension();
       res.writeHead(401, { 'content-type': 'text/plain', ...corsHeaders() });
@@ -2135,6 +2141,26 @@ const server = http.createServer(async (req, res) => {
         credits: quotaCache.value,
         cache: cacheStats,
       });
+    }
+
+    // Pairing: the app asks for a short code, shows it, and puts it on the
+    // clipboard; the extension claims it and gets the loopback token back.
+    // Codes live in memory for five minutes and can be claimed once.
+    if (path === '/pair/code' && req.method === 'GET') {
+      const code = Math.random().toString(36).slice(2, 8).toUpperCase();
+      pairCodes.set(code, { expires: Date.now() + 5 * 60 * 1000, claimed: false });
+      return json(res, 200, { code, expiresAt: Date.now() + 5 * 60 * 1000 });
+    }
+    if (path === '/pair/claim' && req.method === 'POST') {
+      const body = await readJson(req);
+      const code = String(body?.code ?? '').trim().toUpperCase();
+      const entry = pairCodes.get(code);
+      if (!entry || entry.claimed || Date.now() > entry.expires) {
+        return json(res, 400, { ok: false, reason: 'invalid or expired code' });
+      }
+      entry.claimed = true;
+      pairCodes.delete(code);
+      return json(res, 200, { ok: true, token: loadOrMintToken() });
     }
 
     return oaiError(res, 404, `no route for ${req.method} ${path}`, 'not_found');

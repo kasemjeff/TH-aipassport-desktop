@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { SKIP, binaryKind, posix, stripGutter, realPath, DELETED } from './overlay.mjs';
+import { SKIP, binaryKind, posix, stripGutter, realPath, DELETED, isNoisePath } from './overlay.mjs';
 import { sharedWriteRefusal } from './sandbox.mjs';
 import { outbound, inbound } from './waf.mjs';
 import { withResolvedSources } from './web-sources.mjs';
@@ -27,6 +27,8 @@ import { scrubOutput } from './output-scrub.mjs';
 import { runHooks } from './hooks.mjs';
 // The recall: what this project said before (harness/memory-store.mjs).
 import { recallEntries } from './memory-store.mjs';
+import { retrieve as retrieveIndex } from './retrieval.mjs';
+import { resolvePolicy, backendFor } from './boundary.mjs';
 import { dayKey } from './export.mjs';
 import { isPrivateHost, pinnedGet, resolveVetted } from '../bridge/private-hosts.mjs';
 import { loadGitignore } from './gitignore.mjs';
@@ -606,6 +608,10 @@ export function createTools(ctx) {
     overlay,
     skills,
     allowRun = false,
+    // The sandbox mode for this run's RUN/VERIFY/JOBS. 'off' (the default)
+    // keeps today's behaviour; the other modes are enforced by
+    // harness/boundary.mjs, and a mode without a backend refuses.
+    sandbox = 'off',
     readOnly = false,
     readOnlyNote = null,
     // The write side of git: OFF unless the run was told it may change the
@@ -618,6 +624,9 @@ export function createTools(ctx) {
     // only asks for them.
     declaredCheck = null,
     checker = null,
+    // The language-server pool (harness/lsp.mjs). Null means no server is
+    // available and DIAGNOSE says so instead of guessing.
+    lsp = null,
     maxResult = 3000,
     readLines = 250,
     bridge = null,
@@ -656,6 +665,11 @@ export function createTools(ctx) {
   // disk (spill's tailShare). The last lines of a failing command are the
   // diagnosis; the first are where it went wrong first.
   const clipRun = async (s) => (s.length > maxResult ? await spill(s, maxResult, root, 0.6) : s);
+  // The sandbox policy is resolved once per run: the backend is a property
+  // of the platform, and the mode is a property of the run. A refusal here
+  // means every RUN/VERIFY/JOBS in this run refuses the same way.
+  const sandboxPolicy = resolvePolicy({ sandboxMode: sandbox, platform: process.platform, backend: backendFor(process.platform) });
+  const sandboxRefuse = sandboxPolicy.refuse;
   // Background job ids are per run table, not per project: `run1`, `run2`...
   // The spill file with the same name is overwritten by the next run's job of
   // that number, which is the one JOBS of that run points at.
@@ -856,6 +870,7 @@ export function createTools(ctx) {
         return child;
       };
       const ign = loadGitignore(root);
+      let noiseSkipped = 0;
       const walk = async (dirAbs, node, level) => {
         if (level > depth || count >= MAX) return;
         let entries = [];
@@ -866,6 +881,7 @@ export function createTools(ctx) {
           if (SKIP.has(e.name) || e.name.startsWith('.')) continue;
           const full = path.join(dirAbs, e.name);
           const childRel = posix(path.relative(root, full));
+          if (isNoisePath(childRel)) { noiseSkipped++; continue; }
           if (ign.ignored(childRel, e.isDirectory())) continue;
           if (e.isSymbolicLink()) {
             if (!trySafe(full)) continue;
@@ -907,8 +923,9 @@ export function createTools(ctx) {
       };
       render(treeRoot, rel === '.' ? '' : '  ');
       if (!lines.length || (lines.length === 1 && rel !== '.')) return `${rel}/ is empty.`;
+      const noiseNote = noiseSkipped ? `\n… skipped ${noiseSkipped} system temp folder(s) (AppData/Local/Temp); read one directly with NEED file <path> if you need it.` : '';
       const more = count >= MAX ? `\n… stopped at ${MAX} entries — narrow the path or lower -L.` : '';
-      return await clip(lines.join('\n') + more);
+      return await clip(lines.join('\n') + more + noiseNote);
     },
     /**
      * STAT — one path's facts: kind, size, line count, modified time, and
@@ -1021,9 +1038,29 @@ export function createTools(ctx) {
       // level. The asked-for range comes back verbatim instead; a range too
       // large to ride a message is cut here, never re-spilled.
       if (isSpill) {
-        const text = page.join('\n');
-        if (text.length <= 30_000) return text + note;
-        return `${text.slice(0, 30_000)}\n… the range was cut at 30000 chars — a spill read is never spilled again; ask for a smaller range, e.g. ${start}-${Math.min(end, start + 200)}.${note}`;
+        // A spill read is the model's way of paging through a long result, so
+        // it is bounded by maxResult (the same cap every other tool result
+        // rides), not by the old 30 000-char ceiling that let a 15 KB file
+        // travel whole and draw a 403. Whole lines are kept so the gutter the
+        // spill already carries stays intact; a single over-long line is sliced.
+        const cap = maxResult;
+        const kept = [];
+        let bytes = 0;
+        let truncatedLine = null;
+        for (const line of page) {
+          const add = Buffer.byteLength(line, 'utf8') + (kept.length ? 1 : 0);
+          if (kept.length && bytes + add > cap) break;
+          if (!kept.length && add > cap) { truncatedLine = line; break; }
+          kept.push(line);
+          bytes += add;
+        }
+        if (truncatedLine !== null) {
+          const slice = truncatedLine.slice(0, Math.max(1, Math.floor(cap / 4)));
+          return `${slice}\n… the range was cut at ${cap} bytes — a spill read is never spilled again; ask for a smaller range, e.g. ${start}-${Math.min(end, start + 200)}.${note}`;
+        }
+        const text = kept.join('\n');
+        if (kept.length === page.length) return text + note;
+        return `${text}\n… the range was cut at ${cap} bytes — a spill read is never spilled again; ask for a smaller range, e.g. ${start}-${Math.min(end, start + 200)}.${note}`;
       }
 
       const width = String(end).length;
@@ -1157,6 +1194,7 @@ export function createTools(ctx) {
       let matches = 0; // only match lines count toward MAX; context rides along
       const MAX = 50;
       const ign = loadGitignore(root);
+      let noiseSkipped = 0;
       const walk = async (dir) => {
         if (matches >= MAX) return;
         let entries;
@@ -1165,6 +1203,7 @@ export function createTools(ctx) {
           if (SKIP.has(e.name) || e.name.startsWith('.')) continue;
           const full = path.join(dir, e.name);
           const rel = posix(path.relative(root, full));
+          if (isNoisePath(rel)) { if (e.isDirectory()) noiseSkipped++; continue; }
           if (e.isDirectory()) {
             if (!ign.ignored(rel, true)) await walk(full);
             continue;
@@ -1218,11 +1257,13 @@ export function createTools(ctx) {
         }
       };
       await walk(root);
-      if (!hits.length) return `no matches for "${query}".`;
+      const noiseNote = noiseSkipped ? `\n… skipped ${noiseSkipped} system temp folder(s) (AppData/Local/Temp).` : '';
+      if (!hits.length) return `no matches for "${query}".${noiseNote}`;
       const more = matches >= MAX ? `\n… stopped at ${MAX} matches; make the search more specific for the rest.` : '';
-      return clip(hits.join('\n') + more);
+      return clip(hits.join('\n') + more + noiseNote);
     },
     async run(_arg, body) {
+      if (sandboxRefuse) return `err: ${sandboxRefuse}`;
       if (!allowRun) return 'err: shell commands are disabled for this run';
       if (!String(body ?? '').trim()) {
         return 'err: the RUN block has no command. One command per RUN, e.g. RUN\nnode check.mjs\nEND.';
@@ -1253,6 +1294,7 @@ export function createTools(ctx) {
      * @param {string} body
      */
     async background(_arg, body) {
+      if (sandboxRefuse) return `err: ${sandboxRefuse}`;
       if (!allowRun) return 'err: shell commands are disabled for this run';
       if (!String(body ?? '').trim()) {
         return 'err: the RUN block has no command. One command per RUN, e.g. RUN\nnode check.mjs\nEND.';
@@ -1282,6 +1324,7 @@ export function createTools(ctx) {
       const wanted = String(arg ?? '').trim();
       const command = wanted || String(declaredCheck ?? '').trim();
       if (command) {
+        if (sandboxRefuse) return `err: ${sandboxRefuse}`;
         if (!allowRun) return 'err: a check needs the shell, and shell commands are disabled for this run';
         // The secret floor covers tool args; the same screen the RUN body
         // gets, because a check can name a file just as easily.
@@ -1311,6 +1354,34 @@ export function createTools(ctx) {
       }
       return clip(`verdict: ${verdict?.verdict ?? 'none'}\n${String(verdict?.text ?? '')}`);
     },
+    /**
+     * DIAGNOSE — ask a language server for the errors and warnings of a file.
+     *
+     * The regex index (SYMBOLS/DEF/REFS) cannot answer "does this
+     * type-check"; a wrong definition sends the model to the wrong file with
+     * confidence. This asks the machine's own server instead. No server for
+     * the file type is a plain answer, not a guess, and a server that dies
+     * mid-run is reported once and the run continues.
+     */
+    async diagnose(arg) {
+      const wanted = String(arg ?? '').trim();
+      if (!wanted) return 'err: DIAGNOSE needs a path — DIAGNOSE src/foo.ts';
+      if (!lsp) {
+        return 'err: no language server is available for this run — install one (rust-analyzer, typescript-language-server, pyright, gopls) or add it to ~/.aipass/lsp.json with approved: true.';
+      }
+      let result;
+      try {
+        result = await lsp.diagnostics(wanted);
+      } catch (err) {
+        return `err: the language server could not be asked: ${String(err?.message ?? err)}`;
+      }
+      if (result?.none) return `no diagnostics: ${result.none}`;
+      const items = Array.isArray(result?.items) ? result.items : [];
+      if (!items.length) return `no diagnostics from ${result.server} for ${wanted}.`;
+      const lines = items.map((d) => `${d.file}:${d.line}:${d.col} ${d.severity} (${d.source}): ${d.message}`);
+      return clip(`${items.length} diagnostic(s) from ${result.server} for ${wanted}:\n${lines.join('\n')}`);
+    },
+
     async glob(pattern) {
       if (!pattern) return 'err: give me a glob pattern, e.g. **/*.ts';
       const raw = String(pattern);
@@ -1360,6 +1431,7 @@ export function createTools(ctx) {
       // readdirSync over a big tree freezes every window call for the length
       // of the walk (rule 9). Sequential and depth-first, so which files the
       // MAX cutoff returns for a huge tree stays the same as before.
+      let noiseSkipped = 0;
       const walk = async (dir) => {
         if (hits.length >= MAX) return;
         let entries;
@@ -1368,6 +1440,7 @@ export function createTools(ctx) {
           if (SKIP.has(e.name) || e.name.startsWith('.')) continue;
           const full = path.join(dir, e.name);
           const rel = posix(path.relative(root, full));
+          if (isNoisePath(rel)) { noiseSkipped++; continue; }
           if (ign.ignored(rel, e.isDirectory())) continue;
           // A link is not a file of this project: it can point anywhere. The
           // containment check follows it — a link out of the project is a
@@ -1386,12 +1459,13 @@ export function createTools(ctx) {
         }
       };
       await walk(root);
-      if (!hits.length) return `no files matched "${pattern}".`;
+      const noiseNote = noiseSkipped ? `\n… skipped ${noiseSkipped} system temp folder(s) (AppData/Local/Temp).` : '';
+      if (!hits.length) return `no files matched "${pattern}".${noiseNote}`;
       const more = hits.length >= MAX ? `\n… stopped at ${MAX} results.` : '';
       // A glob answer goes through the same cap as every other result: a
       // deep tree can name thousands of files, and the raw list used to ride
       // the message whole.
-      return clip(hits.join('\n') + more);
+      return clip(hits.join('\n') + more + noiseNote);
     },
     async git(arg) {
       const sub = arg.trim();
@@ -1719,11 +1793,34 @@ export function createTools(ctx) {
         return `nothing in this project's past mentions "${q}" — ${result.sessions} session(s) searched, no match.`;
       }
       const lines = result.hits.map((h) => {
+        if (h.type === 'fact') return 'memory fact\n' + h.excerpt;
         const day = dayKey(h.ts) || 'an unknown day';
         const at = h.ts ? new Date(h.ts).toTimeString().slice(0, 5) : '';
-        return `${day}${at ? ' ' + at : ''} · "${h.title}" (${h.session}) · ${h.type}\n${h.excerpt}`;
+        return `${day}${at ? ' ' + at : ''} \u00B7 "${h.title}" (${h.session}) \u00B7 ${h.type}\n${h.excerpt}`;
       });
       return clip(`${result.hits.length} of ${result.matches} past entries about "${q}" (${result.sessions} session(s) searched):\n${lines.join('\n\n')}`);
+    },
+    async retrieve(query) {
+      const q = String(query ?? '').trim();
+      if (!q) return 'err: RETRIEVE needs something to look for - RETRIEVE <what you want to know>';
+      const qIn = inbound(q);
+      let result;
+      try {
+        result = await retrieveIndex(qIn, { root, overlay, signal });
+      } catch (err) {
+        return `err: the index could not be read: ${String(err?.message ?? err)}`;
+      }
+      const words = Array.isArray(result?.words) ? result.words : [];
+      if (!words.length) return 'err: RETRIEVE needs a word of two letters or more - RETRIEVE <what you want to know>';
+      const hits = Array.isArray(result?.hits) ? result.hits : [];
+      const stats = result?.stats ?? {};
+      if (!hits.length) return `nothing in the project index mentions "${q}" - ${stats.chunks ?? 0} passage(s) searched.`;
+       const lines = hits.map((h) => `${h.path}:${h.start}-${h.end}${h.symbol ? '  (' + h.symbol + ')' : ''}\n` + String(h.excerpt).split('\n').map((l) => '  ' + l).join('\n'));
+      const age = stats.builtAt ? `${Math.max(0, Math.round((Date.now() - stats.builtAt) / 1000))}s old` : 'just built';
+      let out = `${hits.length} of ${stats.matches ?? stats.chunks ?? hits.length} matching passages about "${q}" (${stats.files ?? 0} files indexed, ${age}):\n${lines.join('\n\n')}`;
+      if (stats.truncated) out += '\n… index capped; narrow the query or raise AIPASS_RETRIEVAL_MAX_CHUNKS.';
+      if (stats.saved === false) out += '\nindex not saved; it rebuilds next run.';
+      return clip(out);
     },
   };
 

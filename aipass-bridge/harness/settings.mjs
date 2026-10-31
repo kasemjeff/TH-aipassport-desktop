@@ -99,6 +99,11 @@ export const DEFAULTS = {
   // the check runs a command and a command is the shell gate: the person
   // decides whether the model may run one on its own.
   allowVerify: false,
+  // The sandbox a RUN runs in: 'off' (today's behaviour), 'read-only',
+  // 'workspace-write' (the throwaway projection), or 'danger-full-access'.
+  // Machine-wide default; a run may still be given its own. A missing backend
+  // refuses rather than running unsandboxed.
+  sandbox: 'off',
   // The step cap one run may spend, or 0 for no cap: the run goes until DONE,
   // a guard stops it, or a budget below is spent. A positive cap is 1..200.
   maxSteps: 0,
@@ -195,6 +200,8 @@ export const DEFAULTS = {
   searchI: false,
   attach: false,
   webScratch: false,
+  retrieve: true,
+  diagnose: true,
   // A fetch the model chose is a question the person sees — unless the
   // machine has been told to let it through. The window asks (and says
   // where); the CLI's `--allow-fetch` says yes on the command line.
@@ -258,6 +265,7 @@ export const DEFAULTS = {
  * @property {boolean} [attach]               the ATTACH of a non-text file
  * @property {boolean} [webScratch]           the scratch conversation
  * @property {boolean} [recall]               may the model look into the past
+ * @property {boolean} [retrieve]             may the preamble teach RETRIEVE
  * @property {boolean} [explore]              may the preamble teach TREE/STAT
  * @property {string|null} [conversation]     the conversation to send into
  * @property {boolean} [reuse]                reuse the bridge's conversation
@@ -307,6 +315,9 @@ export const HARNESS_OPTION_DEFAULTS = Object.freeze({
   // GIVEN, never powers it takes. Off by default; the person turns them on.
   allowGitWrite: false,
   allowVerify: false,
+  // The sandbox mode for this run. 'off' means no boundary (today's
+  // behaviour); the other three are enforced by harness/boundary.mjs.
+  sandbox: 'off',
   // plan mode: the model writes a plan first, and waits for the human
   plan: false,
   requirePlanApproval: false,
@@ -327,6 +338,9 @@ export const HARNESS_OPTION_DEFAULTS = Object.freeze({
   searchI: false,
   attach: false,
   webScratch: false,
+  retrieve: true,
+  // the DIAGNOSE marker: the model may ask a language server for diagnostics
+  diagnose: true,
   // the RECALL marker: the model may ask what this project said before
   recall: true,
   // TREE and STAT (and LIST -l): the preamble teaches them when this is on
@@ -631,6 +645,8 @@ export class Settings {
     // The RECALL marker is a read, and a read is a switch like any other: a
     // settings file that says "true" as a string says no.
     next.recall = Boolean(next.recall);
+    next.retrieve = Boolean(next.retrieve);
+    next.diagnose = Boolean(next.diagnose);
     next.repeatGuard = Boolean(next.repeatGuard);
     next.repeatGuardMax = num(next.repeatGuardMax, 1, 50, DEFAULTS.repeatGuardMax);
     next.attempts = num(next.attempts, 1, 5, DEFAULTS.attempts);
@@ -646,6 +662,11 @@ export class Settings {
     // says "true" as a string is a file that says no.
     next.allowGitWrite = Boolean(next.allowGitWrite);
     next.allowVerify = Boolean(next.allowVerify);
+    // The sandbox mode is an enum, not a boolean: a typo must not silently
+    // become 'off' and pretend the command was sandboxed.
+    if (!['off', 'read-only', 'workspace-write', 'danger-full-access'].includes(next.sandbox)) {
+      next.sandbox = DEFAULTS.sandbox;
+    }
     // Path rules are policy, and policy that a typo silently disables is worse
     // than no policy: a rule with no pattern would never match anything, and a
     // decision of "yes" would never be honoured by the engine. Both are dropped

@@ -70,9 +70,11 @@ test('the shapes the edge refuses do not survive outbound, and come back byte fo
     '<!doctype html>\n<!-- x -->\n<script>javascript:alert(1)</script>',
     'cd ~/project && ./run.sh',
     'console.warn("127.0.0.1 & 0.0.0.0");',
+    '@echo off\n"D:\\aipass-build\\target\\release\\node.exe" "D:\\aipass-build\\target\\release\\aipass-bridge\\bin\\aipass.mjs" %*\nsetlocal\nendlocal',
+    'call helper.cmd && helper.bat %~dp0',
   ].join('\n');
   const enc = outbound(risky);
-  for (const shape of ['console.log', 'console.warn', 'localhost', '===', '!==', 'node:child_process', '<script', 'javascript:', 'process.env', '127.0.0.1', '0.0.0.0', '&&', '<!doctype']) {
+  for (const shape of ['console.log', 'console.warn', 'localhost', '===', '!==', 'node:child_process', '<script', 'javascript:', 'process.env', '127.0.0.1', '0.0.0.0', '&&', '<!doctype', '@echo off', '%*', 'node.exe', '.cmd', '.bat', '%~dp0', 'setlocal', 'endlocal']) {
     assert.ok(!enc.includes(shape), `${shape} must not survive outbound`);
   }
   assert.equal(inbound(enc), risky, 'the round trip restores the original bytes');

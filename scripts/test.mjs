@@ -65,7 +65,7 @@ const SCRATCH_PREFIXES = [
   'aipass-fixes-home-', 'aipass-gates-home-', 'aipass-hardening-home-',
   'aipass-harness-', 'aipass-integrity-', 'aipass-loadtest-home-',
   'aipass-loadtest-root-', 'aipass-meta-', 'aipass-plan-home-', 'aipass-plugin-',
-  'aipass-qa-home-', 'aipass-rules-', 'aipass-sandbox-home-', 'aipass-sbx-',
+  'aipass-qa-home-', 'aipass-retrieval-', 'aipass-rules-', 'aipass-sandbox-home-', 'aipass-sbx-',
   'aipass-secret-', 'aipass-skills-', 'aipass-stability-', 'aipass-stats-',
   'aipass-stop-', 'aipass-stop-home-', 'aipass-suite-browser-', 'aipass-suite-home-',
   'aipass-symbols-home-', 'aipass-test-', 'aipass-test-home-', 'aipass-tools-',
@@ -156,7 +156,7 @@ const BROWSER_PIDS = path.join(BROWSER_HOME, 'pids.txt');
 // squatting the real port, which any web page could blind-POST to. The floor
 // here names a port of the suite's own, so a CLI that starts a bridge starts
 // it somewhere harmless.
-const BRIDGE_PORT = await freePort();
+const BRIDGE_PORT = process.env.AIPASS_PORT?.trim() || String(await freePort());
 // The environment the suite runs in, shared with the coverage gate
 // (scripts/suite-env.mjs): the same scratch home, the same ports, the same
 // browser profile. A test that behaves differently under the gate measures
@@ -165,6 +165,7 @@ const suite = await suiteEnv({
   home: process.env.AIPASS_HOME?.trim() || HOME,
   browserProfile: BROWSER_PROFILE,
   browserPidFile: BROWSER_PIDS,
+  bridgePort: BRIDGE_PORT,
 });
 const result = spawnSync(process.execPath, nodeArgs, {
   stdio: 'inherit',

@@ -58,6 +58,19 @@ export const SUBSTITUTIONS = [
   [/powershell/gi, 'PSHELL'],
   [/\.ps1\b/gi, 'DOT-PS1'],
   [/\.sh\b/gi, 'DOT-SH'],
+  // Batch / shell-script shapes the upstream edge refuses: a Windows launcher
+  // (aipass.cmd) carrying @echo off, %*, node.exe and a .cmd extension was
+  // enough to draw a 403 on its own. Encode them like the rest; restore
+  // byte-for-byte on write.
+  [/@echo off/gi, 'BATCH-ECHO-OFF'],
+  [/%\*/g, 'BATCH-ALL-ARGS'],
+  [/%~dp0/gi, 'BATCH-DIR'],
+  [/\bsetlocal\b/gi, 'BATCH-SETLOCAL'],
+  [/\bendlocal\b/gi, 'BATCH-ENDLOCAL'],
+  [/\bcmd\.exe\b/gi, 'CMD-EXE'],
+  [/\bnode\.exe\b/gi, 'NODE-EXE'],
+  [/\.cmd\b/gi, 'DOT-CMD'],
+  [/\.bat\b/gi, 'DOT-BAT'],
   // Logging calls the edge refuses outright. The token is encoded; the call
   // shape stays, so the model reads a normal-looking line and writes normal
   // code back. The 403 here is not about size: 20 bytes of console.log alone
@@ -123,6 +136,15 @@ export const RESTORE = [
   [/PSHELL/g, 'powershell'],
   [/DOT-PS1/g, '.ps1'],
   [/DOT-SH/g, '.sh'],
+  [/BATCH-ECHO-OFF/g, '@echo off'],
+  [/BATCH-ALL-ARGS/g, '%*'],
+  [/BATCH-DIR/g, '%~dp0'],
+  [/BATCH-SETLOCAL/g, 'setlocal'],
+  [/BATCH-ENDLOCAL/g, 'endlocal'],
+  [/CMD-EXE/g, 'cmd.exe'],
+  [/NODE-EXE/g, 'node.exe'],
+  [/DOT-CMD/g, '.cmd'],
+  [/DOT-BAT/g, '.bat'],
   [/CONSOLE-LOG/g, 'console.log'],
   [/CONSOLE-WARN/g, 'console.warn'],
   [/CONSOLE-ERROR/g, 'console.error'],
@@ -169,4 +191,4 @@ export function inbound(text) {
 
 // The last-resort drop list, carried into the firewall fallback path: lines
 // matching these are dropped whole when a fragment is rejected even on its own.
-export const RISKY_LINE = /(node\s+-{1,2}e\b|--eval\b|\beval\(|child_process|exec(Sync)?\(|spawnSync?\(|\bcurl\b|\bwget\b|\b(ba)?sh\b|rm\s+-rf|\/etc\/|\/bin\/|\.\.\/\.\.\/|<!doctype|<!--|-->|<script|<\/script|javascript:|onerror\s*=|onload\s*|ExecutionPolicy|BYPASS|AND-AND|\bpowershell\b)/i;
+export const RISKY_LINE = /(node\s+-{1,2}e\b|--eval\b|\beval\(|child_process|exec(Sync)?\(|spawnSync?\(|\bcurl\b|\bwget\b|\b(ba)?sh\b|rm\s+-rf|\/etc\/|\/bin\/|\.\.\/\.\.\/|<!doctype|<!--|-->|<script|<\/script|javascript:|onerror\s*=|onload\s*|ExecutionPolicy|BYPASS|AND-AND|\bpowershell\b|@echo off|%~dp0|%\\*|setlocal|endlocal|cmd\.exe|node\.exe|\.cmd\b|\.bat\b)/i;

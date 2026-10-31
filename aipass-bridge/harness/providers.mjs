@@ -126,11 +126,14 @@ export function sanitizeSpec(raw = {}) {
   // the only provider knob that changes what the request body carries (the
   // anthropic breakpoints), so it must survive the spec like the rest.
   const promptCache = raw.promptCache === false ? false : true;
+  const embeddingModel = typeof raw.embeddingModel === 'string' && raw.embeddingModel.trim()
+    ? raw.embeddingModel.trim().slice(0, 128) : null;
   return {
     id, label, kind, baseUrl, apiKeyEnv, models, defaultModel, headers,
     apiKeyHeader: header, apiKeyPrefix, maxTokens, anthropicVersion,
     modelsTimeoutMs,
     promptCache,
+    embeddingModel,
   };
 }
 
@@ -151,6 +154,7 @@ export function publicSpec(spec) {
     maxTokens: spec.maxTokens ?? null,
     anthropicVersion: spec.anthropicVersion ?? null,
     modelsTimeoutMs: spec.modelsTimeoutMs ?? null,
+    embeddingModel: spec.embeddingModel ?? null,
     builtin: Boolean(spec.builtin),
   };
 }

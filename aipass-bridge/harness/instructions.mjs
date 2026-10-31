@@ -1,3 +1,4 @@
+// @ts-check
 // The project's own standing instructions: the file an agent finds at the
 // root and is expected to read before touching anything.
 //
@@ -29,7 +30,10 @@ const budget = () => {
   return Number.isFinite(n) && n >= 256 ? Math.min(64_000, Math.round(n)) : DEFAULT_MAX_BYTES;
 };
 
-/** Is `file` inside `root`? Lexical, after both were resolved. */
+/** Is `file` inside `root`? Lexical, after both were resolved.
+ * @param {string} root
+ * @param {string} file
+ */
 const inside = (root, file) => {
   const rel = path.relative(root, file);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
@@ -103,5 +107,5 @@ export function loadProjectInstructions(root, opts = {}) {
 
   // shortcut: root-level instruction file only; walk nested AGENTS.md files
   // when a monorepo's subprojects need their own rules.
-  return { file: name, text, bytes, read, truncated };
+  return { file: /** @type {string} */ (name), text, bytes, read, truncated };
 }

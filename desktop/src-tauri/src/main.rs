@@ -1236,7 +1236,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // never lands on a blank page.
             let url = format!("http://127.0.0.1:{backend_port}/");
             let port_open = || std::net::TcpStream::connect(("127.0.0.1", backend_port)).is_ok();
-            for _ in 0..80 {
+            // Sixty seconds, not twenty. A cold boot is the slow case: Defender
+            // scans the bundled node.exe, the disk is still busy, and a backend
+            // that needed twenty-five seconds was reported as "never answered"
+            // and left the person with no window at all.
+            for _ in 0..240 {
                 if port_open() {
                     break;
                 }

@@ -68,6 +68,8 @@ jobs:
             libssl-dev \
             patchelf
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
       - uses: actions/cache@v4
         with:
           path: |
@@ -76,6 +78,16 @@ jobs:
             target
           key: ${{ matrix.artifact }}-cargo-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
       - name: Build the artifact
+        env:
+          WINDOWS_CERT_THUMBPRINT: ${{ secrets.WINDOWS_CERT_THUMBPRINT }}
+          WINDOWS_SIGN_COMMAND: ${{ secrets.WINDOWS_SIGN_COMMAND }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npm run desktop:build
       - uses: actions/upload-artifact@v4
         with:
@@ -99,8 +111,14 @@ jobs:
       - name: Collect every platform's artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: aipass-desktop-*
           path: dist
-          merge-multiple: true
+
+      # Each platform writes its own manifest.json and SHA256SUMS; downloading
+      # them into one folder would overwrite all but one. Flatten them first so
+      # the feed and the release upload see every platform.
+      - name: Merge the per-platform manifests
+        run: node scripts/merge-release-manifests.mjs
 
       # The content pack is the same tree on every platform — it is the code,
       # not the binary — so it is built once, here.

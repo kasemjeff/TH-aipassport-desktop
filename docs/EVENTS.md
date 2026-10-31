@@ -32,6 +32,8 @@ the table says so, the same way a renamed test fails the `Verify:` anchors.
 | `finished` | loop | the run's ending: summary, stopReason, spend, check, changes, todo | window (folds the trail), plugins |
 | `run_stats` | loop | the one stats line `npm run stats` aggregates | stats, plugins |
 | `cancelled` | harness | a stop arrived: `running` says whether there was a run | window, plugins |
+| `job_start` | loop | a background command started: its id, kind and command | window (job row), plugins |
+| `job_end` | loop | a background command finished: its id, exit code and stopped flag | window (job row), plugins |
 
 ## The send and the edge
 

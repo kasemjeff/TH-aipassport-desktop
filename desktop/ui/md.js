@@ -279,13 +279,13 @@ export function renderMarkdown(src) {
     const line = lines[i];
     if (fence !== null) {
       if (new RegExp(`^\\s*\`\`\`\\s*$`).test(line)) {
-        out.push(`<pre><code class="lang-${escapeHtml(fenceLang)}">${escapeHtml(code.join('\n'))}</code></pre>`);
-        fence = null; code = [];
+        out.push(`<pre data-lang="${escapeHtml(fenceLang)}"><div class="code-head"><span class="code-lang">${escapeHtml(fenceLang || 'code')}</span><button type="button" class="code-copy" aria-label="copy">copy</button></div><code class="lang-${escapeHtml(fenceLang)}">${escapeHtml(code.join('\n'))}</code></pre>`);
+        fence = null; fenceLang = ''; code = [];
       } else code.push(line);
       continue;
     }
     const open = line.match(/^\s*```(\S*)\s*$/);
-    if (open) { flushPara(); flushList(); fence = open[1] || ''; continue; }
+    if (open) { flushPara(); flushList(); fence = open[1] || ''; fenceLang = open[1] || ''; continue; }
 
     const heading = line.match(/^(#{1,4})\s+(.*)$/);
     if (heading) { flushPara(); flushList(); const n = heading[1].length; out.push(`<h${n}>${inline(heading[2])}</h${n}>`); continue; }

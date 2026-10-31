@@ -75,25 +75,23 @@
      screen reader had nothing to announce and the keyboard could not reach it.
      The JS only mirrors the checkbox into aria-expanded. -->
 <input type="checkbox" id="nav-toggle" class="nav-toggle" aria-hidden="true" tabindex="-1" />
+<input type="checkbox" id="panel-toggle" class="nav-toggle" aria-hidden="true" tabindex="-1" />
 
 <!-- One slim row. The essentials only: what am I working on, and is it even
      connected. How much a run may change (the mode) sits beside the composer
      where the message is written; everything else is /, ?, or the gear. -->
 <header id="bar">
   <button type="button" class="icon-btn burger" id="side-toggle" aria-controls="side" aria-expanded="true" aria-label="พับ/ขยายเมนูข้าง" title="พับ/ขยายเมนูข้าง">☰</button>
-  <div class="brand"><span class="brand-dot" aria-hidden="true"></span>aipass</div>
+  
 
-  <label class="field" title="โปรเจกต์ที่ agent แตะได้">
-    <select id="project" aria-label="โปรเจกต์" title="โปรเจกต์"></select>
-  </label>
-  <button id="add-project" class="icon-btn" title="เปิดโฟลเดอร์อื่น" aria-label="เปิดโฟลเดอร์อื่น">+</button>
 
   <span class="grow"></span>
   <div class="status" id="status"></div>
   <span class="context hidden" id="context" title="context budget"></span>
   <button id="help-btn" class="icon-btn" title="วิธีใช้" aria-label="วิธีใช้"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.4a2.8 2.8 0 0 1 5.5.8c0 1.8-2.8 2-2.8 3.4"/><path d="M12 17.1h.01"/></svg></button>
   <button id="theme-toggle" class="icon-btn" title="สลับเป็นธีมสว่าง" aria-label="ธีม: มืด"><svg class="i-moon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20.4 14.6A8.6 8.6 0 0 1 9.4 3.6a8.6 8.6 0 1 0 11 11z"/></svg><svg class="i-sun" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.7"/><path d="M12 2.6v2.2M12 19.2v2.2M4.5 4.5l1.6 1.6M17.9 17.9l1.6 1.6M2.6 12h2.2M19.2 12h2.2M4.5 19.5l1.6-1.6M17.9 6.1l1.6-1.6"/></svg></button>
-  <button id="settings-btn" class="icon-btn" title="ตั้งค่า" aria-label="ตั้งค่า"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.5a1.7 1.7 0 0 0 .34 1.87l.06.06a2.06 2.06 0 1 1-2.91 2.91l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2.06 2.06 0 0 1-4.12 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2.06 2.06 0 1 1-2.91-2.91l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2.06 2.06 0 0 1 0-4.12h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2.06 2.06 0 1 1 2.91-2.91l.06.06a1.7 1.7 0 0 0 1.87.34h.08a1.7 1.7 0 0 0 1.03-1.56V3a2.06 2.06 0 0 1 4.12 0v.09a1.7 1.7 0 0 0 1.03 1.56h.08a1.7 1.7 0 0 0 1.87-.34l.06-.06a2.06 2.06 0 1 1 2.91 2.91l-.06.06a1.7 1.7 0 0 0-.34 1.87v.08a1.7 1.7 0 0 0 1.56 1.03H21a2.06 2.06 0 0 1 0 4.12h-.09a1.7 1.7 0 0 0-1.51 1.18z"/></svg></button>
+  <button id="panel-btn" class="icon-btn" title="Session panel" aria-label="Session panel" aria-expanded="true" aria-controls="context-panel"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg></button>
+<button id="settings-btn" class="icon-btn" title="ตั้งค่า" aria-label="ตั้งค่า"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.5a1.7 1.7 0 0 0 .34 1.87l.06.06a2.06 2.06 0 1 1-2.91 2.91l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2.06 2.06 0 0 1-4.12 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2.06 2.06 0 1 1-2.91-2.91l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2.06 2.06 0 0 1 0-4.12h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2.06 2.06 0 1 1 2.91-2.91l.06.06a1.7 1.7 0 0 0 1.87.34h.08a1.7 1.7 0 0 0 1.03-1.56V3a2.06 2.06 0 0 1 4.12 0v.09a1.7 1.7 0 0 0 1.03 1.56h.08a1.7 1.7 0 0 0 1.87-.34l.06-.06a2.06 2.06 0 1 1 2.91 2.91l-.06.06a1.7 1.7 0 0 0-.34 1.87v.08a1.7 1.7 0 0 0 1.56 1.03H21a2.06 2.06 0 0 1 0 4.12h-.09a1.7 1.7 0 0 0-1.51 1.18z"/></svg></button>
 </header>
 
 <main>
@@ -113,6 +111,11 @@
         <span class="wordmark">AiPASS<sup>TM</sup></span>
         <button type="button" class="icon-btn side-burger" id="side-toggle-side" aria-controls="side" aria-expanded="true" aria-label="พับเมนู" title="พับเมนู">☰</button>
       </div>
+
+  <label class="field" title="โปรเจกต์ที่ agent แตะได้">
+    <select id="project" aria-label="โปรเจกต์" title="โปรเจกต์"></select>
+  </label>
+  <button id="add-project" class="icon-btn" title="เปิดโฟลเดอร์อื่น" aria-label="เปิดโฟลเดอร์อื่น">+</button>
 
       <!-- The one thing you do most: start a conversation. Attach sits beside
            it because "here is a file, ask about it" is the other half of it. -->
@@ -209,6 +212,7 @@
         <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.3 9.4a2.8 2.8 0 0 1 5.5.8c0 1.8-2.8 2-2.8 3.4"/><path d="M12 17.1h.01"/></svg></span>วิธีใช้
       </button>
     </div>
+    <div id="side-resize" class="side-resize" aria-hidden="true"></div>
   </aside>
 
   <section id="chat">
@@ -330,6 +334,7 @@
       </div>
     </form>
   </section>
+  <aside id="context-panel" aria-label="Session panel"></aside>
 </main>
 
 <!-- The sheet is a dialog: it says so, it is modal, and it is labelled by its

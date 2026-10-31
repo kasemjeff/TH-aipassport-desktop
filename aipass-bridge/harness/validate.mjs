@@ -1,3 +1,4 @@
+// @ts-check
 // One pre-dispatch shape check for every marker call the loop is about to run.
 //
 // The parser (protocol.mjs) already refuses most malformed replies, but the
@@ -17,7 +18,7 @@
 /** The markers the loop itself owns plus the built-in tool table. */
 export const BUILTIN_KINDS = new Set([
   'skill', 'list', 'read', 'write', 'replace', 'search', 'tree', 'stat', 'run', 'glob',
-  'git', 'fetch', 'delete', 'move', 'attach', 'web', 'symbols', 'def', 'refs', 'recall',
+  'git', 'fetch', 'delete', 'move', 'attach', 'web', 'symbols', 'def', 'refs', 'recall', 'retrieve',
   'plan', 'todo', 'subagent', 'goal', 'jobs', 'done', 'ask', 'verify',
 ]);
 
@@ -39,7 +40,8 @@ const ARG_GUARDS = {
   web: 'err: give me a query to search for.',
   def: 'err: DEF needs a name — DEF foo',
   refs: 'err: REFS needs a name — REFS foo',
-  recall: 'err: RECALL needs something to look for — RECALL <what you want to remember>',
+  recall: 'err: RECALL needs something to look for - RECALL <what you want to remember>',
+  retrieve: 'err: RETRIEVE needs something to look for - RETRIEVE <what you want to know>',
   goal: 'err: GOAL takes DONE or BLOCKED <reason> — e.g. GOAL DONE the parser ships.',
 };
 
@@ -49,7 +51,7 @@ const ARG_GUARDS = {
  * must be in the run's table and a runner must exist, so an MCP tool that was
  * never connected answers with the same sentence a missing plugin does.
  *
- * @param {object} call
+ * @param {{ kind?: string, arg?: any, body?: any, name?: string }} call
  * @param {object} [table]
  * @param {Array<{marker:string}>} [table.pluginTools]
  * @param {Function|null} [table.runPluginTool]
@@ -71,7 +73,8 @@ export function validateCall(call, { pluginTools = [], runPluginTool = null } = 
   }
 
   const arg = call.arg == null ? '' : String(call.arg);
-  if (ARG_GUARDS[kind] && !arg.trim()) return ARG_GUARDS[kind];
+  const guard = /** @type {any} */ (ARG_GUARDS)[kind];
+  if (guard && !arg.trim()) return guard;
   if (kind === 'move' && arg.trim().split(/\s+/).length < 2) {
     return 'err: MOVE needs a source and a destination: MOVE <from> <to>.';
   }

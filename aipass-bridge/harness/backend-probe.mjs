@@ -1,3 +1,4 @@
+// @ts-check
 // "Is a backend already answering on this port?"
 //
 // The launcher asks this before it starts one, and the answer decides whether
@@ -47,6 +48,7 @@ function isOurStatus(body) {
     && typeof result.extensions === 'number';
 }
 
+/** @param {any} port */
 export async function backendIsUp(port, { headers = {}, timeoutMs = 1200 } = {}) {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/rpc`, {
@@ -58,7 +60,7 @@ export async function backendIsUp(port, { headers = {}, timeoutMs = 1200 } = {})
     if (res.ok) return isOurStatus(await res.json().catch(() => null));
     if (res.status !== 401) return false;
     const body = await res.json().catch(() => null);
-    return String(body?.error ?? '') === UNAUTHORIZED;
+    return String(/** @type {any} */ (body)?.error ?? '') === UNAUTHORIZED;
   } catch {
     // Nothing is listening, or it never answered in time. Either way there is
     // no backend to adopt.

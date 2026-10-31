@@ -297,6 +297,30 @@ export class ApiProviderClient {
     }
   }
 
+  async embed(texts = [], { signal = null } = {}) {
+    if (this.spec.kind !== "openai") throw new Error("embeddings need an openai-compatible provider");
+    if (!this.key) throw new Error("no key for this provider");
+    const model = this.spec.embeddingModel;
+    if (!model) throw new Error("no embeddingModel configured on this provider");
+    const url = endpointsFor(this.spec).chat.replace(/\/chat\/completions$/, "/embeddings");
+    const out = [];
+    const batch = 64;
+    for (let i = 0; i < texts.length; i += batch) {
+      if (signal?.aborted) throw new Error("aborted");
+      const slice = texts.slice(i, i + batch).map((t) => String(t ?? "").slice(0, 8000));
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...authHeaders(this.spec, this.key) },
+        body: JSON.stringify({ model, input: slice }),
+        signal: signal ?? undefined,
+      });
+      if (!res.ok) throw new Error("embeddings failed: " + res.status);
+      const data = await res.json();
+      for (const d of (data?.data ?? [])) out.push(Array.isArray(d?.embedding) ? d.embedding : []);
+    }
+    return out;
+  }
+
   /** A provider that is not aipass has no credit pool to report. */
   async quota() { return null; }
 

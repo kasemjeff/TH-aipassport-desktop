@@ -38,7 +38,7 @@ export const REMINDER = REMINDER_HEAD + REMINDER_WAF + REMINDER_TAIL;
  * was tuned against — the recorded replay in evals/fixtures/ is pinned to
  * those bytes.
  */
-export const preamble = ({ allowRun = false, review = false, plan = false, subagent = false, searchI = false, attach = false, verify = false, recall = false, explore = false, plugins = [], sections = [], instructions = null, goal = null, lang = 'th' } = {}) => {
+export const preamble = ({ allowRun = false, review = false, plan = false, subagent = false, searchI = false, attach = false, verify = false, diagnose = false, recall = false, retrieve = false, explore = false, sandbox = 'off', plugins = [], sections = [], instructions = null, goal = null, lang = 'th' } = {}) => {
   // What a review run reads instead of the edit block: the same protocol with
   // the writing half taken out. Kept beside the block it replaces so the two
   // shapes cannot drift, and review=false keeps the bytes identical.
@@ -88,7 +88,7 @@ GIT diff
 FETCH HTTPS-URLexample.com/docs
 WEB search terms to look up on the internet (docs, latest versions, solutions)
 
-${review ? reviewSection : editSection}${!review && allowRun ? '\n\nTo have me run something in the terminal:\n\nRUN\nwhat to run\nEND\n\nA command that outlives a step - a build, a test suite, a dev server - can run as a job instead: write `RUN background` on its own line in place of `RUN`. It answers with a job id at once and keeps going while you work. Its output lands in a file under `.aipass/spill/` that you read with NEED; poll with `JOBS` on its own line, and end one with `JOBS stop <id>` (the whole process tree goes, not the shell alone).' : ''}${attach ? '\n\nTo let me see a file that is not plain text — an image, a PDF, a slide deck — put its path on a line by itself and I will attach it to my next message:\n\nATTACH desktop/shot.png' : ''}
+${review ? reviewSection : editSection}${!review && allowRun ? '\n\nTo have me run something in the terminal:\n\nRUN\nwhat to run\nEND\n\nA command that outlives a step - a build, a test suite, a dev server - can run as a job instead: write `RUN background` on its own line in place of `RUN`. It answers with a job id at once and keeps going while you work. Its output lands in a file under `.aipass/spill/` that you read with NEED; poll with `JOBS` on its own line, and end one with `JOBS stop <id>` (the whole process tree goes, not the shell alone).' : ''}${sandbox && sandbox !== 'off' ? `\n\nCommands in this run run in a sandbox (mode: ${sandbox}); a blocked command, write or host is named in the result rather than failing silently.` : ''}${attach ? '\n\nTo let me see a file that is not plain text - an image, a PDF, a slide deck - put its path on a line by itself and I will attach it to my next message:\n\nATTACH desktop/shot.png' : ''}
 
 Once you have everything you need and are giving me your final answer, write the answer itself in your message, then finish with DONE on its own line:
 
@@ -155,6 +155,16 @@ VERIFY node test.mjs
 The result comes back like any other result: the output of the command, or a verdict.`;
   }
 
+  if (diagnose) {
+    text += `
+
+When you want to know whether a file type-checks, ask the language server for it:
+
+DIAGNOSE src/foo.ts
+
+It comes back with the server's errors and warnings, each with its file, line, column, severity and source. If no server is installed for that file type, that is the answer.`;
+  }
+
   if (recall) {
     text += `
 
@@ -163,6 +173,16 @@ The past of this project is searchable. When the answer may be in what was said 
 RECALL what we decided about the login flow
 
 I will look through this project's past sessions and paste back what was said, each line with its date and the session it came from. It is a word match, so ask with the words the past would carry.`;
+  }
+
+  if (retrieve) {
+    text += `
+
+The project's files are indexed. When you do not know the exact words, ask for the passages that are about it:
+
+RETRIEVE where the login token is renewed
+
+I will rank the passages in the project and paste back the best ones, each with its file and line range. It is a word match over code and docs, so ask with the words the project would carry.`;
   }
 
   if (explore) {
@@ -297,7 +317,7 @@ const markerRe = (marker) => {
 
 // The model usually writes its answer as prose and then a bare DONE, so fall
 // back to that prose rather than reporting an empty result.
-export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|list|ls|file)\b|[^\s]+(?: [\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+)?\s*$)|SEARCH\b|TREE\b|STAT\b|GLOB\b|SYMBOLS\b|DEF\b|REFS\b|RECALL\b|SKILL\b|GIT\b|VERIFY\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*(?:(?:bg|background)\s*)?$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|GOAL\b|TASK\s*:|ASK\b|(?:\*{1,3}|#{1,6}\s*)?DONE\b|JOBS\b)/i;
+export const MARKER_LINE = /^\s*(NEED\s+(?:(?:dir|list|ls|file)\b|[^\s]+(?: [\d\u0E50-\u0E59]+-[\d\u0E50-\u0E59]+)?\s*$)|SEARCH\b|TREE\b|STAT\b|GLOB\b|SYMBOLS\b|DEF\b|REFS\b|RECALL\b|RETRIEVE\b|SKILL\b|GIT\b|VERIFY\b|DIAGNOSE\b|FETCH\b|WEB\b|DELETE\b|MOVE\b|EDIT\b|CREATE\b|ATTACH\b|FIND\s*$|NEW\s*$|END\s*$|RUN\s*(?:(?:bg|background)\s*)?$|PLAN\s*$|TODO\s*$|SUBAGENT\s*$|GOAL\b|TASK\s*:|ASK\b|(?:\*{1,3}|#{1,6}\s*)?DONE\b|JOBS\b)/i;
 export const prose = (reply, plugins = []) => {
   const re = proseRe(plugins);
   let inFence = false;
@@ -311,7 +331,7 @@ export const prose = (reply, plugins = []) => {
 // recorded replies wrote "NEED list desktop" and bare "RUN" as broken markers,
 // while prose that merely starts with the word ("Need to check the logs") must
 // never count as an attempt.
-const MARKER_ATTEMPT = /^\s*(?:\*{1,3}|#{1,6}\s*)?(?:NEED|SEARCH|TREE|STAT|GLOB|SYMBOLS|DEF|REFS|RECALL|SKILL|GIT|VERIFY|FETCH|WEB|DELETE|MOVE|EDIT|CREATE|ATTACH|FIND|NEW|END|RUN|PLAN|TODO|SUBAGENT|GOAL|JOBS|TASK|ASK|DONE)\b/;
+const MARKER_ATTEMPT = /^\s*(?:\*{1,3}|#{1,6}\s*)?(?:NEED|SEARCH|TREE|STAT|GLOB|SYMBOLS|DEF|REFS|RECALL|RETRIEVE|SKILL|GIT|VERIFY|DIAGNOSE|FETCH|WEB|DELETE|MOVE|EDIT|CREATE|ATTACH|FIND|NEW|END|RUN|PLAN|TODO|SUBAGENT|GOAL|JOBS|TASK|ASK|DONE)\b/;
 
 /**
  * Did the reply try to speak the protocol — even in a shape parse() cannot
@@ -337,7 +357,7 @@ export function attemptedMarker(reply) {
  *  the NEXT message too, so a DONE beside one of them used to end the run and
  *  throw the payoff away unread (a listing, a fetched page, a check's
  *  verdict, a helper's summary). */
-export const READING = new Set(['list', 'read', 'search', 'tree', 'stat', 'glob', 'symbols', 'def', 'refs', 'recall', 'skill', 'attach', 'git', 'verify', 'fetch', 'web', 'subagent', 'jobs']);
+export const READING = new Set(['list', 'read', 'search', 'tree', 'stat', 'glob', 'symbols', 'def', 'refs', 'recall', 'retrieve', 'skill', 'attach', 'git', 'verify', 'diagnose', 'fetch', 'web', 'subagent', 'jobs']);
 
 export function parse(reply, { plugins = [] } = {}) {
   const lines = reply.split('\n');
@@ -429,6 +449,9 @@ export function parse(reply, { plugins = [] } = {}) {
     // checker) decides. The argument is one line, like every other marker.
     m = /^\s*VERIFY\s*(.*?)\s*$/i.exec(line);
     if (m) { i++; calls.push({ kind: 'verify', arg: m[1].trim() }); continue; }
+
+    m = /^\s*DIAGNOSE\s+(.+?)\s*$/i.exec(line);
+    if (m) { i++; calls.push({ kind: 'diagnose', arg: m[1].trim() }); continue; }
 
     m = /^\s*FETCH\s+(.+?)\s*$/i.exec(line);
     if (m) { i++; calls.push({ kind: 'fetch', arg: m[1].trim() }); continue; }

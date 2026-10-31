@@ -399,6 +399,14 @@ not a sandbox. Reviewed each hardening round (the dated entries above): a
 new finding gets a dated bullet here and a regression test in the same
 change. The honest residuals are the "Known limits" below.
 
+2026-10-29: the `sandbox` option and `harness/boundary.mjs` seam landed
+(phase 1). A mode that needs enforcing refuses when no backend is available
+rather than running unsandboxed — fail-closed, the one thing this project
+does not downgrade. No enforcing backend ships yet, so every platform
+refuses `read-only` and `workspace-write` today; `danger-full-access` keeps
+today's behaviour. The real backends (Seatbelt, bubblewrap, a Windows
+helper) are later waves.
+
 ## Known limits, not bugs
 
 - The project's own instruction file (`AGENTS.md`, or `CLAUDE.md` /

@@ -80,7 +80,15 @@ export const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 /** Is the bridge answering? Its /status is the one route that needs no token. */
 export async function bridgeIsUp(bridgeUrl, { timeout = 1200 } = {}) {
   return fetch(`${bridgeUrl}/status`, { signal: AbortSignal.timeout(timeout) })
-    .then((r) => r.ok)
+    .then(async (r) => {
+      if (!r.ok) return false;
+      const body = await r.json().catch(() => null);
+      // A 200 on its own is not enough: something that is not our bridge can
+      // hold the port and answer 200 to anything. Adopting it would point the
+      // desktop at a server that has never heard of aipass, and every run
+      // fails with "bridge offline". The bridge's /status carries our shape.
+      return body?.ok === true && typeof body?.extensions === 'number';
+    })
     .catch(() => false);
 }
 
@@ -137,7 +145,11 @@ export async function ensureBridge({
     await wait(every);
     if (await bridgeIsUp(bridgeUrl)) return child;
   }
+  // A bridge that never answered is not a bridge to hand back running: its
+  // pipes would keep this process (and the test runner) alive, and the next
+  // start would find a half-dead listener on the port. End it and say so.
   err.write(`bridge did not come up at ${bridgeUrl}\n`);
+  try { child.kill('SIGKILL'); } catch { /* already gone */ }
   return child;
 }
 
@@ -236,7 +248,7 @@ export async function runLauncher({
     return { ok: true, adopted: true };
   }
 
-  const rpc = createRpc({ port, root, bridgeURL: bridgeUrl, autostartBridge: false });
+  const rpc = createRpc({ port, root, bridgeURL: bridgeUrl, autostartBridge: false, keepBridgeAlive: true });
   // The backend does not start a bridge of its own: the launcher owns the
   // bridge (it is the one that says so in the banner), and two starters race
   // for the same port — the loser's bind fails on EADDRINUSE, and the loser's

@@ -8,9 +8,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { binaryKind } from '../overlay.mjs';
 import { listSymbols, findDefinition, findReferences } from '../symbols.mjs';
-import { fuzzyMatch } from '../fuzzy.mjs';
+import { status as retrievalStatus, clearIndex as retrievalClear } from '../retrieval.mjs';import { fuzzyMatch } from '../fuzzy.mjs';
 import { restoreTable } from '../waf.mjs';
 import { openBrowser } from '../browser.mjs';
+import { aipassHome } from '../settings.mjs';
 // Installing and removing a playbook is a person's act, not a run's: the
 // overlay never sees it, and the only writable libraries are the two known ones.
 import { installSkill, removeSkill } from '../skills.mjs';
@@ -95,6 +96,29 @@ export function createFilesMethods(ctx) {
     /* -------------------------------------------------------------- browser */
 
     async 'browser.open'(params = {}) { return { ok: await openBrowser(params.url ?? appSettings.get('chatUrl')) }; },
+  async 'shell.reveal'(params = {}) {
+    const target = params.path ?? params.target;
+    if (!target || typeof target !== 'string') return { ok: false, reason: 'no path' };
+    const { spawn } = await import('node:child_process');
+    const platform = process.platform;
+    try {
+      if (platform === 'win32') spawn('explorer.exe', [target], { detached: true, stdio: 'ignore' }).unref();
+      else if (platform === 'darwin') spawn('open', [target], { detached: true, stdio: 'ignore' }).unref();
+      else spawn('xdg-open', [target], { detached: true, stdio: 'ignore' }).unref();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: err?.message ?? String(err) };
+    }
+  },
+  async 'extension.install'() {
+    // Zero-cost distribution: the extension ships inside the installer, and
+    // the same tree is downloadable from the GitHub repo (Code -> Download
+    // ZIP) for machines that only want the extension. Open that page so the
+    // person can grab it without a store listing or a clone.
+    const url = 'https://github.com/kasemjeff/aipass';
+    try { await openBrowser(url); } catch { /* fall through — the url is still returned */ }
+    return { ok: true, url };
+  },
 
     /* ------------------------------------------------------------------ waf */
 
@@ -138,6 +162,16 @@ export function createFilesMethods(ctx) {
       const name = String(params.name ?? '').trim();
       if (!name) throw new Error('which name? — /symbols <name>');
       return { name, references: findReferences(h.root, name) };
+    },
+
+    async 'retrieval.status'(params = {}) {
+      const h = targetFor(params);
+      return retrievalStatus(h.root);
+    },
+    async 'retrieval.clear'(params = {}) {
+      const h = targetFor(params);
+      retrievalClear(h.root);
+      return { cleared: true };
     },
 
     /* -------------------------------------------------------------- skills */

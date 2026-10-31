@@ -297,6 +297,27 @@ $('pasteToken').addEventListener('click', async () => {
   }
 });
 
+// Pair without pasting the long token: the app puts a short code on the
+// clipboard; this reads it, claims the token from the bridge, and saves it.
+$('pairFromApp').addEventListener('click', async () => {
+  const url = ($('url').value.trim().replace(/\/+$/, '')) || bridge;
+  try {
+    const code = (await navigator.clipboard.readText()).trim();
+    if (!code) return toast('Clipboard is empty');
+    const res = await fetch(`${url}/pair/claim`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code }) });
+    const body = await res.json().catch(() => null);
+    if (!res.ok || !body?.ok || !body?.token) return toast(body?.reason ? `Pair failed: ${body.reason}` : 'Pair failed');
+    $('token').value = body.token;
+    await chrome.storage.local.set({ bridgeUrl: url, bridgeToken: body.token });
+    bridgeToken = body.token;
+    await chrome.runtime.sendMessage({ type: 'reconnect' }).catch(() => {});
+    toast('Paired — token saved');
+    setTimeout(render, 400);
+  } catch {
+    toast('Could not reach the bridge');
+  }
+});
+
 // Verify the bridge actually accepts the saved URL + token before closing.
 $('testConn').addEventListener('click', async () => {
   const url = ($('url').value.trim().replace(/\/+$/, '')) || bridge;

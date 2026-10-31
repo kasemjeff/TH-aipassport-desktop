@@ -7,6 +7,88 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
 
 ### Added
 
+- **Fewer `[403] refused at the edge`.** Walks (`glob`, `tree`, `search`, the
+  retrieval and symbol indexes) now skip `AppData/Local/Temp` (and the app's
+  update staging areas) with a note instead of spilling thousands of
+  near-identical temp paths into one message. Spill-file reads are bounded by
+  `maxResult` (line-bounded, with the next range named) instead of 30 000
+  chars. The WAF table now encodes batch/script shapes (`@echo off`, `%*`,
+  `%~dp0`, `setlocal`/`endlocal`, `cmd.exe`, `node.exe`, `.cmd`, `.bat`) that
+  drew a 403 on their own. The 403 wait ladder is unchanged.
+- **One contract for the /rpc surface.** `harness/rpc/contract.mjs` names all 119
+  methods the backend answers, grouped by domain, with `hasMethod()` and the
+  first params/result typedefs (`status`, `run`). A new test
+  (`test/contract.test.mjs`) fails the build if a factory defines a method the
+  contract does not name (or vice versa), so the window and the harness can no
+  longer drift on method names silently.
+- **Type-check ratchet widened.** `jsconfig.json` now includes every `.mjs`
+  under `harness/` and `bridge/` (85 files); `// @ts-check` is on 30 of them,
+  up from 19, with `validate.mjs`, `instructions.mjs`, `output-scrub.mjs`,
+  `backend-probe.mjs`, `meta/verify.mjs`, `rpc/update.mjs`, `health.mjs`,
+  `project-key.mjs`, `relocate.mjs`, `app-root.mjs`, `desktop-rpc.mjs` and
+  `meta/score.mjs` tightened (params typed instead of `any`/`object`,
+  null-narrowing fixed). The remaining 50 files are the named backlog.
+
+- **Phase 2 started: the first feature module.** `desktop/ui/features/worktrees.js`
+  is the first slice taken out of `app.js` (the worktree surface: list, enter,
+  leave, remove, render bar, lock). `app.js` now creates it through
+  `createWorktrees(ctx)` and pulls the names back by destructuring, so the
+  module-scope callers keep working. New surfaces can follow the same
+  `createX(ctx)` shape; `app.js` dropped ~200 lines. No behavior change;
+  `ui.test.mjs` (179 tests) and the full suite (1356/0) stay green.
+
+- **Phase 2 continued: git + schedule module.** `desktop/ui/features/git-schedule.js`
+  takes out `showGitStatus` and `showSchedule` (plus the local `folderName`).
+  Wired before `createCommands` so the slash-command table captures the
+  functions instead of `undefined`. `app.js` dropped another ~40 lines.
+
+- **Phase 2 continued: misc commands module.** `desktop/ui/features/misc-commands.js`
+  takes out `showMemory`, `showGoal`, `showMcp`, `showSymbols` and `showIndex`.
+  Wired before `createCommands`. `app.js` dropped another ~110 lines. No
+  behavior change; 179/0 ui tests and 1356/0 full suite stay green.
+
+- **Phase 2 continued: pending-diff module.** `desktop/ui/features/pending.js`
+  takes out `showPendingDiff`, `applyChecked` and `discardAll` (with the
+  `applyInFlight` guard moved inside the module). Wired before `createCommands`.
+  `app.js` dropped another ~50 lines. No behavior change; 179/0 ui tests and
+  1356/0 full suite stay green.
+
+- **Phase 2 continued: session tree + export module.** `desktop/ui/features/session-tree.js`
+  takes out `exportSession` and `showSessionTree`. Wired before `createCommands`.
+  `app.js` dropped ~100 lines. No behavior change; 179/0 ui tests and 1356/0
+  full suite stay green.
+
+- **Phase 2 continued: checkpoints module.** `desktop/ui/features/checkpoints.js`
+  takes out `refreshCheckpoints`, `renderCheckpoints`, `restoreCheckpoint`,
+  `removeCheckpoint` and `showCheckpoints`. Wired before `createCommands`.
+  `app.js` dropped ~120 lines. Original message strings restored from HEAD
+  (`ย้อนกลับแล้ว — กลับมา N ไฟล์...`). No behavior change; 179/0 ui tests and
+  1356/0 full suite stay green.
+
+- **Phase 2 complete.** `app.js` is now ~2,700 lines (was 3,131) with 5 feature
+  modules under `desktop/ui/features/`: `worktrees.js`, `git-schedule.js`,
+  `misc-commands.js`, `pending.js`, `session-tree.js`, `checkpoints.js`.
+  Each follows `createX(ctx)` pattern, shares state via ctx, and is wired
+  before `createCommands`. Remaining surface: `showProjects`/`panels`,
+  `listModels`/`pickConversation`/`freshConversation`, `refreshHeader`/`runDueSchedule`.
+- **The working bar names the tool in flight.** `tool_start` (already emitted by
+  the loop) is wired into `setWorking`, so a long read or edit says which call is
+  running instead of a generic "working" for the whole run
+  (`desktop/ui/app.js`, `desktop/ui/transcript.js`).
+- **The pending panel shows the aggregate impact.** `pending-count` now reads
+  `N changes · +X −Y`, and a `pending-total` span carries the same totals, so
+  Apply's size is visible at a glance (`desktop/ui/app.js`, `desktop/ui/index.html`).
+- **The permission ask shows the delta and names the action.** An EDIT now shows
+  the old block next to the new one; CREATE/DELETE/MOVE are titled as such
+  instead of "change this file?" (`aipass-bridge/harness/loop.mjs` `previewOf`,
+  `desktop/ui/app.js` `askPermission`).
+- **The rail carries the project's goal.** A compact strip shows the objective,
+  the round (`rounds/maxRounds`) and pause/resume, wired to `goal.get` and the
+  goal events, and refreshed from the settings sheet
+  (`desktop/ui/index.html`, `desktop/ui/app.js`, `desktop/ui/settings.js`).
+- **Plan-card items can be unticked by hand.** A UI override map keeps the human's
+  tick across wire frames, so a premature tick does not reappear on the next todo
+  frame (`desktop/ui/app.js` `renderTodo`).
 - **A long command can run behind the run, and the run keeps working.** `RUN
   background <command>` starts the command as a job and streams its scrubbed
   output to `.aipass/spill/<id>.txt` (20 MB cap, tree-killed on stop), so a dev
@@ -218,7 +300,36 @@ procedure, acceptance criteria and rollback live in [`docs/RELEASE.md`](docs/REL
   settings sheet owns — the one tuning channel a run without a settings
   object has, and the lever the experiment queue's rotation arms squeeze
   through (`aipass-bridge/harness/compact.mjs`, `docs/HARNESS_DESIGN.md`).
-
+- **The project retriever's index is now honest about itself.** A cleared
+  index cancels an in-flight build instead of being overwritten by it; staged
+  edits obey the same secret/generated/dotfile filter as the disk walk; the
+  index TTL is 5 s, so a disk edit is visible without a restart while a burst
+  of questions still reuses one index. The benchmark is split into exact,
+  paraphrase and negative sets (24/14/6) with keyword-stuffed distractors;
+  exact answers must carry every expected path in the top 8, paraphrase is
+  measured separately as the Phase 3 gate evidence, and unrelated queries must
+  return no hits. `npm run bench:retrieval` reproduces the numbers, with
+  `--repo <path>` for a real project and `--strict` for a release check
+  (`aipass-bridge/harness/retrieval.mjs`, `test/retrieval.test.mjs`,
+  `test/retrieval-bench.test.mjs`, `evals/retrieval/**`, `scripts/retrieval-bench.mjs`,
+  `docs/RAG_DESIGN.md`, `docs/MATURITY.md`).
+- **The retriever's scorer is more honest about trigrams and disk failures.**
+  Trigram weights are applied once (not squared to 0.0625); `RECALL` excludes
+  trigrams from document length so Thai text is not over-penalised; a failed
+  index save is reported as `index not saved` instead of being swallowed; the
+  output names matching passages rather than total chunks; and excerpt windows
+  fill their budget. Goal storage now keys on the shared project hash
+  (SHA-256 over the real root) instead of a separate sha1, migrating an old
+  goal file on first read; a corrupt new memory store falls back to the legacy
+  one (`aipass-bridge/harness/retrieval.mjs`, `aipass-bridge/harness/text.mjs`,
+  `aipass-bridge/harness/memory-store.mjs`, `aipass-bridge/harness/goal.mjs`,
+  `aipass-bridge/harness/tools.mjs`).
+- **The context panel now shows the project index.** Files, passages, age and a
+  clear button live next to the other surfaces, wired to `retrieval.status` and
+  `retrieval.clear` (`desktop/ui/panels/context.js`). Two worktree fixes ship
+  with it: `ctx.sameProject` is provided to the worktree feature and `hideModal`
+  is called through `ctx` (`desktop/ui/features/worktrees.js`,
+  `desktop/ui/app.js`).
 ### Fixed
 
 - **The token bootstrap refuses same-site pages, and an Origin must be the

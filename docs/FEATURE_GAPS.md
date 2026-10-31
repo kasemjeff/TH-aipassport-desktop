@@ -99,7 +99,7 @@ The window is the product. It gets, in this order:
    cannot lie about what the window can do; the transcript drops its oldest
    rows after 300 and says how many went (the session file still holds
    everything); and the plugin panels live in the rail, not only while the
-   sheet is open. The plan card is **still open** — an item in it cannot be
+   sheet is open. The plan card is **landed** — an item in it cannot be
    un-ticked.
 
 The window's half of this batch is ordinary wiring on top of a surface that

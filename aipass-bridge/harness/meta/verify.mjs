@@ -1,3 +1,4 @@
+// @ts-check
 // What a candidate policy is allowed to say.
 //
 // An optimizer that edits the harness is an optimizer that can edit the rules
@@ -60,6 +61,7 @@ export const KNOWN_MARKERS = new Set([
  */
 export function checkCandidate({ dimension = null, text = '', base = '' } = {}) {
   const problems = [];
+  /** @type {any[]} */
   const warnings = [];
   const body = String(text ?? '');
 

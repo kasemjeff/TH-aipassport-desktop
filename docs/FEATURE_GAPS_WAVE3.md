@@ -48,12 +48,12 @@ claimed:
 
 | row | state | proof |
 |---|---|---|
-| 3.1 OS sandbox | **not landed** — a Windows boundary needs a native helper (restricted token / AppContainer); a switch that was not enforced would be the one thing this project does not ship | — |
+| 3.1 OS sandbox | **phase 1 landed** — `harness/boundary.mjs` (policy resolver, `backendFor`, `boundaryFor`), fail-closed refusal, `sandbox` option on the run sheet, `docs/CONFIG.md`; platform adapters (Seatbelt/bubblewrap) and the Windows helper are still pending | `test/boundary-policy.test.mjs`, `test/run-sandbox.test.mjs` |
 | 3.2 background RUN + `JOBS` | landed | `test/background-run.test.mjs` |
 | 3.3 `REVIEW` | landed | `test/review.test.mjs` |
 | 3.4 hooks: three moments become nine | landed | `test/hooks-events.test.mjs` |
-| 3.5 `aipass acp` | deferred — a protocol edge, not a half one | — |
-| 3.6 `DIAGNOSE` via LSP | deferred — it needs a server lifecycle and an approval rule of its own | — |
+| 3.5 `aipass acp` | **phase 1 landed** — `aipass-bridge/acp.mjs` (initialize, session/new, session/prompt, session/cancel, permission request) over newline-delimited JSON-RPC; `aipass acp` CLI | `test/acp.test.mjs` |
+| 3.6 `DIAGNOSE` via LSP | **landed** — `harness/lsp.mjs` (Content-Length framing, lazy spawn, publishDiagnostics, cache, shutdown), home-approved server config, `DIAGNOSE` marker + tool + preamble | `test/lsp.test.mjs` |
 | 3.7 the schedule ticks itself | landed | `test/schedule-tick.test.mjs` |
 
 The comparison table below is the measurement taken on 2026-10-28, before this

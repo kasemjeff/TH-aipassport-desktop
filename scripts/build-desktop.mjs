@@ -272,8 +272,9 @@ function collectBundles(dir, types) {
 export function signingState(env = process.env) {
   const identity = env.APPLE_SIGNING_IDENTITY || env.APPLE_CERTIFICATE || null;
   const notarized = Boolean(env.APPLE_API_KEY || env.APPLE_ID);
+  const windowsSigned = Boolean(env.WINDOWS_CERT_THUMBPRINT || env.WINDOWS_SIGN_COMMAND);
   return {
-    windows: 'unsigned',
+    windows: windowsSigned ? 'signed' : 'unsigned',
     macos: identity ? (notarized ? 'signed+notarized' : 'signed') : 'unsigned',
   };
 }

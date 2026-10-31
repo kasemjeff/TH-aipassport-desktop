@@ -1,0 +1,16 @@
+[
+  { "q": "how do we get a new access credential", "expect": ["src/auth.ts"] },
+  { "q": "where do we stop repeated failures", "expect": ["src/config.ts", "docs/retry.md"] },
+  { "q": "what happens when a user signs in", "expect": ["src/login.ts"] },
+  { "q": "how do we avoid recomputing the same response", "expect": ["src/cache.ts"] },
+  { "q": "where do we keep a person's details", "expect": ["src/user.ts"] },
+  { "q": "where is the arithmetic helper", "expect": ["src/math.ts"] },
+  { "q": "how do we limit requests from one address", "expect": ["src/ratelimit.ts"] },
+  { "q": "where do we send a message to a device", "expect": ["src/notify.ts"] },
+  { "q": "how do we keep uploaded files", "expect": ["src/upload.ts"] },
+  { "q": "how do we end an idle session", "expect": ["src/session.ts"] },
+  { "q": "ต่ออายุสิทธิ์การเข้าใช้งาน", "expect": ["src/auth.ts"] },
+  { "q": "หยุดการลองซ้ำเมื่อล้มเหลว", "expect": ["src/config.ts", "docs/retry.md"] },
+  { "q": "วิธีเก็บไฟล์ที่ผู้ใช้แนบมา", "expect": ["src/upload.ts"] },
+  { "q": "การจ่ายเงินและการคืนเงิน", "expect": ["src/payment.ts"] }
+]

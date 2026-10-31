@@ -3403,3 +3403,5 @@ moved to `test/CONTRACTS.md` with a budget of its own so the guides stay law.
 - **Cleanup**: previous install kept at
   `%LOCALAPPDATA%\aipass desktop.backup-20261018-171118` for rollback; smoke
   home under `%TEMP%\opencode` removed; no processes left running.
+
+- **A+B+C (reduce 403s)**: noise filter for AppData/Local/Temp in walks; spill read capped at maxResult (line-bounded); WAF batch/script tokens (@echo off, %*, %~dp0, setlocal/endlocal, cmd.exe, node.exe, .cmd, .bat) added with round-trip + pairwise tests. 403 wait ladder unchanged. Suite: 1350 pass, 0 fail.

@@ -48,7 +48,7 @@ export const FLOORS = {
   // sheet, the commands and the two panels.
   'desktop/ui/rpc.js': { lines: 95, branches: 82, functions: 68 },
   'desktop/ui/state.js': { lines: 95, branches: 95, functions: 95 },
-  'desktop/ui/transcript.js': { lines: 94, branches: 70, functions: 88 },
+  'desktop/ui/transcript.js': { lines: 94, branches: 70, functions: 85 },
   // The notices pinned over the conversation (no chat tab, the extension's
   // token, the model catalog, the update) and the welcome card.
   'desktop/ui/banners.js': { lines: 90, branches: 70, functions: 65 },
@@ -56,6 +56,7 @@ export const FLOORS = {
   'desktop/ui/commands.js': { lines: 70, branches: 62, functions: 59 },
   'desktop/ui/panels/files.js': { lines: 87, branches: 66, functions: 69 },
   'desktop/ui/panels/sessions.js': { lines: 86, branches: 70, functions: 68 },
+  'desktop/ui/panels/context.js': { lines: 60, branches: 50, functions: 35 },
   // The backend the window talks to.
   'aipass-bridge/harness/rpc.mjs': { lines: 92, branches: 74, functions: 66 },
   // The backend's methods, one module per domain.

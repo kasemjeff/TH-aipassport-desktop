@@ -29,6 +29,8 @@ import crypto from 'node:crypto';
 import { aipassHome } from './settings.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { realPath } from './overlay.mjs';
+import { projectKey } from './project-key.mjs';
+export { projectKey };
 
 /**
  * How many checkpoints one project keeps.
@@ -42,17 +44,7 @@ export const KEEP = 20;
 /** Where the store lives — outside every project (root rule 1). */
 export const storeRoot = () => path.join(aipassHome(), 'run', 'checkpoints');
 
-/**
- * The stable name of one project in the store.
- *
- * A hash of the REAL root: a project reached through a junction has two
- * names, and only the real one is worth keying on — otherwise the same
- * project would have two histories.
- */
-export const projectKey = (root) => crypto.createHash('sha256')
-  .update(realPath(path.resolve(root)) ?? path.resolve(root))
-  .digest('hex')
-  .slice(0, 16);
+// projectKey is now shared via ./project-key.mjs (single source of truth).
 
 /** The directory one project's checkpoints live in. */
 const projectDir = (root) => path.join(storeRoot(), projectKey(root));

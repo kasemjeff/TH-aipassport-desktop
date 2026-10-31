@@ -34,7 +34,12 @@ const scripted = (replies, sent) => {
   return {
     async chat({ message }) {
       sent.push(message);
-      return { text: replies[Math.min(turn++, replies.length - 1)], reasoning: '' };
+      const reply = replies[Math.min(turn++, replies.length - 1)];
+      // A human (or a real model) never stops a job in the same millisecond it
+      // started it; the child needs a moment to flush its first line to the
+      // pipe. The scripted bridge has no such delay, so give the job one.
+      if (/JOBS stop/.test(reply)) await sleep(300);
+      return { text: reply, reasoning: '' };
     },
     async quota() { return { available: 10 }; },
   };
@@ -83,7 +88,14 @@ test('a background RUN outlives the turn, its output is readable, and stop takes
 
   // Output is on disk where `read` can reach it, and the tree is really gone:
   // the script would have written late.txt two seconds after it started.
-  const output = fs.readFileSync(path.join(dir, '.aipass', 'spill', 'run1.txt'), 'utf8');
+  // The spill file is flushed before `JOBS stop` returns, but on a loaded
+  // machine the last bytes can land a few ms later; poll briefly instead of
+  // reading once.
+  let output = '';
+  for (let i = 0; i < 50 && !/background says hi/.test(output); i++) {
+    try { output = fs.readFileSync(path.join(dir, '.aipass', 'spill', 'run1.txt'), 'utf8'); } catch { output = ''; }
+    if (!/background says hi/.test(output)) await sleep(50);
+  }
   assert.match(output, /background says hi/, `the output file carries the command's output: ${output}`);
   await sleep(2300);
   assert.equal(fs.existsSync(path.join(dir, 'late.txt')), false, 'the stopped tree never wrote its late file');

@@ -19,6 +19,34 @@ import { scan, transcript } from './markers.js';
 export function createTranscript(ctx) {
   const { el, log, state, scrollDown, atBottom, rpc } = ctx;
 
+  function fallbackCopy(text, done) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      done();
+    } catch { /* ignore */ }
+  }
+  // Copy button on fenced code blocks (delegated; markup comes from md.js).
+  log?.addEventListener?.('click', (e) => {
+    const btn = e.target?.closest?.('.code-copy');
+    if (!btn) return;
+    const pre = btn.closest('pre');
+    const code = pre?.querySelector('code');
+    const text = code?.textContent ?? '';
+    const done = () => { btn.textContent = 'copied'; setTimeout(() => { btn.textContent = 'copy'; }, 1200); };
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+    } else {
+      fallbackCopy(text, done);
+    }
+  });
+
 /**
  * The reader's scrollback, bounded.
  *

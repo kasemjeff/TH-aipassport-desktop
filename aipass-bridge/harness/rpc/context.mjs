@@ -1,3 +1,4 @@
+// @ts-check
 // The shape the backend's domain modules share.
 //
 // `createRpc` builds one context and hands it to every domain module, so the

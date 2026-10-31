@@ -162,9 +162,12 @@ prompt for a single-user tool that has no need for either.
   machine that never saw Edge. Together with the Node sidecar it is the
   reason the installer is a couple of hundred megabytes, and the reason it
   works with no network at all.
-- **Unsigned.** Windows shows a SmartScreen warning on an unsigned
-  installer. The manifest says `unsigned`, and `RELEASE.md` says it out loud
-  rather than pretending otherwise.
+- **Unsigned by default.** Windows shows a SmartScreen warning on an unsigned
+  installer. The manifest says `unsigned` until a certificate is configured:
+  set `WINDOWS_CERT_THUMBPRINT` (or `WINDOWS_SIGN_COMMAND`) in the build
+  environment and the manifest says `signed`; the feed's handover gate opens
+  with the same release. `RELEASE.md` says it out loud rather than pretending
+  otherwise.
 
 ### macOS
 

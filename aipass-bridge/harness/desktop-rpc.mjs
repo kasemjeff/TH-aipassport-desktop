@@ -1,3 +1,4 @@
+// @ts-check
 // desktop-rpc.mjs — the CLIs' client for a running desktop backend.
 //
 // The CLI edits the same files the desktop backend reads, but a backend that is
@@ -16,6 +17,7 @@ import { authHeaders } from './authtoken.mjs';
 /** Where the desktop backend listens, shared with desktop/main.mjs. */
 export const desktopPort = () => Number(process.env.AIPASS_DESKTOP_PORT ?? 8790);
 
+/** @param {any} method */
 export async function tryDesktopRpc(method, params = {}, { port = desktopPort(), timeoutMs = 4000 } = {}) {
   let res;
   try {
@@ -31,7 +33,7 @@ export async function tryDesktopRpc(method, params = {}, { port = desktopPort(),
   // Errors answer as 200 { ok: false }; any other shape on this port is not
   // this backend, and a file edit is still the honest fallback.
   if (!res.ok) return null;
-  const body = await res.json().catch(() => null);
+  const body = /** @type {any} */ (await res.json().catch(() => null));
   if (body?.ok) return { ok: true, result: body.result };
   // `stage` is the step that failed, when the failure knows it — the CLI
   // reports it so a refusal names the door it closed.

@@ -247,3 +247,4 @@ export class EventFanout {
     return { subscribers: this.subscribers.size, queued, bytes, dropped, owed };
   }
 }
+

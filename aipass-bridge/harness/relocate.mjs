@@ -1,3 +1,4 @@
+// @ts-check
 // relocate.mjs — re-key a project's data after its folder moved.
 //
 // Everything the app stores for a project is keyed by its absolute path:
@@ -25,10 +26,10 @@ import { moveGoal } from './goal.mjs';
 /**
  * Point every per-project store at `to` instead of `from`.
  *
- * @param {object} opts
- * @param {string} opts.from  the absolute path the data was keyed under
- * @param {string} opts.to    where the project lives now (must exist)
- * @param {string} [opts.home] the install's home directory (tests, AIPASS_HOME)
+ * @param {object} [opts]
+ * @param {string} [opts.from]  the absolute path the data was keyed under
+ * @param {string} [opts.to]    where the project lives now (must exist)
+ * @param {string} [opts.home]  the install's home directory (tests, AIPASS_HOME)
  * @returns {{from: string, to: string, sessions: object, facts: number,
  *            goal: object|null, rules: object, settings: boolean}}
  */

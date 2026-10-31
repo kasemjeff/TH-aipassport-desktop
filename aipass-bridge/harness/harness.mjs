@@ -13,6 +13,7 @@ import { Overlay } from './overlay.mjs';
 import { SkillLibrary } from './skills.mjs';
 import { BridgeClient, DEFAULT_BRIDGE_URL } from './bridge.mjs';
 import { createTools } from './tools.mjs';
+import { createLanguageServers } from './lsp.mjs';
 import { PermissionEngine } from './permissions.mjs';
 import { SessionStore } from './session.mjs';
 import { Compactor, DEFAULT_MODEL_BUDGETS } from './compact.mjs';
@@ -183,6 +184,10 @@ export class Harness {
     this.session = null;
     this.conversation = null;
     this.abort = new AbortController();
+    // The language-server pool (harness/lsp.mjs). 'off' disables it; a null
+    // pool makes DIAGNOSE say so instead of guessing. The pool owns the
+    // server processes and closes them with the harness.
+    this.lsp = opts.lsp === 'off' ? null : (opts.lsp ?? createLanguageServers({ root: this.root, signal: this.abort.signal }));
     this.#crossSessionMemory = loadMemory(this.root);
     this.events.on('compacted', ({ memory }) => {
       if (Array.isArray(memory) && memory.length) {
@@ -268,6 +273,10 @@ export class Harness {
       // The write side of git: off unless the run was given the power, so a
       // run never changes the repository on its own.
       allowGitWrite: this.options.review ? false : Boolean(this.options.allowGitWrite),
+      // The sandbox mode: a review run keeps the person's chosen mode (it
+      // already cannot run anything), otherwise the run's own. A mode without
+      // a backend refuses rather than running unsandboxed.
+      sandbox: this.options.review ? 'off' : (this.options.sandbox ?? 'off'),
       // The check a VERIFY runs: the run's declared command, and the checker
       // that produces a verdict when there is no command to run. The checker
       // is the run's own — a run that may not use a helper has no checker
@@ -275,6 +284,10 @@ export class Harness {
       // has nothing to fall back on and says so.
       declaredCheck: this.#declaredCheck().command,
       checker: this.options.subagent ? checker : null,
+      // The language-server pool, or null when disabled. DIAGNOSE uses it.
+      lsp: this.lsp,
+      // Whether the preamble may teach DIAGNOSE.
+      diagnose: Boolean(this.options.diagnose),
       // The CLI's --max-result / --read-lines are per-run knobs: without this
       // plumbing they sat in this.options and the tools kept their defaults,
       // so the flags were notes nobody read.
@@ -512,7 +525,9 @@ export class Harness {
         searchI: Boolean(this.options.searchI),
         attach: Boolean(this.options.attach),
         verify: Boolean(this.options.allowVerify),
+        diagnose: Boolean(this.options.diagnose),
         recall: Boolean(this.options.recall),
+        retrieve: Boolean(this.options.retrieve),
         explore: Boolean(this.options.explore),
         plugins: this.options.pluginTools ?? [],
         sections: this.options.pluginSections ?? [],
@@ -629,7 +644,9 @@ export class Harness {
         searchI: Boolean(this.options.searchI),
         attach: Boolean(this.options.attach),
         verify: Boolean(this.options.allowVerify),
+        diagnose: Boolean(this.options.diagnose),
         recall: Boolean(this.options.recall),
+        retrieve: Boolean(this.options.retrieve),
         explore: Boolean(this.options.explore),
         plugins: this.options.pluginTools ?? [],
         sections: this.options.pluginSections ?? [],
@@ -785,9 +802,11 @@ export class Harness {
             // behind an option, because the preamble's bytes are pinned by
             // the recorded replay (evals/fixtures/).
             verify: Boolean(this.options.allowVerify),
+        diagnose: Boolean(this.options.diagnose),
             // The RECALL marker: the model may ask what this project said
             // before. The same reason - the preamble's bytes are pinned.
             recall: Boolean(this.options.recall),
+        retrieve: Boolean(this.options.retrieve),
             explore: Boolean(this.options.explore),
             plugins: this.options.pluginTools ?? [],
             sections: this.options.pluginSections ?? [],

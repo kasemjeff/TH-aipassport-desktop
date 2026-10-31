@@ -1054,7 +1054,7 @@ const TABS = [
  * and only "บันทึก" writes them, validation names the problem instead of saving
  * a bad number, and the context meter ticks live while the sheet is open.
  */
-async function openSettings() {
+async function openSettings(pageId = null) {
   const settings = await rpc('settings.get').catch(() => null);
   if (!settings) { addNote('อ่านการตั้งค่าไม่ได้'); return; }
   state.settings = settings;
@@ -1182,7 +1182,7 @@ async function openSettings() {
     for (const field of tab.fields ?? []) group.append(sheet.row(field.label, field.note, sheet.control(field)));
     page.append(group);
   }
-  show(tabs[0].id);
+  show(pageId && tabs.some((t) => t.id === pageId) ? pageId : tabs[0].id);
   const root = el('div', 'settings');
   root.append(nav, pages);
   body.append(root);

@@ -1,3 +1,4 @@
+// @ts-check
 // The loadability probe.
 //
 // The update smoke test runs this against a STAGED content tree, in its own
@@ -33,6 +34,7 @@ export function health() {
 // link (`/var` on macOS is `/private/var`; Windows has short names), and the
 // two spellings of one file are the same script. Comparing the lexical names
 // made the probe silent through a link, so the promotion refused a good tree.
+/** @param {string} file */
 const realpath = (file) => {
   try {
     return fs.realpathSync.native?.(file) ?? fs.realpathSync(file);

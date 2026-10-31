@@ -1,3 +1,4 @@
+// @ts-check
 // Where the bridge records its pid.
 //
 // The bridge is a background process: the CLI starts it and walks away, the

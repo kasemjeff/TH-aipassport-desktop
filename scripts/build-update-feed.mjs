@@ -99,12 +99,20 @@ export function verifyWrittenFeed(dir, keyring = KEYRING) {
   return verifyFeed(bytes, signature, keyring);
 }
 
-function readManifest(dir) {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
-  } catch {
-    return null;
-  }
+function readManifests(dir) {
+  const out = [];
+  const walk = (d) => {
+    if (!fs.existsSync(d)) return;
+    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name === 'manifest.json') {
+        try { out.push(JSON.parse(fs.readFileSync(full, 'utf8'))); } catch { /* skip */ }
+      }
+    }
+  };
+  walk(dir);
+  return out;
 }
 
 /**
@@ -143,7 +151,8 @@ function artifactsFrom(manifest) {
 
 function main() {
   const dir = path.join(REPO, 'dist');
-  const manifest = readManifest(dir);
+  const manifests = readManifests(dir);
+  const manifest = manifests[0] ?? null;
   const version = manifest?.version ?? JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8')).version;
   const packName = `aipass-content-${version}.json.gz`;
   const packFile = path.join(dir, packName);
@@ -159,10 +168,14 @@ function main() {
     minShell: version,
   };
 
+  const seen = new Set();
+  const mergedArtifacts = manifests
+    .flatMap((m) => artifactsFrom(m))
+    .filter((a) => (seen.has(a.file) ? false : (seen.add(a.file), true)));
   const feed = buildFeed({
     version,
     commit: manifest?.commit ?? null,
-    artifacts: artifactsFrom(manifest),
+    artifacts: mergedArtifacts,
     pack,
     sequence: Number(process.env.AIPASS_RELEASE_SEQUENCE ?? 1),
     releasedAt: new Date().toISOString(),

@@ -41,6 +41,7 @@
       "../../aipass-bridge/harness": "aipass-bridge/harness/",
       "../../aipass-bridge/.gitignore": "aipass-bridge/.gitignore",
       "../../aipass-bridge/README.md": "aipass-bridge/README.md",
+      "../../aipass-bridge/acp.mjs": "aipass-bridge/acp.mjs",
       "../../aipass-bridge/agent.mjs": "aipass-bridge/agent.mjs",
       "../../aipass-bridge/argv.mjs": "aipass-bridge/argv.mjs",
       "../../aipass-bridge/assistant-prompt.mjs": "aipass-bridge/assistant-prompt.mjs",

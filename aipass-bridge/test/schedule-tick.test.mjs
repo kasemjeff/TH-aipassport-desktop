@@ -13,6 +13,11 @@ import path from 'node:path';
 import { ScheduleStore, startScheduleTicker, SCHEDULE_LOCK_FILE } from '../harness/schedule.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Poll instead of sleeping a fixed slice: a loaded suite must not look like a missing tick. */
+const waitFor = async (fn, timeoutMs = 2000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!fn() && Date.now() < deadline) await sleep(10);
+};
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-tick-'));
 // Local noon, so an entry at 09:00 is due whatever the machine's zone is.
 const NOW = new Date(2026, 9, 28, 12, 0, 0).getTime();
@@ -74,7 +79,7 @@ test('the ticker runs a due entry on its own, and stop ends it', async () => {
     runDue: { now: NOW, spawnFn: fakeSpawn(calls), cli: 'aipass.mjs' },
   });
 
-  await sleep(80);
+  await waitFor(() => calls.length === 1);
   ticker.stop();
   assert.equal(calls.length, 1, 'the start tick ran the due entry once; later ticks found it spent');
 

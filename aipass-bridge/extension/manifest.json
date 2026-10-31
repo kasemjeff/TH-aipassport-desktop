@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "aipass bridge",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Relays local OpenAI-compatible requests through an open de.aipass.net tab.",
   "permissions": [
     "storage",
     "alarms",
     "tabs",
     "scripting",
-    "offscreen"
+    "offscreen",
+    "clipboardRead"
   ],
   "host_permissions": [
     "https://*.aipass.net/*",

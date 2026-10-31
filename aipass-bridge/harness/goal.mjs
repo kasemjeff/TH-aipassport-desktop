@@ -24,6 +24,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { aipassHome } from './settings.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { projectKey } from './project-key.mjs';
 
 export const DEFAULT_MAX_ROUNDS = 8;
 export const MAX_ROUNDS = 64;
@@ -36,7 +37,10 @@ const STATUSES = new Set(['active', 'paused', 'complete', 'blocked']);
 const LIVE = new Set(['active', 'paused']);
 
 const defaultDir = () => path.join(aipassHome(), 'goal');
-const projectHash = (root) => crypto.createHash('sha1').update(path.resolve(root)).digest('hex').slice(0, 12);
+// Unified with the retrieval/memory/checkpoint stores: SHA-256 over the real
+// root, first 16 hex digits. The old sha1-12 name is read once for migration.
+const projectHash = (root) => projectKey(root);
+const legacyProjectHash = (root) => crypto.createHash('sha1').update(path.resolve(root)).digest('hex').slice(0, 12);
 
 /**
  * Where a project's goal lives. The folder is created owner-only, once — the
@@ -65,8 +69,16 @@ export function goalPath(root, dir = defaultDir()) {
  *   done: string|null, blocked: string|null, created: string|null, updated: string|null}}
  */
 export function loadGoal(root, dir = defaultDir()) {
+  const file = storePath(root, dir);
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); } catch {
+    // Migrate a goal stored under the old sha1-12 name, if present.
+    const legacyFile = path.join(dir, legacyProjectHash(root) + '.json');
+    try { raw = fs.readFileSync(legacyFile, 'utf8'); } catch { return null; }
+    try { fs.writeFileSync(file, raw); fs.rmSync(legacyFile, { force: true }); } catch {}
+  }
   let data;
-  try { data = JSON.parse(fs.readFileSync(storePath(root, dir), 'utf8')); } catch { return null; }
+  try { data = JSON.parse(raw); } catch { return null; }
   if (!data || typeof data !== 'object') return null;
   const objective = String(data.objective ?? '').trim();
   const status = String(data.status ?? '');

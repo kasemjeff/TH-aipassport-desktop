@@ -84,6 +84,9 @@ export function classify(kind, body = '', arg = '') {
   // `ask`, a question in `auto`, free in `yolo`. A check that nobody was
   // asked about is a check nobody agreed to run.
   if (kind === 'verify') return 'shell';
+  // DIAGNOSE asks a language server for diagnostics: a read, not a shell
+  // call. It does not change the tree, and the server is home-approved.
+  if (kind === 'diagnose') return 'read';
   // A plugin marker with no declared risk is not a read: its code runs in
   // this process with the harness's access, so it is classified like a write
   // until the plugin says otherwise.

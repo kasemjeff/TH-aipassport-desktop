@@ -1407,7 +1407,7 @@ function agentSplitInHalf(text) {
 }
 
 const AGENT_MIN_SPLIT = 300;
-const AGENT_RISKY_LINE = /(node\s+-{1,2}e\b|--eval\b|\beval\(|child_process|exec(Sync)?\(|spawnSync?\(|\bcurl\b|\bwget\b|\b(ba)?sh\b|rm\s+-rf|\/etc\/|\/bin\/|\.\.\/\.\.\/|<!doctype|<!--|-->|<script|<\/script|javascript:|onerror\s*=|onload\s*|ExecutionPolicy|BYPASS|AND-AND|\bpowershell\b)/i;
+const AGENT_RISKY_LINE = /(node\s+-{1,2}e\b|--eval\b|\beval\(|child_process|exec(Sync)?\(|spawnSync?\(|\bcurl\b|\bwget\b|\b(ba)?sh\b|rm\s+-rf|\/etc\/|\/bin\/|\.\.\/\.\.\/|<!doctype|<!--|-->|<script|<\/script|javascript:|onerror\s*=|onload\s*|ExecutionPolicy|BYPASS|AND-AND|\bpowershell\b|@echo off|%~dp0|%\\*|setlocal|endlocal|cmd\.exe|node\.exe|\.cmd\b|\.bat\b)/i;
 
 /** @param {string} text @returns {{ redacted: string, dropped: number }} */
 function agentRedact(text) {

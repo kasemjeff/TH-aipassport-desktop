@@ -88,9 +88,22 @@ test('the launcher tells our bridge from a stranger', async () => {
     server.close();
   }
 
-  const up = http.createServer((_req, res) => {
+  const stranger = http.createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise((r) => stranger.listen(port, '127.0.0.1', r));
+  try {
+    assert.equal(await bridgeIsUp(base), false, 'a 200 with the wrong shape is not our bridge');
+  } finally {
+    stranger.close();
+  }
+
+  const up = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    // The shape the bridge's /status really has. `extensions` is what tells
+    // our bridge from a server that answers 200 to anything.
+    res.end(JSON.stringify({ ok: true, extensions: 0 }));
   });
   await new Promise((r) => up.listen(port, '127.0.0.1', r));
   try {
@@ -134,7 +147,7 @@ test('the launcher adopts a bridge that is already running', async () => {
   const base = `http://127.0.0.1:${port}`;
   const server = http.createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true }));
+    res.end(JSON.stringify({ ok: true, extensions: 0 }));
   });
   await new Promise((r) => server.listen(port, '127.0.0.1', r));
   try {

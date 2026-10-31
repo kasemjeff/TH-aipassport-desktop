@@ -28,6 +28,7 @@
     "doctor": "node aipass-bridge/doctor.mjs",
     "stats": "node aipass-bridge/stats.mjs",
     "loadtest": "node scripts/loadtest.mjs",
+    "bench:retrieval": "node scripts/retrieval-bench.mjs",
     "evals": "node scripts/evals.mjs",
     "evals:lint": "node scripts/evals-lint.mjs",
     "evals:compare": "node scripts/evals-compare.mjs",

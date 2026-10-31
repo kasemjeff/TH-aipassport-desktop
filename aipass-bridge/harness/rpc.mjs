@@ -223,10 +223,22 @@ const isBrowserSameOrigin = (req) => {
   // Origin header is read at all.
   const site = req.headers['sec-fetch-site'];
   if (site && site !== 'same-origin') return false;
-  // Without the header, the Origin must be THIS origin — host and port, not
-  // merely loopback: a check that only asks "is it 127.0.0.1?" passes a page
-  // served by any other local server.
+  // A same-origin GET from the window carries Sec-Fetch-Site but no Origin:
+  // the Origin header is only sent on cross-origin requests and on methods
+  // other than GET/HEAD. Requiring it here made /token answer 403 to the very
+  // page it belongs to, so the window had no bearer and the whole app read
+  // "backend ไม่ตอบ". The browser's own same-origin claim is enough — headerless
+  // tools (curl, node) send neither header and still fail on purpose, and they
+  // can read the token file anyway.
   const origin = req.headers['origin'];
+  if (site === 'same-origin') {
+    if (!origin) return true;
+    // Both headers present: they must still agree with this host and port.
+    try { return new URL(origin).host === String(req.headers.host).toLowerCase(); } catch { return false; }
+  }
+  // No Sec-Fetch-Site at all: the Origin alone must be THIS origin — host and
+  // port, not merely loopback: a check that only asks "is it 127.0.0.1?"
+  // passes a page served by any other local server.
   if (origin) {
     try { return new URL(origin).host === String(req.headers.host).toLowerCase(); } catch { return false; }
   }
@@ -269,6 +281,10 @@ export function createRpc({
   // 09:00 must run with the window closed. A test that owns the schedule file
   // turns it off so its own runDue calls are the only ones.
   scheduleTick = true,
+  // Keep the bridge alive across idle exits. Off by default so in-process
+  // tests never leak a timer into the runner; the desktop and the standalone
+  // backend turn it on.
+  keepBridgeAlive = false,
   // The most a `/rpc` body may carry. A caller that needs a different cap
   // (a test) says so; the default is the one a real window needs.
   maxBody = MAX_BODY,
@@ -363,31 +379,103 @@ export function createRpc({
     return null;
   };
 
-  /** Start the bridge if nothing is answering, and wait for it. */
-  const ensureBridge = async () => {
-    if (!autostartBridge) return;
-    // The bridge's /status is the one route that needs no token. Asking the
-    // root instead answers 401 (the bearer gate) and reads as "no bridge" —
-    // so every backend started a second bridge of its own, which then fought
-    // for the port and held the log file open.
-    const up = () => fetch(`${bridgeURL}/status`, { signal: AbortSignal.timeout(1200) }).then((r) => r.ok).catch(() => false);
-    if (await up()) return;
+  // The bridge's /status is the one route that needs no token. Asking the
+  // root instead answers 401 (the bearer gate) and reads as "no bridge" —
+  // so every backend started a second bridge of its own, which then fought
+  // for the port and held the log file open. A 200 alone is not enough
+  // either: the body has to be our shape, or a stranger on the port would be
+  // adopted and every run would fail with "bridge offline".
+  // A bridge that answers /status with our shape is not necessarily ours: a
+  // stray bridge started from another home (a CLI run, a test harness) carries a
+  // different loopback token and every authenticated call then comes back 401
+  // ("bridge ปฏิเสธ token"). /status is unauthenticated by design, so the shape
+  // check is not enough — confirm the token matches by hitting a gated route.
+  // A 401 means "foreign"; anything else (200, or a 5xx from a bridge that is
+  // ours but has no tab) means "ours".
+  const bridgeUp = async () => {
+    try {
+      const r = await fetch(`${bridgeURL}/status`, { signal: AbortSignal.timeout(1200) });
+      if (!r.ok) return false;
+      const body = await r.json().catch(() => null);
+      if (body?.ok !== true || typeof body?.extensions !== 'number') return false;
+      const tok = loadOrMintToken();
+      const auth = await fetch(`${bridgeURL}/credits`, { headers: { authorization: `Bearer ${tok}` }, signal: AbortSignal.timeout(1200) }).catch(() => null);
+      // null = network blip; trust the shape check rather than declaring the
+      // bridge dead on a single failed probe.
+      if (auth === null) return true;
+      if (auth.status === 401) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * Where the bridge we start should listen.
+   *
+   * A backend told `bridgeURL = http://127.0.0.1:9123` must start the bridge
+   * on 9123, not on the process's AIPASS_PORT: the two are the same in the
+   * desktop, but a test (or a second install) that names its own port used to
+   * get a bridge on the developer's default and a probe on the named one that
+   * never met. Only loopback URLs can be served by a local bridge.
+   */
+  const bridgeEnv = () => {
+    let url;
+    try { url = new URL(bridgeURL); } catch { return null; }
+    const loopback = url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]';
+    if (!loopback) return null;
+    const env = { ...process.env };
+    env.AIPASS_PORT = url.port || (url.protocol === 'https:' ? '443' : '80');
+    env.AIPASS_HOST = url.hostname === 'localhost' ? '127.0.0.1' : url.hostname.replace(/^\[|\]$/g, '');
+    return env;
+  };
+
+  /** One start attempt; never two at once (the keeper and the first call overlap). */
+  const startBridgeOnce = async () => {
+    if (await bridgeUp()) return;
     const script = bridgeScript();
     if (!script) return;
+    const env = bridgeEnv();
+    if (!env) return;
     try {
       // Size-capped rotation (harness/log-file.mjs): a bridge left running for
       // weeks used to grow bridge.log without bound.
       const log = openLogFile(path.join(aipassHome(), 'logs', 'bridge.log'));
-      const child = spawn(process.execPath, [script], { cwd: root, stdio: ['ignore', log, log], detached: true, env: process.env });
+      const child = spawn(process.execPath, [script], { cwd: root, stdio: ['ignore', log, log], detached: true, env });
       child.unref();
       fs.closeSync(log);
-      for (let i = 0; i < 60 && !(await up()); i++) await new Promise((r) => setTimeout(r, 250));
+      for (let i = 0; i < 60 && !(await bridgeUp()); i++) await new Promise((r) => setTimeout(r, 250));
     } catch {
       // A bridge that will not start is reported on the first run, where the
       // error is visible, rather than crashing the backend that would explain it.
     }
   };
+
+  /** Start the bridge if nothing is answering, and wait for it. */
+  let bridgeStarting = null;
+  const ensureBridge = () => {
+    if (!autostartBridge && !keepBridgeAlive) return Promise.resolve();
+    if (bridgeStarting) return bridgeStarting;
+    bridgeStarting = startBridgeOnce().finally(() => { bridgeStarting = null; });
+    return bridgeStarting;
+  };
   void ensureBridge();
+  // The bridge exits after sitting idle (IDLE_EXIT_MS), so a desktop that is
+  // open but not sending would otherwise lose it and every run would then fail
+  // with "bridge offline" until the backend was restarted. Keep it alive: a
+  // no-op while it answers, a fresh start when it went away. unref'd so it
+  // never keeps a backend alive after its window is gone. Only in surfaces
+  // that asked for it, so in-process tests never leak a timer.
+  let bridgeKeeper = null;
+  if (keepBridgeAlive) {
+    // Five seconds, not thirty: a bridge that was killed (the Tauri supervisor's
+    // taskkill /T, an idle exit, a person's kill) is exactly the window in which
+    // a message sent from the app fails with "bridge offline". The probe is one
+    // loopback /status, so the cost of asking often is negligible next to a
+    // half-minute hole in the one path the window needs.
+    bridgeKeeper = setInterval(() => { void ensureBridge(); }, 5_000);
+    bridgeKeeper.unref?.();
+  }
   // The plugin event surface. plugins.mjs documents `ctx.events.on(type, fn)`,
   // and a bare `{ emit }` object made every subscribing plugin throw in setup
   // and land in `failed`. This is a real Emitter: every harness event is
@@ -544,6 +632,7 @@ export function createRpc({
         webScratch: appSettings.get('webScratch'),
         // The RECALL marker: the model may ask what this project said before.
         recall: appSettings.get('recall'),
+      retrieve: appSettings.get('retrieve'),
         parallelHelpers: appSettings.get('parallelHelpers'),
         // The reading switches: consecutive reads may run beside each other,
         // and the preamble may teach TREE/STAT. Reads, not powers — on by
@@ -665,6 +754,7 @@ export function createRpc({
       // every harness the backend holds, so the file says the same thing to a
       // harness built last week as to one built now.
       recall: appSettings.get('recall'),
+      retrieve: appSettings.get('retrieve'),
       explore: appSettings.get('explore'),
       parallelReads: appSettings.get('parallelReads'),
       // (Thai pack) the language policy and the loop guards
@@ -1265,6 +1355,7 @@ export function createRpc({
   });
 
   server.listen(port, '127.0.0.1');
+  server.on('close', () => { if (bridgeKeeper) clearInterval(bridgeKeeper); });
   // The schedule ticks itself from here. The timer is unref'd, so the backend
   // still exits when its window does; the store's lock keeps this and the
   // window's manual `schedule.runDue` from running one entry twice. Stopped
@@ -1316,7 +1407,7 @@ if (invokedDirectly) {
   const argv = process.argv.slice(2);
   const arg = (n, d) => { const i = argv.indexOf(`--${n}`); return i === -1 ? d : argv[i + 1]; };
   const port = Number(arg('port', 8790));
-  const rpc = createRpc({ port, root: arg('root', process.cwd()) });
+  const rpc = createRpc({ port, root: arg('root', process.cwd()), keepBridgeAlive: true });
   // The desktop probes the port before spawning, but a race is still possible;
   // name the port instead of dying with a raw EADDRINUSE stack. And a busy
   // port gets its OWN exit code: it is a fact about the machine, not a crash,

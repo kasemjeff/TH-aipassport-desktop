@@ -1,3 +1,4 @@
+// @ts-check
 // The keyring: the public halves this build trusts.
 //
 // The feed is signed by a key whose private half never leaves the release

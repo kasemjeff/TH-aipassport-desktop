@@ -13,49 +13,55 @@
  */
 
 :root {
-  --bg: #1e1c19;
-  --bg-2: #262421;
-  --bg-3: #2e2b26;
-  --line: #3a362f;
-  --fg: #e8e5df;
-  --dim: #9c968a;
-  --accent: #d97757;
-  --ok: #8fbf7f;
-  --warn: #e0b25c;
-  --bad: #e2766a;
+  --bg: #120f0e;
+  --bg-2: #171616;
+  --bg-3: #1b1918;
+  --line: #242323;
+  --fg: #dbd7cc;
+  --dim: #89867c;
+  --accent: #da7c47;
+  --ok: #76ad4f;
+  --warn: #d49a2a;
+  --bad: #da5b4a;
   --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", "Leelawadee UI", "Noto Sans Thai", sans-serif;
 
   /* derived surfaces — same values live in the light block below */
-  --side-bg: #1b1916;          /* sidebar + header rail */
-  --stage: #201e1a;            /* transcript area */
-  --card: #262421;             /* composer card, sheets, panels */
-  --card-line: #3c3831;
-  --input: #1a1815;            /* fields, selects, search */
-  /* The button's ground. The label on it is ordinary text, so the pair owes
-     AA (4.5:1) — and it owes it in BOTH themes, which is why the two blocks
-     below carry the same ground: #b35333 holds #faf5f1 at 4.6:1 and #ffffff
-     at 5.0:1. The hover is a step darker still (5.3:1). */
-  --accent-solid: #b35333;
-  --accent-solid-hover: #a34c2e;
-  --accent-on: #faf5f1;
-  --accent-soft: rgba(217, 119, 87, .12);
-  --accent-ring: rgba(217, 119, 87, .25);
-  --bubble-bg: #2a2723;
-  --bubble-fg: #efe9e2;
-  --bubble-line: #413b33;
-  --code-bg: #191714;
+  --side-bg: #0e0c0b;          /* sidebar + header rail */
+  --stage: #120f0e;            /* transcript area */
+  --card: #1b1918;             /* composer card, sheets, panels */
+  --card-line: #242323;
+  --input: #0e0c0b;            /* fields, selects, search */
+  --accent-solid: #da7c47;
+  --accent-solid-hover: #eb8c57;
+  --accent-on: #120f0e;
+  --accent-soft: rgba(218, 124, 71, .12);
+  --accent-ring: rgba(218, 124, 71, .25);
+  --bubble-bg: #2d1c12;
+  --bubble-fg: #dbd7cc;
+  --bubble-line: #3a2418;
+  --code-bg: #100e0d;
   --scrim: rgba(12, 10, 8, .68);
   --shadow: 0 12px 34px rgba(0, 0, 0, .5);
   --shadow-sm: 0 2px 10px rgba(0, 0, 0, .32);
-  --warn-soft: rgba(224, 178, 92, .1);
-  --warn-line: rgba(224, 178, 92, .35);
-  --ok-soft: rgba(143, 191, 127, .09);
-  --bad-soft: rgba(226, 118, 106, .08);
+  --warn-soft: rgba(198, 127, 19, .1);
+  --warn-line: rgba(198, 127, 19, .35);
+  --ok-soft: rgba(118, 173, 79, .09);
+  --bad-soft: rgba(218, 91, 74, .08);
 
-  --bar-h: 46px;
-  --side-w: 264px;
+  --bar-h: 56px;
+  --side-w: 280px;
+  --panel-w: 320px;
+  --chat-w: 768px;
   --radius-lg: 16px;
+
+  /* semantic type */
+  --text-markdown: 14px;
+  --text-code: 12px;
+  --text-ui-header: 14px;
+  --text-ui-label: 13.5px;
+  --text-meta: 12.5px;
+  --text-micro: 12px;
 
   /* The type of a file, told by its shape. The icons are masks, so they take
      the colour of the row they sit in: one rule, two themes, no images. */
@@ -69,42 +75,50 @@
 }
 
 :root[data-theme="light"] {
-  --bg: #faf9f5;
-  --bg-2: #ffffff;
-  --bg-3: #f0eee7;
-  --line: #e5e1d7;
-  --fg: #2b2820;
-  /* The muted trio is darker here than the eye expects: on the pale grounds
-     of this theme the darker shades of the same hues are what clear AA as
-     text — --dim on the sidebar rail, --accent on a bubble, --ok on the
-     page. The dark theme's values already pass and are left alone. */
-  --dim: #69655e;
-  --accent: #a35033;
-  --ok: #497a47;
-  --warn: #8a6a1d;
-  --bad: #b4473c;
+  --bg: #fdfcfa;
+  --bg-2: #f7f6f4;
+  --bg-3: #f3f2f0;
+  --line: #e5e1de;
+  --fg: #44443d;
+  --dim: #696960;
+  --accent: #b35017;
+  --ok: #517734;
+  --warn: #886914;
+  --bad: #b7493f;
 
-  --side-bg: #f5f3ee;
-  --stage: #fdfcf9;
-  --card: #ffffff;
-  --card-line: #e7e3d9;
+  --side-bg: #f7f6f4;
+  --stage: #fdfcfa;
+  --card: #f3f2f0;
+  --card-line: #e5e1de;
   --input: #ffffff;
-  --accent-solid: #b35333;
-  --accent-solid-hover: #a34c2e;
+  --accent-solid: #b35017;
+  --accent-solid-hover: #9a4310;
   --accent-on: #ffffff;
-  --accent-soft: rgba(163, 80, 51, .09);
-  --accent-ring: rgba(163, 80, 51, .18);
-  --bubble-bg: #f3f1ea;
-  --bubble-fg: #332f26;
-  --bubble-line: #e2ded2;
-  --code-bg: #f1efe9;
+  --accent-soft: rgba(179, 80, 23, .09);
+  --accent-ring: rgba(179, 80, 23, .18);
+  --bubble-bg: #f3f2f0;
+  --bubble-fg: #44443d;
+  --bubble-line: #e5e1de;
+  --code-bg: #faf9f7;
   --scrim: rgba(40, 35, 28, .35);
   --shadow: 0 14px 36px rgba(60, 50, 38, .12);
   --shadow-sm: 0 2px 10px rgba(60, 50, 38, .07);
-  --warn-soft: rgba(224, 178, 92, .18);
-  --warn-line: rgba(138, 106, 29, .35);
-  --ok-soft: rgba(76, 127, 74, .08);
-  --bad-soft: rgba(180, 71, 60, .07);
+  --warn-soft: rgba(136, 105, 20, .1);
+  --warn-line: rgba(136, 105, 20, .35);
+  --ok-soft: rgba(81, 119, 52, .08);
+  --bad-soft: rgba(183, 73, 63, .07);
+
+  --bar-h: 56px;
+  --side-w: 280px;
+  --panel-w: 320px;
+  --chat-w: 768px;
+  --radius-lg: 16px;
+  --text-markdown: 14px;
+  --text-code: 12px;
+  --text-ui-header: 14px;
+  --text-ui-label: 13.5px;
+  --text-meta: 12.5px;
+  --text-micro: 12px;
 
   color-scheme: light;
 }
@@ -223,8 +237,17 @@ input[type="checkbox"] { accent-color: var(--accent-solid); }
 /* A checkbox holds the state and the CSS does the folding; the two ☰ controls
    are buttons that move it. */
 .nav-toggle { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
-#nav-toggle:checked ~ main { grid-template-columns: 0 minmax(0, 1fr); }
-#nav-toggle:checked ~ main > #side { display: none; }
+#nav-toggle:checked ~ main { grid-template-columns: 0 minmax(0, 1fr) var(--panel-w); }
+#nav-toggle:checked ~ main > #side {
+  position: fixed; left: 0; top: var(--bar-h); bottom: 0;
+  width: 14px; overflow: hidden; z-index: 50;
+  transition: width .18s ease;
+  box-shadow: none;
+}
+#nav-toggle:checked ~ main > #side:hover {
+  width: var(--side-w);
+  box-shadow: var(--shadow);
+}
 
 /* ------------------------------------------------------------------- bar */
 
@@ -285,7 +308,11 @@ input[type="checkbox"] { accent-color: var(--accent-solid); }
 
 /* ------------------------------------------------------------------ main */
 
-main { flex: 1; display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr); min-height: 0; }
+main { flex: 1; display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr) var(--panel-w); min-height: 0; }
+#panel-toggle:checked ~ main { grid-template-columns: var(--side-w) minmax(0, 1fr) 0; }
+#panel-toggle:checked ~ main > #context-panel { display: none; }
+#nav-toggle:checked ~ #panel-toggle:checked ~ main,
+#panel-toggle:checked ~ #nav-toggle:checked ~ main { grid-template-columns: 0 minmax(0, 1fr) 0; }
 
 /* ---------------------------------------------------------------- sidebar */
 
@@ -297,6 +324,7 @@ main { flex: 1; display: grid; grid-template-columns: var(--side-w) minmax(0, 1f
   display: flex;
   flex-direction: column;
   min-height: 0;
+  position: relative;
   padding: 10px 10px 8px;
   overflow: hidden;
 }
@@ -743,17 +771,17 @@ button.nav-item:hover { border-color: transparent; }
 }
 #meta {
   grid-row: 1; grid-column: 1;
-  padding: 6px 18px;
+  padding: 10px 18px;
   border-bottom: 1px solid var(--line);
-  color: var(--dim);
-  font-family: var(--mono);
-  font-size: 11px;
+  color: var(--fg);
   display: flex;
-  gap: 12px;
-  white-space: nowrap;
+  align-items: center;
+  gap: 10px;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
+#meta .meta-title { font-size: var(--text-ui-header); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#meta .meta-chip { font: var(--text-micro)/1 var(--mono); color: var(--dim); background: var(--bg-3); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; white-space: nowrap; }
+#meta .meta-file { font: var(--text-micro)/1 var(--mono); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stage {
   grid-row: 2; grid-column: 1;
   position: relative;
@@ -786,7 +814,7 @@ button.nav-item:hover { border-color: transparent; }
 /* One column, one rail: every block in the transcript — messages, runs, the
    welcome card — takes the same width and centers like the composer does, so a
    wide window does not leave the conversation hugging the left edge. */
-#log > * { width: 100%; max-width: 860px; margin-inline: auto; }
+#log > * { width: 100%; max-width: 768px; margin-inline: auto; }
 
 /* The transcript's rows are scrollback: while the reader watches the newest
    ones, every older row is offscreen weight — a session an hour old lays out
@@ -840,6 +868,40 @@ button.nav-item:hover { border-color: transparent; }
 /* The room the bar needs, so it never covers the answer's last line. */
 #log.busy { padding-bottom: 48px; }
 
+/* ----------------------------------------------------------- context panel */
+
+#context-panel {
+  background: var(--side-bg);
+  border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px;
+  gap: 10px;
+  font-size: var(--text-meta);
+}
+#context-panel h3 { margin: 0 0 4px; font-size: var(--text-ui-header); font-weight: 600; }
+#context-panel .cp-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center;
+  padding: 6px 8px; border-radius: 8px; background: var(--bg-3);
+}
+#context-panel .cp-row.clickable { cursor: pointer; }
+#context-panel .cp-row.clickable:hover { background: var(--card); }
+#context-panel .cp-label { color: var(--dim); font-size: var(--text-micro); text-transform: uppercase; letter-spacing: .04em; }
+#context-panel .cp-value { font-weight: 600; }
+#context-panel .cp-bar { grid-column: 1 / -1; height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: 4px; }
+#context-panel .cp-bar > span { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+#context-panel .cp-section { font-size: var(--text-micro); color: var(--dim); text-transform: uppercase; letter-spacing: .06em; margin: 6px 0 2px; }
+#context-panel .cp-details { border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; background: var(--bg-3); }
+#context-panel .cp-details summary { cursor: pointer; font-size: var(--text-micro); color: var(--dim); text-transform: uppercase; letter-spacing: .06em; list-style: none; }
+#context-panel .cp-details summary::-webkit-details-marker { display: none; }
+#context-panel .cp-empty { color: var(--dim); font-size: var(--text-micro); padding: 8px; }
+.side-resize { position: absolute; top: 0; right: 0; bottom: 0; width: 4px; cursor: col-resize; z-index: 5; background: transparent; }
+.side-resize:hover, .side-resize.dragging { background: var(--accent); opacity: .4; }
+#context-panel .cp-mcp { display: flex; align-items: center; gap: 6px; }
+#context-panel .cp-mcp button { padding: 2px 6px; font-size: var(--text-micro); }
+
 /* ------------------------------------------------------------- transcript */
 
 /* Conversation look, harness-first: your words come back as a prompt block —
@@ -854,6 +916,7 @@ button.nav-item:hover { border-color: transparent; }
   display: block;
   width: fit-content;
   max-width: 100%;
+  margin-left: auto;
   text-align: left;
   background: var(--bubble-bg);
   border: 1px solid var(--bubble-line);
@@ -884,10 +947,21 @@ button.nav-item:hover { border-color: transparent; }
   background: var(--code-bg);
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 10px 12px;
+  padding: 0;
   overflow: auto;
   font: 12.5px/1.45 var(--mono);
 }
+.msg .body pre .code-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 10px; border-bottom: 1px solid var(--line);
+  font-size: var(--text-micro); color: var(--dim);
+}
+.msg .body pre .code-copy {
+  background: none; border: 1px solid var(--line); border-radius: 6px;
+  color: var(--dim); padding: 2px 8px; cursor: pointer; font-size: var(--text-micro);
+}
+.msg .body pre .code-copy:hover { color: var(--fg); border-color: var(--accent); }
+.msg .body pre code { display: block; padding: 10px 12px; }
 .msg .body code { font-family: var(--mono); background: var(--code-bg); padding: 1px 4px; border-radius: 4px; font-size: 12.5px; }
 .msg .body pre code { background: none; padding: 0; }
 .msg .body ul, .msg .body ol { margin: 0 0 10px; padding-left: 22px; }
@@ -1164,7 +1238,7 @@ details.run > *:not(summary) { margin-left: 2px; }
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow);
   padding: 10px 12px 8px;
-  max-width: 860px;
+  max-width: 768px;
   margin: 0 auto;
   transition: border-color .15s ease, box-shadow .15s ease;
 }
@@ -1508,6 +1582,19 @@ details.run > *:not(summary) { margin-left: 2px; }
   :root { --side-w: 236px; }
   #log, #composer, #pending, #attachments, #meta { padding-left: 16px; padding-right: 16px; }
   .status { gap: 7px; }
+}
+
+@media (max-width: 1100px) {
+  main { grid-template-columns: var(--side-w) minmax(0, 1fr) 0; }
+  #context-panel {
+    position: fixed; top: var(--bar-h); right: 0; bottom: 0;
+    width: var(--panel-w); z-index: 40;
+    box-shadow: var(--shadow);
+    transform: translateX(100%);
+    transition: transform .2s ease;
+  }
+  #panel-toggle:checked ~ main #context-panel { transform: translateX(100%); }
+  #panel-toggle:not(:checked) ~ main #context-panel { transform: translateX(0); }
 }
 
 @media (max-width: 760px) {

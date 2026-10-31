@@ -18,7 +18,7 @@ import { createTools } from '../harness/tools.mjs';
 import { Overlay } from '../harness/overlay.mjs';
 import { SessionStore } from '../harness/session.mjs';
 import { parse } from '../harness/protocol.mjs';
-import { recallEntries } from '../harness/memory-store.mjs';
+import { recallEntries, saveMemory } from '../harness/memory-store.mjs';
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-recall-home-'));
 process.env.AIPASS_HOME = HOME;
@@ -100,4 +100,15 @@ test('the recall reads the newest first, and the newest wins a tie', async () =>
 
   // And the session that is asked about is the one that answered.
   assert.ok(session.id);
+});
+
+
+test('a memory fact is reachable through RECALL', async () => {
+  const dir = tempDir({ 'app.mjs': 'export const login = () => {};\n' });
+  const store = new SessionStore(path.join(HOME, 'sessions'));
+  saveMemory(dir, ['decision: use bcrypt for password hashing']);
+  const tools = createTools({ root: dir, overlay: new Overlay(dir), store });
+  const out = await tools.recall('bcrypt');
+  assert.match(out, /bcrypt/, 'the fact is found');
+  assert.match(out, /memory fact/, 'and is labelled as a memory fact');
 });

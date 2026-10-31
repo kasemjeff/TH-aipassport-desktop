@@ -292,6 +292,7 @@ export async function runTask(taskText, ctx = {}) {
     // an option, because the preamble's bytes are pinned by the recorded
     // replay (evals/fixtures/).
     verify: Boolean(run.options.allowVerify),
+    diagnose: Boolean(run.options.diagnose),
     // RECALL and the exploration tools are taught behind their own flags. The
     // preamble is built once per run, so a missing flag here means a marker
     // the loop happily dispatches but the model was never told about.

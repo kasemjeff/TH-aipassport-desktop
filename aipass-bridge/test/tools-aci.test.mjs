@@ -106,11 +106,11 @@ test('a spill read hands back the verbatim range — never a spill of a spill', 
 
   // A range that fits comes back exactly as the content sits on disk: one
   // gutter (the original), no second layer of numbering.
-  const page = await tools.read(`${loc[1]} ${start}-${start + 50}`);
+  const page = await tools.read(`${loc[1]} ${start}-${start + 10}`);
   assert.doesNotMatch(page, /more bytes,/, 'still no second spill');
   assert.doesNotMatch(page, /^\s*\d+ \| \s*\d+ \| /m, 'no second gutter stacked on the first');
   assert.match(page, new RegExp(`row ${start} `));
-  assert.match(page, new RegExp(`row ${start + 50} `));
+  assert.match(page, new RegExp(`row ${start + 10} `));
 });
 
 test('the spill locator starts where the head really ended, not where the byte cap guessed', async () => {

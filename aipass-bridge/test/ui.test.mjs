@@ -2936,6 +2936,14 @@ test('every command in the palette has a handler that resolves', async () => {
   task.dispatch('keydown', { key: 'Enter' });
   await tick();
   assert.equal(task.value, '', '/clip needs no argument');
+  // /index reaches the backend. A handler that is not wired into the
+  // commands' destructure throws inside runCommand's catch — the composer
+  // still clears and the run still "succeeds" — so the assertion is the
+  // call itself, not the composer.
+  task.value = '/index';
+  task.dispatch('keydown', { key: 'Enter' });
+  await tick();
+  assert.ok(calls.includes('retrieval.status'), '/index reads the index status');
   // The conversation commands reach the backend, not just the UI.
   assert.ok(calls.includes('conversation.new'), '/fresh creates a bridge conversation');
 });
@@ -4285,4 +4293,23 @@ test('the window does not switch worktrees under a live run', async () => {
   await tick(); await tick();
   assert.equal(node('worktree-bar').classList.contains('hidden'), false, 'the live run keeps the worktree');
   assert.match(node('log').textContent, /รันอยู่/, 'and the window says why it did not leave');
+});
+
+test('the session panel shows context and credits from the backend', async () => {
+  const { node, tick } = await bootApp(BACKEND);
+  await globalThis.__ctx.refreshContextPanel();
+  await tick(); await tick();
+  const panel = node('context-panel');
+  assert.match(panel.textContent, /Usage/);
+  assert.match(panel.textContent, /20%/);
+  assert.match(panel.textContent, /Available/);
+  assert.match(panel.textContent, /42/);
+});
+
+test('the panel toggle flips aria-expanded', async () => {
+  const { node } = await bootApp(BACKEND);
+  const btn = node('panel-btn');
+  assert.equal(btn.getAttribute('aria-expanded'), 'true');
+  btn.dispatch('click');
+  assert.equal(node('panel-toggle').checked, true);
 });

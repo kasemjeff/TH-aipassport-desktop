@@ -203,7 +203,7 @@ The window runs in any browser today — `npm run desktop` serves it on
 `127.0.0.1:8790`. For the real window (tray, native menu, an installer):
 
 ```bash
-npm run tauri:build     # NSIS on Windows, .app/.dmg on macOS, deb/appimage on Linux
+npm run desktop:build   # NSIS on Windows, .app/.dmg on macOS, deb/appimage on Linux
 ```
 
 The packaged build carries the Node runtime inside it, so the machine that

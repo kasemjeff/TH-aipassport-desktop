@@ -1,3 +1,4 @@
+// @ts-check
 // What a set of eval rows says, in numbers.
 //
 // The comparator in `scripts/evals-compare.mjs` decides pass or fail between
@@ -11,15 +12,18 @@
 // SCORED rows, and the invalid count is reported beside it.
 import fs from 'node:fs/promises';
 
+/** @param {any} xs */
 const median = (xs) => {
   if (!xs.length) return null;
   const sorted = [...xs].sort((a, b) => a - b);
   return sorted[Math.floor(sorted.length / 2)];
 };
 
+/** @param {any} row */
 const isScored = (row) => row.scored !== false && row.outcome !== 'invalid' && row.outcome !== 'stale';
 
 /** Every result row in a file. Bad lines are counted, never thrown. */
+/** @param {any} file */
 export async function readRows(file) {
   let text;
   try {
@@ -46,6 +50,7 @@ export async function readRows(file) {
 /**
  * The reading of one run's rows. `passAt1` is the share of scored tasks the
  * run solved on its first attempt — the number a harness change is judged on.
+ * @param {any[]} [rows]
  */
 export function scoreRows(rows = []) {
   const tasks = new Map();
@@ -97,7 +102,9 @@ export function scoreRows(rows = []) {
   };
 }
 
-/** A one-line reading for a table. */
+/** A one-line reading for a table.
+ * @param {any} score
+ */
 export function formatScore(score) {
   if (!score || !score.rows) return 'no rows';
   const pass = score.passAt1 == null ? '—' : `${Math.round(score.passAt1 * 100)}%`;

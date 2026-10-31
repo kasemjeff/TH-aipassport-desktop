@@ -1,3 +1,4 @@
+// @ts-check
 // The update domain: what is out there, and the one way it may be put in
 // place.
 //
@@ -54,7 +55,7 @@ export function createUpdateMethods(ctx) {
      * keyring is the backend's business. A machine that is offline gets the
      * cached feed or nothing — and nothing is nagged.
      */
-    async 'update.check'(params = {}) {
+    async 'update.check'(params = /** @type {any} */ ({})) {
       return checkForUpdates({ force: params.force === true });
     },
 
@@ -69,7 +70,7 @@ export function createUpdateMethods(ctx) {
      * promotion is atomic, so a failure anywhere leaves the content that was
      * running exactly where it was.
      */
-    async 'update.apply'(params = {}) {
+    async 'update.apply'(params = /** @type {any} */ ({})) {
       const h = targetFor(params);
       const refused = refuseWhileRunning(h.running);
       if (refused) return refused;

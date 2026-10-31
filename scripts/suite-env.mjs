@@ -30,7 +30,7 @@ export async function freePort() {
  * already set one of them wins — the suite is runnable under a real home on
  * purpose, and a caller that steers one of these steers it for the gate too.
  */
-export async function suiteEnv({ home = null, browserProfile = null, browserPidFile = null, bridgePidFile = null } = {}) {
+export async function suiteEnv({ home = null, browserProfile = null, browserPidFile = null, bridgePidFile = null, bridgePort = null } = {}) {
   const HOME = home ?? (process.env.AIPASS_HOME?.trim() || fs.mkdtempSync(path.join(os.tmpdir(), 'aipass-suite-home-')));
   const BROWSER_HOME = browserProfile
     ? path.dirname(browserProfile)
@@ -47,7 +47,7 @@ export async function suiteEnv({ home = null, browserProfile = null, browserPidF
   // it — that one would take the suite's bridge away while the other files
   // are still using it. The suite ends the bridge itself, once, at the end.
   const BRIDGE_PIDS = bridgePidFile ?? path.join(BROWSER_HOME, 'bridge.pid');
-  const PORT = process.env.AIPASS_PORT?.trim() || String(await freePort());
+  const PORT = bridgePort ?? (process.env.AIPASS_PORT?.trim() || String(await freePort()));
   return {
     home: HOME,
     browserHome: BROWSER_HOME,
@@ -59,6 +59,12 @@ export async function suiteEnv({ home = null, browserProfile = null, browserPidF
       ...process.env,
       AIPASS_HOME: HOME,
       AIPASS_PORT: PORT,
+      // Every client in the suite must look at the suite's bridge, not at the
+      // developer's 8787. AIPASS_PORT only moves the bridge the suite STARTS;
+      // the address a backend or CLI DIALS is AIPASS_BRIDGE. Without this the
+      // suite's health probes, model reads and bridge adopters talked to the
+      // developer's live bridge — and a test that killed one killed theirs.
+      AIPASS_BRIDGE: `http://127.0.0.1:${PORT}`,
       AIPASS_BRIDGE_PIDFILE: BRIDGE_PIDS,
       // The token bucket in BridgeClient paces real sends at nine per four
       // minutes; the suite's bridges are loopback fakes and must not pay that

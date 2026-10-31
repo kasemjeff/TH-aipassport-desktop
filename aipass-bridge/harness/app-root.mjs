@@ -1,3 +1,4 @@
+// @ts-check
 // One rule for "where the app's files are", shared by the surfaces that have
 // to agree on it.
 //
@@ -95,7 +96,9 @@ export function rootCandidates({ home = aipassHome(), bundleRoot = null, repoRoo
   return candidates;
 }
 
-/** The first candidate that is really an app root. */
+/** The first candidate that is really an app root.
+ * @param {any} candidates
+ */
 export function pickRoot(candidates) {
   for (const candidate of candidates ?? []) {
     if (fs.existsSync(path.join(candidate.root, MARKER))) return candidate;
@@ -103,7 +106,9 @@ export function pickRoot(candidates) {
   return null;
 }
 
-/** Where the root's version lives — the same file `APP_VERSION` reads. */
+/** Where the root's version lives — the same file `APP_VERSION` reads.
+ * @param {any} root
+ */
 export function rootVersion(root) {
   try {
     const raw = fs.readFileSync(path.join(root, 'package.json'), 'utf8');
@@ -114,7 +119,10 @@ export function rootVersion(root) {
   }
 }
 
-/** Do two paths name the same place on disk? */
+/** Do two paths name the same place on disk?
+ * @param {any} a
+ * @param {any} b
+ */
 const samePlace = (a, b) => {
   try {
     return fs.realpathSync(a) === fs.realpathSync(b);
@@ -132,6 +140,8 @@ const samePlace = (a, b) => {
  *
  * Replacing a live link is a window where the shim has nothing to run, so a
  * link that already points at the right place is left exactly as it is.
+ * @param {any} home
+ * @param {any} root
  */
 export function linkCurrent(home = aipassHome(), root) {
   if (!root) return false;

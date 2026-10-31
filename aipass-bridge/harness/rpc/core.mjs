@@ -10,6 +10,7 @@
 // that can disagree.
 import path from 'node:path';
 import { APP_VERSION } from '../session.mjs';
+import { chromeExecutable } from '../open-command.mjs';
 import { AIPASS_PROVIDER } from '../providers.mjs';
 // The write side of git (harness/git.mjs). These four are the HUMAN's
 // buttons: they act on the project's root and report what changed, and they
@@ -44,6 +45,8 @@ export function createCoreMethods(ctx) {
     decoratedPlugins,
     root,
     model,
+    bridgeURL,
+    APP_ROOT,
   } = ctx;
 
   return {
@@ -73,6 +76,8 @@ export function createCoreMethods(ctx) {
         // "paste the token" are different jobs, and only one of them is
         // what the reader has to do.
         extensionToken: st?.extensionToken ?? 'ok',
+        chrome: Boolean(chromeExecutable(process.platform)),
+        extensionPath: APP_ROOT ? path.join(APP_ROOT, 'aipass-bridge', 'extension') : null,
         // Bridge-side cache counters (models/quota/conversation): what rode a
         // cache instead of the tab. Null from a bridge too old to count them —
         // the window's /status omits the line then.
@@ -114,6 +119,16 @@ export function createCoreMethods(ctx) {
         plugins: decoratedPlugins(),
         settings: appSettings.values,
       };
+    },
+
+    async 'pair.code'() {
+      try {
+        const res = await fetch(`${bridgeURL}/pair/code`, { cache: 'no-store' });
+        if (!res.ok) return { ok: false, reason: `bridge answered ${res.status}` };
+        return await res.json();
+      } catch (err) {
+        return { ok: false, reason: err?.message ?? String(err) };
+      }
     },
 
     /**

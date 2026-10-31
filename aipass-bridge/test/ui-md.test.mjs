@@ -261,3 +261,10 @@ test('a standalone video URL or media line waits for a click too', () => {
 test('a bare non-video URL stays prose', () => {
   assert.equal(renderMarkdown('https://example.com/'), '<p>https://example.com/</p>');
 });
+
+test('fenced code carries data-lang and a copy button', () => {
+  const out = renderMarkdown('```js\nconst a = 1;\n```');
+  assert.match(out, /<pre data-lang="js">/);
+  assert.match(out, /class="code-copy"/);
+  assert.match(out, /class="code-lang">js</);
+});

@@ -46,6 +46,9 @@ drift this file exists to catch.
 | `AIPASS_ELIDE` | off | the elision tier (stale bulky sends cut to stubs) | `compact.mjs` |
 | `AIPASS_MEMORY` | on | `off` stops the memory-tier carry across rotations | `compact.mjs` |
 | `AIPASS_MEMORY_BUDGET` | `2400` | the char budget for the facts a session's first message carries | `memory-store.mjs` |
+| `AIPASS_RETRIEVAL_MAX_FILES` | `5000` | the retrieval index's file cap | `retrieval.mjs` |
+| `AIPASS_RETRIEVAL_MAX_CHUNKS` | `20000` | the retrieval index's chunk cap | `retrieval.mjs` |
+| `AIPASS_RETRIEVAL_BUDGET` | `6000` | the char budget for a RETRIEVE answer | `retrieval.mjs` |
 | `AIPASS_INSTRUCTIONS` | on | `off` stops the project's own instruction file (AGENTS.md / CLAUDE.md / GEMINI.md) from riding a run's first message | `instructions.mjs` |
 | `AIPASS_INSTRUCTIONS_MAX_BYTES` | `8000` | the byte cap on the project instruction file pasted into turn 1 | `instructions.mjs` |
 | `AIPASS_SPILL_KEEP` | `200` | how many spill files are kept before pruning | `tools.mjs` |
@@ -109,6 +112,7 @@ drift this file exists to catch.
 | `allowRun` | `false` | may the model reach the shell |
 | `allowGitWrite` | `false` | may the model stage, commit, branch |
 | `allowVerify` | `false` | may the model ask for a check (VERIFY) |
+| `sandbox` | `off` | the sandbox a RUN runs in: `off` / `read-only` / `workspace-write` / `danger-full-access` |
 | `allowFetch` | `false` | may the model send data out |
 | `maxSteps` | `0` | the step cap; 0 = no cap |
 | `maxToolCalls` | shipped | the per-run tool-call budget |
@@ -129,7 +133,7 @@ drift this file exists to catch.
 | `attempts` | `1` | re-runs while the checker still reports fail |
 | `verifyCommand` | `null` | the declared check, replacing `.aipass/check.txt` |
 | `requireCheck` | `false` | the strict gate: refuse a DONE over a failing check |
-| `maxResult` | `3000` | per-tool result cap; the rest spills to disk |
+| `maxResult` | `3000` | per-tool result cap in bytes; the rest spills to disk, and a spill read obeys the same cap (line-bounded) |
 | `compaction` | shipped | the context budget object (tokens, reserve, keep, per-model) |
 | `compactAtPercent` | `40` | rotate at this share of the budget |
 | `skillsDirs` | `[]` | extra playbooks folders, first match wins |
@@ -146,6 +150,9 @@ drift this file exists to catch.
 | `uploads` | `null` | where staged uploads wait |
 | `hooks` | shipped | the person's own commands (nine moments, `sessionStart` … `stop`) |
 | `recall` | `true` | may the model look into this project's past (RECALL) |
+| `retrieve` | `true` | may the preamble teach RETRIEVE (ranked passages from the project index) |
+| `diagnose` | `true` | may the preamble teach DIAGNOSE (language-server diagnostics) |
+| `diagnose` | `true` | may the model ask a language server for diagnostics (DIAGNOSE) |
 | `explore` | `true` | may the preamble teach TREE/STAT |
 | `helperPresets` | `{}` | the machine's own SUBAGENT roles: name → { lead, run }, beside the built-ins |
 
@@ -163,6 +170,7 @@ drift this file exists to catch.
 | `allowFetch` | `false` | may this run send data out |
 | `allowGitWrite` | `false` | may this run stage, commit, branch |
 | `allowVerify` | `false` | may this run ask for a check (VERIFY) |
+| `sandbox` | `off` | the sandbox mode for this run: `off` / `read-only` / `workspace-write` / `danger-full-access` |
 | `plan` | `false` | plan mode |
 | `requirePlanApproval` | `false` | wait for a human before the work starts |
 | `subagent` | `false` | may the run call a helper |
@@ -172,6 +180,11 @@ drift this file exists to catch.
 | `attach` | `false` | the ATTACH marker in the preamble |
 | `webScratch` | `false` | web lookups in a throwaway conversation |
 | `recall` | `true` | may the model look into this project's past (RECALL) |
+| `retrieve` | `true` | may the preamble teach RETRIEVE (ranked passages from the project index) |
+| `diagnose` | `true` | may the preamble teach DIAGNOSE (language-server diagnostics) |
+| `diagnose` | `true` | may the model ask a language server for diagnostics (DIAGNOSE) |
+| `review` | `false` | a review run: read a change, stage nothing |
+| `reviewBase` | `null` | the base ref a review run reads against |
 | `explore` | `true` | may the preamble teach TREE/STAT |
 | `pluginSections` | `[]` | what plugins contribute to the turn-1 message |
 | `helperPresets` | `{}` | the machine's own helper roles beside the built-ins |

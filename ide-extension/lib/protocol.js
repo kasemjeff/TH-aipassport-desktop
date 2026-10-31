@@ -49,6 +49,7 @@ const EVENT_NAMES = Object.freeze([
   'stagnation', 'repeat_block', 'verify_prompt', 'check_start', 'check_end',
   'lang_prompt', 'budget', 'step_limit', 'error', 'todo', 'diff_update',
   'compacted', 'helper_start', 'helper_end', 'subagent_start', 'subagent_end',
+  'job_start', 'job_end',
   'plugin_call', 'ask', 'done_line', 'cancelled', 'finished', 'run_stats',
   'goal_round', 'goal_done', 'goal_blocked',
   'inject_queued', 'injected', 'inject_orphaned',
@@ -310,7 +311,7 @@ const FENCE_LINE = /^\s*(```|~~~)/;
  * harness must be added here, or it would reach the reader as raw wire.
  */
 const MARKER_KEYWORDS = Object.freeze([
-  'NEED', 'SEARCH', 'TREE', 'STAT', 'GLOB', 'SYMBOLS', 'DEF', 'REFS', 'RECALL', 'SKILL', 'GIT', 'VERIFY',
+  'NEED', 'SEARCH', 'TREE', 'STAT', 'GLOB', 'SYMBOLS', 'DEF', 'REFS', 'RECALL', 'RETRIEVE', 'SKILL', 'GIT', 'VERIFY', 'DIAGNOSE',
   'FETCH', 'WEB', 'DELETE', 'MOVE', 'EDIT', 'CREATE', 'ATTACH', 'FIND', 'NEW', 'GOAL',
   'END', 'RUN', 'PLAN', 'TODO', 'SUBAGENT', 'TASK', 'ASK', 'DONE', 'JOBS',
 ]);

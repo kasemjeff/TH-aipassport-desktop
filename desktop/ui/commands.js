@@ -20,7 +20,7 @@ import { SKILL_NAME_RE } from './panels/sessions.js';
  * @param {object} ctx the window it draws into
  */
 export function createCommands(ctx) {
-  const { $, el, state, rpc, friendly, scrollDown, addNote, addCommandOut, sendTask, paintCacheStats, hideModal, openModal, fillModels, refreshModels, fillProviders, refreshHeader, refreshMeta, checkForUpdate, openHelp, openSettings, showMemory, showGoal, showMcp, showSymbols, listModels, pickConversation, freshConversation, attachPath, clipPaste, startNewSession, resumeSession, forkSession, togglePlan, showSkills, useSkill, showPendingDiff, applyChecked, discardAll, pickProject, openFile, pickFile, setWorking, cancelRun, showCheckpoints, exportSession, showSessionTree, showGitStatus, showSchedule, showMediaModels, showWorktrees } = ctx;
+  const { $, el, state, rpc, friendly, scrollDown, addNote, addCommandOut, sendTask, paintCacheStats, hideModal, openModal, fillModels, refreshModels, fillProviders, refreshHeader, refreshMeta, checkForUpdate, openHelp, openSettings, showMemory, showGoal, showMcp, showSymbols, showIndex, listModels, pickConversation, freshConversation, attachPath, clipPaste, startNewSession, resumeSession, forkSession, togglePlan, showSkills, useSkill, showPendingDiff, applyChecked, discardAll, pickProject, openFile, pickFile, setWorking, cancelRun, showCheckpoints, exportSession, showSessionTree, showGitStatus, showSchedule, showMediaModels, showWorktrees } = ctx;
 
 
 /* Every command the app has, reachable by typing "/". The header carries three
@@ -42,6 +42,7 @@ const COMMANDS = [
   { cmd: 'goal', desc: 'เป้าหมายระยะยาวของโปรเจกต์ — /goal set|pause|resume|done|block|clear', args: true, run: (arg) => showGoal(arg) },
   { cmd: 'mcp', desc: 'ดู servers/tools จาก MCP (จัดการที่ /settings → MCP)', run: showMcp },
   { cmd: 'symbols', desc: 'ดู declarations ของไฟล์ หรือที่ที่ชื่อถูกนิยาม — /symbols <file|name>', args: true, run: (arg) => showSymbols(arg) },
+  { cmd: 'index', desc: 'สถานะ index ของโปรเจกต์ — /index ดูสถานะ · /index clear ลบ', run: (arg) => showIndex(arg) },
   { cmd: 'new', desc: 'เริ่มบทสนทนาใหม่ในหน้าต่าง', run: startNewSession },
   { cmd: 'resume', desc: 'เปิดบทสนทนาเดิม', run: resumeSession },
   { cmd: 'fork', desc: 'แยกบทสนทนาจุดนี้ไปแก้ต่อแยก', run: forkSession },

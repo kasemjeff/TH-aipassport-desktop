@@ -242,6 +242,11 @@ switch (cmd) {
     finish(await run('scale.mjs', rest));
     break;
 
+  case 'acp':
+    // ACP over stdio: no bridge needed, the harness is the brain.
+    finish(await run('acp.mjs', rest));
+    break;
+
   case 'mcp':
     finish(await run('mcp.mjs', rest));
     break;

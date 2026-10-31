@@ -28,6 +28,20 @@ export const SKIP = new Set([
   // points the model straight back at one of those files.
   '.aipass',
 ]);
+
+// Paths that are never walked. The OS's temp and the app's update staging areas
+// put thousands of near-identical paths in a single walk, and a glob of the
+// home folder once spilled 160 lines of them into one message the upstream edge
+// refused. SKIP (above) covers well-known names; this covers the *path* shapes
+// that are noise wherever they appear. Walks only: read() and a flat list() are
+// deliberately not filtered, so an explicit NEED file / NEED dir still works.
+export function isNoisePath(rel) {
+  const norm = '/' + String(rel ?? '').replace(/\\/g, '/').toLowerCase().replace(/^\/+|\/+$/g, '') + '/';
+  return norm.includes('/appdata/local/temp/')
+    || norm.includes('/appdata/roaming/temp/')
+    || /\/aipass-update-[a-z0-9]+(\/|$)/.test(norm);
+}
+
 export const DELETED = '\x00DELETE\x00';
 
 // Paths that go to the model come back from it, in a NEED file or an EDIT. On

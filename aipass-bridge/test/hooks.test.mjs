@@ -197,7 +197,10 @@ test('a hook runs when the run ends', async () => {
   await harness.run('do nothing');
   // The hook runs when the run has ended, so it is not part of the run's
   // answer — the person sees it as a note.
-  await new Promise((resolve) => setTimeout(resolve, 400));
+  const deadline = Date.now() + 2000;
+  while ((!fs.existsSync(path.join(dir, 'done-ran.txt')) || !notes.some((text) => /hook \(done\)/.test(text))) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
 
   assert.ok(fs.existsSync(path.join(dir, 'done-ran.txt')), 'the command ran when the run ended');
   assert.ok(notes.some((text) => /hook \(done\)/.test(text)), 'and the person is told what it said');

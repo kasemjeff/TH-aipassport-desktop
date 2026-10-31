@@ -70,6 +70,16 @@ export function planFor(platform = process.platform, artifact = '', env = proces
 }
 
 /** The version an artifact claims, from its file name. */
+/** The order the ladder walks, given whether a previous artifact exists. */
+export function ladderSteps(hasOld) {
+  const steps = [];
+  if (hasOld) steps.push('install-old');
+  steps.push('install-new');
+  if (hasOld) steps.push('rollback-old');
+  steps.push('uninstall');
+  return steps;
+}
+
 export function versionFromName(artifact) {
   const match = path.basename(artifact).match(/aipass-desktop-(\d+\.\d+\.\d+)/);
   return match ? match[1] : null;
@@ -385,16 +395,21 @@ async function main() {
   };
 
   try {
-    step('install', path.basename(newArtifact));
+    // Baseline: prove the previous build installs, so the upgrade below is a
+    // real upgrade rather than a fresh install of the new one.
+    if (oldArtifact) {
+      step('install (baseline)', path.basename(oldArtifact));
+      const installed = impl.install(oldArtifact, { work });
+      if (installed) installDir = installed;
+      await assertRunning('install', oldVersion);
+    }
+
+    step(oldArtifact ? 'upgrade' : 'install', path.basename(newArtifact));
     const installed = impl.install(newArtifact, { work });
     if (installed) installDir = installed;
-    await assertRunning('install', newVersion);
+    await assertRunning(oldArtifact ? 'upgrade' : 'install', newVersion);
 
     if (oldArtifact) {
-      step('upgrade', path.basename(newArtifact));
-      impl.install(newArtifact, { work });
-      await assertRunning('upgrade', newVersion);
-
       step('rollback', path.basename(oldArtifact));
       impl.install(oldArtifact, { work });
       await assertRunning('rollback', oldVersion);

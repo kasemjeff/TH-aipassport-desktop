@@ -85,6 +85,30 @@ test('the spill directory is out of every listing, but still readable', async ()
   assert.ok(!globbed.includes('.aipass'), 'and a glob does not surface it either');
 });
 
+/* H-noise — system temp folders are never walked ---------------------------- */
+
+test('AppData/Local/Temp is skipped by glob/search/tree but still readable', async () => {
+  const dir = tempDir({
+    'src/a.ts': 'needle\n',
+    'AppData/Local/Temp/junk/x.txt': 'needle in temp\n'.repeat(5),
+  });
+  const tools = toolsIn(dir);
+
+  const search = await tools.search('needle');
+  assert.ok(search.includes('src/a.ts'), 'the real file is still found');
+  assert.ok(!search.includes('junk/x.txt'), 'temp noise is not searched');
+
+  const globbed = await tools.glob('**/*.ts');
+  assert.ok(globbed.includes('src/a.ts'), 'the real file is still globbed');
+  assert.ok(!globbed.includes('junk/x.txt'), 'temp noise is not globbed');
+
+  const tree = await tools.tree('AppData/Local');
+  assert.ok(!tree.includes('junk'), 'temp is not walked by tree');
+
+  const back = await tools.read('AppData/Local/Temp/junk/x.txt');
+  assert.ok(back.includes('needle in temp'), 'NEED file still reads a temp path');
+});
+
 /* H2 â€” glob honours the prefix before ** ---------------------------------- */
 
 test('glob matches the pattern against the whole path, not the last segment', async () => {

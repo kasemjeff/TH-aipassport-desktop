@@ -18,12 +18,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { aipassHome } from './settings.mjs';
+import { projectKey } from './project-key.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 // The store the sessions live in, read through its own public API: the
 // header's `root` is the authority on which project a session belongs to,
 // and the store is what knows that.
 import { SessionStore } from './session.mjs';
-
+import { tokenize, queryWords, excerptOf } from './text.mjs';
 // The store's directory is resolved when it is used, not when this module
 // loads. AIPASS_HOME is the switch every surface reads, and a caller that
 // points it at a scratch home after the import — the test suite does — must
@@ -51,6 +52,7 @@ function mergeFacts(prev, fresh) {
 }
 
 function projectHash(root) { return crypto.createHash('sha1').update(path.resolve(root)).digest('hex').slice(0, 12); }
+function legacyStorePath(root, dir = defaultDir()) { return path.join(dir, projectHash(root) + '.json'); }
 
 /**
  * Where a project's facts live.
@@ -74,17 +76,25 @@ function storePath(root, dir = defaultDir()) {
     // Windows has no POSIX modes, so the chmod is best effort there.
     try { fs.chmodSync(dir, 0o700); } catch { /* windows has no POSIX modes */ }
   }
-  return path.join(dir, projectHash(root) + '.json');
+  return path.join(dir, projectKey(root) + '.json');
 }
 
 export function loadMemory(root, dir = defaultDir()) {
-  try {
-    const raw = fs.readFileSync(storePath(root, dir), 'utf8');
+  const newFile = storePath(root, dir);
+  const legacyFile = legacyStorePath(root, dir);
+  const read = (file) => {
+    const raw = fs.readFileSync(file, 'utf8');
     const data = JSON.parse(raw);
     const arr = Array.isArray(data) ? data : (data && Array.isArray(data.facts) ? data.facts : []);
     return arr.map((f) => String(f).trim().slice(0, FACT_CAP)).filter(Boolean).slice(0, CAP);
-  } catch {}
-  return [];
+  };
+  if (fs.existsSync(newFile)) {
+    try { return read(newFile); } catch {
+      // Fall back to the legacy store if the new one is corrupt.
+      try { return read(legacyFile); } catch { return []; }
+    }
+  }
+  try { return read(legacyFile); } catch { return []; }
 }
 
 export function saveMemory(root, facts, dir = defaultDir()) {
@@ -106,6 +116,7 @@ export function saveMemory(root, facts, dir = defaultDir()) {
 
 export function clearMemory(root, dir = defaultDir()) {
   try { fs.rmSync(storePath(root, dir), { force: true }); } catch {}
+  try { fs.rmSync(legacyStorePath(root, dir), { force: true }); } catch {}
 }
 
 /**
@@ -209,28 +220,7 @@ const MAX_SESSION_BYTES = 128 * 1024;
 /** How many entries one recall returns. */
 const MAX_HITS = 8;
 
-/** How long an excerpt may be. */
-const EXCERPT_CAP = 280;
 
-/**
- * The words of a query.
- *
- * A plain split — letters and digits, nothing shorter than two characters,
- * because a one-letter word matches half the store. Thai has no spaces
- * between its words, so a Thai phrase arrives here as one long word and is
- * matched as a phrase, which is what the person who typed it meant.
- *
- * @param {string} query
- * @returns {string[]}
- */
-export function queryWords(query) {
-  const out = [];
-  for (const w of String(query ?? '').toLowerCase().split(/[^\p{L}\p{N}_]+/u)) {
-    if (w.length < 2) continue;
-    if (!out.includes(w)) out.push(w);
-  }
-  return out;
-}
 
 /**
  * The text an entry carries, or '' when it carries none.
@@ -244,49 +234,7 @@ function textOf(entry) {
   return String(entry.text ?? '');
 }
 
-/**
- * How much an entry is about the query.
- *
- * One point for every word of the query the entry carries, and one more when
- * the whole phrase is in it. That is the whole of it: a word match, scored.
- *
- * @param {string} haystack the entry's text, lower-cased
- * @param {string[]} words
- * @param {string} phrase the whole query, lower-cased
- * @returns {number}
- */
-function scoreOf(haystack, words, phrase) {
-  let score = 0;
-  for (const w of words) if (haystack.includes(w)) score += 1;
-  if (score && phrase && haystack.includes(phrase)) score += 1;
-  return score;
-}
 
-/**
- * The passage around the first match.
- *
- * The window is where the answer is, so the excerpt starts a little before
- * the match and stops a little after it — and says so with an ellipsis when
- * it does, so a reader never mistakes a fragment for the whole entry.
- *
- * @param {string} text
- * @param {string[]} words
- * @returns {string}
- */
-export function excerptOf(text, words) {
-  const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
-  const low = flat.toLowerCase();
-  let at = -1;
-  for (const w of words) {
-    const i = low.indexOf(w);
-    if (i >= 0 && (at < 0 || i < at)) at = i;
-  }
-  if (at < 0) return flat.slice(0, EXCERPT_CAP);
-  const before = 80;
-  const start = Math.max(0, at - before);
-  const end = Math.min(flat.length, at + EXCERPT_CAP - before);
-  return (start > 0 ? '… ' : '') + flat.slice(start, end).trim() + (end < flat.length ? ' …' : '');
-}
 
 /**
  * The parsed tails, keyed by file and valid while the file's stat is
@@ -383,7 +331,7 @@ function storeFor(dir) {
  */
 export async function recallEntries(query, { root, store = null, limit = MAX_HITS, maxSessions = MAX_SESSIONS, maxBytes = MAX_SESSION_BYTES } = {}) {
   const words = queryWords(query);
-  const phrase = String(query ?? '').trim().toLowerCase();
+  const qTokens = [...new Set(tokenize(query))];
   if (!words.length) return { hits: [], matches: 0, sessions: 0, words };
   const theStore = store ?? storeFor(aipassHome());
   let sessions = [];
@@ -392,25 +340,77 @@ export async function recallEntries(query, { root, store = null, limit = MAX_HIT
   } catch {
     return { hits: [], matches: 0, sessions: 0, words };
   }
-  const found = [];
+  // collect candidates
+  const cands = [];
   for (const session of sessions) {
     const entries = await readEntries(session.file, maxBytes);
     for (const entry of entries) {
       if (!SPOKEN.has(String(entry.type ?? ''))) continue;
       const text = textOf(entry);
       if (!text) continue;
-      const score = scoreOf(text.toLowerCase(), words, phrase);
-      if (!score) continue;
-      found.push({
-        score,
+      cands.push({
+        text,
         ts: Number(entry.ts ?? session.updated ?? 0) || 0,
         type: String(entry.type),
         session: String(session.id ?? ''),
         title: String(session.title ?? 'session'),
-        excerpt: excerptOf(text, words),
       });
     }
   }
-  found.sort((a, b) => b.score - a.score || b.ts - a.ts);
+  // memory facts as documents
+  try {
+    const facts = loadMemory(root);
+    facts.forEach((f, i) => {
+      cands.push({ text: f, ts: 0, type: 'fact', session: '', title: 'memory' });
+    });
+  } catch {}
+  if (!cands.length) return { hits: [], matches: 0, sessions: sessions.length, words };
+  // BM25 over tokenize(text)
+  const tfArr = cands.map((c) => {
+    const m = new Map();
+    for (const t of tokenize(c.text)) m.set(t, (m.get(t) || 0) + 1);
+    return m;
+  });
+  const N = cands.length;
+  const df = new Map();
+  for (const m of tfArr) for (const t of m.keys()) df.set(t, (df.get(t) || 0) + 1);
+  // Trigrams are a matching aid, not text: weight them in the score via idf but
+  // do not let them inflate the document length (matches the retrieval index).
+  const lenOf = (m) => [...m.entries()].reduce((a, [t, f]) => a + (t.startsWith('t:') ? 0 : f), 0) || 1;
+  const avgLen = tfArr.reduce((a, m) => a + lenOf(m), 0) / N;
+  function idf(t) { const d = df.get(t) || 0; return Math.log(1 + (N - d + 0.5) / (d + 0.5)); }
+  const scored = cands.map((c, i) => {
+    const m = tfArr[i];
+    const len = lenOf(m);
+    let score = 0;
+    for (const t of qTokens) {
+      const f = m.get(t) || 0;
+      if (!f) continue;
+      const idfVal = idf(t);
+      score += idfVal * (f * 2.2) / (f + 1.2 * (1 - 0.75 + 0.75 * len / (avgLen || 1)));
+    }
+    const hay = c.text.toLowerCase();
+    const phrase = String(query ?? '').trim().toLowerCase();
+    if (phrase.length >= 3 && hay.includes(phrase)) score += 0.5 * qTokens.reduce((a, t) => a + idf(t), 0);
+    // recency boost for sessions (facts have ts 0)
+    if (c.ts > 0) score *= 1 + 0.2 * Math.exp(-(Date.now() - c.ts) / (30 * 86400000));
+    return { i, score };
+  }).filter((x) => x.score > 0);
+  const maxScore = scored.reduce((m, x) => Math.max(m, x.score), 0) || 1;
+  scored.sort((a, b) => {
+    if (Math.abs(a.score - b.score) > 0.25 * maxScore) return b.score - a.score;
+    return (cands[b.i].ts || 0) - (cands[a.i].ts || 0) || b.score - a.score;
+  });
+  const found = scored.map(({ i, score }) => {
+    const c = cands[i];
+    return {
+      score,
+      ts: c.ts,
+      type: c.type,
+      session: c.session,
+      title: c.title,
+      excerpt: excerptOf(c.text, words),
+    };
+  });
   return { hits: found.slice(0, limit), matches: found.length, sessions: sessions.length, words };
 }

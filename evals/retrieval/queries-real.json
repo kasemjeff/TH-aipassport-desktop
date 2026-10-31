@@ -1,0 +1,12 @@
+[
+  { "q": "where is the retrieval index built", "expect": ["aipass-bridge/harness/retrieval.mjs"] },
+  { "q": "how does a memory fact get carried into a new session", "expect": ["aipass-bridge/harness/memory-store.mjs"] },
+  { "q": "what does the checker refuse to do", "expect": ["docs/SPEC_CHECKER.md"] },
+  { "q": "how are checkpoints stored", "expect": ["aipass-bridge/harness/checkpoints.mjs"] },
+  { "q": "what is the secret floor", "expect": ["aipass-bridge/harness/permissions.mjs", "docs/SECURITY.md"] },
+  { "q": "how does the schedule ticker work", "expect": ["aipass-bridge/harness/schedule.mjs"] },
+  { "q": "where are the settings defaults", "expect": ["aipass-bridge/harness/settings.mjs"] },
+  { "q": "how does the overlay stage edits", "expect": ["aipass-bridge/harness/overlay.mjs"] },
+  { "q": "what is the retrieval design", "expect": ["docs/RAG_DESIGN.md"] },
+  { "q": "how are project keys computed", "expect": ["aipass-bridge/harness/project-key.mjs"] }
+]

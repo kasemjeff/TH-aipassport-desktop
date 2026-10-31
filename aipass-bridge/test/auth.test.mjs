@@ -208,6 +208,13 @@ test('rpc: /rpc gated, /token is same-origin-browser-only', async () => {
     assert.equal(await call({ authorization: `Bearer ${token}` }), 200, 'right token must pass');
     // Bootstrap: headerless tool-like caller is refused (it reads the file).
     assert.equal(await fetch(`${base}/token`).then((r) => r.status), 403);
+    // The shape a browser really sends for a same-origin GET: Sec-Fetch-Site,
+    // and no Origin at all. Requiring Origin here 403'd the window's own
+    // bootstrap and left the whole app unable to authenticate.
+    const windowBoot = await fetch(`${base}/token`, {
+      headers: { 'sec-fetch-site': 'same-origin' },
+    }).then((r) => r.json());
+    assert.equal(windowBoot.token, token, 'a same-origin GET with no Origin still gets the token');
     // Same-origin browser page gets the token.
     const boot = await fetch(`${base}/token`, {
       headers: { 'sec-fetch-site': 'same-origin', origin: base },

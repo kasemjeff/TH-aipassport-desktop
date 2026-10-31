@@ -1,3 +1,4 @@
+// @ts-check
 // What a command printed, before it becomes part of the transcript.
 //
 // A RUN is the machine's mouth. `set` (Windows) and `env` (POSIX) print the
@@ -28,6 +29,7 @@ const SECRET_WORDS = new Set([
  * `secret` + `access` + `key`. A name that merely contains a word (`MONKEY`)
  * is not one — the split is what keeps it honest.
  */
+/** @param {any} name */
 const wordsOf = (name) => String(name)
   .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
   .split(/[^A-Za-z0-9]+/)
@@ -35,6 +37,7 @@ const wordsOf = (name) => String(name)
   .map((w) => w.toLowerCase());
 
 /** Does this variable name say it carries a credential? */
+/** @param {any} name */
 export function isSecretName(name) {
   return wordsOf(name).some((w) => SECRET_WORDS.has(w));
 }
@@ -48,6 +51,7 @@ const ASSIGNMENT = /(\b[A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^\s&"'`]*)/g;
  * Screen a command's output: the token shapes first, then the assignments
  * whose name carries a credential.
  */
+/** @param {any} text */
 export function scrubOutput(text) {
   if (typeof text !== 'string' || !text) return text;
   const byShape = scrubSecrets(text);

@@ -20,7 +20,7 @@ import {
   bundlerCommand,
   targetDir,
 } from '../../scripts/build-desktop.mjs';
-import { planFor as ladderPlan, versionFromName } from '../../scripts/install-ladder.mjs';
+import { planFor as ladderPlan, versionFromName, ladderSteps } from '../../scripts/install-ladder.mjs';
 import { downloadUrl } from '../../scripts/build-universal-sidecar.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -229,4 +229,12 @@ test('the bundler is called under whichever name the machine has', () => {
     if (saved === undefined) delete process.env.AIPASS_TAURI_CLI;
     else process.env.AIPASS_TAURI_CLI = saved;
   }
+});
+
+test('the ladder tests a real upgrade, not a second fresh install', () => {
+  // With a previous artifact, the ladder must install the old build first
+  // (baseline), then the new one (upgrade), then the old one again (rollback),
+  // then uninstall. Without a previous artifact there is no upgrade to test.
+  assert.deepEqual(ladderSteps(true), ['install-old', 'install-new', 'rollback-old', 'uninstall']);
+  assert.deepEqual(ladderSteps(false), ['install-new', 'uninstall']);
 });

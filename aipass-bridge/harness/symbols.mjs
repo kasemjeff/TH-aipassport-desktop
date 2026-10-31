@@ -14,6 +14,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import { aipassHome } from './settings.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { isNoisePath } from './overlay.mjs';
 
 const EXT_LANG = {
   '.js': 'js', '.mjs': 'js', '.cjs': 'js', '.jsx': 'js',
@@ -188,6 +189,8 @@ function walkFiles(root, dir = root, out = []) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
       if (SKIP_DIRS.has(e.name)) continue;
+      const rel = path.relative(root, full).replace(/\\/g, '/');
+      if (isNoisePath(rel)) continue;
       walkFiles(root, full, out);
     } else if (e.isFile()) {
       const ext = path.extname(e.name).toLowerCase();

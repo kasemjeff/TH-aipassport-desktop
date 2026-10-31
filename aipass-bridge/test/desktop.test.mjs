@@ -363,7 +363,8 @@ test('plan mode parses PLAN and TODO, and stops the run until the plan is approv
   const todos = await waitForEvent(env, 'todo');
   assert.ok(todos, 'a todo event was emitted');
   assert.deepEqual(todos.items.map((i) => i.text), ['read the file', 'change one line']);
-  assert.ok(env.types('plan_request').length === 1, 'the plan waited for approval');
+  const planReq = await waitForEvent(env, 'plan_request');
+  assert.ok(planReq !== null, 'the plan waited for approval');
 
   await env.call('plan.answer', { ok: true });
   const result = await run;

@@ -1,8 +1,9 @@
 # RAG - retrieval that fits this harness
 
-> **Status: design, not built.** This file is the checked state of the current
-> search/memory surfaces and the plan for a retrieval layer. Nothing in it is
-> shipped code.
+> **Status: Phase 1 built (lexical), Phase 2 built (RECALL on the shared tokenizer and searches facts), hardening pass 1 done, Phase 3 not started.**
+> This file is the checked state of the current search/memory surfaces and the
+> plan for the retrieval layer. Phase 1 and 2 are shipped; the remaining gaps
+> (a shared scorer, prebuild/progress UI, embeddings) are tracked in the phases table.
 >
 > **One line:** index the project's own text locally, rank passages with BM25
 > and code-aware chunks, and let the model ask for them with one marker. No new
@@ -55,20 +56,21 @@ first message is harder for the model to ignore than a tool result it asked
 for. An optional first-turn prefetch is a later experiment (Phase 3), not the
 default.
 
-## What exists today (checked 2026-10-28)
+## What exists today (checked 2026-10-29)
 
 | surface | what it does | the limit that hurts |
 |---|---|---|
 | `SEARCH` (`harness/tools.mjs#search`) | literal substring over project text, optional `-i`, `-A/-B/-C` context | case-sensitive by default (`searchI: false`); no ranking; first 50 matching lines in walk order win; skips every dotfile; 1 MB per file |
-| `RECALL` (`harness/memory-store.mjs#recallEntries`) | word-inclusion score over past entries, newest first as tiebreak | 30 newest sessions, 128 KB tail each, 8 hits; no IDF; OR semantics; Thai has no word split |
+| `RETRIEVE` (`harness/retrieval.mjs`) | BM25 over chunked project text, staged edits folded in, 5 s index TTL | lexical only: a paraphrase with no shared word is a miss (measured in the benchmark) |
+| `RECALL` (`harness/memory-store.mjs#recallEntries`) | BM25 over the shared tokenizer; session entries plus memory facts | 30 newest sessions, 128 KB tail each, 8 hits; its own scorer loop, not yet the `RETRIEVE` code |
 | memory carry (`memory-store.mjs#carryFacts`) | picks facts for the first message under 2,400 chars | only the first turn; word match; facts not reachable from `RECALL` |
 | `SYMBOLS`/`DEF`/`REFS` (`harness/symbols.mjs`) | regex symbol index cached under `~/.aipass/symbols` | finds names, not meaning; full synchronous walk and read on refresh (a rule 9 risk) |
 | `ATTACH` (`harness/tools.mjs#attach`) | queues an image/PDF/office file for the next message | whole file, 20 MB cap, per-message only, no text extraction or citation |
 | window file search (`desktop/ui/panels/files.js`) | name or literal content search over the project | a UI convenience, not a model tool; same exact-text limit |
 | project file index (`harness/rpc.mjs#fileIndex`) | path list cached for 60 s for the picker | paths only; no content |
 
-The existing tests pass (`node --test aipass-bridge/test/recall.test.mjs`: 4/4
-on 2026-10-28), so this is a design gap, not a broken feature. Node 24's
+The existing tests pass (`node --test aipass-bridge/test/recall.test.mjs`: 5/5
+on 2026-10-29), so this is a design gap, not a broken feature. Node 24's
 `Intl.Segmenter('th')` does split Thai words, but transliterations are already
 imperfect: `โปรเจกต์` segments as `โปร | เจ | กต์`. That is why the tokenizer
 below adds character trigrams for Thai runs instead of trusting the segmenter
@@ -81,10 +83,9 @@ deterministic, offline, zero-dependency, and good at code identifiers. It is not
 semantic; an embedding path is designed (Phase 3) but not built until a
 benchmark shows the lexical miss rate is worth the privacy and cost.
 
-**D2 - One index, one scorer.** Project files, sessions, and memory facts use
-the same tokenizer and the same ranking code. Three separate search
-implementations would drift; the current `RECALL` already has its own word
-scorer and its own Thai bug.
+**D2 - One tokenizer, one scoring shape.** Project files, sessions, and memory
+facts use the same tokenizer and the same BM25 shape. `RECALL` still carries its
+own loop over that tokenizer (a P1 gap), but tokenization must not drift.
 
 **D3 - A tool, not a hidden pre-step.** `RETRIEVE <query>` is the model's
 surface. The human surface is `/index` (status and clear) and one settings row.
@@ -178,7 +179,7 @@ is read at call time (`aipassHome()`), never captured at module load, so
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "root": "D:\\work\\app",
   "builtAt": 1790000000000,
   "files": {
@@ -202,9 +203,12 @@ there is no second id to get out of sync.
 
 **Freshness.** On a `RETRIEVE`, walk and stat (async, sorted, capped), compare
 `mtimeMs + size`, and re-read only changed files. The walk is cheap compared
-with reading; a 60-second TTL keeps a file written a moment ago findable and
-stops every question from walking twice. Deleted files lose their chunks. The
-index is saved once per build, not per file.
+with reading; a 5-second TTL makes a disk edit visible without a restart and
+stops a burst of questions from walking the tree for each one. Staged edits
+bypass the TTL: `buildView` folds them in on every query. Deleted files lose
+their chunks. `builtAt` is stamped immediately before the save, so the TTL
+measures the index on disk, not the start of a slow build. The index is saved
+once per build, not per file.
 
 **Staged edits are visible.** The overlay is the run's write surface (rule 1),
 and a retriever that only reads the disk would answer with the old file after
@@ -221,8 +225,8 @@ build to a `worker_threads` worker; the JSON format is already the seam. The
 symbol index's synchronous walk is the example not to copy.
 
 **Corruption and moves.** A broken index reads as "nothing indexed" and is
-rebuilt; a save failure keeps the in-memory index for the run and reports
-"not saved". The `root` in the file must match the resolved root, so a moved
+rebuilt; a save failure keeps the in-memory index for the run (reporting
+"not saved" is still open). The `root` in the file must match the resolved root, so a moved
 project rebuilds instead of serving old paths. `aipass relocate` should delete
 the old retrieval file, and the settings button can clear it.
 
@@ -369,11 +373,11 @@ Keep it small; the index is a cache and most people should never manage it.
 | no index yet, first call | build, then answer; the first result carries `built just now` |
 | project has no text files | `nothing to index - no text files under <root>` |
 | index corrupt or version changed | treat as empty, rebuild, say `index rebuilt` |
-| save failed (read-only home, disk full) | answer from memory, say `index not saved`; next run rebuilds |
-| file changed mid-build | the stat after the read wins; the next build catches it, and the answer says the index is 12s old |
+| save failed (read-only home, disk full) | answer from memory; reporting `index not saved` is still open; next run rebuilds |
+| file changed mid-build | the stat after the read wins; the next query rebuilds once the 5 s TTL expires |
 | cap hit (5,000 files / 20,000 chunks) | answer from the capped index, say `indexed 20,000 of N chunks` and how to narrow |
 | query too short | `err:` with the shape, same as `RECALL` |
-| run stopped | abort the walk and the tokenizer loop; no partial write; the next run rebuilds |
+| run stopped | abort the walk and the tokenizer loop; no partial write (no save); the next run rebuilds |
 | embedding provider down (Phase 3) | fall back to lexical, say `embeddings unavailable`; never block the answer |
 
 ## Evals and tests
@@ -389,7 +393,10 @@ Phase 1 is not done until these are green:
 - code chunks break at symbol boundaries and never exceed the line cap;
 - a changed file is re-read, an unchanged file is not (a counter or an mtime
   assertion, not a timing test);
-- a staged edit is visible before Apply; a staged delete is invisible;
+- a staged edit is visible before Apply; a staged delete is invisible; a staged
+  secret, generated file or dotfile never enters the answer;
+- clearing the index cancels an in-flight build and leaves no index file;
+- a disk edit is visible after the 5 s TTL;
 - `.gitignore`, dotfiles, secret names and out-of-root symlinks never enter the
   index;
 - the index file is `0600` where POSIX modes exist; a corrupt index rebuilds;
@@ -399,11 +406,21 @@ Phase 1 is not done until these are green:
 
 **Offline benchmark (`test/retrieval-bench.test.mjs`, a small fixture)**
 
-- 20-30 queries over a mixed Thai/English/code fixture, each with expected
-  paths; assert `recall@8 >= 0.8`, `MRR@8 >= 0.6`, and no query returns more
-  than the budget. Numbers are pinned in the test so a regression names itself.
-- The benchmark is the gate for Phase 3: only a measured lexical miss justifies
-  the embedding work.
+- Three sets in `evals/retrieval`: 24 exact queries, 14 paraphrase queries, 6
+  negative queries. The fixture includes keyword-stuffed distractor notes, so
+  ranking is not free.
+- Exact: every expected path must be in the top 8 for a multi-file question;
+  assert `recall@8 >= 0.9` and `MRR@8 >= 0.8`. The measured baseline is 1.000
+  recall and 0.958 MRR.
+- Paraphrase: reported separately with a regression floor (`any-match recall@8
+  >= 0.1`), not a semantic gate. The measured lexical baseline is 0.214; that
+  miss rate is the Phase 3 gate evidence.
+- Negative: unrelated queries must return no hits.
+- `npm run bench:retrieval` prints the same numbers; `--repo <path>` runs
+  `queries-real.json` against a real project and hides the benchmark's own files
+  from the corpus; `--strict` exits 1 when the exact or negative floor is missed.
+- No query returns more than the budget. Numbers are pinned in the test so a
+  regression names itself.
 
 **Live (optional, `evals/tasks/retrieval-*`)**
 
@@ -423,7 +440,8 @@ Phase 1 is not done until these are green:
 |---|---|---|
 | **0 - design** | this document | `docs/RAG_DESIGN.md` |
 | **1 - lexical MVP** | index, chunker, tokenizer, BM25, `RETRIEVE`, status/clear, tests | new `harness/retrieval.mjs`; `harness/protocol.mjs`, `harness/tools.mjs`, `harness/validate.mjs`, `harness/settings.mjs`, `harness/rpc*.mjs`, `desktop/ui` settings, `docs/DATA_FORMATS.md`, `docs/MATURITY.md` |
-| **2 - past** | `RECALL` on the shared scorer, Thai segmentation, memory facts as documents | `harness/memory-store.mjs`, `harness/tools.mjs`, `test/recall.test.mjs` |
+| **1.5 - hardening** | clear cancels a build, staged overlay obeys the secret/generated/dot filters, 5 s TTL, exact/paraphrase/negative benchmark split | `harness/retrieval.mjs`, `test/retrieval*.test.mjs`, `evals/retrieval/**`, `scripts/retrieval-bench.mjs` |
+| **2 - past** | `RECALL` on the shared tokenizer, Thai segmentation, memory facts as documents | `harness/memory-store.mjs`, `harness/tools.mjs`, `test/recall.test.mjs` |
 | **3 - embeddings (gated)** | provider embeddings, vectors in the index, RRF, consent row | `harness/providers.mjs`, `harness/provider-client.mjs`, `harness/retrieval.mjs`, settings UI |
 
 Phase 1 is the smallest complete change: it answers "where is this?" for a
@@ -464,7 +482,15 @@ lexical retriever is missing queries that a vector would catch.
 
 ## Checked, not assumed
 
-- `node --test aipass-bridge/test/recall.test.mjs` - 4/4 pass on 2026-10-28.
+- `node --test aipass-bridge/test/recall.test.mjs` - 5/5 pass on 2026-10-29.
+- `node --test aipass-bridge/test/retrieval.test.mjs` - 21/21 pass on 2026-10-29.
+- `node --test aipass-bridge/test/retrieval-bench.test.mjs` - 4/4 pass on
+  2026-10-29; exact recall 1.000, MRR 0.958; paraphrase recall 0.214; all six
+  negative queries returned no hits.
+- `npm run bench:retrieval -- --repo D:\aipass` on 2026-10-29: 843 files, 6,714
+  chunks, cold build 2.8 s, incremental 307 ms (read 8, reused 843), query p50
+  6 ms / p95 12 ms, real-query recall 80% / MRR 0.500 with `evals/retrieval`
+  hidden from the corpus.
 - `Intl.Segmenter('th')` is present in the runtime (Node 24.18.0) and splits
   `ระบบค้นคืนความรู้สำหรับโปรเจกต์` into words; it also splits `โปรเจกต์` into
   `โปร | เจ | กต์`, hence the trigram fallback.
